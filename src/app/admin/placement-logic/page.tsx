@@ -5,7 +5,7 @@ import AdminLayout from "@/components/layout/AdminLayout";
 import { Loader2, Plus, Edit2, Trash2, ShieldAlert } from "lucide-react";
 
 export default function AdminPlacementLogicPage() {
-  const [limits, setLimits] = useState([]);
+  const [limits, setLimits] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   
