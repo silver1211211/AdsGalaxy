@@ -10,15 +10,29 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const page = parseInt(searchParams.get("page") || "1");
   const limit = parseInt(searchParams.get("limit") || "10");
+  const search = searchParams.get("search") || "";
   const offset = (page - 1) * limit;
 
   try {
-    const [rows]: any = await pool.query(
-      "SELECT id, telegram_id, first_name, last_name, username, balance_locked, balance_available, ad_balance, created_at FROM users ORDER BY id DESC LIMIT ? OFFSET ?",
-      [limit, offset]
-    );
+    let query = "SELECT id, telegram_id, first_name, last_name, username, balance_locked, balance_available, ad_balance, created_at FROM users";
+    let countQuery = "SELECT COUNT(*) as total FROM users";
+    const queryParams: any[] = [];
+    const countParams: any[] = [];
 
-    const [[countRow]]: any = await pool.query("SELECT COUNT(*) as total FROM users");
+    if (search) {
+      const searchPattern = `%${search}%`;
+      const searchWhere = " WHERE username LIKE ? OR telegram_id LIKE ? OR first_name LIKE ? OR last_name LIKE ?";
+      query += searchWhere;
+      countQuery += searchWhere;
+      queryParams.push(searchPattern, searchPattern, searchPattern, searchPattern);
+      countParams.push(searchPattern, searchPattern, searchPattern, searchPattern);
+    }
+
+    query += " ORDER BY id DESC LIMIT ? OFFSET ?";
+    queryParams.push(limit, offset);
+
+    const [rows]: any = await pool.query(query, queryParams);
+    const [[countRow]]: any = await pool.query(countQuery, countParams);
 
     return NextResponse.json({
       users: rows,

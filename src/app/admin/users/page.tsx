@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Edit2 } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Edit2, Search } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 
 export default function AdminUsersPage() {
@@ -10,16 +10,18 @@ export default function AdminUsersPage() {
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<any>(null);
   const [balanceData, setBalanceData] = useState({ locked: "", available: "", ad: "" });
   const [isUpdating, setIsUpdating] = useState(false);
 
-  const fetchUsers = async (p: number) => {
+  const fetchUsers = async (p: number, q: string) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/users?page=${p}&limit=10`);
+      const res = await fetch(`/api/admin/users?page=${p}&limit=10&search=${encodeURIComponent(q)}`);
       const data = await res.json();
       setUsers(data.users);
       setTotalPages(data.totalPages);
@@ -31,8 +33,14 @@ export default function AdminUsersPage() {
   };
 
   useEffect(() => {
-    fetchUsers(page);
-  }, [page]);
+    fetchUsers(page, searchQuery);
+  }, [page, searchQuery]);
+
+  const handleSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    setSearchQuery(searchInput);
+    setPage(1);
+  };
 
   const openEditModal = (user: any) => {
     setEditingUser(user);
@@ -59,7 +67,7 @@ export default function AdminUsersPage() {
       });
       if (res.ok) {
         setEditModalOpen(false);
-        fetchUsers(page);
+        fetchUsers(page, searchQuery);
       }
     } catch (err) {
       console.error(err);
@@ -100,8 +108,19 @@ export default function AdminUsersPage() {
       )}
 
       <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
+        <div className="px-4 py-3 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <h2 className="text-sm font-semibold text-slate-900">Users Directory</h2>
+          
+          <form onSubmit={handleSearch} className="relative w-full sm:max-w-xs">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+            <input 
+              type="text" 
+              placeholder="Search ID, username, name..." 
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              className="w-full pl-9 pr-4 py-1.5 bg-slate-50 border border-slate-200 rounded-md text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all"
+            />
+          </form>
         </div>
         
         <div className="overflow-x-auto">

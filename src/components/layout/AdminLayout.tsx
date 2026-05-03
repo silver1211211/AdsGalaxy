@@ -33,6 +33,21 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     } else {
       setIsAuthenticated(true);
     }
+
+    // Global fetch interceptor to catch 401 Unauthorized API responses
+    const originalFetch = window.fetch;
+    window.fetch = async (...args) => {
+      const response = await originalFetch(...args);
+      if (response.status === 401) {
+        document.cookie = "admin_auth=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+        window.location.href = "/admin/login";
+      }
+      return response;
+    };
+
+    return () => {
+      window.fetch = originalFetch;
+    };
   }, [pathname, router]);
 
   const handleLogout = () => {
