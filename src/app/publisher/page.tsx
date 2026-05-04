@@ -18,6 +18,11 @@ export default function PublisherDashboard() {
   const { setTitle } = useHeader();
   const [stats, setStats] = React.useState<any>(null);
   const [isLoading, setIsLoading] = React.useState(true);
+  const [isVerifying, setIsVerifying] = React.useState(false);
+  const [verifyError, setVerifyError] = React.useState("");
+  
+  const channelName = process.env.NEXT_PUBLIC_CHANNEL || "AdsGalaxy_News";
+  const channelReward = process.env.NEXT_PUBLIC_CHANNEL_REWARD || "0.5";
 
   React.useEffect(() => {
     setTitle("Dashboard");
@@ -56,6 +61,33 @@ export default function PublisherDashboard() {
     };
     fetchStats();
   }, []);
+
+  const handleVerifyJoin = async () => {
+    setIsVerifying(true);
+    setVerifyError("");
+    try {
+      const initData = (window as any).Telegram?.WebApp?.initData || "";
+      const res = await fetch("/api/publisher/verify-join", {
+        method: "POST",
+        headers: { "x-telegram-init-data": initData }
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setStats({ 
+          ...stats, 
+          join_rewarded: 1, 
+          balance_available: (parseFloat(stats.balance_available) + parseFloat(data.reward)).toString()
+        });
+        (window as any).Telegram?.WebApp?.showAlert(`Success! $${data.reward} added to your available balance.`);
+      } else {
+        setVerifyError(data.error || "Verification failed");
+      }
+    } catch (err) {
+      setVerifyError("Network error. Please try again.");
+    } finally {
+      setIsVerifying(false);
+    }
+  };
 
   const statCards = stats ? [
     { 
@@ -96,6 +128,34 @@ export default function PublisherDashboard() {
           <h1 className="text-2xl font-bold text-slate-900">Publisher Dashboard</h1>
           <p className="text-slate-500">Welcome back! Here's an overview of your channel performance.</p>
         </div>
+
+        {stats && !stats.join_rewarded && (
+          <div className="bg-gradient-to-r from-blue-600 to-blue-500 rounded-2xl p-6 shadow-lg shadow-blue-500/20 text-white flex flex-col md:flex-row md:items-center justify-between gap-6 relative overflow-hidden">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-white opacity-10 rounded-full blur-2xl -mr-10 -mt-10 pointer-events-none" />
+            <div className="relative z-10">
+              <h3 className="font-black text-xl tracking-tight mb-1">Join & Earn ${channelReward}!</h3>
+              <p className="text-sm text-blue-100 font-medium">Join our official channel @{channelName} to receive an instant welcome bonus directly to your available balance.</p>
+              {verifyError && <p className="text-xs text-white mt-3 font-bold bg-red-500/80 px-3 py-1.5 rounded-lg inline-block shadow-sm backdrop-blur-sm border border-red-400/50">{verifyError}</p>}
+            </div>
+            <div className="flex gap-3 w-full md:w-auto relative z-10 shrink-0">
+              <a 
+                href={`https://t.me/${channelName}`} 
+                target="_blank" 
+                rel="noreferrer"
+                className="flex-1 md:flex-none text-center bg-white text-blue-600 px-5 py-2.5 rounded-xl font-bold text-sm hover:bg-blue-50 transition-colors shadow-sm"
+              >
+                Join Channel
+              </a>
+              <button 
+                onClick={handleVerifyJoin}
+                disabled={isVerifying}
+                className="flex-1 md:flex-none bg-blue-700/40 text-white px-5 py-2.5 rounded-xl font-bold text-sm hover:bg-blue-700/60 transition-colors disabled:opacity-50 border border-blue-400/30 backdrop-blur-sm"
+              >
+                {isVerifying ? "Verifying..." : "Verify"}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Stats Grid */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">

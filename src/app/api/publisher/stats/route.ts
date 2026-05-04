@@ -39,7 +39,8 @@ export async function GET(request: Request) {
       total_withdrawn: totalWithdrawn,
       total_channels: channelCountRows[0].total,
       recent_channels: recentChannels,
-      referral_percent: referralPercent
+      referral_percent: referralPercent,
+      join_rewarded: user.join_rewarded
     });
   } catch (error: any) {
     console.error("Stats API Error:", error);
