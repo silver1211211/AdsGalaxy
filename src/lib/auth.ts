@@ -34,7 +34,12 @@ export function validateInitData(initData: string, botToken: string) {
     .update(sortedParams)
     .digest("hex");
 
+  console.log("Auth: checkHash:", checkHash);
+  console.log("Auth: receivedHash:", hash);
+
   if (checkHash !== hash) {
+    console.error("Auth: Hash mismatch detected!");
+    console.error("Auth: sortedParams used for check:", sortedParams);
     throw new Error("Invalid initData: Hash mismatch");
   }
 
@@ -62,13 +67,9 @@ export function validateInitData(initData: string, botToken: string) {
  * If user doesn't exist, it creates one.
  */
 export async function getAuthenticatedUser(initData: string | null) {
-  if (!initData) {
-    if (process.env.NODE_ENV === 'development') {
-      // Mock user for local development
-      const [devUser]: any = await pool.query("SELECT * FROM users LIMIT 1");
-      if (devUser.length > 0) return devUser[0];
-      throw new Error("Development Error: No users in database to mock");
-    }
+  console.log("Auth: Received initData:", initData ? (initData.substring(0, 20) + "...") : "MISSING");
+
+  if (!initData || initData === 'undefined' || initData === 'null') {
     throw new Error("Unauthorized: No initData provided");
   }
 

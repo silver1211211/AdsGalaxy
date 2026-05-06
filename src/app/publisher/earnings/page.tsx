@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { Loader2, DollarSign, Clock, MousePointerClick, Eye, ChevronRight, X, Calendar, Hash, Target, CheckCircle } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { apiFetch } from "@/lib/api";
 
 export default function PublisherEarningsPage() {
   const [earnings, setEarnings] = useState<any[]>([]);
@@ -12,12 +13,7 @@ export default function PublisherEarningsPage() {
   const [selectedEarning, setSelectedEarning] = useState<any>(null);
 
   useEffect(() => {
-    const initData = (window as any).Telegram?.WebApp?.initData || "";
-    fetch("/api/publisher/earnings", {
-      headers: {
-        "x-telegram-init-data": initData
-      }
-    })
+    apiFetch("/api/publisher/earnings")
       .then((res) => res.json())
       .then((data) => {
         if (data.error) throw new Error(data.error);

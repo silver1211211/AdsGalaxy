@@ -21,7 +21,7 @@ export async function GET(request: Request) {
 
     // Fetch referral percentage from settings
     const [settingRows]: any = await pool.query(
-      "SELECT value FROM settings WHERE \`key\` = 'referral_reward_percentage'"
+      "SELECT value FROM settings WHERE `key` = 'referral_reward_percentage'"
     );
     const referralPercent = settingRows[0]?.value || "5";
 

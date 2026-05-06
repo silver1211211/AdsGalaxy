@@ -27,24 +27,6 @@ export default function PublisherDashboard() {
   React.useEffect(() => {
     setTitle("Dashboard");
     const fetchStats = async () => {
-      // Retry logic to wait for Telegram WebApp to be ready
-      let retries = 0;
-      const maxRetries = 10;
-      
-      const getInitData = () => (window as any).Telegram?.WebApp?.initData;
-
-      while (!getInitData() && retries < maxRetries) {
-        await new Promise(resolve => setTimeout(resolve, 200));
-        retries++;
-      }
-
-      const initData = getInitData();
-      if (!initData) {
-        console.warn("No Telegram initData found after retries. Ensure you are in Telegram.");
-        setIsLoading(false);
-        return;
-      }
-
       try {
         const res = await apiFetch("/api/publisher/stats");
         const data = await res.json();
