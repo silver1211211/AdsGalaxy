@@ -18,7 +18,7 @@ export async function sendTelegramMessage(chatId: string | number, text: string,
       if (parse_mode) formData.append("parse_mode", parse_mode);
       if (reply_markup) formData.append("reply_markup", typeof reply_markup === 'string' ? reply_markup : JSON.stringify(reply_markup));
       
-      const blob = new Blob([photo]);
+      const blob = new Blob([new Uint8Array(photo)]);
       formData.append("photo", blob, "photo.jpg");
 
       const res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
