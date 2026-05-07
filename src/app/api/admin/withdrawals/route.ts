@@ -11,24 +11,40 @@ export async function GET(request: Request) {
   const page = parseInt(searchParams.get("page") || "1");
   const limit = parseInt(searchParams.get("limit") || "10");
   const statusFilter = searchParams.get("status") || "all";
+  const search = searchParams.get("search") || "";
   const offset = (page - 1) * limit;
 
   try {
     let query = `
-      SELECT w.*, u.first_name, u.last_name, u.username AS owner_username, u.telegram_id
+      SELECT w.*, u.first_name, u.last_name, u.username AS owner_username, u.telegram_id as owner_telegram_id
       FROM withdrawals w
       LEFT JOIN users u ON w.user_id = u.id
     `;
-    let countQuery = "SELECT COUNT(*) as total FROM withdrawals w";
+    let countQuery = "SELECT COUNT(*) as total FROM withdrawals w LEFT JOIN users u ON w.user_id = u.id";
     const queryParams: any[] = [];
 
+    let whereClause = " WHERE 1=1";
+
     if (statusFilter !== "all") {
-      query += " WHERE w.status = ?";
-      countQuery += " WHERE w.status = ?";
+      whereClause += " AND w.status = ?";
       queryParams.push(statusFilter);
     }
 
-    query += " ORDER BY w.id DESC LIMIT ? OFFSET ?";
+    if (search) {
+      whereClause += ` AND (
+        w.id LIKE ? OR 
+        w.amount LIKE ? OR 
+        u.first_name LIKE ? OR 
+        u.last_name LIKE ? OR 
+        u.username LIKE ? OR 
+        u.telegram_id LIKE ?
+      )`;
+      const searchVal = `%${search}%`;
+      queryParams.push(searchVal, searchVal, searchVal, searchVal, searchVal, searchVal);
+    }
+
+    query += whereClause + " ORDER BY w.id DESC LIMIT ? OFFSET ?";
+    countQuery += whereClause;
     
     const [rows]: any = await pool.query(query, [...queryParams, limit, offset]);
     const [[countRow]]: any = await pool.query(countQuery, queryParams);

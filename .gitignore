@@ -41,3 +41,9 @@ yarn-error.log*
 # Project specific
 *.log
 scripts/
+scratch/
+
+# AI-related
+.gemini/
+AGENTS.md 
+CLAUDE.md 

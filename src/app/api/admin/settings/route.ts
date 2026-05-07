@@ -9,8 +9,15 @@ export async function GET() {
 
   try {
     const [rows] = await pool.query(
-      "SELECT * FROM settings WHERE `key` NOT IN (?, ?, ?, ?) ORDER BY `key` ASC",
-      ["last_cron_run", "last_settlement_run", "last_views_check", "last_settlement_views_run"]
+      "SELECT * FROM settings WHERE `key` NOT IN (?, ?, ?, ?, ?, ?) ORDER BY `key` ASC",
+      [
+        "last_cron_run", 
+        "last_settlement_run", 
+        "last_views_check", 
+        "last_settlement_views_run", 
+        "last_subscriber_cron_run", 
+        "last_unlock_cron_run"
+      ]
     );
     return NextResponse.json({ settings: rows });
   } catch (error) {

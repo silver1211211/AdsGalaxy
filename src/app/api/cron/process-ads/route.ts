@@ -31,7 +31,7 @@ export async function GET(req: NextRequest) {
 
     const [campaigns]: any = await pool.query(`
       SELECT * FROM campaigns 
-      WHERE status = 'active' AND budget > 0 
+      WHERE status = 'active' AND budget > 0 AND type != 'broadcast'
       ORDER BY cpm DESC
     `);
 
@@ -79,6 +79,13 @@ export async function GET(req: NextRequest) {
       `, [campaign.user_id]);
 
       const suitableChannels = channels.filter((channel: any) => {
+        // 1. Category Matching (Campaign category must be in channel categories)
+        const campaignCategory = campaign.category;
+        const channelCategories = channel.categories ? (typeof channel.categories === 'string' ? JSON.parse(channel.categories) : channel.categories) : [];
+        
+        if (!channelCategories.includes(campaignCategory)) return false;
+
+        // 2. Continent Matching
         const campaignConts = campaign.continents ? (typeof campaign.continents === 'string' ? JSON.parse(campaign.continents) : campaign.continents) : [];
         const channelConts = channel.audience_continents ? (typeof channel.audience_continents === 'string' ? JSON.parse(channel.audience_continents) : channel.audience_continents) : [];
 
@@ -122,9 +129,10 @@ export async function GET(req: NextRequest) {
           : campaign.link;
 
         const replyMarkup = {
-          inline_keyboard: [[
-            { text: campaign.button_text, url: buttonUrl }
-          ]]
+          inline_keyboard: [
+            [{ text: campaign.button_text, url: buttonUrl }],
+            [{ text: "Advertise with Ads galaxy", url: "https://t.me/Ads_Galaxy_bot?start=advertise" }]
+          ]
         };
 
         const result = await sendTelegramMessage(channel.chat_id, campaign.message_text, {

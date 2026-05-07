@@ -13,7 +13,8 @@ import {
   ArrowLeftRight,
   Menu,
   X,
-  PlusCircle
+  PlusCircle,
+  Bot
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +30,7 @@ export default function Sidebar({ type, isOpen, onClose }: SidebarProps) {
   const publisherLinks = [
     { name: "Dashboard", href: "/publisher", icon: LayoutDashboard },
     { name: "My Channels", href: "/publisher/channels", icon: Tv },
+    { name: "My Bots", href: "/publisher/bots", icon: Bot },
     { name: "Earnings", href: "/publisher/earnings", icon: Wallet },
     { name: "Withdraw", href: "/publisher/withdraw", icon: ArrowUpRight },
     { name: "Referral", href: "/publisher/referral", icon: Users },

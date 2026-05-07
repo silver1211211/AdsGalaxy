@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 
 export default function AdminWithdrawalsPage() {
@@ -11,6 +11,7 @@ export default function AdminWithdrawalsPage() {
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [search, setSearch] = useState("");
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [error, setError] = useState("");
   
@@ -24,10 +25,10 @@ export default function AdminWithdrawalsPage() {
   const [viewModalOpen, setViewModalOpen] = useState(false);
   const [selectedWithdrawal, setSelectedWithdrawal] = useState<any>(null);
 
-  const fetchWithdrawals = async (p: number, s: string) => {
+  const fetchWithdrawals = async (p: number, s: string, q: string) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/withdrawals?page=${p}&limit=10&status=${s}`);
+      const res = await fetch(`/api/admin/withdrawals?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`);
       const data = await res.json();
       setWithdrawals(data.withdrawals);
       setTotalPages(data.totalPages);
@@ -39,8 +40,11 @@ export default function AdminWithdrawalsPage() {
   };
 
   useEffect(() => {
-    fetchWithdrawals(page, statusFilter);
-  }, [page, statusFilter]);
+    const timer = setTimeout(() => {
+      fetchWithdrawals(page, statusFilter, search);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [page, statusFilter, search]);
 
   const handleApprove = async (id: number) => {
     setActionLoading(id);
@@ -51,7 +55,7 @@ export default function AdminWithdrawalsPage() {
         body: JSON.stringify({ id, action: "approve" })
       });
       if (!res.ok) throw new Error("Action failed");
-      await fetchWithdrawals(page, statusFilter);
+      await fetchWithdrawals(page, statusFilter, search);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -73,7 +77,7 @@ export default function AdminWithdrawalsPage() {
       setRejectModalOpen(false);
       setRejectReason("");
       setRefund(true);
-      await fetchWithdrawals(page, statusFilter);
+      await fetchWithdrawals(page, statusFilter, search);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -195,18 +199,32 @@ export default function AdminWithdrawalsPage() {
       )}
 
       <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between flex-wrap gap-4">
+        <div className="px-4 py-3 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <h2 className="text-sm font-semibold text-slate-900">Withdrawals</h2>
-          <div className="flex bg-slate-100 p-0.5 rounded-md border border-slate-200/50">
-            {["all", "pending", "success", "rejected"].map(f => (
-              <button
-                key={f}
-                onClick={() => { setPage(1); setStatusFilter(f); }}
-                className={`px-3 py-1.5 text-xs font-medium capitalize rounded transition-all cursor-pointer ${statusFilter === f ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}
-              >
-                {f}
-              </button>
-            ))}
+          
+          <div className="flex flex-col sm:flex-row items-center gap-4">
+            <div className="relative w-full sm:w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+              <input 
+                type="text"
+                placeholder="Search withdrawals, users..."
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                className="w-full pl-10 pr-4 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+              />
+            </div>
+
+            <div className="flex bg-slate-100 p-0.5 rounded-md border border-slate-200/50 w-full sm:w-auto">
+              {["all", "pending", "success", "rejected"].map(f => (
+                <button
+                  key={f}
+                  onClick={() => { setPage(1); setStatusFilter(f); }}
+                  className={`flex-1 sm:flex-none px-3 py-1.5 text-xs font-medium capitalize rounded transition-all cursor-pointer ${statusFilter === f ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         

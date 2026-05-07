@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Eye, X } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Eye, X, Search } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 
 export default function AdminDepositsPage() {
@@ -11,16 +11,17 @@ export default function AdminDepositsPage() {
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [search, setSearch] = useState("");
   const [error, setError] = useState("");
 
   // View Modal State
   const [viewModalOpen, setViewModalOpen] = useState(false);
   const [selectedDeposit, setSelectedDeposit] = useState<any>(null);
 
-  const fetchDeposits = async (p: number, s: string) => {
+  const fetchDeposits = async (p: number, s: string, q: string) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/deposits?page=${p}&limit=10&status=${s}`);
+      const res = await fetch(`/api/admin/deposits?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`);
       const data = await res.json();
       setDeposits(data.deposits);
       setTotalPages(data.totalPages);
@@ -33,8 +34,11 @@ export default function AdminDepositsPage() {
   };
 
   useEffect(() => {
-    fetchDeposits(page, statusFilter);
-  }, [page, statusFilter]);
+    const timer = setTimeout(() => {
+      fetchDeposits(page, statusFilter, search);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [page, statusFilter, search]);
 
   const openViewModal = (deposit: any) => {
     setSelectedDeposit(deposit);
@@ -111,18 +115,32 @@ export default function AdminDepositsPage() {
       )}
 
       <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between flex-wrap gap-4">
+        <div className="px-4 py-3 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <h2 className="text-sm font-semibold text-slate-900">Deposits</h2>
-          <div className="flex bg-slate-100 p-0.5 rounded-md border border-slate-200/50">
-            {["all", "pending", "paid", "cancelled"].map(f => (
-              <button
-                key={f}
-                onClick={() => { setPage(1); setStatusFilter(f); }}
-                className={`px-3 py-1.5 text-xs font-medium capitalize rounded transition-all cursor-pointer ${statusFilter === f ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}
-              >
-                {f}
-              </button>
-            ))}
+          
+          <div className="flex flex-col sm:flex-row items-center gap-4">
+            <div className="relative w-full sm:w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+              <input 
+                type="text"
+                placeholder="Search deposits, users..."
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                className="w-full pl-10 pr-4 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+              />
+            </div>
+
+            <div className="flex bg-slate-100 p-0.5 rounded-md border border-slate-200/50 w-full sm:w-auto">
+              {["all", "pending", "paid", "cancelled"].map(f => (
+                <button
+                  key={f}
+                  onClick={() => { setPage(1); setStatusFilter(f); }}
+                  className={`flex-1 sm:flex-none px-3 py-1.5 text-xs font-medium capitalize rounded transition-all cursor-pointer ${statusFilter === f ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 

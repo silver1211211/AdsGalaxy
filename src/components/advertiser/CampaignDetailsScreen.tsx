@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 interface Campaign {
   id: number;
   name: string;
-  type: "views" | "clicks";
+  type: "views" | "clicks" | "broadcast";
   status: string;
   budget: string;
   cpm: string;
@@ -21,7 +21,10 @@ interface Campaign {
   created_at: string;
   total_clicks?: number;
   total_views?: number;
+  total_deliveries?: number;
+  total_spent?: number;
   posts?: any[];
+  broadcast_stats?: any[];
   chart_data?: any[];
 }
 
@@ -31,7 +34,7 @@ interface CampaignDetailsScreenProps {
 }
 
 import { apiFetch } from "@/lib/api";
-import { Loader2, PlayCircle, Eye, MousePointer2 } from "lucide-react";
+import { Loader2, PlayCircle, Eye, MousePointer2, Send, Bot } from "lucide-react";
 
 export default function CampaignDetailsScreen({ campaign: initialCampaign, onClose }: CampaignDetailsScreenProps) {
   const [campaign, setCampaign] = React.useState<Campaign>(initialCampaign);
@@ -109,22 +112,45 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
             </p>
             <p className="text-lg font-black text-slate-900">${campaign.cpm}</p>
           </div>
-          <div className="p-4 bg-[#0c9de8]/5 rounded-3xl border border-[#0c9de8]/10 space-y-1">
-            <p className="text-[10px] font-bold text-[#0c9de8] uppercase tracking-widest flex items-center gap-1.5">
-              <MousePointer2 size={10} /> Clicks
-            </p>
-            <p className="text-lg font-black text-slate-900">
-              {isLoading ? <Loader2 className="animate-spin" size={16} /> : campaign.total_clicks || 0}
-            </p>
-          </div>
-          <div className="p-4 bg-indigo-50 rounded-3xl border border-indigo-100 space-y-1">
-            <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest flex items-center gap-1.5">
-              <Eye size={10} /> Views
-            </p>
-            <p className="text-lg font-black text-slate-900">
-              {isLoading ? <Loader2 className="animate-spin" size={16} /> : campaign.total_views || 0}
-            </p>
-          </div>
+          {campaign.type === 'broadcast' ? (
+            <>
+              <div className="p-4 bg-[#0c9de8]/5 rounded-3xl border border-[#0c9de8]/10 space-y-1">
+                <p className="text-[10px] font-bold text-[#0c9de8] uppercase tracking-widest flex items-center gap-1.5">
+                  <Send size={10} /> Total Sent
+                </p>
+                <p className="text-lg font-black text-slate-900">
+                  {isLoading ? <Loader2 className="animate-spin" size={16} /> : campaign.total_deliveries || 0}
+                </p>
+              </div>
+              <div className="p-4 bg-emerald-50 rounded-3xl border border-emerald-100 space-y-1">
+                <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest flex items-center gap-1.5">
+                  <DollarSign size={10} /> Total Spent
+                </p>
+                <p className="text-lg font-black text-slate-900">
+                  {isLoading ? <Loader2 className="animate-spin" size={16} /> : `$${parseFloat(campaign.total_spent as any || "0").toFixed(4)}`}
+                </p>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="p-4 bg-[#0c9de8]/5 rounded-3xl border border-[#0c9de8]/10 space-y-1">
+                <p className="text-[10px] font-bold text-[#0c9de8] uppercase tracking-widest flex items-center gap-1.5">
+                  <MousePointer2 size={10} /> Clicks
+                </p>
+                <p className="text-lg font-black text-slate-900">
+                  {isLoading ? <Loader2 className="animate-spin" size={16} /> : campaign.total_clicks || 0}
+                </p>
+              </div>
+              <div className="p-4 bg-indigo-50 rounded-3xl border border-indigo-100 space-y-1">
+                <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest flex items-center gap-1.5">
+                  <Eye size={10} /> Views
+                </p>
+                <p className="text-lg font-black text-slate-900">
+                  {isLoading ? <Loader2 className="animate-spin" size={16} /> : campaign.total_views || 0}
+                </p>
+              </div>
+            </>
+          )}
           <div className="p-4 bg-slate-50 rounded-3xl border border-slate-100 space-y-1">
             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
               <Target size={10} /> Goal
@@ -179,6 +205,48 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
                   <Loader2 className="animate-spin text-[#0c9de8]" size={32} />
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Loading performance data...</p>
                 </div>
+              ) : campaign.type === 'broadcast' ? (
+                campaign.broadcast_stats && campaign.broadcast_stats.length > 0 ? (
+                  campaign.broadcast_stats.map((stat: any, idx: number) => (
+                    <div key={idx} className="p-4 bg-slate-50/80 border border-slate-200/60 rounded-2xl hover:bg-white hover:shadow-md hover:border-[#0c9de8]/40 transition-all group">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 bg-indigo-50 rounded-xl flex items-center justify-center text-indigo-400 group-hover:bg-indigo-100 transition-colors">
+                            <Bot size={20} />
+                          </div>
+                          <div>
+                            <p className="text-sm font-black text-slate-900 truncate max-w-[150px]">
+                              {stat.bot_name}
+                            </p>
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                              @{stat.bot_username}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-4 pt-3 border-t border-slate-100">
+                        <div className="flex items-center gap-1.5">
+                          <Send size={12} className="text-blue-500" />
+                          <span className="text-[10px] font-black text-slate-600">
+                            {stat.delivery_count} Messages
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 ml-auto pr-2">
+                          <DollarSign size={12} className="text-emerald-500" />
+                          <span className="text-[10px] font-black text-emerald-600">
+                            ${parseFloat(stat.total_spent || "0").toFixed(4)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-center py-12 bg-slate-50 rounded-3xl border border-dashed border-slate-200">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">No broadcasts yet</p>
+                    <p className="text-[8px] font-bold text-slate-300 uppercase mt-1 tracking-wider">Campaign waiting for next distribution cycle</p>
+                  </div>
+                )
               ) : campaign.posts && campaign.posts.length > 0 ? (
                 campaign.posts.map((post: any) => (
                   <div key={post.id} className="p-4 bg-slate-50/80 border border-slate-200/60 rounded-2xl hover:bg-white hover:shadow-md hover:border-[#0c9de8]/40 transition-all group">

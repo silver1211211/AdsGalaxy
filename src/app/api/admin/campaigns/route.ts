@@ -11,6 +11,7 @@ export async function GET(request: Request) {
   const page = parseInt(searchParams.get("page") || "1");
   const limit = parseInt(searchParams.get("limit") || "10");
   const statusFilter = searchParams.get("status") || "all";
+  const search = searchParams.get("search") || "";
   const offset = (page - 1) * limit;
 
   try {
@@ -19,16 +20,31 @@ export async function GET(request: Request) {
       FROM campaigns c 
       LEFT JOIN users u ON c.user_id = u.id
     `;
-    let countQuery = "SELECT COUNT(*) as total FROM campaigns c";
+    let countQuery = "SELECT COUNT(*) as total FROM campaigns c LEFT JOIN users u ON c.user_id = u.id";
     const queryParams: any[] = [];
 
+    let whereClause = " WHERE 1=1";
+
     if (statusFilter !== "all") {
-      query += " WHERE c.status = ?";
-      countQuery += " WHERE c.status = ?";
+      whereClause += " AND c.status = ?";
       queryParams.push(statusFilter);
     }
 
-    query += " ORDER BY c.id DESC LIMIT ? OFFSET ?";
+    if (search) {
+      whereClause += ` AND (
+        c.name LIKE ? OR 
+        c.message_text LIKE ? OR 
+        u.first_name LIKE ? OR 
+        u.last_name LIKE ? OR 
+        u.username LIKE ? OR 
+        u.telegram_id LIKE ?
+      )`;
+      const searchVal = `%${search}%`;
+      queryParams.push(searchVal, searchVal, searchVal, searchVal, searchVal, searchVal);
+    }
+
+    query += whereClause + " ORDER BY c.id DESC LIMIT ? OFFSET ?";
+    countQuery += whereClause;
     
     const [rows]: any = await pool.query(query, [...queryParams, limit, offset]);
     const [[countRow]]: any = await pool.query(countQuery, queryParams);

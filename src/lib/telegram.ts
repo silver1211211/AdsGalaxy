@@ -1,5 +1,5 @@
 export async function sendTelegramMessage(chatId: string | number, text: string, options: any = {}) {
-  const token = process.env.BOT_TOKEN;
+  const token = options.token || process.env.BOT_TOKEN;
   if (!token) {
     console.error("BOT_TOKEN is not defined");
     return;
@@ -9,6 +9,26 @@ export async function sendTelegramMessage(chatId: string | number, text: string,
 
   try {
     const endpoint = photo ? "sendPhoto" : "sendMessage";
+    
+    // If photo is a Buffer, we must use FormData
+    if (photo && Buffer.isBuffer(photo)) {
+      const formData = new FormData();
+      formData.append("chat_id", chatId.toString());
+      formData.append("caption", text);
+      if (parse_mode) formData.append("parse_mode", parse_mode);
+      if (reply_markup) formData.append("reply_markup", typeof reply_markup === 'string' ? reply_markup : JSON.stringify(reply_markup));
+      
+      const blob = new Blob([photo]);
+      formData.append("photo", blob, "photo.jpg");
+
+      const res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
+        method: "POST",
+        body: formData,
+      });
+      return await res.json();
+    }
+
+    // Default JSON for text or URL-based photos
     const body: any = {
       chat_id: chatId,
       parse_mode,

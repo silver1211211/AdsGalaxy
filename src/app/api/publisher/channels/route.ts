@@ -24,9 +24,30 @@ export async function POST(request: Request) {
     const user = await getAuthenticatedUser(initData);
 
     const body = await request.json();
-    const { chat_id, username, title, posts_per_day, audience_continents } = body;
+    const { chat_id, username, title, posts_per_day, audience_continents, categories } = body;
 
-    // 1. Check if channel already exists
+    // 1. Get minimum subscribers requirement from settings
+    const [settings]: any = await pool.query("SELECT value FROM settings WHERE `key` = 'min_subscribers'");
+    const minSubscribers = parseInt(settings[0]?.value || "0");
+
+    // 2. Fetch current member count from Telegram
+    const botToken = process.env.BOT_TOKEN;
+    const tgRes = await fetch(`https://api.telegram.org/bot${botToken}/getChatMemberCount?chat_id=${chat_id}`);
+    const tgData = await tgRes.json();
+
+    if (!tgData.ok) {
+      return NextResponse.json({ error: "Failed to verify channel member count. Make sure the bot is an admin." }, { status: 400 });
+    }
+
+    const subscriberCount = tgData.result;
+
+    if (subscriberCount < minSubscribers) {
+      return NextResponse.json({ 
+        error: `Channel must have at least ${minSubscribers} subscribers. Current: ${subscriberCount}` 
+      }, { status: 400 });
+    }
+
+    // 3. Check if channel already exists
     const [existing]: any = await pool.query(
       "SELECT id, user_id, is_deleted FROM channels WHERE chat_id = ?",
       [chat_id]
@@ -49,22 +70,24 @@ export async function POST(request: Request) {
         `UPDATE channels SET 
           username = ?, 
           title = ?, 
+          subscriber_count = ?,
           posts_per_day = ?, 
           audience_continents = ?, 
+          categories = ?,
           is_deleted = FALSE, 
           status = 'pending' 
          WHERE id = ?`,
-        [username, title, posts_per_day, JSON.stringify(audience_continents), channel.id]
+        [username, title, subscriberCount, posts_per_day, JSON.stringify(audience_continents), JSON.stringify(categories || []), channel.id]
       );
 
       return NextResponse.json({ success: true, id: channel.id, message: "Channel reactivated and updated" });
     }
 
-    // 2. Insert new channel
+    // 4. Insert new channel
     const [result] = await pool.query(
-      `INSERT INTO channels (user_id, chat_id, username, title, posts_per_day, audience_continents, status) 
-       VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
-      [user.id, chat_id, username, title, posts_per_day, JSON.stringify(audience_continents)]
+      `INSERT INTO channels (user_id, chat_id, username, title, subscriber_count, posts_per_day, audience_continents, categories, status) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      [user.id, chat_id, username, title, subscriberCount, posts_per_day, JSON.stringify(audience_continents), JSON.stringify(categories || [])]
     );
 
     return NextResponse.json({ success: true, id: (result as any).insertId });

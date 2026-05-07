@@ -2,11 +2,11 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Bot, Search, Users, ShieldOff } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 
-export default function AdminCampaignsPage() {
-  const [campaigns, setCampaigns] = useState([]);
+export default function AdminBotsPage() {
+  const [bots, setBots] = useState([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -14,16 +14,16 @@ export default function AdminCampaignsPage() {
   const [search, setSearch] = useState("");
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [error, setError] = useState("");
-  
-  const [viewModalOpen, setViewModalOpen] = useState(false);
-  const [selectedCampaign, setSelectedCampaign] = useState<any>(null);
 
-  const fetchCampaigns = async (p: number, s: string, q: string) => {
+  const [viewModalOpen, setViewModalOpen] = useState(false);
+  const [selectedBot, setSelectedBot] = useState<any>(null);
+
+  const fetchBots = async (p: number, s: string, q: string) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/campaigns?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`);
+      const res = await fetch(`/api/admin/bots?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`);
       const data = await res.json();
-      setCampaigns(data.campaigns);
+      setBots(data.bots);
       setTotalPages(data.totalPages);
     } catch (err) {
       console.error(err);
@@ -34,7 +34,7 @@ export default function AdminCampaignsPage() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      fetchCampaigns(page, statusFilter, search);
+      fetchBots(page, statusFilter, search);
     }, 500);
     return () => clearTimeout(timer);
   }, [page, statusFilter, search]);
@@ -42,22 +42,22 @@ export default function AdminCampaignsPage() {
   const handleAction = async (id: number, action: string) => {
     setActionLoading(id);
     try {
-      const res = await fetch("/api/admin/campaigns", {
+      const res = await fetch("/api/admin/bots", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, action })
       });
       if (!res.ok) throw new Error("Action failed");
-      await fetchCampaigns(page, statusFilter, search);
+      await fetchBots(page, statusFilter, search);
     } catch (err: any) {
       setError(err.message);
     } finally {
       setActionLoading(null);
     }
   };
-  
-  const openViewModal = (campaign: any) => {
-    setSelectedCampaign(campaign);
+
+  const openViewModal = (bot: any) => {
+    setSelectedBot(bot);
     setViewModalOpen(true);
   };
 
@@ -76,76 +76,97 @@ export default function AdminCampaignsPage() {
           </div>
         );
       }
-    } catch (e) {
-      // Fallback if not JSON
-    }
+    } catch (e) {}
     return <span className="font-medium text-slate-900">{continentsStr}</span>;
+  };
+
+  const renderCategories = (categoriesStr: string) => {
+    if (!categoriesStr) return <span className="text-slate-400 italic">None selected</span>;
+    try {
+      const parsed = JSON.parse(categoriesStr);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return (
+          <div className="flex flex-wrap gap-1 mt-1">
+            {parsed.map((cat: string) => (
+              <span key={cat} className="px-2 py-0.5 bg-indigo-50 text-indigo-600 border border-indigo-100 rounded text-[10px] font-semibold uppercase tracking-wider">
+                {cat}
+              </span>
+            ))}
+          </div>
+        );
+      }
+    } catch (e) {}
+    return <span className="text-slate-400 italic">None selected</span>;
   };
 
   return (
     <AdminLayout>
       <Modal isOpen={!!error} onClose={() => setError("")} type="error" title="Error">{error}</Modal>
 
-      {/* View Campaign Modal */}
-      {viewModalOpen && selectedCampaign && (
+      {/* View Bot Modal */}
+      {viewModalOpen && selectedBot && (
         <div className="fixed inset-0 z-[100] bg-slate-900/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-lg w-full max-w-2xl shadow-xl border border-slate-200 flex flex-col max-h-[90vh]">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
-              <h3 className="text-lg font-bold text-slate-900">Campaign Details (#{selectedCampaign.id})</h3>
+              <h3 className="text-lg font-bold text-slate-900">Bot Details (#{selectedBot.id})</h3>
               <button onClick={() => setViewModalOpen(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
                 <X size={20} />
               </button>
             </div>
             
             <div className="p-6 overflow-y-auto space-y-6">
-              {/* Creator Info */}
+              {/* Publisher Info */}
               <div>
-                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Creator Profile</h4>
+                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Publisher Profile</h4>
                 <div className="bg-slate-50 p-3 rounded-md border border-slate-200 text-sm">
                   <div className="grid grid-cols-2 gap-2">
-                    <div><span className="text-slate-500">Name:</span> <span className="font-medium text-slate-900">{selectedCampaign.first_name} {selectedCampaign.last_name}</span></div>
-                    <div><span className="text-slate-500">Username:</span> <span className="font-medium text-slate-900">@{selectedCampaign.username || "N/A"}</span></div>
-                    <div><span className="text-slate-500">User ID:</span> <span className="font-medium text-slate-900">{selectedCampaign.user_id}</span></div>
-                    <div><span className="text-slate-500">Telegram ID:</span> <span className="font-medium text-slate-900">{selectedCampaign.telegram_id}</span></div>
+                    <div><span className="text-slate-500">Name:</span> <span className="font-medium text-slate-900">{selectedBot.first_name} {selectedBot.last_name}</span></div>
+                    <div><span className="text-slate-500">Username:</span> <span className="font-medium text-slate-900">@{selectedBot.owner_username || "N/A"}</span></div>
+                    <div><span className="text-slate-500">User ID:</span> <span className="font-medium text-slate-900">{selectedBot.user_id}</span></div>
+                    <div><span className="text-slate-500">Telegram ID:</span> <span className="font-medium text-slate-900">{selectedBot.telegram_id}</span></div>
                   </div>
                 </div>
               </div>
 
-              {/* Campaign Content */}
+              {/* Bot Info */}
               <div>
-                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Ad Content</h4>
-                <div className="bg-slate-50 p-4 rounded-md border border-slate-200 text-sm space-y-4">
-                  {selectedCampaign.image_url && (
-                    <div>
-                      <span className="text-slate-500 block mb-1">Image:</span>
-                      <img src={selectedCampaign.image_url} alt="Campaign" className="max-w-full h-auto max-h-48 rounded-md border border-slate-200 object-cover" />
+                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Bot Information</h4>
+                <div className="bg-slate-50 p-3 rounded-md border border-slate-200 text-sm">
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                    <div><span className="text-slate-500">Bot Name:</span> <span className="font-medium text-slate-900">{selectedBot.bot_name || "N/A"}</span></div>
+                    <div><span className="text-slate-500">Username:</span> <span className="font-medium text-blue-600">@{selectedBot.bot_username || "N/A"}</span></div>
+                    <div className="col-span-2"><span className="text-slate-500">API Token:</span> <span className="font-mono text-[10px] break-all">{selectedBot.bot_token}</span></div>
+                    <div><span className="text-slate-500">Status:</span> <span className="font-medium text-slate-900 capitalize">{selectedBot.status}</span></div>
+                    <div><span className="text-slate-500">Posts / Day:</span> <span className="font-medium text-slate-900">{selectedBot.posts_per_day}</span></div>
+                    <div className="col-span-1">
+                      <span className="text-slate-500 block">Categories:</span> 
+                      {renderCategories(selectedBot.categories)}
                     </div>
-                  )}
-                  <div>
-                    <span className="text-slate-500 block mb-1">Message ({selectedCampaign.parse_mode}):</span>
-                    <div className="bg-white p-3 rounded border border-slate-200 whitespace-pre-wrap font-mono text-xs max-h-60 overflow-y-auto">{selectedCampaign.message_text}</div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div><span className="text-slate-500">Link URL:</span> <a href={selectedCampaign.link} target="_blank" className="font-medium text-blue-600 hover:underline block truncate" title={selectedCampaign.link}>{selectedCampaign.link}</a></div>
-                    <div><span className="text-slate-500">Button Text:</span> <span className="font-medium text-slate-900">{selectedCampaign.button_text || "N/A"}</span></div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Settings */}
-              <div>
-                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Configuration</h4>
-                <div className="bg-slate-50 p-3 rounded-md border border-slate-200 text-sm">
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                    <div><span className="text-slate-500">Type:</span> <span className="font-medium text-slate-900 capitalize">{selectedCampaign.type}</span></div>
-                    <div><span className="text-slate-500">Budget:</span> <span className="font-medium text-slate-900">${selectedCampaign.budget}</span></div>
-                    <div><span className="text-slate-500">CPM:</span> <span className="font-medium text-slate-900">${selectedCampaign.cpm}</span></div>
-                    <div><span className="text-slate-500">Status:</span> <span className="font-medium text-slate-900 capitalize">{selectedCampaign.status}</span></div>
                     <div className="col-span-2">
-                      <span className="text-slate-500 block">Continents:</span> 
-                      {renderContinents(selectedCampaign.continents)}
+                      <span className="text-slate-500 block">Audience Continents:</span> 
+                      {renderContinents(selectedBot.continents)}
                     </div>
-                    <div className="col-span-2"><span className="text-slate-500">Category:</span> <span className="font-medium text-slate-900">{selectedCampaign.category || "All"}</span></div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Bot Users Stats */}
+              <div>
+                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Bot Users Stats</h4>
+                <div className="grid grid-cols-2 gap-4 text-sm font-medium">
+                  <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-100 flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-emerald-600">
+                      <Users size={16} />
+                      <span>Active</span>
+                    </div>
+                    <span className="text-emerald-700">{selectedBot.active_count?.toLocaleString() || 0}</span>
+                  </div>
+                  <div className="bg-red-50 p-4 rounded-xl border border-red-100 flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-red-600">
+                      <ShieldOff size={16} />
+                      <span>Blocked</span>
+                    </div>
+                    <span className="text-red-700">{selectedBot.blocked_count?.toLocaleString() || 0}</span>
                   </div>
                 </div>
               </div>
@@ -156,14 +177,14 @@ export default function AdminCampaignsPage() {
 
       <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <h2 className="text-sm font-semibold text-slate-900">Campaigns</h2>
+          <h2 className="text-sm font-semibold text-slate-900">Monetized Bots</h2>
           
           <div className="flex flex-col sm:flex-row items-center gap-4">
             <div className="relative w-full sm:w-64">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
               <input 
                 type="text"
-                placeholder="Search campaigns, owners..."
+                placeholder="Search bots, owners..."
                 value={search}
                 onChange={(e) => { setSearch(e.target.value); setPage(1); }}
                 className="w-full pl-10 pr-4 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
@@ -188,9 +209,11 @@ export default function AdminCampaignsPage() {
           <table className="w-full text-left text-sm whitespace-nowrap min-w-[800px]">
             <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
               <tr>
-                <th className="px-4 py-3 font-medium">ID & Name</th>
-                <th className="px-4 py-3 font-medium">Type & Budget</th>
-                <th className="px-4 py-3 font-medium">Target</th>
+                <th className="px-4 py-3 font-medium">ID & Username</th>
+                <th className="px-4 py-3 font-medium">Bot Name</th>
+                <th className="px-4 py-3 font-medium text-center">Active</th>
+                <th className="px-4 py-3 font-medium text-center">Blocked</th>
+                <th className="px-4 py-3 font-medium">Posts/Day</th>
                 <th className="px-4 py-3 font-medium">Status</th>
                 <th className="px-4 py-3 font-medium text-right">Actions</th>
               </tr>
@@ -198,53 +221,61 @@ export default function AdminCampaignsPage() {
             <tbody className="divide-y divide-slate-100">
               {loading ? (
                 <tr><td colSpan={5} className="p-8 text-center"><Loader2 className="animate-spin text-blue-600 mx-auto" size={20} /></td></tr>
-              ) : campaigns.length === 0 ? (
-                <tr><td colSpan={5} className="p-8 text-center text-slate-500">No campaigns found.</td></tr>
+              ) : bots.length === 0 ? (
+                <tr><td colSpan={5} className="p-8 text-center text-slate-500">No bots found.</td></tr>
               ) : (
-                campaigns.map((campaign: any) => (
-                  <tr key={campaign.id} className="hover:bg-slate-50 transition-colors">
+                bots.map((bot: any) => (
+                  <tr key={bot.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-4 py-3">
-                      <div className="font-medium text-slate-900">{campaign.name}</div>
-                      <div className="text-xs text-slate-500">ID: #{campaign.id} • User: {campaign.user_id}</div>
+                      <div className="font-medium text-slate-900 flex items-center gap-2">
+                        <Bot size={14} className="text-indigo-500" />
+                        @{bot.bot_username || "N/A"}
+                      </div>
+                      <div className="text-xs text-slate-500">ID: #{bot.id} • User: {bot.user_id}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <div className="font-medium text-slate-900 capitalize">{campaign.type}</div>
-                      <div className="text-xs text-slate-500">Budget: ${campaign.budget} • CPM: ${campaign.cpm}</div>
+                      <div className="font-medium text-slate-900 truncate max-w-[150px]" title={bot.bot_name}>{bot.bot_name || "N/A"}</div>
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <div className="font-bold text-emerald-600">{(bot.active_count || 0).toLocaleString()}</div>
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <div className="font-bold text-red-600">{(bot.blocked_count || 0).toLocaleString()}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <a href={campaign.link} target="_blank" className="text-blue-600 hover:underline block truncate max-w-[150px]">{campaign.link}</a>
+                      <div className="font-medium text-slate-900">{bot.posts_per_day}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${campaign.status === 'active' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : campaign.status === 'pending' ? 'bg-amber-50 text-amber-700 border border-amber-200' : campaign.status === 'rejected' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-700 border border-slate-200'}`}>
-                        {campaign.status}
+                      <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${bot.status === 'active' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : bot.status === 'pending' ? 'bg-amber-50 text-amber-700 border border-amber-200' : bot.status === 'rejected' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-700 border border-slate-200'}`}>
+                        {bot.status}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <button 
-                          onClick={() => openViewModal(campaign)}
+                          onClick={() => openViewModal(bot)}
                           className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors cursor-pointer"
                           title="View Details"
                         >
                           <Eye size={16} />
                         </button>
-                        {campaign.status === "pending" && (
+                        {bot.status === "pending" && (
                           <>
                             <button 
-                              onClick={() => handleAction(campaign.id, "approve")}
-                              disabled={actionLoading === campaign.id}
+                              onClick={() => handleAction(bot.id, "approve")}
+                              disabled={actionLoading === bot.id}
                               className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Approve"
                             >
-                              {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
+                              {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
                             </button>
                             <button 
-                              onClick={() => handleAction(campaign.id, "reject")}
-                              disabled={actionLoading === campaign.id}
+                              onClick={() => handleAction(bot.id, "reject")}
+                              disabled={actionLoading === bot.id}
                               className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Reject"
                             >
-                              {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
+                              {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
                             </button>
                           </>
                         )}

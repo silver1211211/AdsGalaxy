@@ -15,17 +15,29 @@ export async function GET(request: Request) {
   const offset = (page - 1) * limit;
 
   try {
-    let postQuery = "SELECT post_id, MAX(check_time) as max_time FROM campaign_views_audit";
-    let countQuery = "SELECT COUNT(DISTINCT post_id) as total FROM campaign_views_audit";
+    let postQuery = `
+      SELECT audit.post_id, MAX(audit.check_time) as max_time 
+      FROM campaign_views_audit audit
+      JOIN campaign_posts p ON audit.post_id = p.id
+      JOIN campaigns c ON p.campaign_id = c.id
+      WHERE c.type != 'broadcast'
+    `;
+    let countQuery = `
+      SELECT COUNT(DISTINCT audit.post_id) as total 
+      FROM campaign_views_audit audit
+      JOIN campaign_posts p ON audit.post_id = p.id
+      JOIN campaigns c ON p.campaign_id = c.id
+      WHERE c.type != 'broadcast'
+    `;
     const params: any[] = [];
 
     if (postIdFilter && !isNaN(parseInt(postIdFilter))) {
-      postQuery += " WHERE post_id = ?";
-      countQuery += " WHERE post_id = ?";
+      postQuery += " AND audit.post_id = ?";
+      countQuery += " AND audit.post_id = ?";
       params.push(parseInt(postIdFilter));
     }
 
-    postQuery += " GROUP BY post_id ORDER BY max_time DESC LIMIT ? OFFSET ?";
+    postQuery += " GROUP BY audit.post_id ORDER BY max_time DESC LIMIT ? OFFSET ?";
     
     const [postRows]: any = await pool.query(postQuery, [...params, limit, offset]);
     const [[countRow]]: any = await pool.query(countQuery, params);
