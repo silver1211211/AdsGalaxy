@@ -24,11 +24,11 @@ export async function GET(req: NextRequest) {
     const rewardPercentage = parseFloat(rewardSetting[0]?.value || "50") / 100;
 
     // 1. Find active broadcast campaigns with budget
-    const [campaigns]: any = await pool.query(\`
+    const [campaigns]: any = await pool.query(`
       SELECT * FROM campaigns 
       WHERE type = 'broadcast' AND status = 'active' AND budget > 0 
       ORDER BY cpm DESC
-    \`);
+    `);
 
     let totalDispatched = 0;
     const limit = 20;
@@ -38,11 +38,11 @@ export async function GET(req: NextRequest) {
       if (totalDispatched >= limit) break;
 
       // Find suitable bots
-      const [bots]: any = await pool.query(\`
+      const [bots]: any = await pool.query(`
         SELECT * FROM bots 
         WHERE status = 'active' AND is_deleted = FALSE
         AND user_id != ?
-      \`, [campaign.user_id]);
+      `, [campaign.user_id]);
 
       const suitableBots = bots.filter((bot: any) => {
         // Category match
@@ -70,7 +70,7 @@ export async function GET(req: NextRequest) {
         
         const hoursInterval = 24 / bot.posts_per_day;
         
-        const [users]: any = await pool.query(\`
+        const [users]: any = await pool.query(`
           SELECT bu.* 
           FROM bot_users bu
           WHERE bu.bot_id = ? AND bu.is_active = TRUE
@@ -80,7 +80,7 @@ export async function GET(req: NextRequest) {
             WHERE bd.user_id = bu.id AND bd.created_at > NOW() - INTERVAL 1 DAY
           ) < ?
           LIMIT ?
-        \`, [bot.id, hoursInterval, bot.posts_per_day, limit - totalDispatched]);
+        `, [bot.id, hoursInterval, bot.posts_per_day, limit - totalDispatched]);
 
         for (const user of users) {
           dispatches.push({ campaign, bot, user });
@@ -129,10 +129,10 @@ export async function GET(req: NextRequest) {
             await conn.query("UPDATE users SET balance = balance + ? WHERE id = ?", [reward, bot.user_id]);
             
             // 3. Record delivery
-            await conn.query(\`
+            await conn.query(`
               INSERT INTO broadcast_deliveries (campaign_id, bot_id, user_id, chat_id, cost, publisher_reward)
               VALUES (?, ?, ?, ?, ?, ?)
-            \`, [campaign.id, bot.id, user.id, user.chat_id, cost, reward]);
+            `, [campaign.id, bot.id, user.id, user.chat_id, cost, reward]);
             
             // 4. Update last_broadcast_at
             await conn.query("UPDATE bot_users SET last_broadcast_at = NOW() WHERE id = ?", [user.id]);
