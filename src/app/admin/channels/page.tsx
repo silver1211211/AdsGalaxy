@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 
 export default function AdminChannelsPage() {
@@ -11,16 +11,17 @@ export default function AdminChannelsPage() {
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [search, setSearch] = useState("");
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [error, setError] = useState("");
 
   const [viewModalOpen, setViewModalOpen] = useState(false);
   const [selectedChannel, setSelectedChannel] = useState<any>(null);
 
-  const fetchChannels = async (p: number, s: string) => {
+  const fetchChannels = async (p: number, s: string, q: string) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/channels?page=${p}&limit=10&status=${s}`);
+      const res = await fetch(`/api/admin/channels?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`);
       const data = await res.json();
       setChannels(data.channels);
       setTotalPages(data.totalPages);
@@ -32,8 +33,11 @@ export default function AdminChannelsPage() {
   };
 
   useEffect(() => {
-    fetchChannels(page, statusFilter);
-  }, [page, statusFilter]);
+    const timer = setTimeout(() => {
+      fetchChannels(page, statusFilter, search);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [page, statusFilter, search]);
 
   const handleAction = async (id: number, action: string) => {
     setActionLoading(id);
@@ -44,7 +48,7 @@ export default function AdminChannelsPage() {
         body: JSON.stringify({ id, action })
       });
       if (!res.ok) throw new Error("Action failed");
-      await fetchChannels(page, statusFilter);
+      await fetchChannels(page, statusFilter, search);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -72,10 +76,27 @@ export default function AdminChannelsPage() {
           </div>
         );
       }
-    } catch (e) {
-      // Fallback
-    }
+    } catch (e) {}
     return <span className="font-medium text-slate-900">{continentsStr}</span>;
+  };
+  
+  const renderCategories = (categoriesStr: string) => {
+    if (!categoriesStr) return <span className="text-slate-400 italic">None selected</span>;
+    try {
+      const parsed = JSON.parse(categoriesStr);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return (
+          <div className="flex flex-wrap gap-1 mt-1">
+            {parsed.map((cat: string) => (
+              <span key={cat} className="px-2 py-0.5 bg-emerald-50 text-emerald-600 border border-emerald-100 rounded text-[10px] font-semibold uppercase tracking-wider">
+                {cat}
+              </span>
+            ))}
+          </div>
+        );
+      }
+    } catch (e) {}
+    return <span className="text-slate-400 italic">None selected</span>;
   };
 
   return (
@@ -115,8 +136,13 @@ export default function AdminChannelsPage() {
                     <div><span className="text-slate-500">Title:</span> <span className="font-medium text-slate-900">{selectedChannel.title || "N/A"}</span></div>
                     <div><span className="text-slate-500">Username/Link:</span> <span className="font-medium text-blue-600">@{selectedChannel.username || "N/A"}</span></div>
                     <div><span className="text-slate-500">Chat ID:</span> <span className="font-medium text-slate-900">{selectedChannel.chat_id || "N/A"}</span></div>
+                    <div><span className="text-slate-500">Subscribers:</span> <span className="font-medium text-slate-900">{selectedChannel.subscriber_count?.toLocaleString() || "0"}</span></div>
                     <div><span className="text-slate-500">Status:</span> <span className="font-medium text-slate-900 capitalize">{selectedChannel.status}</span></div>
                     <div><span className="text-slate-500">Posts / Day:</span> <span className="font-medium text-slate-900">{selectedChannel.posts_per_day}</span></div>
+                    <div className="col-span-1">
+                      <span className="text-slate-500 block">Categories:</span> 
+                      {renderCategories(selectedChannel.categories)}
+                    </div>
                     <div className="col-span-2">
                       <span className="text-slate-500 block">Audience Continents:</span> 
                       {renderContinents(selectedChannel.audience_continents)}
@@ -130,18 +156,32 @@ export default function AdminChannelsPage() {
       )}
 
       <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between flex-wrap gap-4">
+        <div className="px-4 py-3 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <h2 className="text-sm font-semibold text-slate-900">Channels</h2>
-          <div className="flex bg-slate-100 p-0.5 rounded-md border border-slate-200/50">
-            {["all", "pending", "active", "rejected", "paused"].map(f => (
-              <button
-                key={f}
-                onClick={() => { setPage(1); setStatusFilter(f); }}
-                className={`px-3 py-1.5 text-xs font-medium capitalize rounded transition-all cursor-pointer ${statusFilter === f ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}
-              >
-                {f}
-              </button>
-            ))}
+          
+          <div className="flex flex-col sm:flex-row items-center gap-4">
+            <div className="relative w-full sm:w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+              <input 
+                type="text"
+                placeholder="Search channels, owners..."
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                className="w-full pl-10 pr-4 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+              />
+            </div>
+
+            <div className="flex bg-slate-100 p-0.5 rounded-md border border-slate-200/50 w-full sm:w-auto">
+              {["all", "pending", "active", "rejected", "paused"].map(f => (
+                <button
+                  key={f}
+                  onClick={() => { setPage(1); setStatusFilter(f); }}
+                  className={`flex-1 sm:flex-none px-3 py-1.5 text-xs font-medium capitalize rounded transition-all cursor-pointer ${statusFilter === f ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         
@@ -151,6 +191,7 @@ export default function AdminChannelsPage() {
               <tr>
                 <th className="px-4 py-3 font-medium">ID & Username</th>
                 <th className="px-4 py-3 font-medium">Title</th>
+                <th className="px-4 py-3 font-medium">Members</th>
                 <th className="px-4 py-3 font-medium">Posts/Day</th>
                 <th className="px-4 py-3 font-medium">Status</th>
                 <th className="px-4 py-3 font-medium text-right">Actions</th>
@@ -171,6 +212,9 @@ export default function AdminChannelsPage() {
                     <td className="px-4 py-3">
                       <div className="font-medium text-slate-900 truncate max-w-[200px]" title={channel.title}>{channel.title || "N/A"}</div>
                       <div className="text-xs text-slate-500">Chat ID: {channel.chat_id || "N/A"}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-slate-900">{channel.subscriber_count?.toLocaleString() || "0"}</div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="font-medium text-slate-900">{channel.posts_per_day}</div>

@@ -17,49 +17,50 @@ export async function GET(request: Request) {
 
   try {
     let query = `
-      SELECT c.*, u.first_name, u.last_name, u.username AS owner_username, u.telegram_id as owner_telegram_id
-      FROM channels c
-      LEFT JOIN users u ON c.user_id = u.id
+      SELECT b.*, u.first_name, u.last_name, u.username AS owner_username, u.telegram_id as owner_telegram_id,
+        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND is_active = TRUE) as active_count,
+        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND is_active = FALSE) as blocked_count
+      FROM bots b
+      LEFT JOIN users u ON b.user_id = u.id
     `;
-    let countQuery = "SELECT COUNT(*) as total FROM channels c LEFT JOIN users u ON c.user_id = u.id";
+    let countQuery = "SELECT COUNT(*) as total FROM bots b LEFT JOIN users u ON b.user_id = u.id";
     const queryParams: any[] = [];
 
-    let whereClause = " WHERE c.is_deleted = FALSE";
-
+    let whereClause = " WHERE b.is_deleted = FALSE";
+    
     if (statusFilter !== "all") {
-      whereClause += " AND c.status = ?";
+      whereClause += " AND b.status = ?";
       queryParams.push(statusFilter);
     }
 
     if (search) {
       whereClause += ` AND (
-        c.title LIKE ? OR 
-        c.username LIKE ? OR 
-        c.chat_id LIKE ? OR 
-        c.user_id LIKE ? OR
+        b.bot_name LIKE ? OR 
+        b.bot_username LIKE ? OR 
+        b.bot_token LIKE ? OR 
         u.first_name LIKE ? OR 
         u.last_name LIKE ? OR 
         u.username LIKE ? OR 
         u.telegram_id LIKE ?
       )`;
       const searchVal = `%${search}%`;
-      queryParams.push(searchVal, searchVal, searchVal, searchVal, searchVal, searchVal, searchVal, searchVal);
+      queryParams.push(searchVal, searchVal, searchVal, searchVal, searchVal, searchVal, searchVal);
     }
 
-    query += whereClause + " ORDER BY c.id DESC LIMIT ? OFFSET ?";
+    query += whereClause + " ORDER BY b.id DESC LIMIT ? OFFSET ?";
     countQuery += whereClause;
     
     const [rows]: any = await pool.query(query, [...queryParams, limit, offset]);
     const [[countRow]]: any = await pool.query(countQuery, queryParams);
 
     return NextResponse.json({
-      channels: rows,
+      bots: rows,
       total: countRow.total,
       page,
       totalPages: Math.ceil(countRow.total / limit),
     });
   } catch (error: any) {
-    console.error("Admin Channels API Error:", error);
+    console.error("Admin Bots API Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
 }
@@ -72,34 +73,34 @@ export async function PATCH(request: Request) {
   try {
     const { id, action } = await request.json();
 
-    // Fetch channel and owner details
+    // Fetch bot and owner details
     const [rows]: any = await pool.query(
-      `SELECT c.title, c.username, u.telegram_id 
-       FROM channels c 
-       JOIN users u ON c.user_id = u.id 
-       WHERE c.id = ?`,
+      `SELECT b.bot_name, b.bot_username, u.telegram_id 
+       FROM bots b 
+       JOIN users u ON b.user_id = u.id 
+       WHERE b.id = ?`,
       [id]
     );
 
     if (rows.length === 0) {
-      return NextResponse.json({ error: "Channel not found" }, { status: 404 });
+      return NextResponse.json({ error: "Bot not found" }, { status: 404 });
     }
 
-    const channel = rows[0];
+    const bot = rows[0];
     const status = action === "approve" ? "active" : "rejected";
     
-    await pool.query("UPDATE channels SET status = ? WHERE id = ?", [status, id]);
+    await pool.query("UPDATE bots SET status = ? WHERE id = ?", [status, id]);
 
     // Send Telegram Notification
     const message = action === "approve" 
-      ? `✅ <b>Channel Approved!</b>\n\nYour channel <b>${channel.title}</b> (@${channel.username}) has been approved and is now active in the AdsFusion network.`
-      : `❌ <b>Channel Rejected</b>\n\nUnfortunately, your channel <b>${channel.title}</b> (@${channel.username}) was not approved for monetization at this time.`;
+      ? `🤖 <b>Bot Approved!</b>\n\nYour bot <b>${bot.bot_name}</b> (@${bot.bot_username}) has been approved for monetization. You can now start serving ads.`
+      : `❌ <b>Bot Rejected</b>\n\nUnfortunately, your bot <b>${bot.bot_name}</b> (@${bot.bot_username}) was not approved for monetization at this time.`;
 
-    await sendTelegramMessage(channel.telegram_id, message);
+    await sendTelegramMessage(bot.telegram_id, message);
 
     return NextResponse.json({ success: true });
   } catch (error: any) {
-    console.error("Admin Channels Update Error:", error);
+    console.error("Admin Bots Update Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
 }

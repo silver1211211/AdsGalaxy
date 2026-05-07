@@ -22,35 +22,71 @@ export async function GET(
 
     const campaign = campaignRows[0];
 
-    // Get total clicks
-    const [clickCount]: any = await pool.query(
-      "SELECT COUNT(*) as count FROM campaign_clicks WHERE campaign_id = ?",
-      [id]
-    );
+    // Stats based on campaign type
+    let extraData: any = {};
 
-    // Get total views
-    const [viewCount]: any = await pool.query(
-      "SELECT SUM(views) as count FROM campaign_posts WHERE campaign_id = ?",
-      [id]
-    );
+    if (campaign.type === 'broadcast') {
+      // Get broadcast summary
+      const [broadcastSummary]: any = await pool.query(
+        "SELECT COUNT(*) as count, SUM(cost) as total_cost FROM broadcast_deliveries WHERE campaign_id = ?",
+        [id]
+      );
+      
+      // Get stats by bot
+      const [botStats]: any = await pool.query(
+        `SELECT b.bot_name, b.bot_username, 
+         COUNT(*) as delivery_count, 
+         SUM(bd.cost) as total_spent
+         FROM broadcast_deliveries bd
+         JOIN bots b ON bd.bot_id = b.id
+         WHERE bd.campaign_id = ?
+         GROUP BY b.id`,
+        [id]
+      );
 
-    // Get posts with individual stats
-    const [posts]: any = await pool.query(
-      `SELECT cp.*, ch.title as channel_title, ch.username as channel_username,
-       (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) as post_clicks,
-       (SELECT COUNT(*) FROM campaign_views_audit cva WHERE cva.post_id = cp.id AND cva.status = 'invalid') as invalid_audit_count,
-       (SELECT SUM(advertiser_paid) FROM ad_settlements asett WHERE asett.post_id = cp.id) as total_paid
-       FROM campaign_posts cp
-       JOIN channels ch ON cp.channel_id = ch.id
-       WHERE cp.campaign_id = ?
-       ORDER BY cp.created_at DESC`,
-      [id]
-    );
+      extraData = {
+        total_deliveries: broadcastSummary[0].count || 0,
+        total_spent: broadcastSummary[0].total_cost || 0,
+        broadcast_stats: botStats
+      };
+    } else {
+      // Get total clicks
+      const [clickCount]: any = await pool.query(
+        "SELECT COUNT(*) as count FROM campaign_clicks WHERE campaign_id = ?",
+        [id]
+      );
 
-    // Get click chart data (last 7 days)
+      // Get total views
+      const [viewCount]: any = await pool.query(
+        "SELECT SUM(views) as count FROM campaign_posts WHERE campaign_id = ?",
+        [id]
+      );
+
+      // Get posts with individual stats
+      const [posts]: any = await pool.query(
+        `SELECT cp.*, ch.title as channel_title, ch.username as channel_username,
+         (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) as post_clicks,
+         (SELECT COUNT(*) FROM campaign_views_audit cva WHERE cva.post_id = cp.id AND cva.status = 'invalid') as invalid_audit_count,
+         (SELECT SUM(advertiser_paid) FROM ad_settlements asett WHERE asett.post_id = cp.id) as total_paid
+         FROM campaign_posts cp
+         JOIN channels ch ON cp.channel_id = ch.id
+         WHERE cp.campaign_id = ?
+         ORDER BY cp.created_at DESC`,
+        [id]
+      );
+
+      extraData = {
+        total_clicks: clickCount[0].count,
+        total_views: viewCount[0].count || 0,
+        posts: posts
+      };
+    }
+
+    // Get click/broadcast chart data (last 7 days)
+    const chartTable = campaign.type === 'broadcast' ? 'broadcast_deliveries' : 'campaign_clicks';
     const [chartData]: any = await pool.query(
       `SELECT DATE(created_at) as date, COUNT(*) as count 
-       FROM campaign_clicks 
+       FROM ${chartTable}
        WHERE campaign_id = ? AND created_at > NOW() - INTERVAL 7 DAY
        GROUP BY DATE(created_at)
        ORDER BY date ASC`,
@@ -59,9 +95,7 @@ export async function GET(
 
     return NextResponse.json({
       ...campaign,
-      total_clicks: clickCount[0].count,
-      total_views: viewCount[0].count || 0,
-      posts: posts,
+      ...extraData,
       chart_data: chartData
     });
   } catch (error: any) {

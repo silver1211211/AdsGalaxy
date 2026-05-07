@@ -142,7 +142,9 @@ export default function AdminSettingsPage() {
             <div className="text-center p-12 text-slate-500 text-sm">No settings found.</div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {settings.map((setting: any) => (
+              {settings
+                .filter((s: any) => s.key !== "last_broadcast_cron_run")
+                .map((setting: any) => (
                 <div key={setting.key} className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm flex flex-col justify-between">
                   <div>
                     <div className="flex items-start justify-between gap-2 mb-2">

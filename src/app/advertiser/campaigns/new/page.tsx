@@ -49,6 +49,8 @@ export default function NewCampaignPage() {
     max_cpm_views: 5.0,
     min_cpm_clicks: 2, 
     max_cpm_clicks: 20.0,
+    min_cpm_broadcast: 1.0,
+    max_cpm_broadcast: 10.0,
     min_budget: 10 
   });
 
@@ -85,6 +87,8 @@ export default function NewCampaignPage() {
           max_cpm_views: parseFloat(data.max_cpm_views || "5.0"),
           min_cpm_clicks: parseFloat(data.min_cpm_clicks || "2.0"),
           max_cpm_clicks: parseFloat(data.max_cpm_clicks || "20.0"),
+          min_cpm_broadcast: parseFloat(data.min_cpm_broadcast || "1.0"),
+          max_cpm_broadcast: parseFloat(data.max_cpm_broadcast || "10.0"),
           min_budget: parseFloat(data.min_campaign_budget || "10.0")
         });
         // Set defaults
@@ -119,12 +123,18 @@ export default function NewCampaignPage() {
     setIsValidating(true);
     setError("");
     try {
+      const validateData = new FormData();
+      validateData.append("text", formData.message_text);
+      validateData.append("parse_mode", formData.parse_mode);
+      validateData.append("link", formData.link);
+      validateData.append("button_text", formData.button_text);
+      if (image) {
+        validateData.append("image", image);
+      }
+
       const res = await apiFetch("/api/advertiser/campaigns/validate", {
         method: "POST",
-        body: JSON.stringify({ 
-          text: formData.message_text, 
-          parse_mode: formData.parse_mode 
-        }),
+        body: validateData,
       });
       const data = await res.json();
       if (res.ok) {
@@ -300,13 +310,11 @@ export default function NewCampaignPage() {
                     </select>
                   </div>
                 </div>
-                <div className="space-y-3">
-                  <label className="text-xs font-black uppercase tracking-widest text-slate-400">Campaign Type</label>
-                  <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-2xl border border-slate-300 h-[50px]">
+                  <div className="grid grid-cols-3 gap-2 bg-slate-100 p-1 rounded-2xl border border-slate-300 h-[50px]">
                     <button
                       onClick={() => setFormData({ ...formData, type: 'views', cpm: limits.min_cpm_views.toString() })}
                       className={cn(
-                        "py-3 rounded-xl text-xs font-black uppercase transition-all",
+                        "py-3 rounded-xl text-[10px] font-black uppercase transition-all",
                         formData.type === 'views' ? "bg-white text-blue-600 shadow-sm" : "text-slate-400"
                       )}
                     >
@@ -315,14 +323,22 @@ export default function NewCampaignPage() {
                     <button
                       onClick={() => setFormData({ ...formData, type: 'clicks', cpm: limits.min_cpm_clicks.toString() })}
                       className={cn(
-                        "py-3 rounded-xl text-xs font-black uppercase transition-all",
+                        "py-3 rounded-xl text-[10px] font-black uppercase transition-all",
                         formData.type === 'clicks' ? "bg-white text-blue-600 shadow-sm" : "text-slate-400"
                       )}
                     >
                       Clicks
                     </button>
+                    <button
+                      onClick={() => setFormData({ ...formData, type: 'broadcast', cpm: limits.min_cpm_broadcast.toString() })}
+                      className={cn(
+                        "py-3 rounded-xl text-[10px] font-black uppercase transition-all",
+                        formData.type === 'broadcast' ? "bg-white text-blue-600 shadow-sm" : "text-slate-400"
+                      )}
+                    >
+                      Broadcast
+                    </button>
                   </div>
-                </div>
               </div>
 
               <div className="p-4 bg-blue-50 border border-blue-100 rounded-2xl flex gap-3 text-blue-700">
@@ -330,7 +346,9 @@ export default function NewCampaignPage() {
                 <p className="text-xs font-bold leading-relaxed">
                   {formData.type === 'views'
                     ? "Select VIEWS if you want broad reach and brand recognition across channels."
-                    : "Select CLICKS if you want direct conversions and user engagement."}
+                    : formData.type === 'clicks'
+                    ? "Select CLICKS if you want direct conversions and user engagement."
+                    : "Your post will be sent to bot users. Perfect if you are targeting bot users specifically."}
                 </p>
               </div>
             </div>
@@ -535,22 +553,22 @@ export default function NewCampaignPage() {
                   <div className="pt-2 px-1">
                     <input 
                       type="range"
-                      min={formData.type === 'views' ? limits.min_cpm_views : limits.min_cpm_clicks}
-                      max={formData.type === 'views' ? limits.max_cpm_views : limits.max_cpm_clicks}
+                      min={formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast}
+                      max={formData.type === 'views' ? limits.max_cpm_views : formData.type === 'clicks' ? limits.max_cpm_clicks : limits.max_cpm_broadcast}
                       step="0.05"
                       value={formData.cpm}
                       onChange={(e) => setFormData({ ...formData, cpm: e.target.value })}
                       className="w-full h-1.5 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-500"
                       style={{
-                        background: `linear-gradient(to right, #10b981 0%, #10b981 ${((parseFloat(formData.cpm || "0") - (formData.type === 'views' ? limits.min_cpm_views : limits.min_cpm_clicks)) / ((formData.type === 'views' ? limits.max_cpm_views : limits.max_cpm_clicks) - (formData.type === 'views' ? limits.min_cpm_views : limits.min_cpm_clicks))) * 100}%, #f1f5f9 ${((parseFloat(formData.cpm || "0") - (formData.type === 'views' ? limits.min_cpm_views : limits.min_cpm_clicks)) / ((formData.type === 'views' ? limits.max_cpm_views : limits.max_cpm_clicks) - (formData.type === 'views' ? limits.min_cpm_views : limits.min_cpm_clicks))) * 100}%, #f1f5f9 100%)`
+                        background: `linear-gradient(to right, #10b981 0%, #10b981 ${((parseFloat(formData.cpm || "0") - (formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast)) / ((formData.type === 'views' ? limits.max_cpm_views : formData.type === 'clicks' ? limits.max_cpm_clicks : limits.max_cpm_broadcast) - (formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast))) * 100}%, #f1f5f9 ${((parseFloat(formData.cpm || "0") - (formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast)) / ((formData.type === 'views' ? limits.max_cpm_views : formData.type === 'clicks' ? limits.max_cpm_clicks : limits.max_cpm_broadcast) - (formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast))) * 100}%, #f1f5f9 100%)`
                       }}
                     />
                     <div className="flex justify-between mt-1.5">
                       <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                        Min: ${formData.type === 'views' ? limits.min_cpm_views : limits.min_cpm_clicks}
+                        Min: ${formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast}
                       </p>
                       <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                        Max: ${formData.type === 'views' ? limits.max_cpm_views : limits.max_cpm_clicks}
+                        Max: ${formData.type === 'views' ? limits.max_cpm_views : formData.type === 'clicks' ? limits.max_cpm_clicks : limits.max_cpm_broadcast}
                       </p>
                     </div>
                   </div>

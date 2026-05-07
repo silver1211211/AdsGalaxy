@@ -21,32 +21,17 @@ async function getChat(chatId: string | number) {
 
 export async function GET(req: NextRequest) {
   try {
-    // 0. Throttling (1 minute)
-    const isDev = process.env.MODE === "DEV";
-    const [settings]: any = await pool.query("SELECT value FROM settings WHERE \`key\` = 'last_views_check'");
-    const lastRun = parseInt(settings[0]?.value || "0");
-    const now = Date.now();
-    const intervalMinutes = parseInt(process.env.CRON_VIEWS_INTERVAL || "1");
-    const intervalMs = intervalMinutes * 60 * 1000;
-
-    if (!isDev && now - lastRun < intervalMs) {
-      const minutesLeft = Math.ceil((intervalMs - (now - lastRun)) / 60000);
-      return NextResponse.json({ success: false, message: `Too early. Wait ${minutesLeft} min.` }, { status: 429 });
-    }
-
-    // Update last run immediately
-    await pool.query("UPDATE settings SET value = ? WHERE \`key\` = 'last_views_check'", [now.toString()]);
-
-    // 1. Get up to 10 active/non-deleted posts
+    const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
     const [posts]: any = await pool.query(`
       SELECT cp.*, ch.chat_id, ch.username as channel_username, ch.user_id as owner_id, u.telegram_id as owner_telegram_id
       FROM campaign_posts cp
       JOIN channels ch ON cp.channel_id = ch.id
       JOIN users u ON ch.user_id = u.id
       WHERE cp.status = 'active'
-      ORDER BY cp.created_at ASC
+      AND cp.last_views_update < ?
+      ORDER BY cp.last_views_update ASC
       LIMIT 10
-    `);
+    `, [tenMinutesAgo]);
 
     if (posts.length === 0) {
       return NextResponse.json({ success: true, message: "No active posts to check." });
@@ -56,9 +41,13 @@ export async function GET(req: NextRequest) {
 
     for (const post of posts) {
       try {
-        const apiUrl = `https://php.arijitiyan.cc/tgview/api.php?channel=${post.channel_username}&post=${post.message_id}`;
+        const apiUrl = `https://php.adsgalaxy.online/views/api.php?channel=${post.channel_username}&post=${post.message_id}`;
         const res = await fetch(apiUrl);
         const data = await res.json();
+
+        // Mark as updated regardless of response (to rotate)
+        const now = Date.now();
+        await pool.query("UPDATE campaign_posts SET last_views_update = ? WHERE id = ?", [now, post.id]);
 
         if (data.status === "success") {
           const views = parseInt(data.views || "0");
@@ -74,16 +63,16 @@ export async function GET(req: NextRequest) {
           `, [post.id, post.channel_id, views, lastViews]);
 
           results.push({ post_id: post.id, views: views, prev_views: lastViews });
-        } 
+        }
         else if (data.status === "post-not-found") {
           // Mark as deleted
           await pool.query("UPDATE campaign_posts SET status = 'deleted' WHERE id = ?", [post.id]);
           results.push({ post_id: post.id, status: 'deleted' });
-        } 
+        }
         else if (data.status === "channel-not-found") {
           // Attempt to update username
           const chatInfo = await getChat(post.chat_id);
-          
+
           if (chatInfo?.ok && chatInfo.result.username) {
             const newUsername = chatInfo.result.username;
             await pool.query("UPDATE channels SET username = ? WHERE id = ?", [newUsername, post.channel_id]);
@@ -91,9 +80,9 @@ export async function GET(req: NextRequest) {
           } else {
             // Pause channel and notify owner
             await pool.query("UPDATE channels SET status = 'paused' WHERE id = ?", [post.channel_id]);
-            
+
             const notifyMsg = `⚠️ <b>Action Required: Channel Access Lost</b>\n\nHello! Your channel (ID: ${post.chat_id}) has no public username or has changed. We have temporarily paused your channel's status.\n\nPlease add a public username to your channel and resume it from your dashboard to continue earning.`;
-            
+
             await sendTelegramMessage(post.owner_telegram_id, notifyMsg);
             results.push({ post_id: post.id, status: 'channel_paused_owner_notified' });
           }

@@ -13,7 +13,7 @@ export async function PATCH(
     const { id } = await params;
 
     const body = await request.json().catch(() => ({}));
-    const { title, posts_per_day, audience_continents, action } = body;
+    const { title, posts_per_day, audience_continents, categories, action } = body;
 
     // If it's a status toggle action
     if (action === "toggle_status") {
@@ -32,6 +32,32 @@ export async function PATCH(
       }
 
       const newStatus = currentStatus === "active" ? "paused" : "active";
+      
+      // If resuming, verify bot access
+      if (newStatus === "active") {
+        const botToken = process.env.BOT_TOKEN;
+        const [channelRow]: any = await pool.query("SELECT chat_id FROM channels WHERE id = ?", [id]);
+        const chatId = channelRow[0]?.chat_id;
+
+        if (botToken && chatId) {
+          // Get Bot ID
+          const meRes = await fetch(`https://api.telegram.org/bot${botToken}/getMe`);
+          const meData = await meRes.json();
+          
+          if (meData.ok) {
+            const botId = meData.result.id;
+            const memberRes = await fetch(`https://api.telegram.org/bot${botToken}/getChatMember?chat_id=${chatId}&user_id=${botId}`);
+            const memberData = await memberRes.json();
+
+            if (!memberData.ok || (memberData.result.status !== 'administrator' && memberData.result.status !== 'creator')) {
+              return NextResponse.json({ 
+                error: "Bot is not an administrator in this channel. Please add the bot as admin with post permissions before resuming." 
+              }, { status: 400 });
+            }
+          }
+        }
+      }
+
       await pool.query(
         "UPDATE channels SET status = ? WHERE id = ? AND user_id = ?",
         [newStatus, id, user.id]
@@ -40,14 +66,15 @@ export async function PATCH(
     }
 
     // Otherwise, handle general edit
-    if (title || posts_per_day || audience_continents) {
+    if (title || posts_per_day || audience_continents || categories) {
       await pool.query(
         `UPDATE channels SET 
           title = ?, 
           posts_per_day = ?, 
-          audience_continents = ? 
+          audience_continents = ?,
+          categories = ?
          WHERE id = ? AND user_id = ?`,
-        [title, posts_per_day, JSON.stringify(audience_continents), id, user.id]
+        [title, posts_per_day, JSON.stringify(audience_continents), JSON.stringify(categories || []), id, user.id]
       );
       return NextResponse.json({ success: true, message: "Channel updated successfully" });
     }

@@ -25,6 +25,12 @@ export async function GET() {
     const [[depositsPaid]]: any = await pool.query("SELECT SUM(amount) as total FROM deposits WHERE status IN ('Paid', 'paid', 'success')");
     const [[withdrawalsPaid]]: any = await pool.query("SELECT SUM(amount) as total FROM withdrawals WHERE status = 'success'");
 
+    const [[totalSubscribers]]: any = await pool.query("SELECT SUM(subscriber_count) as total FROM channels WHERE is_deleted = FALSE AND status = 'active'");
+    
+    const [[botsTotal]]: any = await pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE");
+    const [[botUsersTotal]]: any = await pool.query("SELECT COUNT(*) as count FROM bot_users");
+    const [[botUsersActive]]: any = await pool.query("SELECT COUNT(*) as count FROM bot_users WHERE is_active = TRUE");
+
     return NextResponse.json({
       users: {
         total: usersTotal.count,
@@ -43,7 +49,13 @@ export async function GET() {
         pending: channelsStats.pending || 0,
         approved: channelsStats.active || 0,
         rejected: channelsStats.rejected || 0,
-        total: Object.values(channelsStats).reduce((a: any, b: any) => a + b, 0)
+        total: Object.values(channelsStats).reduce((a: any, b: any) => a + b, 0),
+        totalSubscribers: totalSubscribers.total || 0
+      },
+      bots: {
+        total: botsTotal.count,
+        totalUsers: botUsersTotal.count,
+        activeUsers: botUsersActive.count
       },
       withdrawals: {
         pending: withdrawalsStats.pending || 0,

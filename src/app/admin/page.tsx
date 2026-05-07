@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, Users, Megaphone, Tv, CreditCard, DollarSign, Activity, AlertCircle, CheckCircle, Clock, XCircle, TrendingUp } from "lucide-react";
+import { Loader2, Users, Megaphone, Tv, CreditCard, DollarSign, Activity, AlertCircle, CheckCircle, Clock, XCircle, TrendingUp, Bot, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 
 export default function AdminDashboard() {
@@ -110,6 +110,17 @@ export default function AdminDashboard() {
           </div>
         </div>
 
+        {/* Network Reach */}
+        <div>
+          <SectionHeader title="Network Reach" icon={Activity} />
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <StatCard title="Total Subscribers" value={stats.channels.totalSubscribers.toLocaleString()} icon={Users} bgClass="bg-blue-100" textClass="text-blue-600" subtitle="Across all active channels" />
+            <StatCard title="Monetized Bots" value={stats.bots.total} icon={Bot} bgClass="bg-purple-100" textClass="text-purple-600" subtitle="Active in network" />
+            <StatCard title="Active Bot Users" value={stats.bots.activeUsers.toLocaleString()} icon={ShieldCheck} bgClass="bg-emerald-100" textClass="text-emerald-600" subtitle="Users receiving ads" />
+            <StatCard title="Total Bot Users" value={stats.bots.totalUsers.toLocaleString()} icon={Activity} bgClass="bg-indigo-100" textClass="text-indigo-600" subtitle="All users across bots" />
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           
           {/* Campaigns */}
@@ -158,8 +169,8 @@ export default function AdminDashboard() {
                 <span className="text-lg font-black">{stats.channels.rejected}</span>
               </div>
               <div className="flex justify-between items-center pt-4 border-t border-slate-100">
-                <span className="text-sm font-semibold text-slate-500">Total Submitted</span>
-                <span className="text-sm font-black text-slate-900">{stats.channels.total}</span>
+                <span className="text-sm font-semibold text-slate-500">Aggregate Reach</span>
+                <span className="text-sm font-black text-slate-900">{stats.channels.totalSubscribers.toLocaleString()} subs</span>
               </div>
             </div>
           </div>

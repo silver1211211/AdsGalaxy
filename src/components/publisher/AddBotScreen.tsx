@@ -5,16 +5,13 @@ import {
   Search,
   Loader2,
   CheckCircle2,
-  ExternalLink,
   Info,
-  ChevronLeft,
-  Tv,
-  Plus
+  Bot,
+  Globe
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
 import { motion, AnimatePresence } from "framer-motion";
-import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Toast from "@/components/ui/Toast";
 
 const CATEGORIES = ["Crypto", "Finance", "NSFW +18", "Tech", "Gambling", "Entertainment", "Education", "Shopping", "Other"];
@@ -28,37 +25,31 @@ const CONTINENTS = [
   { name: "Oceania", countries: "Australia, New Zealand" }
 ];
 
-interface AddChannelScreenProps {
+interface AddBotScreenProps {
   onClose: () => void;
   onSuccess: () => void;
-  channel?: any; // Optional for edit mode
+  bot?: any; // Optional for edit mode
 }
 
-export default function AddChannelScreen({ onClose, onSuccess, channel }: AddChannelScreenProps) {
-  const isEdit = !!channel;
+export default function AddBotScreen({ onClose, onSuccess, bot }: AddBotScreenProps) {
+  const isEdit = !!bot;
   const [step, setStep] = useState(isEdit ? 2 : 1);
-  const [username, setUsername] = useState(channel?.username || "");
+  const [token, setToken] = useState(bot?.bot_token || "");
   const [isLoading, setIsLoading] = useState(false);
   const [notification, setNotification] = useState<{ type: "success" | "error"; title: string; message: string } | null>(null);
-  const [channelInfo, setChannelInfo] = useState<any>(channel || null);
+  const [botInfo, setBotInfo] = useState<any>(
+    bot 
+      ? { ...bot, first_name: bot.bot_name, username: bot.bot_username } 
+      : null
+  );
   
-  // Modal states
-  const [permissionModal, setPermissionModal] = useState<{
-    isOpen: boolean;
-    message: string;
-  }>({
-    isOpen: false,
-    message: ""
-  });
-
   // Form fields
-  const [editedTitle, setEditedTitle] = useState(channel?.title || "");
-  const [postsPerDay, setPostsPerDay] = useState(channel?.posts_per_day || 1);
+  const [postsPerDay, setPostsPerDay] = useState(bot?.posts_per_day || 1);
   const [selectedContinents, setSelectedContinents] = useState<string[]>(
-    channel?.audience_continents ? (typeof channel.audience_continents === 'string' ? JSON.parse(channel.audience_continents) : channel.audience_continents) : []
+    bot?.continents ? (typeof bot.continents === 'string' ? JSON.parse(bot.continents) : bot.continents) : []
   );
   const [selectedCategories, setSelectedCategories] = useState<string[]>(
-    channel?.categories ? (typeof channel.categories === 'string' ? JSON.parse(channel.categories) : channel.categories) : []
+    bot?.categories ? (typeof bot.categories === 'string' ? JSON.parse(bot.categories) : bot.categories) : []
   );
 
   // Telegram Back Button Logic
@@ -82,32 +73,24 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
     }
   }, [step, onClose, isEdit]);
 
-  const handleFetchInfo = async () => {
-    if (!username) return;
+  const handleValidateToken = async () => {
+    if (!token) return;
     setIsLoading(true);
     setNotification(null);
     try {
-      const res = await apiFetch(`/api/telegram/chat-info?username=${username}`);
-      const data = await res.json();
-      
-      if (!res.ok) {
-        if (data.error === "PERMISSION_REQUIRED") {
-          setPermissionModal({
-            isOpen: true,
-            message: data.message
-          });
-          return;
-        }
-        throw new Error(data.error || "Failed to fetch channel info");
-      }
+      const tgRes = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+      const tgData = await tgRes.json();
+      if (!tgData.ok) throw new Error("Invalid bot token");
 
-      setChannelInfo(data);
-      setEditedTitle(data.title);
+      setBotInfo({
+        username: tgData.result.username,
+        first_name: tgData.result.first_name
+      });
       setStep(2);
     } catch (err: any) {
       setNotification({
         type: "error",
-        title: "Search Failed",
+        title: "Validation Failed",
         message: err.message
       });
     } finally {
@@ -148,21 +131,19 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
     setIsLoading(true);
     setNotification(null);
     try {
-      const res = await apiFetch(isEdit ? `/api/publisher/channels/${channel.id}` : "/api/publisher/channels", {
+      const res = await apiFetch(isEdit ? `/api/publisher/bots/${bot.id}` : "/api/publisher/bots", {
         method: isEdit ? "PATCH" : "POST",
         body: JSON.stringify({
-          chat_id: isEdit ? channel.chat_id : channelInfo.id,
-          username: isEdit ? channel.username : channelInfo.username,
-          title: editedTitle,
+          bot_token: token,
           posts_per_day: postsPerDay,
-          audience_continents: selectedContinents,
+          continents: selectedContinents,
           categories: selectedCategories,
         }),
       });
 
       if (!res.ok) {
         const data = await res.json();
-        throw new Error(data.error || `Failed to ${isEdit ? 'update' : 'add'} channel`);
+        throw new Error(data.error || `Failed to ${isEdit ? 'update' : 'add'} bot`);
       }
 
       onSuccess();
@@ -177,9 +158,6 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
       setIsLoading(false);
     }
   };
-
-  const botUsername = process.env.NEXT_PUBLIC_BOT_USERNAME || "Ads_Galaxy_bot";
-  const botAdminLink = `https://t.me/${botUsername}?startchannel&admin=add_admins+post_messages+edit_messages+delete_messages+invite_users`;
 
   return (
     <motion.div
@@ -201,58 +179,37 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                 className="space-y-8"
               >
                 <div className="space-y-4">
-                  <div className="w-14 h-14 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-600">
-                    <Tv size={28} />
+                  <div className="w-14 h-14 bg-indigo-50 rounded-2xl flex items-center justify-center text-indigo-600">
+                    <Bot size={28} />
                   </div>
                   <div>
-                    <h2 className="text-2xl font-black text-slate-900">Find your Channel</h2>
-                    <p className="text-sm text-slate-500">Add your public Telegram channel to the network.</p>
+                    <h2 className="text-2xl font-black text-slate-900">Add your Bot</h2>
+                    <p className="text-sm text-slate-500">Monetize your Telegram bot by serving ads.</p>
                   </div>
 
                   <div className="space-y-2 pt-2">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Channel Username</label>
-                    <div className="relative">
-                      <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
-                        <span className="text-blue-500 font-black text-lg">@</span>
-                      </div>
-                      <input
-                        type="text"
-                        value={username}
-                        onChange={(e) => setUsername(e.target.value.replace("@", ""))}
-                        placeholder="username"
-                        className="w-full pl-10 pr-4 py-3 bg-slate-50 border-none rounded-2xl focus:bg-white focus:ring-2 focus:ring-blue-500/20 transition-all outline-none font-bold text-lg text-slate-900"
-                      />
-                    </div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Bot API Token</label>
+                    <input
+                      type="text"
+                      value={token}
+                      onChange={(e) => setToken(e.target.value)}
+                      placeholder="123456789:ABCDefGhIjKlMnOpQrStUvWxYz"
+                      className="w-full px-4 py-3 bg-slate-50 border-none rounded-2xl focus:bg-white focus:ring-2 focus:ring-indigo-500/20 transition-all outline-none font-mono text-sm text-slate-900"
+                    />
+                    <p className="text-[10px] text-slate-400 font-medium">
+                      You can get this token from <a href="https://t.me/BotFather" target="_blank" className="text-indigo-600 underline">@BotFather</a>.
+                    </p>
                   </div>
-                </div>
-
-                {/* BOT ADMIN ACTION */}
-                <div className="space-y-4">
-                  <div className="flex items-center gap-2 text-[#0c9de8]">
-                    <CheckCircle2 size={20} className="fill-current text-white bg-[#0c9de8] rounded-full" />
-                    <span className="font-black text-xs uppercase tracking-widest">Step 1: Authorization</span>
-                  </div>
-                  <p className="text-sm text-slate-500 leading-relaxed">
-                    Grant admin permissions to our bot in your channel to enable automated ad management.
-                  </p>
-                  <a
-                    href={botAdminLink}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center justify-center gap-2 w-full py-3 bg-[#0c9de8] text-white rounded-2xl text-sm font-black hover:bg-blue-600 transition-all"
-                  >
-                    Add Bot as Admin <ExternalLink size={16} />
-                  </a>
                 </div>
 
                 <div className="pt-4">
                   <button
-                    onClick={handleFetchInfo}
-                    disabled={!username || isLoading}
+                    onClick={handleValidateToken}
+                    disabled={!token || isLoading}
                     className="w-full py-3.5 bg-slate-900 disabled:bg-slate-200 text-white font-black rounded-2xl transition-all flex items-center justify-center gap-2 text-sm"
                   >
                     {isLoading ? <Loader2 className="animate-spin" size={20} /> : <Search size={20} />}
-                    2. Continue to Configuration
+                    Continue to Configuration
                   </button>
                 </div>
               </motion.div>
@@ -270,35 +227,16 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                       <CheckCircle2 size={28} />
                     </div>
                     <div>
-                      <h2 className="text-2xl font-black text-slate-900">Configure</h2>
-                      <p className="text-sm text-slate-500">Reviewing @{channelInfo.username}</p>
+                      <h2 className="text-2xl font-black text-slate-900">{botInfo?.first_name || "Configure Bot"}</h2>
+                      <p className="text-sm text-slate-500">@{botInfo?.username}</p>
                     </div>
                   </div>
 
                   <div className="space-y-6">
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Display Name</label>
-                        <input
-                          type="text"
-                          value={editedTitle}
-                          onChange={(e) => setEditedTitle(e.target.value)}
-                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl focus:bg-white focus:ring-2 focus:ring-blue-500/20 outline-none transition-all font-bold text-slate-900"
-                        />
-                      </div>
-                      <div className="space-y-1 opacity-60">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Chat ID</label>
-                        <div className="px-4 py-2.5 bg-slate-100 rounded-xl font-mono text-xs font-bold text-slate-600 overflow-hidden truncate">
-                          {isEdit ? channelInfo.chat_id : channelInfo.id}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* CUSTOM SLIDING RADIO FOR POST FREQUENCY */}
+                    {/* POST FREQUENCY */}
                     <div className="space-y-3">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block text-center">Post Frequency (Per Day)</label>
                       <div className="relative w-full max-w-[320px] h-10 bg-slate-100 p-1 rounded-full flex items-center mx-auto">
-                        {/* Slider Indicator */}
                         <motion.div
                           className="absolute h-8 bg-white rounded-full shadow-sm"
                           initial={false}
@@ -315,20 +253,17 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                             onClick={() => setPostsPerDay(num)}
                             className={cn(
                               "relative z-10 flex-1 h-full flex items-center justify-center font-black text-xs transition-colors duration-300",
-                              postsPerDay === num ? "text-[#0c9de8]" : "text-slate-400"
+                              postsPerDay === num ? "text-indigo-600" : "text-slate-400"
                             )}
                           >
                             {num} {num === 1 ? 'post' : 'posts'}
                           </button>
                         ))}
                       </div>
-                      <p className="text-[10px] font-bold tracking-tighter text-center">
-                        <span className="text-[#0c9de8]">Tip:</span> <span className="text-slate-400">1-2 posts for maximum engagement</span>
-                      </p>
                     </div>
 
                     <div className="space-y-3">
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Channel Categories (Max 3)</label>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Bot Categories (Max 3)</label>
                       <div className="flex flex-wrap gap-2">
                         {CATEGORIES.map((cat) => (
                           <button
@@ -337,8 +272,8 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                             className={cn(
                               "px-3 py-2 rounded-xl text-[10px] font-black uppercase transition-all border",
                               selectedCategories.includes(cat)
-                                ? "bg-blue-600 border-blue-600 text-white shadow-md shadow-blue-100"
-                                : "bg-white border-slate-200 text-slate-400 hover:border-blue-200"
+                                ? "bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-100"
+                                : "bg-white border-slate-200 text-slate-400 hover:border-indigo-200"
                             )}
                           >
                             {cat}
@@ -357,7 +292,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                             className={cn(
                               "px-5 py-3 text-sm font-bold rounded-2xl transition-all flex flex-col items-start gap-1 text-left border-2",
                               selectedContinents.includes(cont.name)
-                                ? "bg-blue-50 border-blue-500/30 text-blue-700"
+                                ? "bg-indigo-50 border-indigo-500/30 text-indigo-700"
                                 : "bg-slate-50 border-transparent text-slate-500 hover:bg-slate-100"
                             )}
                           >
@@ -367,7 +302,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                             </div>
                             <span className={cn(
                               "text-[10px] font-bold uppercase tracking-wider",
-                              selectedContinents.includes(cont.name) ? "text-blue-400" : "text-slate-400"
+                              selectedContinents.includes(cont.name) ? "text-indigo-400" : "text-slate-400"
                             )}>
                               {cont.countries}
                             </span>
@@ -379,16 +314,18 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                 </div>
 
                 <div className="flex gap-4 pb-6">
-                  <button
-                    onClick={() => setStep(1)}
-                    className="flex-1 py-3.5 bg-slate-100 text-slate-600 font-black rounded-2xl hover:bg-slate-200 transition-all text-sm"
-                  >
-                    Back
-                  </button>
+                  {!isEdit && (
+                    <button
+                      onClick={() => setStep(1)}
+                      className="flex-1 py-3.5 bg-slate-100 text-slate-600 font-black rounded-2xl hover:bg-slate-200 transition-all text-sm"
+                    >
+                      Back
+                    </button>
+                  )}
                   <button
                     onClick={handleSubmit}
                     disabled={isLoading || selectedContinents.length === 0 || selectedCategories.length === 0}
-                    className="flex-1 py-3.5 bg-[#0c9de8] hover:bg-blue-600 disabled:bg-slate-200 text-white font-black rounded-2xl transition-all flex items-center justify-center gap-2 text-sm"
+                    className="flex-1 py-3.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 text-white font-black rounded-2xl transition-all flex items-center justify-center gap-2 text-sm"
                   >
                     {isLoading && <Loader2 className="animate-spin" size={20} />}
                     Complete
@@ -399,15 +336,6 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
           </AnimatePresence>
         </div>
       </div>
-      <ConfirmationModal
-        isOpen={permissionModal.isOpen}
-        onClose={() => setPermissionModal(prev => ({ ...prev, isOpen: false }))}
-        onConfirm={() => setPermissionModal(prev => ({ ...prev, isOpen: false }))}
-        title="Admin Required"
-        message={permissionModal.message}
-        confirmBtnText="I've added the bot"
-        closeBtnText="Close"
-      />
       <Toast
         isOpen={!!notification}
         onClose={() => setNotification(null)}

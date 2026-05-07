@@ -24,3 +24,351 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Admin Panel Theme Engine */
+.admin-panel {
+  /* Default: Snow Frost (Light) */
+  --admin-bg: #F8FAFC;
+  --admin-card-bg: #FFFFFF;
+  --admin-border: #E2E8F0;
+  --admin-text-primary: #0F172A;
+  --admin-text-secondary: #64748B;
+  --admin-text-muted: #94A3B8;
+  --admin-accent: #3B82F6;
+  --admin-hover: #F1F5F9;
+  --admin-active: #EFF6FF;
+  --admin-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
+  --admin-shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+  --admin-scrollbar-track: #F8FAFC;
+  --admin-scrollbar-thumb: #CBD5E1;
+  --admin-scrollbar-hover: #94A3B8;
+  
+  /* Sidebar Specifics */
+  --admin-sidebar-bg: #FFFFFF;
+  --admin-sidebar-item-active-bg: #3B82F6;
+  --admin-sidebar-item-active-text: #FFFFFF;
+  --admin-sidebar-item-hover-bg: #F1F5F9;
+  
+  /* Pills & Filter Specifics */
+  --admin-pill-bg: #F1F5F9;
+  --admin-pill-text: #64748B;
+  --admin-pill-active-bg: #3B82F6;
+  --admin-pill-active-text: #FFFFFF;
+
+  background-color: var(--admin-bg) !important;
+  color: var(--admin-text-primary) !important;
+  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+}
+
+/* 🌑 5 DARK THEMES */
+.admin-panel.theme-midnight {
+  --admin-bg: #0A0A0F; --admin-card-bg: #12121A; --admin-text-primary: #EDEDF2; --admin-text-secondary: #A1A1B5; --admin-accent: #6366F1; --admin-border: #27273A;
+  --admin-hover: #1E1E2E; --admin-active: #232335; --admin-scrollbar-track: #0A0A0F; --admin-scrollbar-thumb: #6366F1; --admin-scrollbar-hover: #818CF8;
+  --admin-sidebar-bg: #0A0A0F; --admin-sidebar-item-active-bg: #6366F1; --admin-sidebar-item-active-text: #FFFFFF;
+  --admin-pill-bg: #1A1A26; --admin-pill-text: #A1A1B5; --admin-pill-active-bg: #6366F1; --admin-pill-active-text: #FFFFFF;
+}
+.admin-panel.theme-obsidian {
+  --admin-bg: #050507; --admin-card-bg: #0F0F14; --admin-text-primary: #F8F8FA; --admin-text-secondary: #8F8F9E; --admin-accent: #E11D48; --admin-border: #1F1F2B;
+  --admin-hover: #1C1C26; --admin-active: #1F1F2B; --admin-scrollbar-track: #050507; --admin-scrollbar-thumb: #E11D48; --admin-scrollbar-hover: #F43F5E;
+  --admin-sidebar-bg: #050507; --admin-sidebar-item-active-bg: #E11D48; --admin-sidebar-item-active-text: #FFFFFF;
+  --admin-pill-bg: #16161E; --admin-pill-text: #8F8F9E; --admin-pill-active-bg: #E11D48; --admin-pill-active-text: #FFFFFF;
+}
+.admin-panel.theme-emerald {
+  --admin-bg: #0B1110; --admin-card-bg: #13201E; --admin-text-primary: #ECF4F3; --admin-text-secondary: #8CA39F; --admin-accent: #10B981; --admin-border: #1E2F2C;
+  --admin-hover: #1C2E2A; --admin-active: #223B37; --admin-scrollbar-track: #0B1110; --admin-scrollbar-thumb: #10B981; --admin-scrollbar-hover: #34D399;
+  --admin-sidebar-bg: #0B1110; --admin-sidebar-item-active-bg: #10B981; --admin-sidebar-item-active-text: #FFFFFF;
+  --admin-pill-bg: #1A2D2A; --admin-pill-text: #8CA39F; --admin-pill-active-bg: #10B981; --admin-pill-active-text: #FFFFFF;
+}
+.admin-panel.theme-purple {
+  --admin-bg: #0F0817; --admin-card-bg: #1A1326; --admin-text-primary: #F0E6FF; --admin-text-secondary: #B4A0D9; --admin-accent: #C026D3; --admin-border: #2C1F3F;
+  --admin-hover: #231B32; --admin-active: #2C223F; --admin-scrollbar-track: #0F0817; --admin-scrollbar-thumb: #C026D3; --admin-scrollbar-hover: #D946EF;
+  --admin-sidebar-bg: #0F0817; --admin-sidebar-item-active-bg: #C026D3; --admin-sidebar-item-active-text: #FFFFFF;
+  --admin-pill-bg: #231B32; --admin-pill-text: #B4A0D9; --admin-pill-active-bg: #C026D3; --admin-pill-active-text: #FFFFFF;
+}
+.admin-panel.theme-amoled {
+  --admin-bg: #000000; --admin-card-bg: #050505; --admin-text-primary: #FFFFFF; --admin-text-secondary: #A1A1AA; --admin-accent: #3B82F6; --admin-border: #111111;
+  --admin-hover: #1A1A1A; --admin-active: #262626; --admin-scrollbar-track: #000000; --admin-scrollbar-thumb: #3B82F6; --admin-scrollbar-hover: #60A5FA;
+  --admin-sidebar-bg: #000000; --admin-sidebar-item-active-bg: #3B82F6; --admin-sidebar-item-active-text: #FFFFFF;
+  --admin-pill-bg: #111111; --admin-pill-text: #A1A1AA; --admin-pill-active-bg: #3B82F6; --admin-pill-active-text: #FFFFFF;
+}
+.admin-panel.theme-midnight-stark {
+  --admin-bg: #000000; --admin-card-bg: #0A0A0A; --admin-text-primary: #FFFFFF; --admin-text-secondary: #E5E5E5; --admin-accent: #FACC15; --admin-border: #262626;
+  --admin-hover: #171717; --admin-active: #262626; --admin-scrollbar-track: #000000; --admin-scrollbar-thumb: #FACC15; --admin-scrollbar-hover: #FDE047;
+  --admin-sidebar-bg: #000000; --admin-sidebar-item-active-bg: #FACC15; --admin-sidebar-item-active-text: #000000;
+  --admin-pill-bg: #0A0A0A; --admin-pill-text: #E5E5E5; --admin-pill-active-bg: #FACC15; --admin-pill-active-text: #000000;
+}
+
+/* ☀️ 5 LIGHT THEMES */
+.admin-panel.theme-arctic {
+  --admin-bg: #F1F5F9; --admin-card-bg: #FFFFFF; --admin-text-primary: #0F172A; --admin-text-secondary: #475569; --admin-accent: #2563EB; --admin-border: #E2E8F0;
+  --admin-hover: #E2E8F0; --admin-active: #DBEAFE; --admin-scrollbar-track: #F1F5F9; --admin-scrollbar-thumb: #3B82F6;
+  --admin-sidebar-bg: #FFFFFF; --admin-sidebar-item-active-bg: #2563EB; --admin-sidebar-item-active-text: #FFFFFF;
+  --admin-pill-bg: #F8FAFC; --admin-pill-text: #64748B; --admin-pill-active-bg: #2563EB; --admin-pill-active-text: #FFFFFF;
+}
+.admin-panel.theme-arctic-stark {
+  --admin-bg: #FFFFFF; --admin-card-bg: #FFFFFF; --admin-text-primary: #000000; --admin-text-secondary: #171717; --admin-accent: #0000FF; --admin-border: #000000;
+  --admin-hover: #F3F4F6; --admin-active: #E5E7EB; --admin-scrollbar-track: #FFFFFF; --admin-scrollbar-thumb: #0000FF;
+  --admin-sidebar-bg: #FFFFFF; --admin-sidebar-item-active-bg: #0000FF; --admin-sidebar-item-active-text: #FFFFFF;
+  --admin-pill-bg: #FFFFFF; --admin-pill-text: #171717; --admin-pill-active-bg: #0000FF; --admin-pill-active-text: #FFFFFF;
+}
+.admin-panel.theme-sand {
+  --admin-bg: #F7EFE5; --admin-card-bg: #FFFFFF; --admin-text-primary: #2C2218; --admin-text-secondary: #715F4C; --admin-accent: #C2410C; --admin-border: #EBD9C6;
+  --admin-hover: #EBD9C6; --admin-active: #F7EFE5; --admin-scrollbar-track: #F7EFE5; --admin-scrollbar-thumb: #C2410C;
+  --admin-sidebar-bg: #FFFFFF; --admin-sidebar-item-active-bg: #C2410C; --admin-sidebar-item-active-text: #FFFFFF;
+  --admin-pill-bg: #FAF3E8; --admin-pill-text: #8C7660; --admin-pill-active-bg: #C2410C; --admin-pill-active-text: #FFFFFF;
+}
+.admin-panel.theme-sage {
+  --admin-bg: #E9F0EC; --admin-card-bg: #FFFFFF; --admin-text-primary: #1F2A25; --admin-text-secondary: #4A5D55; --admin-accent: #15803D; --admin-border: #D1DFD8;
+  --admin-hover: #D1DFD8; --admin-active: #E9F0EC; --admin-scrollbar-track: #E9F0EC; --admin-scrollbar-thumb: #15803D;
+  --admin-sidebar-bg: #FFFFFF; --admin-sidebar-item-active-bg: #15803D; --admin-sidebar-item-active-text: #FFFFFF;
+  --admin-pill-bg: #F6F9F6; --admin-pill-text: #5F726A; --admin-pill-active-bg: #15803D; --admin-pill-active-text: #FFFFFF;
+}
+.admin-panel.theme-sakura {
+  --admin-bg: #FDF0F3; --admin-card-bg: #FFFFFF; --admin-text-primary: #2A1F24; --admin-text-secondary: #705562; --admin-accent: #DB2777; --admin-border: #F1D1DA;
+  --admin-hover: #F1D1DA; --admin-active: #FDF0F3; --admin-scrollbar-track: #FDF0F3; --admin-scrollbar-thumb: #DB2777;
+  --admin-sidebar-bg: #FFFFFF; --admin-sidebar-item-active-bg: #DB2777; --admin-sidebar-item-active-text: #FFFFFF;
+  --admin-pill-bg: #FFF7F9; --admin-pill-text: #8B6F7A; --admin-pill-active-bg: #DB2777; --admin-pill-active-text: #FFFFFF;
+}
+.admin-panel.theme-cloud {
+  --admin-bg: #E2E8F0; --admin-card-bg: #FFFFFF; --admin-text-primary: #1E293B; --admin-text-secondary: #475569; --admin-accent: #0284C7; --admin-border: #CBD5E1;
+  --admin-hover: #CBD5E1; --admin-active: #E2E8F0; --admin-scrollbar-track: #E2E8F0; --admin-scrollbar-thumb: #0284C7;
+  --admin-sidebar-bg: #FFFFFF; --admin-sidebar-item-active-bg: #0284C7; --admin-sidebar-item-active-text: #FFFFFF;
+  --admin-pill-bg: #F1F5F9; --admin-pill-text: #64748B; --admin-pill-active-bg: #0284C7; --admin-pill-active-text: #FFFFFF;
+}
+
+/* Global Component Overrides */
+.admin-panel .bg-white, .admin-panel.bg-white { background-color: var(--admin-card-bg) !important; }
+.admin-panel .bg-slate-50, .admin-panel.bg-slate-50, 
+.admin-panel .bg-slate-100, .admin-panel.bg-slate-100 { background-color: var(--admin-hover) !important; }
+.admin-panel .bg-slate-50\/50, .admin-panel.bg-slate-50\/50, 
+.admin-panel .bg-\[\#f4f4f5\], .admin-panel.bg-\[\#f4f4f5\],
+.admin-panel main, .admin-panel#admin-root { background-color: var(--admin-bg) !important; }
+
+/* Global Accent Color Overrides - Binding Tailwind to Theme Variables */
+.admin-panel .bg-blue-600, .admin-panel .bg-blue-500,
+.admin-panel .bg-blue-600\/10, .admin-panel .bg-blue-50\/5 { background-color: var(--admin-accent) !important; }
+.admin-panel .text-blue-600, .admin-panel .text-blue-500 { color: var(--admin-accent) !important; }
+.admin-panel .border-blue-600, .admin-panel .border-blue-500 { border-color: var(--admin-accent) !important; }
+.admin-panel .focus\:border-blue-500:focus { border-color: var(--admin-accent) !important; }
+.admin-panel .focus\:ring-blue-500:focus { ring-color: rgba(var(--admin-accent-rgb, 59, 130, 246), 0.2) !important; }
+
+/* Sidebar & Navigation */
+.admin-panel aside { background-color: var(--admin-sidebar-bg) !important; border-right-color: var(--admin-border) !important; }
+.admin-panel .sidebar-item-active, 
+.admin-panel aside nav a.sidebar-item-active { 
+  background-color: var(--admin-sidebar-item-active-bg) !important; 
+  color: var(--admin-sidebar-item-active-text) !important; 
+  opacity: 1 !important;
+}
+.admin-panel .sidebar-item:hover:not(.sidebar-item-active),
+.admin-panel aside nav a.sidebar-item:hover:not(.sidebar-item-active) { 
+  background-color: var(--admin-hover) !important; 
+}
+
+/* Hover Overrides for Lists & Rows */
+.admin-panel .hover\:bg-slate-50:hover, 
+.admin-panel .hover\:bg-slate-100:hover,
+.admin-panel tr:hover,
+.admin-panel .hover\:bg-white:hover,
+.admin-panel button.hover\:bg-slate-50:hover { 
+  background-color: var(--admin-hover) !important; 
+  color: var(--admin-text-primary) !important;
+}
+
+/* Eye Icon / Action Buttons Refinement (View, Edit, Delete) */
+.admin-panel button[title*="View"],
+.admin-panel button[title*="Edit"],
+.admin-panel button[title*="Delete"],
+.admin-panel button.hover\:bg-blue-50,
+.admin-panel button.hover\:bg-slate-50 {
+  color: var(--admin-text-secondary) !important;
+  transition: all 0.2s ease !important;
+}
+
+.admin-panel button[title*="View"]:hover,
+.admin-panel button[title*="Edit"]:hover,
+.admin-panel button[title*="Delete"]:hover,
+.admin-panel button.hover\:bg-blue-50:hover,
+.admin-panel button.hover\:bg-slate-50:hover {
+  background-color: var(--admin-hover) !important;
+  color: var(--admin-accent) !important;
+}
+
+/* Detail Badges & Continent Labels (e.g. GLOBAL, AFRICA) */
+.admin-panel .border-slate-100, .admin-panel .border-slate-200, .admin-panel .border-slate-300, .admin-panel .border-slate-900,
+.admin-panel .border-r, .admin-panel .border-b, .admin-panel .border-t, .admin-panel thead, .admin-panel tbody, .admin-panel tr,
+.admin-panel .divide-slate-100 > :not([hidden]) ~ :not([hidden]), .admin-panel .divide-slate-200 > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--admin-border) !important;
+}
+
+/* Themed Continent Badges */
+.admin-panel span[class*="border-slate-"], 
+.admin-panel span[class*="border"] {
+  background-color: rgba(var(--admin-accent-rgb, 59, 130, 246), 0.05) !important;
+  border-color: var(--admin-border) !important;
+}
+
+.admin-panel .text-slate-900, .admin-panel .text-slate-800, .admin-panel .text-slate-700 { color: var(--admin-text-primary) !important; }
+.admin-panel .text-slate-600, .admin-panel .text-slate-500 { color: var(--admin-text-secondary) !important; }
+.admin-panel .text-slate-400 { color: var(--admin-text-muted) !important; }
+
+/* Status Badges & Labels (Vibrant & Adaptive) */
+.admin-panel .bg-emerald-100, .admin-panel .bg-emerald-50 { background-color: rgba(16, 185, 129, 0.15) !important; }
+.admin-panel .bg-amber-100, .admin-panel .bg-amber-50 { background-color: rgba(245, 158, 11, 0.15) !important; }
+.admin-panel .bg-red-100, .admin-panel .bg-red-50 { background-color: rgba(239, 68, 68, 0.15) !important; }
+.admin-panel .bg-blue-100, .admin-panel .bg-blue-50 { background-color: rgba(59, 130, 246, 0.15) !important; }
+.admin-panel .bg-purple-100, .admin-panel .bg-purple-50 { background-color: rgba(168, 85, 247, 0.15) !important; }
+.admin-panel .bg-slate-200, .admin-panel .bg-slate-100 { background-color: var(--admin-hover) !important; }
+
+.admin-panel .text-emerald-700, .admin-panel .text-emerald-600 { color: #10B981 !important; }
+.admin-panel .text-amber-700, .admin-panel .text-amber-600 { color: #F59E0B !important; }
+.admin-panel .text-red-700, .admin-panel .text-red-600 { color: #EF4444 !important; }
+.admin-panel .text-blue-700, .admin-panel .text-blue-600 { color: var(--admin-accent) !important; }
+.admin-panel .text-purple-700, .admin-panel .text-purple-600 { color: #A855F7 !important; }
+.admin-panel .text-slate-700, .admin-panel .text-slate-600 { color: var(--admin-text-secondary) !important; }
+
+/* Filter Bar & Pills - Unified Theming */
+.admin-panel .bg-slate-100.p-1.rounded-2xl.border,
+.admin-panel .bg-white.p-1.rounded-2xl.border,
+.admin-panel .bg-slate-100.p-0\.5,
+.admin-panel .bg-white.p-0\.5 { 
+  background-color: var(--admin-pill-bg) !important; 
+  border-color: var(--admin-border) !important; 
+}
+
+.admin-panel .bg-slate-100.p-1.rounded-2xl.border button,
+.admin-panel .bg-white.p-1.rounded-2xl.border button,
+.admin-panel .bg-slate-100.p-0\.5 button,
+.admin-panel .bg-white.p-0\.5 button {
+  color: var(--admin-pill-text) !important;
+  background-color: transparent !important;
+}
+
+.admin-panel .bg-slate-100.p-1.rounded-2xl.border button.bg-white,
+.admin-panel .bg-white.p-1.rounded-2xl.border button.bg-white,
+.admin-panel .bg-slate-100.p-0\.5 .bg-white,
+.admin-panel .bg-white.p-0\.5 .bg-white,
+.admin-panel .bg-slate-100.p-1.rounded-2xl.border button[class*="bg-blue"],
+.admin-panel .bg-white.p-1.rounded-2xl.border button[class*="bg-blue"],
+.admin-panel .bg-slate-100.p-0\.5 button[class*="bg-blue"],
+.admin-panel .bg-white.p-0\.5 button[class*="bg-blue"] {
+  background-color: var(--admin-pill-active-bg) !important; 
+  color: var(--admin-pill-active-text) !important; 
+  box-shadow: var(--admin-shadow) !important; 
+}
+
+/* Modals & Dialogs */
+.admin-panel .fixed.inset-0 { 
+  backdrop-filter: blur(8px) !important;
+  background-color: rgba(0, 0, 0, 0.6) !important;
+}
+
+.admin-panel .fixed.inset-0 .bg-white { 
+  background-color: var(--admin-card-bg) !important; 
+  border-color: var(--admin-border) !important;
+  box-shadow: var(--admin-shadow-lg) !important;
+}
+
+/* Alert Modal Headers (Red/Emerald) */
+.admin-panel .bg-red-50 { background-color: rgba(239, 68, 68, 0.1) !important; border-bottom-color: rgba(239, 68, 68, 0.2) !important; }
+.admin-panel .bg-emerald-50 { background-color: rgba(16, 185, 129, 0.1) !important; border-bottom-color: rgba(16, 185, 129, 0.2) !important; }
+.admin-panel .border-red-100, .admin-panel .border-red-200 { border-color: rgba(239, 68, 68, 0.3) !important; }
+.admin-panel .border-emerald-100, .admin-panel .border-emerald-200 { border-color: rgba(16, 185, 129, 0.3) !important; }
+
+/* Invalidate Button in Lists */
+.admin-panel button.bg-red-50.text-red-600:not(:disabled):not([class*="bg-slate"]) {
+  background-color: #EF4444 !important;
+  color: #FFFFFF !important;
+  border: none !important;
+  box-shadow: 0 4px 6px -1px rgba(239, 68, 68, 0.2) !important;
+}
+
+.admin-panel button.bg-red-50.text-red-600:not(:disabled):not([class*="bg-slate"]):hover {
+  background-color: #DC2626 !important;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 8px -1px rgba(239, 68, 68, 0.3) !important;
+}
+
+/* Invalidate with Error/Disabled State */
+.admin-panel button.bg-slate-50.text-slate-600,
+.admin-panel button.bg-slate-100.text-slate-400 {
+  background-color: var(--admin-card-bg) !important;
+  color: var(--admin-text-secondary) !important;
+  border: 1px solid var(--admin-border) !important;
+  opacity: 1 !important;
+}
+
+.admin-panel button.bg-slate-50.text-slate-600:hover {
+  background-color: var(--admin-hover) !important;
+  border-color: var(--admin-accent) !important;
+  color: var(--admin-accent) !important;
+}
+
+/* Form Elements - Professional Search Bar & Modern Selects */
+.admin-panel input, .admin-panel textarea, .admin-panel select {
+  background-color: var(--admin-card-bg) !important;
+  border-color: var(--admin-border) !important;
+  color: var(--admin-text-primary) !important;
+  outline: none !important;
+  box-shadow: none !important;
+  border-width: 1px !important;
+}
+
+/* 🚀 Cutting Edge: Customizable Select (Experimental Chrome Support) */
+.admin-panel select, 
+.admin-panel select::picker(select) {
+  appearance: base-select !important;
+}
+
+.admin-panel select::picker(select) {
+  background-color: var(--admin-card-bg) !important;
+  border: 1px solid var(--admin-border) !important;
+  border-radius: 12px !important;
+  padding: 8px !important;
+  box-shadow: var(--admin-shadow-lg) !important;
+  margin-top: 4px !important;
+}
+
+.admin-panel select option {
+  padding: 10px 14px !important;
+  border-radius: 8px !important;
+  color: var(--admin-text-primary) !important;
+  background-color: transparent !important;
+  transition: all 0.2s !important;
+  cursor: pointer !important;
+}
+
+.admin-panel select option:hover,
+.admin-panel select option:focus,
+.admin-panel select option:checked {
+  background-color: var(--admin-hover) !important;
+  color: var(--admin-accent) !important;
+}
+
+.admin-panel input:focus, .admin-panel textarea:focus, .admin-panel select:focus {
+  border-color: var(--admin-accent) !important;
+  box-shadow: 0 0 0 2px rgba(var(--admin-accent-rgb, 59, 130, 246), 0.1) !important;
+  ring: none !important;
+}
+
+/* Specific Search Bar Professionalism */
+.admin-panel input[type="number"], .admin-panel input[type="text"] {
+  background-color: var(--admin-hover) !important;
+}
+
+.admin-panel input::placeholder { color: var(--admin-text-muted) !important; }
+
+/* Custom Scrollbar System */
+.admin-panel *::-webkit-scrollbar, .admin-panel::-webkit-scrollbar { width: 6px !important; height: 6px !important; }
+.admin-panel *::-webkit-scrollbar-track, .admin-panel::-webkit-scrollbar-track { background: var(--admin-scrollbar-track) !important; }
+.admin-panel *::-webkit-scrollbar-thumb, .admin-panel::-webkit-scrollbar-thumb {
+  background: var(--admin-scrollbar-thumb) !important;
+  border-radius: 10px !important;
+}
+.admin-panel *::-webkit-scrollbar-thumb:hover, .admin-panel::-webkit-scrollbar-thumb:hover { background: var(--admin-scrollbar-hover) !important; }
+
+/* Firefox Support */
+.admin-panel *, .admin-panel {
+  scrollbar-width: thin !important;
+  scrollbar-color: var(--admin-scrollbar-thumb) var(--admin-scrollbar-track) !important;
+}

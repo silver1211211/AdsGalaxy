@@ -3,12 +3,12 @@
 import React, { useEffect } from "react";
 import { motion } from "framer-motion";
 import { 
-  Tv, 
+  Bot, 
   CheckCircle2, 
   Clock, 
   XCircle, 
   PauseCircle,
-  Hash,
+  Key,
   Globe,
   Calendar,
   MessageSquare,
@@ -17,15 +17,15 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-interface ChannelDetailsScreenProps {
-  channel: any;
+interface BotDetailsScreenProps {
+  bot: any;
   onClose: () => void;
 }
 
-export default function ChannelDetailsScreen({ channel, onClose }: ChannelDetailsScreenProps) {
+export default function BotDetailsScreen({ bot, onClose }: BotDetailsScreenProps) {
   // Telegram Back Button Logic
   useEffect(() => {
-    const twa = window.Telegram?.WebApp;
+    const twa = (window as any).Telegram?.WebApp;
     if (twa?.BackButton) {
       twa.BackButton.show();
       twa.BackButton.onClick(onClose);
@@ -46,9 +46,9 @@ export default function ChannelDetailsScreen({ channel, onClose }: ChannelDetail
     }
   };
 
-  const statusInfo = getStatusInfo(channel.status);
-  const continents = JSON.parse(channel.audience_continents || "[]");
-  const categories = channel.categories ? (typeof channel.categories === 'string' ? JSON.parse(channel.categories) : channel.categories) : [];
+  const statusInfo = getStatusInfo(bot.status);
+  const continents = JSON.parse(bot.continents || "[]");
+  const categories = bot.categories ? (typeof bot.categories === 'string' ? JSON.parse(bot.categories) : bot.categories) : [];
 
   return (
     <motion.div 
@@ -62,12 +62,12 @@ export default function ChannelDetailsScreen({ channel, onClose }: ChannelDetail
         <div className="p-6 space-y-8">
           {/* Header Info */}
           <div className="flex flex-col items-center text-center space-y-4">
-            <div className="w-20 h-20 bg-slate-50 rounded-[32px] flex items-center justify-center text-slate-400">
-              <Tv size={40} />
+            <div className="w-20 h-20 bg-indigo-50 rounded-[32px] flex items-center justify-center text-indigo-400">
+              <Bot size={40} />
             </div>
             <div>
-              <h2 className="text-2xl font-black text-slate-900">{channel.title}</h2>
-              <p className="text-blue-500 font-bold">@{channel.username}</p>
+              <h2 className="text-2xl font-black text-slate-900">{bot.bot_name}</h2>
+              <p className="text-indigo-500 font-bold">@{bot.bot_username}</p>
             </div>
           </div>
 
@@ -75,7 +75,7 @@ export default function ChannelDetailsScreen({ channel, onClose }: ChannelDetail
           <div className={cn("p-6 rounded-[32px] flex items-center gap-4 border border-transparent", statusInfo.bg)}>
             <div className={statusInfo.color}>{statusInfo.icon}</div>
             <div>
-              <p className={cn("text-[10px] font-black uppercase tracking-widest", statusInfo.color, "opacity-70")}>Channel Status</p>
+              <p className={cn("text-[10px] font-black uppercase tracking-widest", statusInfo.color, "opacity-70")}>Bot Status</p>
               <p className={cn("text-lg font-black", statusInfo.color)}>{statusInfo.label}</p>
             </div>
           </div>
@@ -83,26 +83,33 @@ export default function ChannelDetailsScreen({ channel, onClose }: ChannelDetail
           {/* Details Grid */}
           <div className="space-y-6">
             <div className="grid grid-cols-2 gap-4">
-              <div className="p-5 bg-slate-50 rounded-[28px] space-y-1">
-                <div className="flex items-center gap-2 text-slate-400 mb-1">
-                  <Hash size={14} />
-                  <span className="text-[10px] font-black uppercase tracking-widest">Chat ID</span>
-                </div>
-                <p className="text-sm font-bold text-slate-900 font-mono truncate">{channel.chat_id}</p>
-              </div>
-              <div className="p-5 bg-slate-50 rounded-[28px] space-y-1">
-                <div className="flex items-center gap-2 text-slate-400 mb-1">
+              <div className="p-5 bg-emerald-50 rounded-[28px] border border-emerald-100 space-y-1">
+                <div className="flex items-center gap-2 text-emerald-600 mb-1">
                   <Users size={14} />
-                  <span className="text-[10px] font-black uppercase tracking-widest">Subscribers</span>
+                  <span className="text-[10px] font-black uppercase tracking-widest">Active Users</span>
                 </div>
-                <p className="text-sm font-bold text-slate-900">{channel.subscriber_count?.toLocaleString() || "0"}</p>
+                <p className="text-xl font-black text-emerald-700">{bot.active_count?.toLocaleString() || "0"}</p>
+              </div>
+              <div className="p-5 bg-red-50 rounded-[28px] border border-red-100 space-y-1">
+                <div className="flex items-center gap-2 text-red-600 mb-1">
+                  <XCircle size={14} />
+                  <span className="text-[10px] font-black uppercase tracking-widest">Blocked Users</span>
+                </div>
+                <p className="text-xl font-black text-red-700">{bot.blocked_count?.toLocaleString() || "0"}</p>
+              </div>
+              <div className="p-5 bg-slate-50 rounded-[28px] space-y-1 col-span-2">
+                <div className="flex items-center gap-2 text-slate-400 mb-1">
+                  <Key size={14} />
+                  <span className="text-[10px] font-black uppercase tracking-widest">Bot API Token</span>
+                </div>
+                <p className="text-sm font-bold text-slate-900 font-mono break-all">{bot.bot_token.substring(0, 10)}...{bot.bot_token.substring(bot.bot_token.length - 4)}</p>
               </div>
               <div className="p-5 bg-slate-50 rounded-[28px] space-y-1 col-span-2">
                 <div className="flex items-center gap-2 text-slate-400 mb-1">
                   <MessageSquare size={14} />
                   <span className="text-[10px] font-black uppercase tracking-widest">Monetization Rate</span>
                 </div>
-                <p className="text-sm font-bold text-slate-900">{channel.posts_per_day} Ad Posts / Day</p>
+                <p className="text-sm font-bold text-slate-900">{bot.posts_per_day} Ad Posts / Day</p>
               </div>
             </div>
 
@@ -110,14 +117,14 @@ export default function ChannelDetailsScreen({ channel, onClose }: ChannelDetail
             <div className="p-6 bg-slate-50 rounded-[32px] space-y-4">
               <div className="flex items-center gap-2 text-slate-400">
                 <LayoutGrid size={16} />
-                <span className="text-[10px] font-black uppercase tracking-widest">Channel Categories</span>
+                <span className="text-[10px] font-black uppercase tracking-widest">Bot Categories</span>
               </div>
               <div className="flex flex-wrap gap-2">
                 {categories.length > 0 ? (
                   categories.map((cat: string) => (
                     <span 
                       key={cat} 
-                      className="px-4 py-1.5 bg-blue-600 text-white rounded-full text-[10px] font-black uppercase tracking-wider"
+                      className="px-4 py-1.5 bg-indigo-600 text-white rounded-full text-[10px] font-black uppercase tracking-wider"
                     >
                       {cat}
                     </span>
@@ -132,7 +139,7 @@ export default function ChannelDetailsScreen({ channel, onClose }: ChannelDetail
             <div className="p-6 bg-slate-50 rounded-[32px] space-y-4">
               <div className="flex items-center gap-2 text-slate-400">
                 <Globe size={16} />
-                <span className="text-[10px] font-black uppercase tracking-widest">Target Audience</span>
+                <span className="text-[10px] font-black uppercase tracking-widest">Audience Coverage</span>
               </div>
               <div className="flex flex-wrap gap-2">
                 {continents.length > 0 ? (
@@ -154,10 +161,10 @@ export default function ChannelDetailsScreen({ channel, onClose }: ChannelDetail
             <div className="p-6 bg-slate-50 rounded-[32px] flex items-center justify-between">
               <div className="flex items-center gap-3 text-slate-400">
                 <Calendar size={18} />
-                <span className="text-[10px] font-black uppercase tracking-widest">Registered On</span>
+                <span className="text-[10px] font-black uppercase tracking-widest">Bot Registered</span>
               </div>
               <p className="text-sm font-bold text-slate-900">
-                {new Date(channel.created_at).toLocaleDateString()}
+                {new Date(bot.created_at).toLocaleDateString()}
               </p>
             </div>
           </div>
