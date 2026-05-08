@@ -8,13 +8,15 @@ export async function GET(request: Request) {
   }
 
   const { searchParams } = new URL(request.url);
-  const type = searchParams.get("type") || "broadcast"; // broadcast or clicks/views
+  const type = searchParams.get("type") || "broadcast";
   const category = searchParams.get("category") || "";
-  const continent = searchParams.get("continent") || "";
+  const continentsParam = searchParams.get("continents") || "Global";
+  const predictionMinutes = parseInt(searchParams.get("predictionMinutes") || "0");
+  const selectedContinents = continentsParam.split(",");
 
   try {
     if (type === "broadcast") {
-      const [bots]: any = await pool.query("SELECT id, categories, continents FROM bots WHERE status = 'active' AND is_deleted = FALSE");
+      const [bots]: any = await pool.query("SELECT id, categories, continents, posts_per_day FROM bots WHERE status = 'active' AND is_deleted = FALSE");
       
       const filteredBots = bots.filter((bot: any) => {
         let catMatch = true;
@@ -25,9 +27,9 @@ export async function GET(request: Request) {
           catMatch = botCats.includes(category);
         }
 
-        if (continent) {
+        if (continentsParam && !selectedContinents.includes("Global")) {
           const botConts = bot.continents ? (typeof bot.continents === 'string' ? JSON.parse(bot.continents) : bot.continents) : [];
-          contMatch = botConts.includes(continent) || botConts.includes("Global");
+          contMatch = botConts.includes("Global") || selectedContinents.some(c => botConts.includes(c));
         }
 
         return catMatch && contMatch;
@@ -36,7 +38,22 @@ export async function GET(request: Request) {
       const botIds = filteredBots.map((b: any) => b.id);
       let totalUsers = 0;
       if (botIds.length > 0) {
-        const [userCount]: any = await pool.query("SELECT COUNT(*) as count FROM bot_users WHERE bot_id IN (?) AND is_active = TRUE", [botIds]);
+        // Use 6 hours as the gap for broadcast as per user requirement
+        const hoursInterval = 6;
+          
+        const [userCount]: any = await pool.query(`
+          SELECT COUNT(*) as count FROM bot_users bu
+          WHERE bu.bot_id IN (?) AND bu.is_active = TRUE
+          AND (
+            bu.last_broadcast_at IS NULL 
+            OR bu.last_broadcast_at < (NOW() + INTERVAL ? MINUTE) - INTERVAL ? HOUR
+          )
+          AND (
+            SELECT COUNT(*) FROM broadcast_deliveries bd 
+            WHERE bd.user_id = bu.id AND bd.created_at > (NOW() + INTERVAL ? MINUTE) - INTERVAL 1 DAY
+          ) < (SELECT posts_per_day FROM bots WHERE id = bu.bot_id)
+        `, [botIds, predictionMinutes, hoursInterval, predictionMinutes]);
+        
         totalUsers = userCount[0].count;
       }
 
@@ -46,8 +63,13 @@ export async function GET(request: Request) {
         userCount: totalUsers,
       });
     } else {
-      // clicks/views (Channels)
-      const [channels]: any = await pool.query("SELECT id, categories, audience_continents, subscriber_count FROM channels WHERE status = 'active' AND is_deleted = FALSE");
+      const [channels]: any = await pool.query(`
+        SELECT c.*, 
+        (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id = c.id AND cp.created_at > (NOW() + INTERVAL ? MINUTE) - INTERVAL 1 DAY) as daily_posts,
+        (SELECT MAX(created_at) FROM campaign_posts cp WHERE cp.channel_id = c.id) as last_post_at
+        FROM channels c
+        WHERE c.status = 'active' AND c.is_deleted = FALSE
+      `, [predictionMinutes]);
 
       const filteredChannels = channels.filter((ch: any) => {
         let catMatch = true;
@@ -58,12 +80,18 @@ export async function GET(request: Request) {
           catMatch = chCats.includes(category);
         }
 
-        if (continent) {
+        if (continentsParam && !selectedContinents.includes("Global")) {
           const chConts = ch.audience_continents ? (typeof ch.audience_continents === 'string' ? JSON.parse(ch.audience_continents) : ch.audience_continents) : [];
-          contMatch = chConts.includes(continent) || chConts.includes("Global");
+          contMatch = chConts.includes("Global") || selectedContinents.some(c => chConts.includes(c));
         }
 
-        return catMatch && contMatch;
+        // Channels already use 6 hours
+        const isEligible = ch.daily_posts < ch.posts_per_day && (
+          !ch.last_post_at || 
+          new Date(ch.last_post_at).getTime() < (Date.now() + predictionMinutes * 60000) - (6 * 60 * 60 * 1000)
+        );
+
+        return catMatch && contMatch && isEligible;
       });
 
       const totalSubscribers = filteredChannels.reduce((acc: number, ch: any) => acc + (ch.subscriber_count || 0), 0);
