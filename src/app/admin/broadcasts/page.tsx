@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Search, Radio, Send, Users, DollarSign, Activity, CheckCircle, Clock, AlertCircle, Bot, X, Eye, ShieldCheck } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Search, Radio, Send, Users, DollarSign, Activity, CheckCircle, Clock, AlertCircle, Bot, X, Eye } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export default function AdminBroadcastsPage() {
@@ -17,12 +17,6 @@ export default function AdminBroadcastsPage() {
   const [campaignModalOpen, setCampaignModalOpen] = useState(false);
   const [botModalOpen, setBotModalOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState<any>(null);
-
-  const [checkType, setCheckType] = useState("broadcast");
-  const [checkCategory, setCheckCategory] = useState("Crypto");
-  const [checkContinent, setCheckContinent] = useState("Global");
-  const [checkResults, setCheckResults] = useState<any>(null);
-  const [checking, setChecking] = useState(false);
 
   const fetchBroadcasts = async (p: number, s: string) => {
     setLoading(true);
@@ -43,26 +37,9 @@ export default function AdminBroadcastsPage() {
     }
   };
 
-  const runAvailabilityCheck = async () => {
-    setChecking(true);
-    try {
-      const res = await fetch(`/api/admin/availability?type=${checkType}&category=${encodeURIComponent(checkCategory)}&continent=${encodeURIComponent(checkContinent)}`);
-      const data = await res.json();
-      setCheckResults(data);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setChecking(false);
-    }
-  };
-
   useEffect(() => {
     fetchBroadcasts(page, search);
   }, [page, search]);
-
-  useEffect(() => {
-    runAvailabilityCheck();
-  }, [checkType, checkCategory, checkContinent]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -85,9 +62,6 @@ export default function AdminBroadcastsPage() {
       return Array.isArray(parsed) ? parsed.join(", ") : str;
     } catch (e) { return str; }
   };
-
-  const categories = ["Crypto", "Finance", "NSFW +18", "Tech", "Gambling", "Entertainment", "Education", "Shopping", "Other"];
-  const continents = ["Global", "Africa", "Asia", "Europe", "North America", "South America", "Oceania"];
 
   return (
     <AdminLayout>
@@ -164,64 +138,6 @@ export default function AdminBroadcastsPage() {
       )}
 
       <div className="space-y-4">
-        {/* Availability Checker - Compact */}
-        <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
-          <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-              <ShieldCheck size={14} className="text-blue-500" />
-              Availability Checker
-            </h3>
-            {checking && <Loader2 size={12} className="animate-spin text-blue-500" />}
-          </div>
-          <div className="p-3">
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-              <div>
-                <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Campaign Type</p>
-                <select 
-                  value={checkType} 
-                  onChange={(e) => setCheckType(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1.5 text-xs font-medium outline-none focus:border-blue-500 transition-all"
-                >
-                  <option value="broadcast">Broadcast (Bots)</option>
-                  <option value="clicks_views">Clicks & Views (Channels)</option>
-                </select>
-              </div>
-              <div>
-                <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Category</p>
-                <select 
-                  value={checkCategory} 
-                  onChange={(e) => setCheckCategory(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1.5 text-xs font-medium outline-none focus:border-blue-500 transition-all"
-                >
-                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </div>
-              <div>
-                <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Continent</p>
-                <select 
-                  value={checkContinent} 
-                  onChange={(e) => setCheckContinent(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1.5 text-xs font-medium outline-none focus:border-blue-500 transition-all"
-                >
-                  {continents.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </div>
-              
-              <div className="flex items-center gap-4 bg-blue-50/50 rounded-lg px-4 border border-blue-100/50">
-                <div className="flex-1">
-                  <p className="text-[9px] font-bold text-blue-400 uppercase leading-none mb-1">Available {checkType === 'broadcast' ? 'Bots' : 'Channels'}</p>
-                  <p className="text-sm font-black text-blue-700 leading-none">{checkResults?.itemCount || 0}</p>
-                </div>
-                <div className="w-px h-6 bg-blue-200" />
-                <div className="flex-1">
-                  <p className="text-[9px] font-bold text-blue-400 uppercase leading-none mb-1">Total {checkType === 'broadcast' ? 'Users' : 'Subscribers'}</p>
-                  <p className="text-sm font-black text-blue-700 leading-none">{(checkResults?.userCount || 0).toLocaleString()}</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
         {/* Header Stats - Compact */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           {[

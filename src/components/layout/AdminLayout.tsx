@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LayoutDashboard, Users, Megaphone, Tv, CreditCard, Wallet, Activity, HelpCircle, Settings, Network, LogOut, Menu, X, Bot, Moon, Sun, Radio } from "lucide-react";
+import { LayoutDashboard, Users, Megaphone, Tv, CreditCard, Wallet, Activity, HelpCircle, Settings, Network, LogOut, Menu, X, Bot, Moon, Sun, Radio, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const menuItems = [
@@ -16,6 +16,7 @@ const menuItems = [
   { href: "/admin/deposits", icon: Wallet, label: "Deposits" },
   { href: "/admin/audits", icon: Activity, label: "Views Audit" },
   { href: "/admin/broadcasts", icon: Radio, label: "Broadcast Audit" },
+  { href: "/admin/availability", icon: ShieldCheck, label: "Availability Checker" },
   { href: "/admin/faqs", icon: HelpCircle, label: "Manage FAQs" },
   { href: "/admin/placement-logic", icon: Network, label: "Placement Logic" },
   { href: "/admin/settings", icon: Settings, label: "System Settings" },
