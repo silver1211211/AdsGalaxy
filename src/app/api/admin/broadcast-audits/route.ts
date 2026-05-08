@@ -24,11 +24,16 @@ export async function GET(request: Request) {
     }
 
     const [deliveries]: any = await pool.query(`
-      SELECT bd.*, c.name as campaign_name, b.bot_name, u.username as publisher_username
+      SELECT bd.*, 
+        c.name as campaign_name, c.parse_mode, c.message_text, c.image_url, c.link, c.button_text, c.type as campaign_type, c.budget as campaign_budget, c.cpm as campaign_cpm, c.category as campaign_category, c.continents as campaign_continents, c.status as campaign_status,
+        b.bot_name, b.bot_username, b.bot_token, b.status as bot_status, b.posts_per_day, b.categories as bot_categories, b.continents as bot_continents,
+        u_adv.first_name as adv_first_name, u_adv.last_name as adv_last_name, u_adv.username as adv_username, u_adv.telegram_id as adv_telegram_id,
+        u_pub.username as publisher_username, u_pub.first_name as pub_first_name, u_pub.last_name as pub_last_name, u_pub.telegram_id as pub_telegram_id
       FROM broadcast_deliveries bd
       JOIN campaigns c ON bd.campaign_id = c.id
       JOIN bots b ON bd.bot_id = b.id
-      JOIN users u ON b.user_id = u.id
+      JOIN users u_adv ON c.user_id = u_adv.id
+      JOIN users u_pub ON b.user_id = u_pub.id
       ${whereClause}
       ORDER BY bd.created_at DESC
       LIMIT ? OFFSET ?

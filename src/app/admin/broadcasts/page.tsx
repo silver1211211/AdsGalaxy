@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Search, Radio, Send, Users, DollarSign, Activity, CheckCircle, Clock, AlertCircle, Bot } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Search, Radio, Send, Users, DollarSign, Activity, CheckCircle, Clock, AlertCircle, Bot, X, Eye } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export default function AdminBroadcastsPage() {
@@ -13,6 +13,10 @@ export default function AdminBroadcastsPage() {
   const [totalItems, setTotalItems] = useState(0);
   const [search, setSearch] = useState("");
   const [searchInput, setSearchInput] = useState("");
+  
+  const [campaignModalOpen, setCampaignModalOpen] = useState(false);
+  const [botModalOpen, setBotModalOpen] = useState(false);
+  const [selectedItem, setSelectedItem] = useState<any>(null);
 
   const fetchBroadcasts = async (p: number, s: string) => {
     setLoading(true);
@@ -43,128 +47,190 @@ export default function AdminBroadcastsPage() {
     setSearch(searchInput);
   };
 
+  const renderContinents = (str: string) => {
+    if (!str) return "Global";
+    try {
+      const parsed = JSON.parse(str);
+      return Array.isArray(parsed) ? parsed.join(", ") : str;
+    } catch (e) { return str; }
+  };
+
+  const renderCategories = (str: string) => {
+    if (!str) return "None";
+    try {
+      const parsed = JSON.parse(str);
+      return Array.isArray(parsed) ? parsed.join(", ") : str;
+    } catch (e) { return str; }
+  };
+
   return (
     <AdminLayout>
-      <div className="space-y-6">
-        {/* Header Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
-            <div className="w-10 h-10 rounded-lg bg-blue-50 flex items-center justify-center text-blue-600">
-              <Radio size={20} />
+      {/* Campaign Info Modal */}
+      {campaignModalOpen && selectedItem && (
+        <div className="fixed inset-0 z-[100] bg-slate-900/50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="bg-white rounded-lg w-full max-w-xl shadow-xl border border-slate-200 flex flex-col max-h-[90vh] animate-in zoom-in-95 duration-200">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-tight">Campaign Details (#{selectedItem.campaign_id})</h3>
+              <button onClick={() => setCampaignModalOpen(false)} className="text-slate-400 hover:text-slate-600 transition-colors cursor-pointer">
+                <X size={18} />
+              </button>
             </div>
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Total Deliveries</p>
-              <p className="text-xl font-black text-slate-900">{totalItems.toLocaleString()}</p>
-            </div>
-          </div>
-          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
-            <div className="w-10 h-10 rounded-lg bg-emerald-50 flex items-center justify-center text-emerald-600">
-              <DollarSign size={20} />
-            </div>
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Total Revenue</p>
-              <p className="text-xl font-black text-slate-900">
-                ${deliveries.reduce((acc, d) => acc + parseFloat(d.cost), 0).toFixed(2)}
-              </p>
-            </div>
-          </div>
-          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
-            <div className="w-10 h-10 rounded-lg bg-purple-50 flex items-center justify-center text-purple-600">
-              <Activity size={20} />
-            </div>
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Publisher Rewards</p>
-              <p className="text-xl font-black text-slate-900">
-                ${deliveries.reduce((acc, d) => acc + parseFloat(d.publisher_reward), 0).toFixed(2)}
-              </p>
-            </div>
-          </div>
-          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
-            <div className="w-10 h-10 rounded-lg bg-orange-50 flex items-center justify-center text-orange-600">
-              <Users size={20} />
-            </div>
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Unique Recipients</p>
-              <p className="text-xl font-black text-slate-900">
-                {new Set(deliveries.map(d => d.chat_id)).size}
-              </p>
+            <div className="p-4 overflow-y-auto space-y-4 text-xs">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Campaign Name</p>
+                  <p className="font-bold text-slate-900">{selectedItem.campaign_name}</p>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Creator</p>
+                  <p className="font-bold text-slate-900">{selectedItem.adv_first_name} {selectedItem.adv_last_name} (@{selectedItem.adv_username})</p>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Ad Message</p>
+                <div className="bg-slate-50 p-2 rounded border border-slate-100 font-mono whitespace-pre-wrap max-h-32 overflow-y-auto">{selectedItem.message_text}</div>
+              </div>
+              <div className="grid grid-cols-3 gap-4">
+                <div><p className="text-[10px] font-bold text-slate-400 uppercase">Category</p><p className="font-bold">{selectedItem.campaign_category}</p></div>
+                <div><p className="text-[10px] font-bold text-slate-400 uppercase">Status</p><p className="font-bold capitalize">{selectedItem.campaign_status}</p></div>
+                <div><p className="text-[10px] font-bold text-slate-400 uppercase">CPM</p><p className="font-bold">${selectedItem.campaign_cpm}</p></div>
+              </div>
+              <div><p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Targeting</p><p className="font-bold text-slate-700">{renderContinents(selectedItem.campaign_continents)}</p></div>
             </div>
           </div>
         </div>
+      )}
 
-        {/* Main Table Section */}
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between flex-wrap gap-4">
-            <div>
-              <h2 className="text-lg font-black text-slate-900 uppercase tracking-tight text-gradient">Broadcast Audit Log</h2>
-              <p className="text-xs text-slate-500 font-medium tracking-wide">Real-time verification of message distribution.</p>
+      {/* Bot Info Modal */}
+      {botModalOpen && selectedItem && (
+        <div className="fixed inset-0 z-[100] bg-slate-900/50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="bg-white rounded-lg w-full max-w-xl shadow-xl border border-slate-200 flex flex-col max-h-[90vh] animate-in zoom-in-95 duration-200">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-tight">Bot Details (#{selectedItem.bot_id})</h3>
+              <button onClick={() => setBotModalOpen(false)} className="text-slate-400 hover:text-slate-600 transition-colors cursor-pointer">
+                <X size={18} />
+              </button>
             </div>
+            <div className="p-4 overflow-y-auto space-y-4 text-xs">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Bot Name</p>
+                  <p className="font-bold text-slate-900">{selectedItem.bot_name}</p>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Username</p>
+                  <p className="font-bold text-blue-600">@{selectedItem.bot_username}</p>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Publisher</p>
+                <p className="font-bold text-slate-900">{selectedItem.pub_first_name} {selectedItem.pub_last_name} (@{selectedItem.publisher_username})</p>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div><p className="text-[10px] font-bold text-slate-400 uppercase">Posts / Day</p><p className="font-bold">{selectedItem.posts_per_day}</p></div>
+                <div><p className="text-[10px] font-bold text-slate-400 uppercase">Status</p><p className="font-bold capitalize">{selectedItem.bot_status}</p></div>
+              </div>
+              <div><p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Categories</p><p className="font-bold text-slate-700">{renderCategories(selectedItem.bot_categories)}</p></div>
+              <div><p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Audience</p><p className="font-bold text-slate-700">{renderContinents(selectedItem.bot_continents)}</p></div>
+            </div>
+          </div>
+        </div>
+      )}
 
-            <form onSubmit={handleSearch} className="relative w-full sm:w-72 group">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-blue-500 transition-colors" size={16} />
+      <div className="space-y-4">
+        {/* Header Stats - Compact */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {[
+            { label: "Total Deliveries", val: totalItems.toLocaleString(), icon: Radio, color: "blue" },
+            { label: "Total Revenue", val: `$${deliveries.reduce((acc, d) => acc + parseFloat(d.cost), 0).toFixed(2)}`, icon: DollarSign, color: "emerald" },
+            { label: "Pub Rewards", val: `$${deliveries.reduce((acc, d) => acc + parseFloat(d.publisher_reward), 0).toFixed(2)}`, icon: Activity, color: "purple" },
+            { label: "Unique Users", val: new Set(deliveries.map(d => d.chat_id)).size, icon: Users, color: "orange" },
+          ].map((stat, i) => (
+            <div key={i} className="bg-white px-3 py-2.5 rounded-lg border border-slate-200 flex items-center gap-3">
+              <div className={`p-1.5 rounded-md bg-${stat.color}-50 text-${stat.color}-600`}>
+                <stat.icon size={14} />
+              </div>
+              <div>
+                <p className="text-[9px] font-bold uppercase tracking-wider text-slate-400 leading-none mb-1">{stat.label}</p>
+                <p className="text-sm font-bold text-slate-900 leading-none">{stat.val}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Main Table Section - Compact */}
+        <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden flex flex-col h-[calc(100vh-180px)]">
+          <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-4 shrink-0">
+            <h2 className="text-sm font-bold text-slate-900">Broadcast Audit Log</h2>
+
+            <form onSubmit={handleSearch} className="relative w-full sm:w-64">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
               <input
                 type="text"
-                placeholder="Search campaign, bot, or chat ID..."
+                placeholder="Search logs..."
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:border-blue-500 outline-none transition-all font-medium placeholder:text-slate-400"
+                className="w-full pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded text-xs outline-none focus:border-blue-500 transition-all font-medium"
               />
             </form>
           </div>
 
-          <div className="overflow-x-auto overflow-y-hidden">
+          <div className="overflow-auto flex-1">
             {loading ? (
               <div className="flex items-center justify-center h-64">
-                <Loader2 className="animate-spin text-blue-600" size={32} />
+                <Loader2 className="animate-spin text-blue-600" size={24} />
               </div>
             ) : deliveries.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-2">
-                <AlertCircle size={32} />
-                <p className="text-sm font-bold uppercase tracking-widest">No deliveries found</p>
-              </div>
+              <div className="text-center p-12 text-slate-400 text-xs">No deliveries found.</div>
             ) : (
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-50/50 border-b border-slate-100">
-                    <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-400">Campaign / Bot</th>
-                    <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-400">Recipient (Chat ID)</th>
-                    <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-400">Publisher</th>
-                    <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-400 text-right">Cost</th>
-                    <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-400 text-right">Reward</th>
-                    <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-400 text-right">Timestamp</th>
+              <table className="w-full text-left text-xs whitespace-nowrap">
+                <thead className="bg-slate-50 border-b border-slate-200 sticky top-0 z-10">
+                  <tr>
+                    <th className="px-4 py-2 font-bold text-slate-500 uppercase tracking-wider">Campaign</th>
+                    <th className="px-4 py-2 font-bold text-slate-500 uppercase tracking-wider">Bot</th>
+                    <th className="px-4 py-2 font-bold text-slate-500 uppercase tracking-wider">Recipient</th>
+                    <th className="px-4 py-2 font-bold text-slate-500 uppercase tracking-wider">Publisher</th>
+                    <th className="px-4 py-2 font-bold text-slate-500 uppercase tracking-wider text-right">Cost</th>
+                    <th className="px-4 py-2 font-bold text-slate-500 uppercase tracking-wider text-right">Reward</th>
+                    <th className="px-4 py-2 font-bold text-slate-500 uppercase tracking-wider text-right">Time</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-50">
+                <tbody className="divide-y divide-slate-100">
                   {deliveries.map((d: any) => (
-                    <tr key={d.id} className="hover:bg-slate-50/50 transition-colors">
-                      <td className="px-6 py-4">
-                        <div className="flex flex-col gap-0.5">
-                          <p className="text-sm font-black text-slate-900">{d.campaign_name}</p>
-                          <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 uppercase">
-                            <Bot size={10} className="text-blue-500" />
-                            {d.bot_name}
-                          </div>
+                    <tr key={d.id} className="hover:bg-slate-50 transition-colors">
+                      <td className="px-4 py-2">
+                        <div className="flex items-center gap-2 group">
+                          <span className="font-bold text-slate-900">{d.campaign_name}</span>
+                          <button 
+                            onClick={() => { setSelectedItem(d); setCampaignModalOpen(true); }}
+                            className="p-1 text-slate-300 hover:text-blue-500 hover:bg-blue-50 rounded transition-all cursor-pointer"
+                          >
+                            <Eye size={12} />
+                          </button>
                         </div>
                       </td>
-                      <td className="px-6 py-4">
-                        <code className="text-xs font-mono bg-slate-100 px-1.5 py-0.5 rounded text-slate-600">{d.chat_id}</code>
+                      <td className="px-4 py-2">
+                        <div className="flex items-center gap-2 group">
+                          <span className="text-slate-600 flex items-center gap-1 font-medium">
+                            <Bot size={10} /> {d.bot_name}
+                          </span>
+                          <button 
+                            onClick={() => { setSelectedItem(d); setBotModalOpen(true); }}
+                            className="p-1 text-slate-300 hover:text-blue-500 hover:bg-blue-50 rounded transition-all cursor-pointer"
+                          >
+                            <Eye size={12} />
+                          </button>
+                        </div>
                       </td>
-                      <td className="px-6 py-4">
-                        <p className="text-sm font-bold text-slate-700">@{d.publisher_username}</p>
+                      <td className="px-4 py-2">
+                        <span className="font-mono text-slate-600">{d.chat_id}</span>
                       </td>
-                      <td className="px-6 py-4 text-right">
-                        <p className="text-sm font-black text-slate-900">${parseFloat(d.cost).toFixed(4)}</p>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <p className="text-sm font-black text-emerald-600">${parseFloat(d.publisher_reward).toFixed(4)}</p>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <p className="text-xs font-bold text-slate-600 whitespace-nowrap">
-                          {new Date(d.created_at).toLocaleDateString()}
-                        </p>
-                        <p className="text-[10px] font-medium text-slate-400">
-                          {new Date(d.created_at).toLocaleTimeString()}
-                        </p>
+                      <td className="px-4 py-2 text-slate-700">@{d.publisher_username}</td>
+                      <td className="px-4 py-2 text-right font-medium text-slate-900">${parseFloat(d.cost).toFixed(4)}</td>
+                      <td className="px-4 py-2 text-right font-medium text-emerald-600">${parseFloat(d.publisher_reward).toFixed(4)}</td>
+                      <td className="px-4 py-2 text-right">
+                        <p className="font-medium text-slate-600">{new Date(d.created_at).toLocaleDateString()}</p>
+                        <p className="text-[10px] text-slate-400 leading-none">{new Date(d.created_at).toLocaleTimeString()}</p>
                       </td>
                     </tr>
                   ))}
@@ -173,24 +239,24 @@ export default function AdminBroadcastsPage() {
             )}
           </div>
 
-          <div className="px-6 py-4 bg-slate-50/50 border-t border-slate-100 flex items-center justify-between">
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest tracking-widest">
-              Showing {deliveries.length} of {totalItems} total logs
-            </p>
-            <div className="flex gap-2">
+          <div className="px-4 py-2 bg-slate-50 border-t border-slate-200 flex items-center justify-between shrink-0">
+            <span className="text-[10px] font-bold text-slate-400 uppercase">
+              Showing {deliveries.length} of {totalItems} logs
+            </span>
+            <div className="flex gap-1">
               <button
                 disabled={page === 1 || loading}
                 onClick={() => setPage(p => p - 1)}
-                className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition-all shadow-sm cursor-pointer"
+                className="p-1 rounded bg-white border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-50 transition-all cursor-pointer"
               >
-                <ChevronLeft size={18} />
+                <ChevronLeft size={14} />
               </button>
               <button
                 disabled={page === totalPages || loading}
                 onClick={() => setPage(p => p + 1)}
-                className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition-all shadow-sm cursor-pointer"
+                className="p-1 rounded bg-white border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-50 transition-all cursor-pointer"
               >
-                <ChevronRight size={18} />
+                <ChevronRight size={14} />
               </button>
             </div>
           </div>
