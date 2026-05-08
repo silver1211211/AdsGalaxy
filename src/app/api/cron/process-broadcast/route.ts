@@ -126,7 +126,7 @@ export async function GET(req: NextRequest) {
             await conn.query("UPDATE campaigns SET budget = budget - ? WHERE id = ?", [cost, campaign.id]);
             
             // 2. Add reward to publisher
-            await conn.query("UPDATE users SET balance = balance + ? WHERE id = ?", [reward, bot.user_id]);
+            await conn.query("UPDATE users SET balance_available = balance_available + ? WHERE id = ?", [reward, bot.user_id]);
             
             // 3. Record delivery
             await conn.query(`
