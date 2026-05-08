@@ -14,39 +14,36 @@ export async function GET(request: Request) {
   const search = searchParams.get("search") || "";
 
   try {
-    let whereClause = "WHERE c.type = 'broadcast'";
+    let whereClause = "";
     const params: any[] = [];
 
     if (search) {
-      whereClause += " AND (c.name LIKE ? OR u.username LIKE ?)";
-      params.push(`%${search}%`, `%${search}%`);
+      whereClause = "WHERE c.name LIKE ? OR b.bot_name LIKE ? OR bd.chat_id LIKE ?";
+      const searchVal = `%${search}%`;
+      params.push(searchVal, searchVal, searchVal);
     }
 
-    const [campaigns]: any = await pool.query(`
-      SELECT c.*, u.username as owner_username,
-      (SELECT COUNT(*) FROM broadcast_deliveries WHERE campaign_id = c.id) as delivery_count,
-      (SELECT SUM(cost) FROM broadcast_deliveries WHERE campaign_id = c.id) as total_spent,
-      (SELECT SUM(publisher_reward) FROM broadcast_deliveries WHERE campaign_id = c.id) as total_rewards
-      FROM campaigns c
-      JOIN users u ON c.user_id = u.id
+    const [deliveries]: any = await pool.query(`
+      SELECT bd.*, c.name as campaign_name, b.bot_name, u.username as publisher_username
+      FROM broadcast_deliveries bd
+      JOIN campaigns c ON bd.campaign_id = c.id
+      JOIN bots b ON bd.bot_id = b.id
+      JOIN users u ON b.user_id = u.id
       ${whereClause}
-      ORDER BY c.created_at DESC
+      ORDER BY bd.created_at DESC
       LIMIT ? OFFSET ?
     `, [...params, limit, offset]);
 
     const [[countRow]]: any = await pool.query(`
-      SELECT COUNT(*) as total FROM campaigns c
-      JOIN users u ON c.user_id = u.id
+      SELECT COUNT(*) as total 
+      FROM broadcast_deliveries bd
+      JOIN campaigns c ON bd.campaign_id = c.id
+      JOIN bots b ON bd.bot_id = b.id
       ${whereClause}
     `, params);
 
     return NextResponse.json({
-      campaigns: campaigns.map((c: any) => ({
-        ...c,
-        delivery_count: parseInt(c.delivery_count || "0"),
-        total_spent: parseFloat(c.total_spent || "0"),
-        total_rewards: parseFloat(c.total_rewards || "0")
-      })),
+      deliveries,
       total: countRow.total,
       page,
       totalPages: Math.ceil(countRow.total / limit),
