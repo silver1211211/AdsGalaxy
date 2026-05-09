@@ -136,8 +136,33 @@ export async function GET(req: NextRequest) {
             
             // 4. Update last_broadcast_at
             await conn.query("UPDATE bot_users SET last_broadcast_at = NOW() WHERE id = ?", [user.id]);
+
+            // 5. Check if budget is exhausted
+            const [updatedCampaign]: any = await conn.query("SELECT budget, status FROM campaigns WHERE id = ?", [campaign.id]);
+            const remainingBudget = parseFloat(updatedCampaign[0]?.budget || "0");
+            
+            let paused = false;
+            if (remainingBudget <= 0 && updatedCampaign[0]?.status === 'active') {
+              await conn.query("UPDATE campaigns SET status = 'paused', budget = 0 WHERE id = ?", [campaign.id]);
+              paused = true;
+            }
             
             await conn.commit();
+
+            // 6. Notify advertiser if paused
+            if (paused) {
+              try {
+                const [advertiser]: any = await pool.query("SELECT chat_id FROM users WHERE id = ?", [campaign.user_id]);
+                if (advertiser[0]?.chat_id) {
+                  await sendTelegramMessage(advertiser[0].chat_id, `⚠️ *Campaign Paused*\n\nYour broadcast campaign "*${campaign.name || 'Untitled'}*" has been paused because the budget has been exhausted.\n\nPlease top up your budget to resume the broadcast.`, {
+                    parse_mode: 'Markdown'
+                  });
+                }
+              } catch (notifyErr) {
+                console.error("Failed to notify advertiser:", notifyErr);
+              }
+            }
+
             return { status: 'success', user: user.id };
           } catch (e) {
             await conn.rollback();
