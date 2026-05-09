@@ -48,7 +48,7 @@ export async function GET(request: Request) {
 
     query += whereClause + " ORDER BY c.id DESC LIMIT ? OFFSET ?";
     countQuery += whereClause;
-    
+
     const [rows]: any = await pool.query(query, [...queryParams, limit, offset]);
     const [[countRow]]: any = await pool.query(countQuery, queryParams);
 
@@ -87,12 +87,12 @@ export async function PATCH(request: Request) {
 
     const channel = rows[0];
     const status = action === "approve" ? "active" : "rejected";
-    
+
     await pool.query("UPDATE channels SET status = ? WHERE id = ?", [status, id]);
 
     // Send Telegram Notification
-    const message = action === "approve" 
-      ? `✅ <b>Channel Approved!</b>\n\nYour channel <b>${channel.title}</b> (@${channel.username}) has been approved and is now active in the AdsFusion network.`
+    const message = action === "approve"
+      ? `✅ <b>Channel Approved!</b>\n\nYour channel <b>${channel.title}</b> (@${channel.username}) has been approved and is now active in the advertisements network.`
       : `❌ <b>Channel Rejected</b>\n\nUnfortunately, your channel <b>${channel.title}</b> (@${channel.username}) was not approved for monetization at this time.`;
 
     await sendTelegramMessage(channel.telegram_id, message);
