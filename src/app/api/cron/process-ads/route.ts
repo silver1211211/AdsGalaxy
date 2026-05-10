@@ -61,8 +61,9 @@ export async function GET(req: NextRequest) {
       const postedInLast24h = postCountRow[0].count;
       const remainingPostsToday = Math.max(0, dailyLimit - postedInLast24h);
 
+      const postsToCreateThisRun = Math.min(remainingPostsToday, 5);
+
       // C. Find suitable channels
-      // D. Find suitable channels - Moved logic to SQL for consistency with NOW()
       // D. Find suitable channels - Using SQL for all checks to ensure consistency with NOW()
       const [suitableChannels]: any = await pool.query(`
         SELECT c.*
