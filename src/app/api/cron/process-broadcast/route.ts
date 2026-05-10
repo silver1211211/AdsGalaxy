@@ -171,8 +171,16 @@ export async function GET(req: NextRequest) {
             conn.release();
           }
         }
+        if (!res?.ok && res?.description?.includes("Forbidden: bot was blocked by the user")) {
+          await pool.query("UPDATE bot_users SET is_active = FALSE WHERE id = ?", [user.id]);
+          return { status: 'failed', user: user.id, error: "Bot blocked by user - deactivated" };
+        }
         return { status: 'failed', user: user.id, error: res?.description || 'Unknown error' };
       } catch (err: any) {
+        if (err.message?.includes("Forbidden: bot was blocked by the user")) {
+          await pool.query("UPDATE bot_users SET is_active = FALSE WHERE id = ?", [user.id]);
+          return { status: 'error', user: user.id, error: "Bot blocked by user - deactivated" };
+        }
         return { status: 'error', user: user.id, error: err.message };
       }
     }));
