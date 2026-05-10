@@ -174,11 +174,13 @@ export async function GET(req: NextRequest) {
       results.push(campaignInfo);
     }
 
+    const successfulResults = results.filter((r: any) => r.posts_created > 0);
+
     return NextResponse.json({
       success: true,
-      processed_campaigns: campaigns.length,
-      posts_created: results.reduce((acc: number, curr: any) => acc + (curr.posts_created || 0), 0),
-      details: results
+      processed_campaigns: successfulResults.length,
+      posts_created: successfulResults.reduce((acc: number, curr: any) => acc + (curr.posts_created || 0), 0),
+      details: successfulResults
     });
 
   } catch (error) {
