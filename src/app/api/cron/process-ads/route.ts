@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
       if (limitRules.length > 0) {
         const campaignBudget = parseFloat(campaign.budget);
         const matchedRule = limitRules.find((r: any) => campaignBudget <= parseFloat(r.budget_threshold));
-        
+
         if (matchedRule) {
           dailyLimit = matchedRule.daily_placement_limit;
         } else {
@@ -61,51 +61,67 @@ export async function GET(req: NextRequest) {
       const postedInLast24h = postCountRow[0].count;
       const remainingPostsToday = Math.max(0, dailyLimit - postedInLast24h);
 
-      if (remainingPostsToday <= 0) {
-        continue;
-      }
-
-      // C. Limit to 5 per cron run
       const postsToCreateThisRun = Math.min(remainingPostsToday, 5);
 
-      // D. Find suitable channels
-      const [channels]: any = await pool.query(`
-        SELECT c.*, 
-        (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 1 DAY) as daily_posts,
-        (SELECT MAX(created_at) FROM campaign_posts cp WHERE cp.channel_id = c.id) as last_post_at
+      // C. Find suitable channels
+      const [suitableChannels]: any = await pool.query(`
+        SELECT c.*
         FROM channels c
         WHERE c.status = 'active' AND c.is_deleted = FALSE
         AND c.user_id != ?
-      `, [campaign.user_id]);
+        -- Category Match
+        AND JSON_CONTAINS(c.categories, JSON_QUOTE(?))
+        -- Continent Match (Global or matches campaign continent)
+        AND (
+          JSON_CONTAINS(c.audience_continents, '"Global"')
+          OR EXISTS (
+            SELECT 1 FROM JSON_TABLE(?, '$[*]' COLUMNS (continent VARCHAR(50) PATH '$')) AS jt
+            WHERE JSON_CONTAINS(LOWER(c.audience_continents), JSON_QUOTE(LOWER(jt.continent)))
+          )
+        )
+        -- Daily limit check (24h)
+        AND (
+          SELECT COUNT(*) FROM campaign_posts cp 
+          WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 1 DAY
+        ) < c.posts_per_day
+        -- 6 hour cooldown check
+        AND (
+          NOT EXISTS (
+            SELECT 1 FROM campaign_posts cp 
+            WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 6 HOUR
+          )
+        )
+        ORDER BY RAND() 
+        LIMIT ?
+      `, [
+        campaign.user_id,
+        campaign.category,
+        campaign.continents,
+        postsToCreateThisRun
+      ]);
 
-      const suitableChannels = channels.filter((channel: any) => {
-        // 1. Category Matching (Campaign category must be in channel categories)
-        const campaignCategory = campaign.category;
-        const channelCategories = channel.categories ? (typeof channel.categories === 'string' ? JSON.parse(channel.categories) : channel.categories) : [];
-        
-        if (!channelCategories.includes(campaignCategory)) return false;
+      // E. Track results for this campaign
+      const campaignInfo = {
+        id: campaign.id,
+        name: campaign.name,
+        daily_limit: dailyLimit,
+        remaining_today: remainingPostsToday,
+        suitable_channels_found: suitableChannels.length,
+        posts_created: 0,
+        status: 'processed'
+      };
 
-        // 2. Continent Matching
-        const campaignConts = campaign.continents ? (typeof campaign.continents === 'string' ? JSON.parse(campaign.continents) : campaign.continents) : [];
-        const channelConts = channel.audience_continents ? (typeof channel.audience_continents === 'string' ? JSON.parse(channel.audience_continents) : channel.audience_continents) : [];
+      if (remainingPostsToday <= 0) {
+        campaignInfo.status = 'daily_limit_reached';
+        results.push(campaignInfo);
+        continue;
+      }
 
-        if (campaignConts.length > 0) {
-          const hasMatch = campaignConts.some((cont: string) => channelConts.includes(cont) || channelConts.includes("Global"));
-          if (!hasMatch) return false;
-        }
-
-        if (channel.daily_posts >= channel.posts_per_day) return false;
-
-        if (channel.last_post_at) {
-          const lastPost = new Date(channel.last_post_at).getTime();
-          const sixHoursAgo = Date.now() - (6 * 60 * 60 * 1000);
-          if (lastPost > sixHoursAgo) return false;
-        }
-
-        return true;
-      }).slice(0, postsToCreateThisRun);
-
-
+      if (suitableChannels.length === 0) {
+        campaignInfo.status = 'no_suitable_channels_found';
+        results.push(campaignInfo);
+        continue;
+      }
 
       let postsInThisRun = 0;
       for (const channel of suitableChannels) {
@@ -116,7 +132,7 @@ export async function GET(req: NextRequest) {
           INSERT INTO campaign_posts (campaign_id, channel_id, channel_username, status)
           VALUES (?, ?, ?, 'active')
         `, [campaign.id, channel.id, channel.username]);
-        
+
         const postId = insertPost.insertId;
 
         const parseModeMap: any = { 'html': 'HTML', 'markdown': 'MarkdownV2', 'none': undefined };
@@ -150,19 +166,22 @@ export async function GET(req: NextRequest) {
           );
 
           postsInThisRun++;
-          results.push({ campaign: campaign.id, channel: channel.username, status: 'success', post_id: postId });
+          campaignInfo.posts_created++;
         } else {
           // If sending fails, delete the placeholder post
           await pool.query("DELETE FROM campaign_posts WHERE id = ?", [postId]);
         }
       }
+      results.push(campaignInfo);
     }
+
+    const successfulResults = results.filter((r: any) => r.posts_created > 0);
 
     return NextResponse.json({
       success: true,
-      processed_campaigns: campaigns.length,
-      posts_created: results.length,
-      details: results
+      processed_campaigns: successfulResults.length,
+      posts_created: successfulResults.reduce((acc: number, curr: any) => acc + (curr.posts_created || 0), 0),
+      details: successfulResults
     });
 
   } catch (error) {

@@ -163,7 +163,14 @@ export async function GET(req: NextRequest) {
               }
             }
 
-            return { status: 'success', user: user.id };
+            return { 
+              status: 'success', 
+              user: user.id, 
+              campaign_id: campaign.id,
+              campaign_name: campaign.name,
+              cost: cost,
+              remaining_budget: remainingBudget
+            };
           } catch (e) {
             await conn.rollback();
             throw e;
@@ -171,9 +178,41 @@ export async function GET(req: NextRequest) {
             conn.release();
           }
         }
-        return { status: 'failed', user: user.id, error: res?.description || 'Unknown error' };
+        if (!res?.ok && res?.description?.includes("Forbidden: bot was blocked by the user")) {
+          await pool.query("UPDATE bot_users SET is_active = FALSE WHERE id = ?", [user.id]);
+          return { 
+            status: 'failed', 
+            user: user.id, 
+            campaign_id: campaign.id,
+            campaign_name: campaign.name,
+            error: "Bot blocked by user - deactivated" 
+          };
+        }
+        return { 
+          status: 'failed', 
+          user: user.id, 
+          campaign_id: campaign.id,
+          campaign_name: campaign.name,
+          error: res?.description || 'Unknown error' 
+        };
       } catch (err: any) {
-        return { status: 'error', user: user.id, error: err.message };
+        if (err.message?.includes("Forbidden: bot was blocked by the user")) {
+          await pool.query("UPDATE bot_users SET is_active = FALSE WHERE id = ?", [user.id]);
+          return { 
+            status: 'error', 
+            user: user.id, 
+            campaign_id: campaign.id,
+            campaign_name: campaign.name,
+            error: "Bot blocked by user - deactivated" 
+          };
+        }
+        return { 
+          status: 'error', 
+          user: user.id, 
+          campaign_id: campaign.id,
+          campaign_name: campaign.name,
+          error: err.message 
+        };
       }
     }));
 
