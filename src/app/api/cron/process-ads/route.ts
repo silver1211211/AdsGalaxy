@@ -62,41 +62,43 @@ export async function GET(req: NextRequest) {
       const remainingPostsToday = Math.max(0, dailyLimit - postedInLast24h);
 
       // C. Find suitable channels
-      const [channels]: any = await pool.query(`
-        SELECT c.*, 
-        (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 1 DAY) as daily_posts,
-        (SELECT MAX(created_at) FROM campaign_posts cp WHERE cp.channel_id = c.id) as last_post_at
+      // D. Find suitable channels - Moved logic to SQL for consistency with NOW()
+      // D. Find suitable channels - Using SQL for all checks to ensure consistency with NOW()
+      const [suitableChannels]: any = await pool.query(`
+        SELECT c.*
         FROM channels c
         WHERE c.status = 'active' AND c.is_deleted = FALSE
         AND c.user_id != ?
-      `, [campaign.user_id]);
-
-      const postsToCreateThisRun = Math.min(remainingPostsToday, 5);
-
-      const suitableChannels = channels.filter((channel: any) => {
-        // 1. Category Matching
-        const campaignCategory = campaign.category;
-        const channelCategories = channel.categories ? (typeof channel.categories === 'string' ? JSON.parse(channel.categories) : channel.categories) : [];
-        if (!channelCategories.includes(campaignCategory)) return false;
-
-        // 2. Continent Matching
-        const campaignConts = campaign.continents ? (typeof campaign.continents === 'string' ? JSON.parse(campaign.continents) : campaign.continents) : [];
-        const channelConts = channel.audience_continents ? (typeof channel.audience_continents === 'string' ? JSON.parse(channel.audience_continents) : channel.audience_continents) : [];
-        if (campaignConts.length > 0) {
-          const hasMatch = campaignConts.some((cont: string) => channelConts.includes(cont) || channelConts.includes("Global"));
-          if (!hasMatch) return false;
-        }
-
-        if (channel.daily_posts >= channel.posts_per_day) return false;
-
-        if (channel.last_post_at) {
-          const lastPost = new Date(channel.last_post_at).getTime();
-          const sixHoursAgo = Date.now() - (6 * 60 * 60 * 1000);
-          if (lastPost > sixHoursAgo) return false;
-        }
-
-        return true;
-      }).slice(0, postsToCreateThisRun);
+        -- Category Match
+        AND JSON_CONTAINS(c.categories, JSON_QUOTE(?))
+        -- Continent Match (Global or matches campaign continent)
+        AND (
+          JSON_CONTAINS(c.audience_continents, '"Global"')
+          OR EXISTS (
+            SELECT 1 FROM JSON_TABLE(?, '$[*]' COLUMNS (continent VARCHAR(50) PATH '$')) AS jt
+            WHERE JSON_CONTAINS(LOWER(c.audience_continents), JSON_QUOTE(LOWER(jt.continent)))
+          )
+        )
+        -- Daily limit check (24h)
+        AND (
+          SELECT COUNT(*) FROM campaign_posts cp 
+          WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 1 DAY
+        ) < c.posts_per_day
+        -- 6 hour cooldown check
+        AND (
+          NOT EXISTS (
+            SELECT 1 FROM campaign_posts cp 
+            WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 6 HOUR
+          )
+        )
+        ORDER BY RAND() 
+        LIMIT ?
+      `, [
+        campaign.user_id, 
+        campaign.category, 
+        campaign.continents, 
+        postsToCreateThisRun
+      ]);
 
       // E. Track results for this campaign
       const campaignInfo = {
@@ -104,7 +106,6 @@ export async function GET(req: NextRequest) {
         name: campaign.name,
         daily_limit: dailyLimit,
         remaining_today: remainingPostsToday,
-        total_channels_scanned: channels.length,
         suitable_channels_found: suitableChannels.length,
         posts_created: 0,
         status: 'processed'
