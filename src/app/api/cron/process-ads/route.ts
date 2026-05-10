@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
       if (limitRules.length > 0) {
         const campaignBudget = parseFloat(campaign.budget);
         const matchedRule = limitRules.find((r: any) => campaignBudget <= parseFloat(r.budget_threshold));
-        
+
         if (matchedRule) {
           dailyLimit = matchedRule.daily_placement_limit;
         } else {
@@ -64,7 +64,6 @@ export async function GET(req: NextRequest) {
       const postsToCreateThisRun = Math.min(remainingPostsToday, 5);
 
       // C. Find suitable channels
-      // D. Find suitable channels - Using SQL for all checks to ensure consistency with NOW()
       const [suitableChannels]: any = await pool.query(`
         SELECT c.*
         FROM channels c
@@ -95,9 +94,9 @@ export async function GET(req: NextRequest) {
         ORDER BY RAND() 
         LIMIT ?
       `, [
-        campaign.user_id, 
-        campaign.category, 
-        campaign.continents, 
+        campaign.user_id,
+        campaign.category,
+        campaign.continents,
         postsToCreateThisRun
       ]);
 
@@ -133,7 +132,7 @@ export async function GET(req: NextRequest) {
           INSERT INTO campaign_posts (campaign_id, channel_id, channel_username, status)
           VALUES (?, ?, ?, 'active')
         `, [campaign.id, channel.id, channel.username]);
-        
+
         const postId = insertPost.insertId;
 
         const parseModeMap: any = { 'html': 'HTML', 'markdown': 'MarkdownV2', 'none': undefined };

@@ -51,3 +51,27 @@ export async function sendTelegramMessage(chatId: string | number, text: string,
     console.error("Telegram Fetch Error:", error);
   }
 }
+
+export async function deleteTelegramMessage(chatId: string | number, messageId: number, options: any = {}) {
+  const token = options.token || process.env.BOT_TOKEN;
+  if (!token) {
+    console.error("BOT_TOKEN is not defined");
+    return;
+  }
+
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+      }),
+    });
+    
+    const data = await res.json();
+    return data;
+  } catch (error) {
+    console.error("Telegram Delete Error:", error);
+  }
+}
