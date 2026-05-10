@@ -61,14 +61,7 @@ export async function GET(req: NextRequest) {
       const postedInLast24h = postCountRow[0].count;
       const remainingPostsToday = Math.max(0, dailyLimit - postedInLast24h);
 
-      if (remainingPostsToday <= 0) {
-        continue;
-      }
-
-      // C. Limit to 5 per cron run
-      const postsToCreateThisRun = Math.min(remainingPostsToday, 5);
-
-      // D. Find suitable channels
+      // C. Find suitable channels
       const [channels]: any = await pool.query(`
         SELECT c.*, 
         (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 1 DAY) as daily_posts,
@@ -78,17 +71,17 @@ export async function GET(req: NextRequest) {
         AND c.user_id != ?
       `, [campaign.user_id]);
 
+      const postsToCreateThisRun = Math.min(remainingPostsToday, 5);
+
       const suitableChannels = channels.filter((channel: any) => {
-        // 1. Category Matching (Campaign category must be in channel categories)
+        // 1. Category Matching
         const campaignCategory = campaign.category;
         const channelCategories = channel.categories ? (typeof channel.categories === 'string' ? JSON.parse(channel.categories) : channel.categories) : [];
-        
         if (!channelCategories.includes(campaignCategory)) return false;
 
         // 2. Continent Matching
         const campaignConts = campaign.continents ? (typeof campaign.continents === 'string' ? JSON.parse(campaign.continents) : campaign.continents) : [];
         const channelConts = channel.audience_continents ? (typeof channel.audience_continents === 'string' ? JSON.parse(channel.audience_continents) : channel.audience_continents) : [];
-
         if (campaignConts.length > 0) {
           const hasMatch = campaignConts.some((cont: string) => channelConts.includes(cont) || channelConts.includes("Global"));
           if (!hasMatch) return false;
@@ -105,7 +98,29 @@ export async function GET(req: NextRequest) {
         return true;
       }).slice(0, postsToCreateThisRun);
 
+      // E. Track results for this campaign
+      const campaignInfo = {
+        id: campaign.id,
+        name: campaign.name,
+        daily_limit: dailyLimit,
+        remaining_today: remainingPostsToday,
+        total_channels_scanned: channels.length,
+        suitable_channels_found: suitableChannels.length,
+        posts_created: 0,
+        status: 'processed'
+      };
 
+      if (remainingPostsToday <= 0) {
+        campaignInfo.status = 'daily_limit_reached';
+        results.push(campaignInfo);
+        continue;
+      }
+
+      if (suitableChannels.length === 0) {
+        campaignInfo.status = 'no_suitable_channels_found';
+        results.push(campaignInfo);
+        continue;
+      }
 
       let postsInThisRun = 0;
       for (const channel of suitableChannels) {
@@ -150,18 +165,19 @@ export async function GET(req: NextRequest) {
           );
 
           postsInThisRun++;
-          results.push({ campaign: campaign.id, channel: channel.username, status: 'success', post_id: postId });
+          campaignInfo.posts_created++;
         } else {
           // If sending fails, delete the placeholder post
           await pool.query("DELETE FROM campaign_posts WHERE id = ?", [postId]);
         }
       }
+      results.push(campaignInfo);
     }
 
     return NextResponse.json({
       success: true,
       processed_campaigns: campaigns.length,
-      posts_created: results.length,
+      posts_created: results.reduce((acc: number, curr: any) => acc + (curr.posts_created || 0), 0),
       details: results
     });
 
