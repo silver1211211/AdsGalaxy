@@ -47,3 +47,5 @@ scratch/
 .gemini/
 AGENTS.md 
 CLAUDE.md 
+
+.env
