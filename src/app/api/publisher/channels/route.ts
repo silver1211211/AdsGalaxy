@@ -1,6 +1,20 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth";
+import { normalizePostingTimes, normalizePostsPerDay } from "@/lib/postingTimes";
+
+async function hasPostingTimesColumn() {
+  const [rows]: any = await pool.query(`
+    SELECT 1
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'channels'
+      AND COLUMN_NAME = 'posting_times'
+    LIMIT 1
+  `);
+
+  return rows.length > 0;
+}
 
 export async function GET(request: Request) {
   try {
@@ -24,7 +38,14 @@ export async function POST(request: Request) {
     const user = await getAuthenticatedUser(initData);
 
     const body = await request.json();
-    const { chat_id, username, title, posts_per_day, audience_continents, categories } = body;
+    const { chat_id, username, title, posts_per_day, audience_continents, categories, posting_times } = body;
+    const normalizedPostsPerDay = normalizePostsPerDay(posts_per_day);
+    const normalizedPostingTimes = normalizePostingTimes(posting_times, normalizedPostsPerDay);
+    const canStorePostingTimes = await hasPostingTimesColumn();
+
+    if (!canStorePostingTimes) {
+      console.warn("channels.posting_times column is missing; channel posting times will use runtime defaults");
+    }
 
     // 1. Get minimum subscribers requirement from settings
     const [settings]: any = await pool.query("SELECT value FROM settings WHERE `key` = 'min_subscribers'");
@@ -66,28 +87,73 @@ export async function POST(request: Request) {
       }
 
       // If it belongs to same user and IS deleted, reactivate/update it
+      const updateColumns = [
+        "username = ?",
+        "title = ?",
+        "subscriber_count = ?",
+        "posts_per_day = ?",
+        "audience_continents = ?",
+        "categories = ?",
+        "is_deleted = FALSE",
+        "status = 'pending'"
+      ];
+      const updateParams = [
+        username,
+        title,
+        subscriberCount,
+        normalizedPostsPerDay,
+        JSON.stringify(audience_continents),
+        JSON.stringify(categories || [])
+      ];
+
+      if (canStorePostingTimes) {
+        updateColumns.splice(6, 0, "posting_times = ?");
+        updateParams.push(JSON.stringify(normalizedPostingTimes));
+      }
+
+      updateParams.push(channel.id);
+
       await pool.query(
-        `UPDATE channels SET 
-          username = ?, 
-          title = ?, 
-          subscriber_count = ?,
-          posts_per_day = ?, 
-          audience_continents = ?, 
-          categories = ?,
-          is_deleted = FALSE, 
-          status = 'pending' 
-         WHERE id = ?`,
-        [username, title, subscriberCount, posts_per_day, JSON.stringify(audience_continents), JSON.stringify(categories || []), channel.id]
+        `UPDATE channels SET ${updateColumns.join(", ")} WHERE id = ?`,
+        updateParams
       );
 
       return NextResponse.json({ success: true, id: channel.id, message: "Channel reactivated and updated" });
     }
 
     // 4. Insert new channel
+    const insertColumns = [
+      "user_id",
+      "chat_id",
+      "username",
+      "title",
+      "subscriber_count",
+      "posts_per_day",
+      "audience_continents",
+      "categories",
+      "status"
+    ];
+    const insertParams = [
+      user.id,
+      chat_id,
+      username,
+      title,
+      subscriberCount,
+      normalizedPostsPerDay,
+      JSON.stringify(audience_continents),
+      JSON.stringify(categories || []),
+      "pending"
+    ];
+
+    if (canStorePostingTimes) {
+      insertColumns.splice(8, 0, "posting_times");
+      insertParams.splice(8, 0, JSON.stringify(normalizedPostingTimes));
+    }
+
+    const placeholders = insertColumns.map(() => "?").join(", ");
     const [result] = await pool.query(
-      `INSERT INTO channels (user_id, chat_id, username, title, subscriber_count, posts_per_day, audience_continents, categories, status) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
-      [user.id, chat_id, username, title, subscriberCount, posts_per_day, JSON.stringify(audience_continents), JSON.stringify(categories || [])]
+      `INSERT INTO channels (${insertColumns.join(", ")}) VALUES (${placeholders})`,
+      insertParams
     );
 
     return NextResponse.json({ success: true, id: (result as any).insertId });

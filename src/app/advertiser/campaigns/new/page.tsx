@@ -23,8 +23,9 @@ import { apiFetch } from "@/lib/api";
 import { useHeader } from "@/context/HeaderContext";
 import { useRouter } from "next/navigation";
 import Modal from "@/components/ui/Modal";
+import { CAMPAIGN_CATEGORIES } from "@/lib/campaignCategories";
 
-const CATEGORIES = ["Crypto", "Finance", "NSFW +18", "Tech", "Gambling", "Entertainment", "Education", "Shopping", "Other"];
+const CATEGORIES = CAMPAIGN_CATEGORIES;
 const BUTTON_TEXTS = ["Learn more", "Get started", "Join channel", "Join group", "Start bot", "Buy Now", "Sign Up", "Download", "Visit site", "Play now", "Shop now"];
 const CONTINENTS = [
   { id: "global", name: "Global", countries: "All countries" },

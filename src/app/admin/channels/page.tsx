@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 
 export default function AdminChannelsPage() {
@@ -42,12 +42,14 @@ export default function AdminChannelsPage() {
   const handleAction = async (id: number, action: string) => {
     setActionLoading(id);
     try {
-      const res = await fetch("/api/admin/channels", {
-        method: "PATCH",
+      const normalizedAction = action === "approve" ? "activate" : action;
+      const res = await fetch(`/api/admin/channels/${id}/actions`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, action })
+        body: JSON.stringify({ action: normalizedAction })
       });
-      if (!res.ok) throw new Error("Action failed");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Action failed");
       await fetchChannels(page, statusFilter, search);
     } catch (err: any) {
       setError(err.message);
@@ -236,7 +238,7 @@ export default function AdminChannelsPage() {
                         {channel.status === "pending" && (
                           <>
                             <button 
-                              onClick={() => handleAction(channel.id, "approve")}
+                              onClick={() => window.confirm("Activate this channel?") && handleAction(channel.id, "activate")}
                               disabled={actionLoading === channel.id}
                               className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Approve"
@@ -244,7 +246,7 @@ export default function AdminChannelsPage() {
                               {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
                             </button>
                             <button 
-                              onClick={() => handleAction(channel.id, "reject")}
+                              onClick={() => window.confirm("Reject this channel?") && handleAction(channel.id, "reject")}
                               disabled={actionLoading === channel.id}
                               className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Reject"
@@ -252,6 +254,46 @@ export default function AdminChannelsPage() {
                               {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
                             </button>
                           </>
+                        )}
+                        {channel.status === "active" && (
+                          <button
+                            onClick={() => window.confirm("Pause this channel?") && handleAction(channel.id, "pause")}
+                            disabled={actionLoading === channel.id}
+                            className="p-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 rounded-md transition-colors border border-amber-100 cursor-pointer disabled:cursor-not-allowed"
+                            title="Pause"
+                          >
+                            {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <Pause size={16} />}
+                          </button>
+                        )}
+                        {channel.status === "paused" && (
+                          <button
+                            onClick={() => window.confirm("Reactivate this channel?") && handleAction(channel.id, "activate")}
+                            disabled={actionLoading === channel.id}
+                            className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
+                            title="Reactivate"
+                          >
+                            {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <Play size={16} />}
+                          </button>
+                        )}
+                        {channel.status === "rejected" && (
+                          <button
+                            onClick={() => window.confirm("Activate this rejected channel?") && handleAction(channel.id, "activate")}
+                            disabled={actionLoading === channel.id}
+                            className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
+                            title="Activate"
+                          >
+                            {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
+                          </button>
+                        )}
+                        {channel.status !== "rejected" && channel.status !== "pending" && (
+                          <button
+                            onClick={() => window.confirm("Reject this channel?") && handleAction(channel.id, "reject")}
+                            disabled={actionLoading === channel.id}
+                            className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
+                            title="Reject"
+                          >
+                            {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
+                          </button>
                         )}
                       </div>
                     </td>

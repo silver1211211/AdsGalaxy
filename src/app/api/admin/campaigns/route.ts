@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
+import { adminResumeCampaign, recordAdminActionAudit } from "@/lib/campaignLifecycle";
 
 export async function GET(request: Request) {
   if (!(await checkAdminAuth())) {
@@ -79,9 +80,20 @@ export async function PATCH(request: Request) {
       return NextResponse.json({ success: true });
     }
 
+    if (action === "resume") {
+      await adminResumeCampaign(id);
+      await recordAdminActionAudit({
+        action: "campaign_resume_override",
+        entityType: "campaign",
+        entityId: id,
+        reason: "admin_resume_override",
+      });
+      return NextResponse.json({ success: true });
+    }
+
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
   } catch (error: any) {
     console.error("Admin Campaigns Update Error:", error);
-    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: 500 });
   }
 }

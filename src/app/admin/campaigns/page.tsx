@@ -1,8 +1,9 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Trash2 } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 
 export default function AdminCampaignsPage() {
@@ -48,6 +49,30 @@ export default function AdminCampaignsPage() {
         body: JSON.stringify({ id, action })
       });
       if (!res.ok) throw new Error("Action failed");
+      await fetchCampaigns(page, statusFilter, search);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleManagementAction = async (id: number, action: "pause" | "resume" | "delete") => {
+    const message = action === "delete"
+      ? "Delete this campaign? Active Telegram posts will be deleted and the campaign will be marked deleted."
+      : `${action === "pause" ? "Pause" : "Resume"} this campaign?`;
+
+    if (!window.confirm(message)) return;
+
+    setActionLoading(id);
+    try {
+      const res = await fetch(`/api/admin/campaigns/${id}/actions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Action failed");
       await fetchCampaigns(page, statusFilter, search);
     } catch (err: any) {
       setError(err.message);
@@ -221,10 +246,17 @@ export default function AdminCampaignsPage() {
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
-                        <button 
-                          onClick={() => openViewModal(campaign)}
+                        <Link
+                          href={`/admin/campaigns/${campaign.id}`}
                           className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors cursor-pointer"
                           title="View Details"
+                        >
+                          <Eye size={16} />
+                        </Link>
+                        <button
+                          onClick={() => openViewModal(campaign)}
+                          className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors cursor-pointer"
+                          title="Quick View"
                         >
                           <Eye size={16} />
                         </button>
@@ -247,6 +279,36 @@ export default function AdminCampaignsPage() {
                               {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
                             </button>
                           </>
+                        )}
+                        {campaign.status === "active" && (
+                          <button
+                            onClick={() => handleManagementAction(campaign.id, "pause")}
+                            disabled={actionLoading === campaign.id}
+                            className="p-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 rounded-md transition-colors border border-amber-100 cursor-pointer disabled:cursor-not-allowed"
+                            title="Pause"
+                          >
+                            {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Pause size={16} />}
+                          </button>
+                        )}
+                        {campaign.status === "paused" && (
+                          <button
+                            onClick={() => handleManagementAction(campaign.id, "resume")}
+                            disabled={actionLoading === campaign.id}
+                            className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
+                            title="Resume"
+                          >
+                            {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Play size={16} />}
+                          </button>
+                        )}
+                        {campaign.status !== "deleted" && (
+                          <button
+                            onClick={() => handleManagementAction(campaign.id, "delete")}
+                            disabled={actionLoading === campaign.id}
+                            className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
+                            title="Delete"
+                          >
+                            {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Trash2 size={16} />}
+                          </button>
                         )}
                       </div>
                     </td>

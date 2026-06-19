@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth";
+import { assertCampaignLifecycleColumns } from "@/lib/campaignLifecycle";
+import { deleteActiveCampaignPosts } from "@/lib/campaignPostDeletion";
 
 export async function GET(
   request: Request,
@@ -130,9 +132,54 @@ export async function PATCH(
         return NextResponse.json({ error: "Cannot toggle pending campaigns" }, { status: 400 });
       }
 
-      const newStatus = campaign.status === "active" ? "paused" : "active";
-      await pool.query("UPDATE campaigns SET status = ? WHERE id = ?", [newStatus, id]);
-      return NextResponse.json({ success: true, status: newStatus });
+      if (campaign.status === "active") {
+        await assertCampaignLifecycleColumns();
+        if (!process.env.BOT_TOKEN) {
+          return NextResponse.json({ error: "BOT_TOKEN is missing; cannot delete active posts safely" }, { status: 500 });
+        }
+
+        await pool.query(`
+          UPDATE campaigns
+          SET status = 'paused',
+            paused_at = NOW(),
+            resume_locked_until = DATE_ADD(NOW(), INTERVAL 1 HOUR),
+            pause_reason = 'user_paused'
+          WHERE id = ? AND user_id = ?
+        `, [id, user.id]);
+
+        const deletion = await deleteActiveCampaignPosts(id);
+        return NextResponse.json({ success: true, status: "paused", deletion });
+      }
+
+      if (campaign.status === "paused") {
+        await assertCampaignLifecycleColumns();
+
+        if (campaign.pause_reason === "user_paused" && campaign.resume_locked_until) {
+          const lockedUntil = new Date(campaign.resume_locked_until);
+          if (lockedUntil.getTime() > Date.now()) {
+            return NextResponse.json({
+              error: `This campaign can be resumed after ${lockedUntil.toLocaleString()}. Admin can resume it earlier.`
+            }, { status: 400 });
+          }
+        }
+
+        if (parseFloat(campaign.budget || "0") <= 0) {
+          return NextResponse.json({ error: "Campaign budget is exhausted. Add budget before resuming." }, { status: 400 });
+        }
+
+        await pool.query(`
+          UPDATE campaigns
+          SET status = 'active',
+            pause_reason = NULL,
+            paused_at = NULL,
+            resume_locked_until = NULL
+          WHERE id = ? AND user_id = ?
+        `, [id, user.id]);
+
+        return NextResponse.json({ success: true, status: "active" });
+      }
+
+      return NextResponse.json({ error: "This campaign status cannot be toggled" }, { status: 400 });
     }
 
     if (action === "add_fund") {
@@ -158,11 +205,33 @@ export async function PATCH(
           [amount, user.id]
         );
 
-        // 2. Update campaign budget
-        await conn.query(
-          "UPDATE campaigns SET budget = budget + ? WHERE id = ?",
-          [amount, id]
-        );
+        // 2. Update campaign budget, with guarded auto-reactivation for exhausted campaigns
+        if (campaign.status === "budget_exhausted") {
+          await assertCampaignLifecycleColumns();
+          const shouldAutoReactivate = campaign.auto_reactivate === 1 || campaign.auto_reactivate === true;
+
+          if (shouldAutoReactivate) {
+            await conn.query(`
+              UPDATE campaigns
+              SET budget = budget + ?,
+                status = 'active',
+                budget_exhausted_at = NULL,
+                pause_reason = NULL,
+                completed_at = NULL
+              WHERE id = ?
+            `, [amount, id]);
+          } else {
+            await conn.query(
+              "UPDATE campaigns SET budget = budget + ? WHERE id = ?",
+              [amount, id]
+            );
+          }
+        } else {
+          await conn.query(
+            "UPDATE campaigns SET budget = budget + ? WHERE id = ?",
+            [amount, id]
+          );
+        }
 
         // 3. Log transaction
         await conn.query(

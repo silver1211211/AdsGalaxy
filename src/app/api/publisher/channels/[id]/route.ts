@@ -1,6 +1,20 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth";
+import { normalizePostingTimes, normalizePostsPerDay } from "@/lib/postingTimes";
+
+async function hasPostingTimesColumn() {
+  const [rows]: any = await pool.query(`
+    SELECT 1
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'channels'
+      AND COLUMN_NAME = 'posting_times'
+    LIMIT 1
+  `);
+
+  return rows.length > 0;
+}
 
 // PATCH: Update channel status OR Edit channel info
 export async function PATCH(
@@ -13,7 +27,7 @@ export async function PATCH(
     const { id } = await params;
 
     const body = await request.json().catch(() => ({}));
-    const { title, posts_per_day, audience_continents, categories, action } = body;
+    const { title, posts_per_day, audience_continents, categories, posting_times, action } = body;
 
     // If it's a status toggle action
     if (action === "toggle_status") {
@@ -66,15 +80,46 @@ export async function PATCH(
     }
 
     // Otherwise, handle general edit
-    if (title || posts_per_day || audience_continents || categories) {
+    if (title || posts_per_day || audience_continents || categories || posting_times) {
+      const canStorePostingTimes = await hasPostingTimesColumn();
+      const [existingRows]: any = await pool.query(
+        `SELECT posts_per_day${canStorePostingTimes ? ", posting_times" : ""} FROM channels WHERE id = ? AND user_id = ?`,
+        [id, user.id]
+      );
+
+      if (existingRows.length === 0) {
+        return NextResponse.json({ error: "Channel not found" }, { status: 404 });
+      }
+
+      const normalizedPostsPerDay = normalizePostsPerDay(posts_per_day ?? existingRows[0].posts_per_day);
+      const normalizedPostingTimes = posting_times === undefined && canStorePostingTimes && existingRows[0].posting_times
+        ? normalizePostingTimes(existingRows[0].posting_times, normalizedPostsPerDay)
+        : normalizePostingTimes(posting_times, normalizedPostsPerDay);
+      const updateColumns = [
+        "title = ?",
+        "posts_per_day = ?",
+        "audience_continents = ?",
+        "categories = ?"
+      ];
+      const updateParams = [
+        title,
+        normalizedPostsPerDay,
+        JSON.stringify(audience_continents),
+        JSON.stringify(categories || [])
+      ];
+
+      if (canStorePostingTimes) {
+        updateColumns.push("posting_times = ?");
+        updateParams.push(JSON.stringify(normalizedPostingTimes));
+      } else {
+        console.warn("channels.posting_times column is missing; channel posting times edit was validated but not stored");
+      }
+
+      updateParams.push(id, user.id);
+
       await pool.query(
-        `UPDATE channels SET 
-          title = ?, 
-          posts_per_day = ?, 
-          audience_continents = ?,
-          categories = ?
-         WHERE id = ? AND user_id = ?`,
-        [title, posts_per_day, JSON.stringify(audience_continents), JSON.stringify(categories || []), id, user.id]
+        `UPDATE channels SET ${updateColumns.join(", ")} WHERE id = ? AND user_id = ?`,
+        updateParams
       );
       return NextResponse.json({ success: true, message: "Channel updated successfully" });
     }

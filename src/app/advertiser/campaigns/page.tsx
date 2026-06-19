@@ -36,7 +36,7 @@ interface Campaign {
   id: number;
   name: string;
   type: "views" | "clicks";
-  status: "pending" | "active" | "paused" | "completed" | "rejected";
+  status: "pending" | "active" | "paused" | "completed" | "rejected" | "budget_exhausted";
   budget: string;
   cpm: string;
   message_text: string;
@@ -181,6 +181,7 @@ export default function MyCampaignsPage() {
         title: "Status Updated",
         message: "Your campaign status has been updated successfully."
       });
+      setConfirmModal(prev => ({ ...prev, isOpen: false }));
     } catch (error: any) {
       if (webapp) webapp.HapticFeedback.notificationOccurred('error');
       setNotification({
@@ -351,11 +352,25 @@ export default function MyCampaignsPage() {
                           <DollarSign size={16} /> Add Fund
                         </button>
                         <button
-                          disabled={campaign.status === "pending" || campaign.status === "rejected" || campaign.status === "completed" || processingId === campaign.id}
-                          onClick={() => handleToggleStatus(campaign.id)}
+                          disabled={campaign.status === "pending" || campaign.status === "rejected" || campaign.status === "completed" || campaign.status === "budget_exhausted" || processingId === campaign.id}
+                          onClick={() => {
+                            if (campaign.status === "active") {
+                              setConfirmModal({
+                                isOpen: true,
+                                id: campaign.id,
+                                title: "Pause Campaign",
+                                message: "Pausing this campaign will delete all active posts from channels. You cannot resume this campaign for 1 hour unless an admin resumes it manually. Do you want to continue?",
+                                confirmText: "Pause",
+                                action: "status"
+                              });
+                              setMenuOpenId(null);
+                              return;
+                            }
+                            handleToggleStatus(campaign.id);
+                          }}
                           className={cn(
                             "w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold rounded-xl transition-all mt-1",
-                            (campaign.status === "pending" || campaign.status === "rejected" || campaign.status === "completed" || processingId === campaign.id)
+                            (campaign.status === "pending" || campaign.status === "rejected" || campaign.status === "completed" || campaign.status === "budget_exhausted" || processingId === campaign.id)
                               ? "text-slate-200 cursor-not-allowed"
                               : "text-slate-700 hover:bg-slate-50"
                           )}
@@ -446,7 +461,14 @@ export default function MyCampaignsPage() {
       <ConfirmationModal
         isOpen={confirmModal.isOpen}
         onClose={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
-        onConfirm={() => confirmModal.id && handleRemove(confirmModal.id)}
+        onConfirm={() => {
+          if (!confirmModal.id) return;
+          if (confirmModal.action === "status") {
+            handleToggleStatus(confirmModal.id);
+          } else {
+            handleRemove(confirmModal.id);
+          }
+        }}
         title={confirmModal.title}
         message={confirmModal.message}
         confirmBtnText={confirmModal.confirmText}

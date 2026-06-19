@@ -16,6 +16,7 @@ import { apiFetch } from "@/lib/api";
 import { motion, AnimatePresence } from "framer-motion";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Toast from "@/components/ui/Toast";
+import { getDefaultPostingTimes, normalizePostingTimes, POSTING_TIME_OPTIONS } from "@/lib/postingTimes";
 
 const CATEGORIES = ["Crypto", "Finance", "NSFW +18", "Tech", "Gambling", "Entertainment", "Education", "Shopping", "Other"];
 const CONTINENTS = [
@@ -27,6 +28,14 @@ const CONTINENTS = [
   { name: "South America", countries: "Brazil, Argentina, Colombia" },
   { name: "Oceania", countries: "Australia, New Zealand" }
 ];
+
+function getInitialPostingTimes(channel: { posting_times?: unknown } | undefined, postsPerDay: number) {
+  try {
+    return normalizePostingTimes(channel?.posting_times, postsPerDay);
+  } catch {
+    return getDefaultPostingTimes(postsPerDay);
+  }
+}
 
 interface AddChannelScreenProps {
   onClose: () => void;
@@ -54,6 +63,8 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
   // Form fields
   const [editedTitle, setEditedTitle] = useState(channel?.title || "");
   const [postsPerDay, setPostsPerDay] = useState(channel?.posts_per_day || 1);
+  const [postingTimes, setPostingTimes] = useState<string[]>(() => getInitialPostingTimes(channel, channel?.posts_per_day || 1));
+  const [postingTimesError, setPostingTimesError] = useState("");
   const [selectedContinents, setSelectedContinents] = useState<string[]>(
     channel?.audience_continents ? (typeof channel.audience_continents === 'string' ? JSON.parse(channel.audience_continents) : channel.audience_continents) : []
   );
@@ -144,6 +155,38 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
     });
   };
 
+  const handlePostsPerDayChange = (value: number) => {
+    setPostsPerDay(value);
+    setPostingTimesError("");
+    setPostingTimes(prev => {
+      const allowedCount = Math.min(value, 3);
+      const next = prev.slice(0, allowedCount);
+      return next.length > 0 ? next : getDefaultPostingTimes(value);
+    });
+  };
+
+  const togglePostingTime = (time: string) => {
+    setPostingTimes(prev => {
+      if (prev.includes(time)) {
+        if (prev.length === 1) {
+          setPostingTimesError("Select at least 1 posting time");
+          return prev;
+        }
+
+        setPostingTimesError("");
+        return prev.filter(item => item !== time);
+      }
+
+      if (prev.length >= Math.min(postsPerDay, 3)) {
+        setPostingTimesError(`Select up to ${Math.min(postsPerDay, 3)} posting ${postsPerDay === 1 ? "time" : "times"}`);
+        return prev;
+      }
+
+      setPostingTimesError("");
+      return normalizePostingTimes([...prev, time], postsPerDay);
+    });
+  };
+
   const handleSubmit = async () => {
     setIsLoading(true);
     setNotification(null);
@@ -155,6 +198,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
           username: isEdit ? channel.username : channelInfo.username,
           title: editedTitle,
           posts_per_day: postsPerDay,
+          posting_times: postingTimes,
           audience_continents: selectedContinents,
           categories: selectedCategories,
         }),
@@ -312,7 +356,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                         {[1, 2, 3].map((num) => (
                           <button
                             key={num}
-                            onClick={() => setPostsPerDay(num)}
+                            onClick={() => handlePostsPerDayChange(num)}
                             className={cn(
                               "relative z-10 flex-1 h-full flex items-center justify-center font-black text-xs transition-colors duration-300",
                               postsPerDay === num ? "text-[#0c9de8]" : "text-slate-400"
@@ -324,6 +368,32 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                       </div>
                       <p className="text-[10px] font-bold tracking-tighter text-center">
                         <span className="text-[#0c9de8]">Tip:</span> <span className="text-slate-400">1-2 posts for maximum engagement</span>
+                      </p>
+                    </div>
+
+                    <div className="space-y-3">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Posting Times</label>
+                      <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto pr-1">
+                        {POSTING_TIME_OPTIONS.map((time) => (
+                          <button
+                            key={time}
+                            onClick={() => togglePostingTime(time)}
+                            className={cn(
+                              "px-3 py-2 rounded-xl text-[10px] font-black uppercase transition-all border",
+                              postingTimes.includes(time)
+                                ? "bg-blue-600 border-blue-600 text-white shadow-md shadow-blue-100"
+                                : "bg-white border-slate-200 text-slate-400 hover:border-blue-200"
+                            )}
+                          >
+                            {time}
+                          </button>
+                        ))}
+                      </div>
+                      <p className={cn(
+                        "text-[10px] font-bold tracking-tighter",
+                        postingTimesError ? "text-red-500" : "text-slate-400"
+                      )}>
+                        {postingTimesError || `Select ${postsPerDay === 1 ? "1 time" : `up to ${postsPerDay} times`} in 30-minute intervals.`}
                       </p>
                     </div>
 
@@ -387,7 +457,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                   </button>
                   <button
                     onClick={handleSubmit}
-                    disabled={isLoading || selectedContinents.length === 0 || selectedCategories.length === 0}
+                    disabled={isLoading || selectedContinents.length === 0 || selectedCategories.length === 0 || postingTimes.length === 0 || postingTimes.length > postsPerDay}
                     className="flex-1 py-3.5 bg-[#0c9de8] hover:bg-blue-600 disabled:bg-slate-200 text-white font-black rounded-2xl transition-all flex items-center justify-center gap-2 text-sm"
                   >
                     {isLoading && <Loader2 className="animate-spin" size={20} />}

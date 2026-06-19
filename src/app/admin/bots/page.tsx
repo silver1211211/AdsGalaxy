@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Bot, Search, Users, ShieldOff } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Bot, Search, Users, ShieldOff, Pause, Play } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 
 export default function AdminBotsPage() {
@@ -42,12 +42,14 @@ export default function AdminBotsPage() {
   const handleAction = async (id: number, action: string) => {
     setActionLoading(id);
     try {
-      const res = await fetch("/api/admin/bots", {
-        method: "PATCH",
+      const normalizedAction = action === "approve" ? "activate" : action;
+      const res = await fetch(`/api/admin/bots/${id}/actions`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, action })
+        body: JSON.stringify({ action: normalizedAction })
       });
-      if (!res.ok) throw new Error("Action failed");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Action failed");
       await fetchBots(page, statusFilter, search);
     } catch (err: any) {
       setError(err.message);
@@ -135,7 +137,7 @@ export default function AdminBotsPage() {
                   <div className="grid grid-cols-2 gap-x-4 gap-y-3">
                     <div><span className="text-slate-500">Bot Name:</span> <span className="font-medium text-slate-900">{selectedBot.bot_name || "N/A"}</span></div>
                     <div><span className="text-slate-500">Username:</span> <span className="font-medium text-blue-600">@{selectedBot.bot_username || "N/A"}</span></div>
-                    <div className="col-span-2"><span className="text-slate-500">API Token:</span> <span className="font-mono text-[10px] break-all">{selectedBot.bot_token}</span></div>
+                    <div className="col-span-2"><span className="text-slate-500">API Token:</span> <span className="font-mono text-[10px] break-all">Hidden</span></div>
                     <div><span className="text-slate-500">Status:</span> <span className="font-medium text-slate-900 capitalize">{selectedBot.status}</span></div>
                     <div><span className="text-slate-500">Posts / Day:</span> <span className="font-medium text-slate-900">{selectedBot.posts_per_day}</span></div>
                     <div className="col-span-1">
@@ -262,7 +264,7 @@ export default function AdminBotsPage() {
                         {bot.status === "pending" && (
                           <>
                             <button 
-                              onClick={() => handleAction(bot.id, "approve")}
+                              onClick={() => window.confirm("Activate this bot?") && handleAction(bot.id, "activate")}
                               disabled={actionLoading === bot.id}
                               className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Approve"
@@ -270,7 +272,7 @@ export default function AdminBotsPage() {
                               {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
                             </button>
                             <button 
-                              onClick={() => handleAction(bot.id, "reject")}
+                              onClick={() => window.confirm("Reject this bot?") && handleAction(bot.id, "reject")}
                               disabled={actionLoading === bot.id}
                               className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Reject"
@@ -278,6 +280,46 @@ export default function AdminBotsPage() {
                               {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
                             </button>
                           </>
+                        )}
+                        {bot.status === "active" && (
+                          <button
+                            onClick={() => window.confirm("Pause this bot?") && handleAction(bot.id, "pause")}
+                            disabled={actionLoading === bot.id}
+                            className="p-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 rounded-md transition-colors border border-amber-100 cursor-pointer disabled:cursor-not-allowed"
+                            title="Pause"
+                          >
+                            {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Pause size={16} />}
+                          </button>
+                        )}
+                        {bot.status === "paused" && (
+                          <button
+                            onClick={() => window.confirm("Resume this bot?") && handleAction(bot.id, "activate")}
+                            disabled={actionLoading === bot.id}
+                            className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
+                            title="Resume"
+                          >
+                            {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Play size={16} />}
+                          </button>
+                        )}
+                        {bot.status === "rejected" && (
+                          <button
+                            onClick={() => window.confirm("Activate this rejected bot?") && handleAction(bot.id, "activate")}
+                            disabled={actionLoading === bot.id}
+                            className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
+                            title="Activate"
+                          >
+                            {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
+                          </button>
+                        )}
+                        {bot.status !== "rejected" && bot.status !== "pending" && (
+                          <button
+                            onClick={() => window.confirm("Reject this bot?") && handleAction(bot.id, "reject")}
+                            disabled={actionLoading === bot.id}
+                            className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
+                            title="Reject"
+                          >
+                            {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
+                          </button>
                         )}
                       </div>
                     </td>

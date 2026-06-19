@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth";
+import { normalizeCampaignCategory } from "@/lib/campaignCategories";
 
 export async function POST(request: Request) {
   try {
@@ -17,7 +18,7 @@ export async function POST(request: Request) {
     const type = formData.get("type") as string;
     const budget = parseFloat(formData.get("budget") as string);
     const cpm = parseFloat(formData.get("cpm") as string);
-    const category = formData.get("category") as string;
+    const category = normalizeCampaignCategory(formData.get("category"));
     const continents = formData.get("continents") as string;
     const imageFile = formData.get("image") as File | null;
 

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
+import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
+import { deleteActiveCampaignPosts } from "@/lib/campaignPostDeletion";
 
 export const dynamic = 'force-dynamic';
 
@@ -29,10 +31,10 @@ export async function GET(req: NextRequest) {
     // 2. Fetch all active posts for 'views' campaigns that have unsettled views
     // We compare cp.views with cp.settled_views
     const [postsToSettle]: any = await pool.query(`
-      SELECT 
-        cp.id as post_id, 
-        cp.campaign_id, 
-        cp.channel_id, 
+      SELECT
+        cp.id as post_id,
+        cp.campaign_id,
+        cp.channel_id,
         cp.settled_views,
         cp.views as current_total_views,
         c.cpm,
@@ -50,6 +52,7 @@ export async function GET(req: NextRequest) {
 
     const results = [];
     const conn = await pool.getConnection();
+    const exhaustedCampaigns = new Map<number, { id: number; name: string; advertiser_telegram_id: string | number }>();
 
     try {
       for (const post of postsToSettle) {
@@ -75,15 +78,12 @@ export async function GET(req: NextRequest) {
           const currentBudget = parseFloat(campaignCheck[0].budget);
 
           if (currentBudget <= 0) {
-            // Pause campaign
-            await conn.query(
-              "UPDATE campaigns SET status = 'paused' WHERE id = ?",
-              [post.campaign_id]
-            );
-            
-            // Notify advertiser
-            const notifyMsg = `🔴 <b>Campaign Paused: Out of Funds</b>\n\nYour campaign "<b>${post.campaign_name}</b>" has exhausted its budget and has been automatically paused.\n\nPlease add more funds to your campaign budget to resume ad distribution.`;
-            await sendTelegramMessage(post.advertiser_telegram_id, notifyMsg);
+            await markCampaignBudgetExhausted(post.campaign_id, conn);
+            exhaustedCampaigns.set(post.campaign_id, {
+              id: post.campaign_id,
+              name: post.campaign_name,
+              advertiser_telegram_id: post.advertiser_telegram_id,
+            });
           }
 
           // B. Add to publisher's locked balance
@@ -113,6 +113,12 @@ export async function GET(req: NextRequest) {
       }
     } finally {
       conn.release();
+    }
+
+    for (const campaign of exhaustedCampaigns.values()) {
+      await deleteActiveCampaignPosts(campaign.id);
+      const notifyMsg = `Campaign Budget Exhausted\n\nYour campaign "${campaign.name}" has exhausted its budget.\n\nPlease add more funds to reactivate ad distribution.`;
+      await sendTelegramMessage(campaign.advertiser_telegram_id, notifyMsg);
     }
 
     return NextResponse.json({

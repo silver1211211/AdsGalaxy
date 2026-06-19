@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
+import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
 
 export const dynamic = 'force-dynamic';
 
@@ -141,20 +142,20 @@ export async function GET(req: NextRequest) {
             const [updatedCampaign]: any = await conn.query("SELECT budget, status FROM campaigns WHERE id = ?", [campaign.id]);
             const remainingBudget = parseFloat(updatedCampaign[0]?.budget || "0");
             
-            let paused = false;
+            let budgetExhausted = false;
             if (remainingBudget <= 0 && updatedCampaign[0]?.status === 'active') {
-              await conn.query("UPDATE campaigns SET status = 'paused', budget = 0 WHERE id = ?", [campaign.id]);
-              paused = true;
+              await markCampaignBudgetExhausted(campaign.id, conn);
+              budgetExhausted = true;
             }
             
             await conn.commit();
 
-            // 6. Notify advertiser if paused
-            if (paused) {
+            // 6. Notify advertiser if budget exhausted
+            if (budgetExhausted) {
               try {
                 const [advertiser]: any = await pool.query("SELECT chat_id FROM users WHERE id = ?", [campaign.user_id]);
                 if (advertiser[0]?.chat_id) {
-                  await sendTelegramMessage(advertiser[0].chat_id, `⚠️ *Campaign Paused*\n\nYour broadcast campaign "*${campaign.name || 'Untitled'}*" has been paused because the budget has been exhausted.\n\nPlease top up your budget to resume the broadcast.`, {
+                  await sendTelegramMessage(advertiser[0].chat_id, `Campaign Budget Exhausted\n\nYour broadcast campaign "${campaign.name || 'Untitled'}" has exhausted its budget.\n\nPlease top up your budget to resume the broadcast.`, {
                     parse_mode: 'Markdown'
                   });
                 }
