@@ -23,9 +23,9 @@ import { apiFetch } from "@/lib/api";
 import { useHeader } from "@/context/HeaderContext";
 import { useRouter } from "next/navigation";
 import Modal from "@/components/ui/Modal";
-import { CAMPAIGN_CATEGORIES } from "@/lib/campaignCategories";
+import { ALL_CATEGORIES, CAMPAIGN_CATEGORIES } from "@/lib/campaignCategories";
 
-const CATEGORIES = CAMPAIGN_CATEGORIES;
+const CATEGORIES = CAMPAIGN_CATEGORIES.filter(category => category !== ALL_CATEGORIES);
 const BUTTON_TEXTS = ["Learn more", "Get started", "Join channel", "Join group", "Start bot", "Buy Now", "Sign Up", "Download", "Visit site", "Play now", "Shop now"];
 const CONTINENTS = [
   { id: "global", name: "Global", countries: "All countries" },
@@ -307,6 +307,7 @@ export default function NewCampaignPage() {
                       className="w-full pl-12 pr-6 py-3 bg-white border border-slate-200 rounded-2xl focus:border-blue-500 outline-none font-bold text-slate-900 appearance-none cursor-pointer"
                     >
                       <option value="" disabled>Select category</option>
+                      <option value={ALL_CATEGORIES}>{ALL_CATEGORIES}</option>
                       {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
                     </select>
                   </div>
