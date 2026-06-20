@@ -20,13 +20,15 @@ export async function POST(
   try {
     const { id } = await params;
     const { action } = await request.json();
+    const normalizedAction = action === "deny" ? "reject" : action;
     const statusMap: Record<string, string> = {
       activate: "active",
       pause: "paused",
       reject: "rejected",
+      deny: "rejected",
     };
 
-    if (!statusMap[action]) {
+    if (!statusMap[normalizedAction]) {
       return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
 
@@ -36,19 +38,19 @@ export async function POST(
     }
 
     const oldStatus = rows[0].status;
-    const newStatus = statusMap[action];
+    const newStatus = statusMap[normalizedAction];
 
-    if (action === "activate") {
+    if (normalizedAction === "activate") {
       await pool.query("UPDATE bots SET status = ?, is_deleted = FALSE WHERE id = ?", [newStatus, id]);
     } else {
       await pool.query("UPDATE bots SET status = ? WHERE id = ?", [newStatus, id]);
     }
 
     await recordAdminActionAudit({
-      action: `bot_${action}`,
+      action: `bot_${normalizedAction}`,
       entityType: "bot",
       entityId: id,
-      reason: `admin_${action}`,
+      reason: `admin_${normalizedAction}`,
       metadata: {
         old_status: oldStatus,
         new_status: newStatus,

@@ -17,7 +17,22 @@ export async function GET(request: Request) {
 
   try {
     let query = `
-      SELECT b.*, u.first_name, u.last_name, u.username AS owner_username, u.telegram_id as owner_telegram_id,
+      SELECT
+        b.id,
+        b.user_id,
+        b.bot_username,
+        b.bot_name,
+        b.posts_per_day,
+        b.continents,
+        b.categories,
+        b.status,
+        b.is_deleted,
+        b.created_at,
+        b.updated_at,
+        u.first_name,
+        u.last_name,
+        u.username AS owner_username,
+        u.telegram_id as owner_telegram_id,
         (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND is_active = TRUE) as active_count,
         (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND is_active = FALSE) as blocked_count
       FROM bots b
@@ -37,14 +52,13 @@ export async function GET(request: Request) {
       whereClause += ` AND (
         b.bot_name LIKE ? OR 
         b.bot_username LIKE ? OR 
-        b.bot_token LIKE ? OR 
         u.first_name LIKE ? OR 
         u.last_name LIKE ? OR 
         u.username LIKE ? OR 
         u.telegram_id LIKE ?
       )`;
       const searchVal = `%${search}%`;
-      queryParams.push(searchVal, searchVal, searchVal, searchVal, searchVal, searchVal, searchVal);
+      queryParams.push(searchVal, searchVal, searchVal, searchVal, searchVal, searchVal);
     }
 
     query += whereClause + " ORDER BY b.id DESC LIMIT ? OFFSET ?";
@@ -72,6 +86,7 @@ export async function PATCH(request: Request) {
 
   try {
     const { id, action } = await request.json();
+    const normalizedAction = action === "deny" ? "reject" : action;
 
     // Fetch bot and owner details
     const [rows]: any = await pool.query(
@@ -87,12 +102,12 @@ export async function PATCH(request: Request) {
     }
 
     const bot = rows[0];
-    const status = action === "approve" ? "active" : "rejected";
+    const status = normalizedAction === "approve" ? "active" : "rejected";
     
     await pool.query("UPDATE bots SET status = ? WHERE id = ?", [status, id]);
 
     // Send Telegram Notification
-    const message = action === "approve" 
+    const message = normalizedAction === "approve" 
       ? `🤖 <b>Bot Approved!</b>\n\nYour bot <b>${bot.bot_name}</b> (@${bot.bot_username}) has been approved for monetization. You can now start serving ads.`
       : `❌ <b>Bot Rejected</b>\n\nUnfortunately, your bot <b>${bot.bot_name}</b> (@${bot.bot_username}) was not approved for monetization at this time.`;
 

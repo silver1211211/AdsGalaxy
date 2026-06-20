@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Trash2 } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Trash2, Zap } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 
 export default function AdminCampaignsPage() {
@@ -73,6 +73,35 @@ export default function AdminCampaignsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Action failed");
+      await fetchCampaigns(page, statusFilter, search);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleEmergencyPush = async (id: number, mode: "fill_empty_slots" | "replace_everything") => {
+    const label = mode === "fill_empty_slots" ? "Fill Empty Slots" : "Replace Everything";
+    let confirmation = "";
+
+    if (mode === "fill_empty_slots") {
+      if (!window.confirm("Emergency push this campaign to eligible empty channel slots now?")) return;
+    } else {
+      confirmation = window.prompt("This deletes currently active ads before pushing this campaign. Type CONFIRM to continue.") || "";
+      if (confirmation !== "CONFIRM") return;
+    }
+
+    setActionLoading(id);
+    try {
+      const res = await fetch(`/api/admin/campaigns/${id}/emergency-push`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, confirmation })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `${label} failed`);
+      window.alert(`${label} complete. Posted: ${data.posted || 0}, Failed: ${data.failed || 0}, Skipped: ${data.skipped || 0}`);
       await fetchCampaigns(page, statusFilter, search);
     } catch (err: any) {
       setError(err.message);
@@ -281,14 +310,32 @@ export default function AdminCampaignsPage() {
                           </>
                         )}
                         {campaign.status === "active" && (
-                          <button
-                            onClick={() => handleManagementAction(campaign.id, "pause")}
-                            disabled={actionLoading === campaign.id}
-                            className="p-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 rounded-md transition-colors border border-amber-100 cursor-pointer disabled:cursor-not-allowed"
-                            title="Pause"
-                          >
-                            {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Pause size={16} />}
-                          </button>
+                          <>
+                            <button
+                              onClick={() => handleEmergencyPush(campaign.id, "fill_empty_slots")}
+                              disabled={actionLoading === campaign.id}
+                              className="p-1.5 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-md transition-colors border border-blue-100 cursor-pointer disabled:cursor-not-allowed"
+                              title="Emergency Push: Fill Empty Slots"
+                            >
+                              {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Zap size={16} />}
+                            </button>
+                            <button
+                              onClick={() => handleEmergencyPush(campaign.id, "replace_everything")}
+                              disabled={actionLoading === campaign.id}
+                              className="px-2 py-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed text-[10px] font-bold"
+                              title="Emergency Push: Replace Everything"
+                            >
+                              Replace
+                            </button>
+                            <button
+                              onClick={() => handleManagementAction(campaign.id, "pause")}
+                              disabled={actionLoading === campaign.id}
+                              className="p-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 rounded-md transition-colors border border-amber-100 cursor-pointer disabled:cursor-not-allowed"
+                              title="Pause"
+                            >
+                              {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Pause size={16} />}
+                            </button>
+                          </>
                         )}
                         {campaign.status === "paused" && (
                           <button
