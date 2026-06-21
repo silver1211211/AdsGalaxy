@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { normalizeCampaignCategory } from "@/lib/campaignCategories";
 
 export async function POST(request: Request) {
@@ -111,7 +111,7 @@ export async function POST(request: Request) {
 
   } catch (error: any) {
     console.error("Create Campaign Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to create campaign" }, { status: 500 });
+    return NextResponse.json({ error: error.message || "Failed to create campaign" }, { status: getAuthErrorStatus(error) });
   }
 }
 
@@ -128,6 +128,6 @@ export async function GET(request: Request) {
     return NextResponse.json(rows);
   } catch (error: any) {
     console.error("Fetch Campaigns Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to fetch campaigns" }, { status: 500 });
+    return NextResponse.json({ error: error.message || "Failed to fetch campaigns" }, { status: getAuthErrorStatus(error) });
   }
 }

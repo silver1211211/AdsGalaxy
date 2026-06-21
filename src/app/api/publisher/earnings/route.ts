@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 
 export async function GET(request: Request) {
   const initData = request.headers.get("x-telegram-init-data");
@@ -56,6 +56,6 @@ export async function GET(request: Request) {
     return NextResponse.json({ earnings: allEarnings });
   } catch (error: any) {
     console.error("Publisher Earnings Error:", error);
-    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: getAuthErrorStatus(error) });
   }
 }

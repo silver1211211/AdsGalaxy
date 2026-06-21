@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { sendTelegramMessage } from "@/lib/telegram";
 
 export async function POST(request: Request) {
@@ -61,6 +61,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ success: true, message: "Validation message sent to your Telegram!" });
   } catch (error: any) {
     console.error("Validation API Error:", error);
-    return NextResponse.json({ error: error.message || "Internal validation error" }, { status: 500 });
+    return NextResponse.json({ error: error.message || "Internal validation error" }, { status: getAuthErrorStatus(error) });
   }
 }

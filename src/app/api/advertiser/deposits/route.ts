@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 
 const OXAPAY_API_URL = "https://api.oxapay.com/v1/payment/white-label";
 const OXAPAY_KEY = process.env.OXAPAY_MERCHANT_API_KEY;
@@ -31,7 +31,7 @@ export async function GET(request: Request) {
       minDeposit 
     });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
   }
 }
 
@@ -116,6 +116,6 @@ export async function POST(request: Request) {
     return NextResponse.json(invoice);
   } catch (error: any) {
     console.error("Deposit Error:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
   }
 }

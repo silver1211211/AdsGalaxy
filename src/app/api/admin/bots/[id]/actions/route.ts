@@ -26,6 +26,7 @@ export async function POST(
       pause: "paused",
       reject: "rejected",
       deny: "rejected",
+      delete: "deleted",
     };
 
     if (!statusMap[normalizedAction]) {
@@ -42,6 +43,8 @@ export async function POST(
 
     if (normalizedAction === "activate") {
       await pool.query("UPDATE bots SET status = ?, is_deleted = FALSE WHERE id = ?", [newStatus, id]);
+    } else if (normalizedAction === "delete") {
+      await pool.query("UPDATE bots SET status = ?, is_deleted = TRUE WHERE id = ?", [newStatus, id]);
     } else {
       await pool.query("UPDATE bots SET status = ? WHERE id = ?", [newStatus, id]);
     }

@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, Edit2, ShieldAlert } from "lucide-react";
+import { Loader2, Edit2, ShieldAlert, Upload } from "lucide-react";
 
 export default function AdminSettingsPage() {
   const [settings, setSettings] = useState([]);
@@ -14,6 +14,9 @@ export default function AdminSettingsPage() {
   const [editingSetting, setEditingSetting] = useState<any>(null);
   const [editValue, setEditValue] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [logoFile, setLogoFile] = useState<File | null>(null);
+  const [logoUploading, setLogoUploading] = useState(false);
+  const [logoVersion, setLogoVersion] = useState(Date.now());
 
   const fetchSettings = async () => {
     setLoading(true);
@@ -59,6 +62,30 @@ export default function AdminSettingsPage() {
       setError(err.message);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleLogoUpload = async () => {
+    if (!logoFile) return;
+
+    setLogoUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("logo", logoFile);
+
+      const res = await fetch("/api/admin/logo", {
+        method: "POST",
+        body: formData
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to upload logo");
+
+      setLogoFile(null);
+      setLogoVersion(Date.now());
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLogoUploading(false);
     }
   };
 
@@ -136,6 +163,40 @@ export default function AdminSettingsPage() {
         </div>
         
         <div className="overflow-y-auto flex-1 bg-slate-50/50 p-4 space-y-4">
+          <div className="bg-white border border-slate-200 rounded-lg p-3 shadow-sm flex flex-col sm:flex-row sm:items-center gap-3">
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="w-12 h-12 rounded-lg bg-slate-50 border border-slate-200 flex items-center justify-center overflow-hidden shrink-0">
+                <img src={`/logo.svg?v=${logoVersion}`} alt="Current logo" className="w-full h-full object-contain" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-slate-900">Homepage Logo</h3>
+                <p className="text-[11px] text-slate-500 truncate">Upload any image type. Saved as the homepage logo.</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="px-3 py-2 bg-slate-50 text-slate-600 border border-slate-200 rounded-md text-xs font-medium hover:bg-slate-100 cursor-pointer whitespace-nowrap">
+                Choose Image
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => setLogoFile(e.target.files?.[0] || null)}
+                />
+              </label>
+              <button
+                onClick={handleLogoUpload}
+                disabled={!logoFile || logoUploading}
+                className="px-3 py-2 bg-blue-600 text-white rounded-md text-xs font-medium hover:bg-blue-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5 whitespace-nowrap"
+              >
+                {logoUploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+                Upload
+              </button>
+            </div>
+            {logoFile && (
+              <p className="text-[11px] text-slate-500 sm:max-w-[160px] truncate" title={logoFile.name}>{logoFile.name}</p>
+            )}
+          </div>
+
           {loading ? (
             <div className="flex justify-center p-12"><Loader2 className="animate-spin text-blue-600" size={24} /></div>
           ) : settings.length === 0 ? (

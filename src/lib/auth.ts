@@ -13,6 +13,24 @@ export interface TelegramUser {
   photo_url?: string;
 }
 
+export class BannedUserError extends Error {
+  statusCode = 403;
+
+  constructor() {
+    super("Account restricted");
+    this.name = "BannedUserError";
+  }
+}
+
+export function isBannedUserError(error: unknown) {
+  return error instanceof BannedUserError
+    || (error instanceof Error && error.name === "BannedUserError");
+}
+
+export function getAuthErrorStatus(error: unknown) {
+  return isBannedUserError(error) ? 403 : 500;
+}
+
 export function validateInitData(initData: string, botToken: string) {
   const urlParams = new URLSearchParams(initData);
   const hash = urlParams.get("hash");
@@ -66,7 +84,7 @@ export function validateInitData(initData: string, botToken: string) {
  * Validates the request and returns the user object from the DB.
  * If user doesn't exist, it creates one.
  */
-export async function getAuthenticatedUser(initData: string | null) {
+export async function getAuthenticatedUser(initData: string | null, options: { allowBanned?: boolean } = {}) {
   console.log("Auth: Received initData:", initData ? (initData.substring(0, 20) + "...") : "MISSING");
 
   if (!initData || initData === 'undefined' || initData === 'null') {
@@ -88,6 +106,12 @@ export async function getAuthenticatedUser(initData: string | null) {
     );
 
     if (rows.length > 0) {
+      const userStatus = String(rows[0].status || "").toLowerCase();
+      const legacyBanned = rows[0].status === undefined && Number(rows[0].is_banned || 0) === 1;
+      if (!options.allowBanned && (userStatus === "banned" || legacyBanned)) {
+        throw new BannedUserError();
+      }
+
       // Update existing user info
       await pool.query(
         "UPDATE users SET first_name = ?, last_name = ?, username = ?, photo_url = ? WHERE telegram_id = ?",
@@ -136,6 +160,10 @@ export async function getAuthenticatedUser(initData: string | null) {
       return newUser[0];
     }
   } catch (error) {
+    if (isBannedUserError(error)) {
+      throw error;
+    }
+
     console.error("Auth Database Error:", error);
     throw new Error("Internal authentication error");
   }

@@ -2,38 +2,98 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Edit2, Search } from "lucide-react";
+import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Modal from "@/components/ui/Modal";
+import { Ban, CheckCircle2, ChevronLeft, ChevronRight, Edit2, Loader2, Search, ShieldOff } from "lucide-react";
+
+type UserRow = {
+  id: number;
+  telegram_id: string | number;
+  first_name?: string;
+  last_name?: string;
+  username?: string;
+  balance_locked: string | number;
+  balance_available: string | number;
+  ad_balance: string | number;
+  created_at?: string;
+  status?: "active" | "banned" | string;
+  is_banned?: boolean | number;
+  banned_at?: string | null;
+  ban_reason?: string | null;
+};
+
+type UserAction = {
+  type: "ban" | "unban";
+  user: UserRow;
+} | null;
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
+
+function money(value: unknown) {
+  return `$${Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function displayUsername(user: UserRow) {
+  return user.username ? `@${user.username}` : "No Username";
+}
+
+function displayName(user: UserRow) {
+  return [user.first_name, user.last_name].filter(Boolean).join(" ") || `User #${user.id}`;
+}
+
+function isUserBanned(user: UserRow) {
+  return user.status === "banned" || Boolean(user.is_banned);
+}
+
+function StatusBadge({ user }: { user: UserRow }) {
+  const banned = isUserBanned(user);
+  return (
+    <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-bold capitalize ${
+      banned ? "border-red-200 bg-red-50 text-red-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"
+    }`}>
+      {banned ? "Banned" : "Active"}
+    </span>
+  );
+}
 
 export default function AdminUsersPage() {
-  const [users, setUsers] = useState([]);
+  const [users, setUsers] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
-  
+  const [error, setError] = useState("");
+
   const [editModalOpen, setEditModalOpen] = useState(false);
-  const [editingUser, setEditingUser] = useState<any>(null);
+  const [editingUser, setEditingUser] = useState<UserRow | null>(null);
   const [balanceData, setBalanceData] = useState({ locked: "", available: "", ad: "" });
   const [isUpdating, setIsUpdating] = useState(false);
+  const [userAction, setUserAction] = useState<UserAction>(null);
+  const [banReason, setBanReason] = useState("");
 
   const fetchUsers = async (p: number, q: string) => {
     setLoading(true);
     try {
       const res = await fetch(`/api/admin/users?page=${p}&limit=10&search=${encodeURIComponent(q)}`);
-      const data = await res.json();
-      setUsers(data.users);
-      setTotalPages(data.totalPages);
-    } catch (err) {
-      console.error(err);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to fetch users");
+      setUsers(data.users || []);
+      setTotalPages(data.totalPages || 1);
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to fetch users"));
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchUsers(page, searchQuery);
+    const timer = window.setTimeout(() => {
+      fetchUsers(page, searchQuery);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [page, searchQuery]);
 
   const handleSearch = (e: React.FormEvent) => {
@@ -42,17 +102,18 @@ export default function AdminUsersPage() {
     setPage(1);
   };
 
-  const openEditModal = (user: any) => {
+  const openEditModal = (user: UserRow) => {
     setEditingUser(user);
     setBalanceData({
-      locked: user.balance_locked,
-      available: user.balance_available,
-      ad: user.ad_balance
+      locked: String(user.balance_locked ?? ""),
+      available: String(user.balance_available ?? ""),
+      ad: String(user.ad_balance ?? ""),
     });
     setEditModalOpen(true);
   };
 
   const handleUpdateBalance = async () => {
+    if (!editingUser) return;
     setIsUpdating(true);
     try {
       const res = await fetch("/api/admin/users", {
@@ -62,44 +123,129 @@ export default function AdminUsersPage() {
           id: editingUser.id,
           balance_locked: balanceData.locked,
           balance_available: balanceData.available,
-          ad_balance: balanceData.ad
-        })
+          ad_balance: balanceData.ad,
+        }),
       });
-      if (res.ok) {
-        setEditModalOpen(false);
-        fetchUsers(page, searchQuery);
-      }
-    } catch (err) {
-      console.error(err);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to update user");
+      setEditModalOpen(false);
+      await fetchUsers(page, searchQuery);
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to update user"));
     } finally {
       setIsUpdating(false);
     }
   };
 
+  const openUserAction = (type: "ban" | "unban", user: UserRow) => {
+    setUserAction({ type, user });
+    setBanReason("");
+  };
+
+  const runUserAction = async () => {
+    if (!userAction) return;
+    setIsUpdating(true);
+    try {
+      const res = await fetch("/api/admin/users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: userAction.user.id,
+          action: userAction.type,
+          reason: banReason,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to update user status");
+      setUserAction(null);
+      await fetchUsers(page, searchQuery);
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to update user status"));
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const ActionButtons = ({ user }: { user: UserRow }) => {
+    const banned = isUserBanned(user);
+    return (
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <button
+          onClick={() => openEditModal(user)}
+          className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+          title="Edit balances"
+        >
+          <Edit2 size={14} /> Edit
+        </button>
+        {banned ? (
+          <button
+            onClick={() => openUserAction("unban", user)}
+            className="inline-flex items-center gap-1 rounded-md border border-emerald-100 bg-emerald-50 px-2 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100"
+          >
+            <CheckCircle2 size={14} /> Unban User
+          </button>
+        ) : (
+          <button
+            onClick={() => openUserAction("ban", user)}
+            className="inline-flex items-center gap-1 rounded-md border border-red-100 bg-red-50 px-2 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100"
+          >
+            <Ban size={14} /> Ban User
+          </button>
+        )}
+      </div>
+    );
+  };
+
   return (
     <AdminLayout>
-      {/* Edit Balance Modal */}
+      <Modal isOpen={!!error} onClose={() => setError("")} type="error" title="Error">{error}</Modal>
+
+      <ConfirmationModal
+        isOpen={!!userAction}
+        onClose={() => setUserAction(null)}
+        onConfirm={runUserAction}
+        title={userAction?.type === "ban" ? "Ban User" : "Unban User"}
+        message={userAction ? `${displayUsername(userAction.user)} (${displayName(userAction.user)}) will ${userAction.type === "ban" ? "lose access to all Mini App authenticated pages." : "regain normal Mini App access."}` : ""}
+        confirmBtnText={userAction?.type === "ban" ? "Ban User" : "Unban User"}
+        confirmBtnVariant={userAction?.type === "ban" ? "danger" : "primary"}
+        isLoading={isUpdating}
+      >
+        {userAction?.type === "ban" && (
+          <div className="space-y-2">
+            <label className="block text-xs font-black uppercase tracking-wide text-slate-500">Ban reason</label>
+            <textarea
+              value={banReason}
+              onChange={(e) => setBanReason(e.target.value)}
+              rows={3}
+              className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm outline-none focus:border-blue-500"
+              placeholder="Optional admin note..."
+            />
+          </div>
+        )}
+      </ConfirmationModal>
+
       {editModalOpen && editingUser && (
-        <div className="fixed inset-0 z-[100] bg-slate-900/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg p-6 w-full max-w-sm shadow-xl border border-slate-200">
-            <h3 className="text-lg font-bold text-slate-900 mb-4">Edit Balances (User #{editingUser.id})</h3>
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-6 shadow-xl">
+            <h3 className="mb-1 text-lg font-bold text-slate-900">Edit Balances</h3>
+            <p className="mb-4 text-xs text-slate-500">{displayUsername(editingUser)} - User #{editingUser.id}</p>
             <div className="space-y-4">
               <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">Locked Balance</label>
-                <input type="number" step="0.01" value={balanceData.locked} onChange={e => setBalanceData({...balanceData, locked: e.target.value})} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-sm outline-none focus:border-blue-500" />
+                <label className="mb-1 block text-xs font-medium text-slate-600">Locked Balance</label>
+                <input type="number" step="0.01" value={balanceData.locked} onChange={(e) => setBalanceData({ ...balanceData, locked: e.target.value })} className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">Available Balance</label>
-                <input type="number" step="0.01" value={balanceData.available} onChange={e => setBalanceData({...balanceData, available: e.target.value})} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-sm outline-none focus:border-blue-500" />
+                <label className="mb-1 block text-xs font-medium text-slate-600">Available Balance</label>
+                <input type="number" step="0.01" value={balanceData.available} onChange={(e) => setBalanceData({ ...balanceData, available: e.target.value })} className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">Ad Balance</label>
-                <input type="number" step="0.01" value={balanceData.ad} onChange={e => setBalanceData({...balanceData, ad: e.target.value})} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-sm outline-none focus:border-blue-500" />
+                <label className="mb-1 block text-xs font-medium text-slate-600">Ad Balance</label>
+                <input type="number" step="0.01" value={balanceData.ad} onChange={(e) => setBalanceData({ ...balanceData, ad: e.target.value })} className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
               </div>
             </div>
-            <div className="flex gap-3 mt-6">
-              <button onClick={() => setEditModalOpen(false)} className="flex-1 py-2 text-slate-600 border border-slate-200 rounded-md text-sm font-medium hover:bg-slate-50">Cancel</button>
-              <button onClick={handleUpdateBalance} disabled={isUpdating} className="flex-1 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+            <div className="mt-6 flex gap-3">
+              <button onClick={() => setEditModalOpen(false)} className="flex-1 rounded-md border border-slate-200 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+              <button onClick={handleUpdateBalance} disabled={isUpdating} className="flex-1 rounded-md bg-blue-600 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
                 {isUpdating ? "Saving..." : "Save"}
               </button>
             </div>
@@ -107,72 +253,98 @@ export default function AdminUsersPage() {
         </div>
       )}
 
-      <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <h2 className="text-sm font-semibold text-slate-900">Users Directory</h2>
-          
+      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-col gap-3 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900">Users Directory</h2>
+            <p className="text-xs text-slate-500">Manage balances, bans, and Mini App access.</p>
+          </div>
           <form onSubmit={handleSearch} className="relative w-full sm:max-w-xs">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-            <input 
-              type="text" 
-              placeholder="Search ID, username, name..." 
+            <input
+              type="text"
+              placeholder="Search username, TG ID, name..."
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
-              className="w-full pl-9 pr-4 py-1.5 bg-slate-50 border border-slate-200 rounded-md text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all"
+              className="w-full rounded-md border border-slate-200 bg-slate-50 py-1.5 pl-9 pr-4 text-sm outline-none transition-all focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
             />
           </form>
         </div>
-        
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm whitespace-nowrap">
-            <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
+
+        <div className="hidden overflow-x-auto md:block">
+          <table className="w-full text-left text-sm">
+            <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
               <tr>
-                <th className="px-4 py-3 font-medium">User ID</th>
+                <th className="px-4 py-3 font-medium">Username</th>
                 <th className="px-4 py-3 font-medium">Profile</th>
-                <th className="px-4 py-3 font-medium text-right">Locked</th>
-                <th className="px-4 py-3 font-medium text-right">Available</th>
-                <th className="px-4 py-3 font-medium text-right">Ad Balance</th>
-                <th className="px-4 py-3 font-medium">Joined</th>
-                <th className="px-4 py-3 font-medium text-center">Actions</th>
+                <th className="px-4 py-3 text-right font-medium">Locked</th>
+                <th className="px-4 py-3 text-right font-medium">Available</th>
+                <th className="px-4 py-3 text-right font-medium">Ad Balance</th>
+                <th className="px-4 py-3 font-medium">Status</th>
+                <th className="px-4 py-3 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <tr><td colSpan={7} className="p-8 text-center"><Loader2 className="animate-spin text-blue-600 mx-auto" size={20} /></td></tr>
+                <tr><td colSpan={7} className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></td></tr>
               ) : users.length === 0 ? (
                 <tr><td colSpan={7} className="p-8 text-center text-slate-500">No users found.</td></tr>
-              ) : (
-                users.map((user: any) => (
-                  <tr key={user.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-3 font-medium text-slate-900">
-                      {user.id}
-                      <span className="block text-xs text-slate-400 font-normal">TG: {user.telegram_id}</span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="font-medium text-slate-900">{user.first_name} {user.last_name}</div>
-                      <div className="text-xs text-slate-500">@{user.username || "N/A"}</div>
-                    </td>
-                    <td className="px-4 py-3 text-right text-slate-700">${user.balance_locked}</td>
-                    <td className="px-4 py-3 text-right text-slate-700">${user.balance_available}</td>
-                    <td className="px-4 py-3 text-right text-slate-700">${user.ad_balance}</td>
-                    <td className="px-4 py-3 text-slate-500 text-xs">{new Date(user.created_at).toLocaleDateString()}</td>
-                    <td className="px-4 py-3 text-center">
-                      <button onClick={() => openEditModal(user)} className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors" title="Edit Balances">
-                        <Edit2 size={16} />
-                      </button>
-                    </td>
-                  </tr>
-                ))
-              )}
+              ) : users.map((user) => (
+                <tr key={user.id} className="hover:bg-slate-50">
+                  <td className="px-4 py-3">
+                    <div className="font-semibold text-slate-900">{displayUsername(user)}</div>
+                    <div className="text-xs text-slate-500">User #{user.id} - TG {user.telegram_id}</div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="font-medium text-slate-900">{displayName(user)}</div>
+                    <div className="text-xs text-slate-500">{user.created_at ? new Date(user.created_at).toLocaleDateString() : "Joined date N/A"}</div>
+                  </td>
+                  <td className="px-4 py-3 text-right text-slate-700">{money(user.balance_locked)}</td>
+                  <td className="px-4 py-3 text-right text-slate-700">{money(user.balance_available)}</td>
+                  <td className="px-4 py-3 text-right text-slate-700">{money(user.ad_balance)}</td>
+                  <td className="px-4 py-3"><StatusBadge user={user} /></td>
+                  <td className="px-4 py-3 text-right"><ActionButtons user={user} /></td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
 
-        <div className="px-4 py-3 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500">
+        <div className="space-y-3 p-3 md:hidden">
+          {loading ? (
+            <div className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></div>
+          ) : users.length === 0 ? (
+            <div className="p-8 text-center text-sm text-slate-500">No users found.</div>
+          ) : users.map((user) => (
+            <div key={user.id} className="rounded-lg border border-slate-200 p-3 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate font-semibold text-slate-900">{displayUsername(user)}</div>
+                  <div className="text-xs text-slate-500">{displayName(user)}</div>
+                  <div className="text-xs text-slate-400">User #{user.id} - TG {user.telegram_id}</div>
+                </div>
+                <StatusBadge user={user} />
+              </div>
+              {isUserBanned(user) && user.ban_reason && (
+                <div className="mt-3 rounded-md border border-red-100 bg-red-50 p-2 text-xs text-red-700">
+                  <ShieldOff className="mr-1 inline" size={13} /> {user.ban_reason}
+                </div>
+              )}
+              <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Locked</div><div className="font-semibold text-slate-900">{money(user.balance_locked)}</div></div>
+                <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Available</div><div className="font-semibold text-slate-900">{money(user.balance_available)}</div></div>
+                <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Ads</div><div className="font-semibold text-slate-900">{money(user.ad_balance)}</div></div>
+              </div>
+              <div className="mt-3"><ActionButtons user={user} /></div>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs text-slate-500">
           <span>Page {page} of {totalPages}</span>
           <div className="flex gap-1">
-            <button disabled={page === 1 || loading} onClick={() => setPage(p => p - 1)} className="p-1 rounded text-slate-500 hover:bg-slate-100 disabled:opacity-50"><ChevronLeft size={16} /></button>
-            <button disabled={page === totalPages || loading} onClick={() => setPage(p => p + 1)} className="p-1 rounded text-slate-500 hover:bg-slate-100 disabled:opacity-50"><ChevronRight size={16} /></button>
+            <button disabled={page === 1 || loading} onClick={() => setPage((p) => p - 1)} className="rounded p-1 text-slate-500 hover:bg-slate-100 disabled:opacity-50"><ChevronLeft size={16} /></button>
+            <button disabled={page === totalPages || loading} onClick={() => setPage((p) => p + 1)} className="rounded p-1 text-slate-500 hover:bg-slate-100 disabled:opacity-50"><ChevronRight size={16} /></button>
           </div>
         </div>
       </div>

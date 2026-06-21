@@ -10,6 +10,7 @@ import { sendTelegramMessage } from "@/lib/telegram";
 export const dynamic = "force-dynamic";
 
 const MAX_EMERGENCY_CHANNELS = 1000;
+const MAX_EMERGENCY_BROADCAST_USERS = 1000;
 const ACTIVE_POST_STATUSES = ["active", "posted", "sent"];
 const VALID_MODES = new Set(["fill_empty_slots", "replace_everything"]);
 
@@ -40,10 +41,31 @@ type ChannelRow = RowDataPacket & {
   audience_continents: string | string[] | null;
 };
 
+type BotRow = RowDataPacket & {
+  id: number;
+  user_id: number;
+  bot_token: string;
+  categories: string | string[] | null;
+  continents: string | string[] | null;
+  posts_per_day: number;
+};
+
+type BroadcastUserRow = RowDataPacket & {
+  id: number;
+  chat_id: string | number;
+};
+
 type EmergencySchema = {
   hasPostDeletedAtColumn: boolean;
   hasPostSlotColumns: boolean;
   hasCampaignDeliveryEvents: boolean;
+};
+
+type BroadcastSchema = {
+  hasBotUserChatId: boolean;
+  hasDeliveryStatus: boolean;
+  hasDeliveryCost: boolean;
+  hasDeliveryPublisherReward: boolean;
 };
 
 type ColumnRow = RowDataPacket & {
@@ -93,6 +115,20 @@ function campaignMatchesChannel(campaign: CampaignRow, channel: ChannelRow) {
     || campaignContinents.some((continent) => channelContinents.includes(continent));
 }
 
+function campaignMatchesBot(campaign: CampaignRow, bot: BotRow) {
+  const botCategories = parseJsonArray(bot.categories);
+  const categoryMatches = campaign.category === ALL_CATEGORIES || botCategories.includes(campaign.category);
+
+  if (!categoryMatches) return false;
+
+  const campaignContinents = parseJsonArray(campaign.continents).map(normalizeTarget);
+  const botContinents = parseJsonArray(bot.continents).map(normalizeTarget);
+
+  return campaignContinents.includes("global")
+    || botContinents.includes("global")
+    || campaignContinents.some((continent) => botContinents.includes(continent));
+}
+
 async function getEmergencySchema(): Promise<EmergencySchema> {
   const [rows] = await pool.query<ColumnRow[]>(`
     SELECT TABLE_NAME, COLUMN_NAME
@@ -111,6 +147,27 @@ async function getEmergencySchema(): Promise<EmergencySchema> {
     hasPostDeletedAtColumn: columns.has("campaign_posts.deleted_at"),
     hasPostSlotColumns: columns.has("campaign_posts.posting_slot_date") && columns.has("campaign_posts.posting_slot_time"),
     hasCampaignDeliveryEvents: tables.has("campaign_delivery_events"),
+  };
+}
+
+async function getBroadcastSchema(): Promise<BroadcastSchema> {
+  const [rows] = await pool.query<ColumnRow[]>(`
+    SELECT TABLE_NAME, COLUMN_NAME
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND (
+        (TABLE_NAME = 'bot_users' AND COLUMN_NAME = 'chat_id')
+        OR (TABLE_NAME = 'broadcast_deliveries' AND COLUMN_NAME IN ('status', 'cost', 'publisher_reward'))
+      )
+  `);
+
+  const columns = new Set(rows.map((row) => `${row.TABLE_NAME}.${row.COLUMN_NAME}`));
+
+  return {
+    hasBotUserChatId: columns.has("bot_users.chat_id"),
+    hasDeliveryStatus: columns.has("broadcast_deliveries.status"),
+    hasDeliveryCost: columns.has("broadcast_deliveries.cost"),
+    hasDeliveryPublisherReward: columns.has("broadcast_deliveries.publisher_reward"),
   };
 }
 
@@ -287,6 +344,187 @@ async function deleteAllActivePostsSafely(): Promise<CampaignPostDeletionSummary
   }
 }
 
+async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: BroadcastSchema) {
+  const [bots] = await pool.query<BotRow[]>(`
+    SELECT *
+    FROM bots
+    WHERE status = 'active'
+      AND is_deleted = FALSE
+      AND user_id != ?
+    ORDER BY id ASC
+  `, [campaign.user_id]);
+
+  const eligibleBots = bots.filter((bot) => campaignMatchesBot(campaign, bot));
+  const dispatches: Array<{ bot: BotRow; user: BroadcastUserRow }> = [];
+
+  for (const bot of eligibleBots) {
+    if (dispatches.length >= MAX_EMERGENCY_BROADCAST_USERS + 1) break;
+
+    const hoursInterval = 24 / Math.max(1, Number(bot.posts_per_day) || 1);
+    const chatIdExpression = schema.hasBotUserChatId ? "bu.chat_id" : "bu.user_id";
+    const [users] = await pool.query<BroadcastUserRow[]>(`
+      SELECT bu.id, ${chatIdExpression} as chat_id
+      FROM bot_users bu
+      WHERE bu.bot_id = ?
+        AND bu.is_active = TRUE
+        AND (${chatIdExpression} IS NOT NULL AND ${chatIdExpression} != '')
+        AND (bu.last_broadcast_at IS NULL OR bu.last_broadcast_at < NOW() - INTERVAL ? HOUR)
+        AND (
+          SELECT COUNT(*)
+          FROM broadcast_deliveries bd
+          WHERE bd.user_id = bu.id
+            AND bd.created_at > NOW() - INTERVAL 1 DAY
+        ) < ?
+      ORDER BY bu.id ASC
+      LIMIT ?
+    `, [bot.id, hoursInterval, Math.max(1, Number(bot.posts_per_day) || 1), MAX_EMERGENCY_BROADCAST_USERS + 1 - dispatches.length]);
+
+    for (const user of users) {
+      dispatches.push({ bot, user });
+      if (dispatches.length >= MAX_EMERGENCY_BROADCAST_USERS + 1) break;
+    }
+  }
+
+  return {
+    dispatches: dispatches.slice(0, MAX_EMERGENCY_BROADCAST_USERS),
+    skippedByLimit: Math.max(0, dispatches.length - MAX_EMERGENCY_BROADCAST_USERS),
+  };
+}
+
+async function recordBroadcastDelivery(
+  schema: BroadcastSchema,
+  campaignId: number,
+  botId: number,
+  userId: number,
+  chatId: string | number
+) {
+  const columns = ["campaign_id", "bot_id", "user_id", "chat_id"];
+  const params: Array<number | string> = [campaignId, botId, userId, String(chatId)];
+
+  if (schema.hasDeliveryStatus) {
+    columns.push("status");
+    params.push("sent");
+  }
+
+  if (schema.hasDeliveryCost) {
+    columns.push("cost");
+    params.push(0);
+  }
+
+  if (schema.hasDeliveryPublisherReward) {
+    columns.push("publisher_reward");
+    params.push(0);
+  }
+
+  const placeholders = columns.map(() => "?").join(", ");
+  await pool.query(
+    `INSERT INTO broadcast_deliveries (${columns.join(", ")}) VALUES (${placeholders})`,
+    params
+  );
+}
+
+async function postBroadcastToBotUser(options: {
+  campaign: CampaignRow;
+  bot: BotRow;
+  user: BroadcastUserRow;
+  schema: BroadcastSchema;
+}) {
+  const { campaign, bot, user, schema } = options;
+  const parseModeMap: Record<string, string | undefined> = { html: "HTML", markdown: "MarkdownV2", none: undefined };
+  const parseMode = parseModeMap[campaign.parse_mode] || "HTML";
+  const replyMarkup = {
+    inline_keyboard: [[
+      { text: campaign.button_text, url: campaign.link },
+    ]],
+  };
+
+  const result = await sendTelegramMessage(user.chat_id, campaign.message_text, {
+    photo: campaign.image_url,
+    parse_mode: parseMode,
+    reply_markup: replyMarkup,
+    token: bot.bot_token,
+  }) as TelegramSendResponse | undefined;
+
+  if (result?.ok) {
+    await recordBroadcastDelivery(schema, campaign.id, bot.id, user.id, user.chat_id);
+    await pool.query("UPDATE bot_users SET last_broadcast_at = NOW() WHERE id = ?", [user.id]);
+    return { ok: true };
+  }
+
+  const reason = result?.description || "Telegram send failed";
+  if (reason.includes("Forbidden: bot was blocked by the user")) {
+    await pool.query("UPDATE bot_users SET is_active = FALSE WHERE id = ?", [user.id]);
+  }
+
+  return { ok: false, reason };
+}
+
+async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode) {
+  const schema = await getBroadcastSchema();
+  const { dispatches, skippedByLimit } = await getEligibleBroadcastDispatches(campaign, schema);
+  const failedUsers: Array<{ botId: number; userId: number; reason: string }> = [];
+  let attempted = 0;
+  let posted = 0;
+
+  for (const dispatch of dispatches) {
+    attempted++;
+
+    try {
+      const result = await postBroadcastToBotUser({
+        campaign,
+        bot: dispatch.bot,
+        user: dispatch.user,
+        schema,
+      });
+
+      if (result.ok) {
+        posted++;
+      } else {
+        failedUsers.push({ botId: dispatch.bot.id, userId: dispatch.user.id, reason: result.reason || "Telegram send failed" });
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Emergency broadcast failed";
+      failedUsers.push({ botId: dispatch.bot.id, userId: dispatch.user.id, reason: message });
+    }
+  }
+
+  const failed = failedUsers.length;
+  const skipped = skippedByLimit;
+
+  await recordAdminActionAudit({
+    action: "emergency_push",
+    entityType: "campaign",
+    entityId: campaign.id,
+    reason: mode,
+    metadata: {
+      mode,
+      delivery_type: "broadcast",
+      eligible_bot_users: dispatches.length,
+      attempted,
+      success: posted,
+      failed,
+      skipped,
+      timestamp: new Date().toISOString(),
+    },
+  });
+
+  return NextResponse.json({
+    success: true,
+    mode,
+    campaignId: campaign.id,
+    deliveryType: "broadcast",
+    eligibleBotUsers: dispatches.length,
+    eligibleChannels: 0,
+    attempted,
+    posted,
+    failed,
+    skipped,
+    deleteSummary: null,
+    failedUsers,
+    failedChannels: [],
+  });
+}
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -326,6 +564,10 @@ export async function POST(
 
     if (!campaign.message_text || !campaign.button_text || !campaign.link) {
       return NextResponse.json({ error: "Campaign must have message text, button text, and link before emergency push" }, { status: 400 });
+    }
+
+    if (campaign.type === "broadcast") {
+      return emergencyPushBroadcast(campaign, mode);
     }
 
     const schema = await getEmergencySchema();

@@ -3,6 +3,7 @@ import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
 import { deleteActiveCampaignPosts } from "@/lib/campaignPostDeletion";
+import { creditUserLockedBalance } from "@/lib/earnings";
 
 export const dynamic = 'force-dynamic';
 
@@ -86,10 +87,11 @@ export async function GET(req: NextRequest) {
           }
 
           // B. Add to publisher's locked balance
-          await conn.query(
-            "UPDATE users SET balance_locked = balance_locked + ? WHERE id = ?",
-            [publisherReward, post.publisher_id]
-          );
+          const creditedPublisher = await creditUserLockedBalance(conn, post.publisher_id, publisherReward);
+          if (!creditedPublisher) {
+            await conn.rollback();
+            continue;
+          }
 
           // C. Log settlement
           await conn.query(`

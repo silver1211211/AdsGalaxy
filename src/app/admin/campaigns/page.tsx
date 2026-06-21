@@ -5,6 +5,22 @@ import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
 import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Trash2, Zap } from "lucide-react";
 import Modal from "@/components/ui/Modal";
+import ConfirmationModal from "@/components/ui/ConfirmationModal";
+import Toast from "@/components/ui/Toast";
+
+type CampaignConfirmActionType = "approve" | "reject" | "pause" | "resume" | "delete";
+type ConfirmAction = {
+  id: number;
+  action: CampaignConfirmActionType;
+  title: string;
+  message: string;
+  danger?: boolean;
+} | null;
+
+type EmergencyAction = {
+  id: number;
+  mode: "fill_empty_slots" | "replace_everything";
+} | null;
 
 export default function AdminCampaignsPage() {
   const [campaigns, setCampaigns] = useState([]);
@@ -15,6 +31,10 @@ export default function AdminCampaignsPage() {
   const [search, setSearch] = useState("");
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [error, setError] = useState("");
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
+  const [emergencyAction, setEmergencyAction] = useState<EmergencyAction>(null);
+  const [typedConfirmation, setTypedConfirmation] = useState("");
+  const [toast, setToast] = useState<{ type: "success" | "error"; title: string; message: string } | null>(null);
   
   const [viewModalOpen, setViewModalOpen] = useState(false);
   const [selectedCampaign, setSelectedCampaign] = useState<any>(null);
@@ -58,12 +78,6 @@ export default function AdminCampaignsPage() {
   };
 
   const handleManagementAction = async (id: number, action: "pause" | "resume" | "delete") => {
-    const message = action === "delete"
-      ? "Delete this campaign? Active Telegram posts will be deleted and the campaign will be marked deleted."
-      : `${action === "pause" ? "Pause" : "Resume"} this campaign?`;
-
-    if (!window.confirm(message)) return;
-
     setActionLoading(id);
     try {
       const res = await fetch(`/api/admin/campaigns/${id}/actions`, {
@@ -81,16 +95,8 @@ export default function AdminCampaignsPage() {
     }
   };
 
-  const handleEmergencyPush = async (id: number, mode: "fill_empty_slots" | "replace_everything") => {
+  const handleEmergencyPush = async (id: number, mode: "fill_empty_slots" | "replace_everything", confirmation = "") => {
     const label = mode === "fill_empty_slots" ? "Fill Empty Slots" : "Replace Everything";
-    let confirmation = "";
-
-    if (mode === "fill_empty_slots") {
-      if (!window.confirm("Emergency push this campaign to eligible empty channel slots now?")) return;
-    } else {
-      confirmation = window.prompt("This deletes currently active ads before pushing this campaign. Type CONFIRM to continue.") || "";
-      if (confirmation !== "CONFIRM") return;
-    }
 
     setActionLoading(id);
     try {
@@ -101,7 +107,11 @@ export default function AdminCampaignsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `${label} failed`);
-      window.alert(`${label} complete. Posted: ${data.posted || 0}, Failed: ${data.failed || 0}, Skipped: ${data.skipped || 0}`);
+      setToast({
+        type: "success",
+        title: `${label} complete`,
+        message: `Posted: ${data.posted || 0}, Failed: ${data.failed || 0}, Skipped: ${data.skipped || 0}`,
+      });
       await fetchCampaigns(page, statusFilter, search);
     } catch (err: any) {
       setError(err.message);
@@ -113,6 +123,35 @@ export default function AdminCampaignsPage() {
   const openViewModal = (campaign: any) => {
     setSelectedCampaign(campaign);
     setViewModalOpen(true);
+  };
+
+  const openConfirmAction = (id: number, action: CampaignConfirmActionType, title: string, message: string, danger = false) => {
+    setConfirmAction({ id, action, title, message, danger });
+  };
+
+  const runConfirmedAction = async () => {
+    if (!confirmAction) return;
+    const { id, action } = confirmAction;
+    setConfirmAction(null);
+    if (action === "approve" || action === "reject") {
+      await handleAction(id, action);
+    } else {
+      await handleManagementAction(id, action);
+    }
+  };
+
+  const openEmergencyConfirm = (id: number, mode: "fill_empty_slots" | "replace_everything") => {
+    setTypedConfirmation("");
+    setEmergencyAction({ id, mode });
+  };
+
+  const runEmergencyConfirm = async () => {
+    if (!emergencyAction) return;
+    const { id, mode } = emergencyAction;
+    const confirmation = mode === "replace_everything" ? typedConfirmation : "";
+    setEmergencyAction(null);
+    setTypedConfirmation("");
+    await handleEmergencyPush(id, mode, confirmation);
   };
 
   const renderContinents = (continentsStr: string) => {
@@ -139,6 +178,40 @@ export default function AdminCampaignsPage() {
   return (
     <AdminLayout>
       <Modal isOpen={!!error} onClose={() => setError("")} type="error" title="Error">{error}</Modal>
+      <Toast
+        isOpen={!!toast}
+        onClose={() => setToast(null)}
+        type={toast?.type || "success"}
+        title={toast?.title || ""}
+        message={toast?.message || ""}
+      />
+      <ConfirmationModal
+        isOpen={!!confirmAction}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={runConfirmedAction}
+        title={confirmAction?.title || ""}
+        message={confirmAction?.message || ""}
+        confirmBtnText="Confirm"
+        confirmBtnVariant={confirmAction?.danger ? "danger" : "primary"}
+        isLoading={actionLoading !== null}
+      />
+      <ConfirmationModal
+        isOpen={!!emergencyAction}
+        onClose={() => { setEmergencyAction(null); setTypedConfirmation(""); }}
+        onConfirm={runEmergencyConfirm}
+        title={emergencyAction?.mode === "replace_everything" ? "Emergency Push: Replace Everything" : "Emergency Push: Fill Empty Slots"}
+        message={emergencyAction?.mode === "replace_everything"
+          ? "This deletes currently active ads before pushing this campaign. Type CONFIRM to continue."
+          : "Emergency push this campaign to eligible empty channel slots now?"}
+        confirmBtnText={emergencyAction?.mode === "replace_everything" ? "Replace Everything" : "Push Now"}
+        confirmBtnVariant={emergencyAction?.mode === "replace_everything" ? "danger" : "primary"}
+        isLoading={actionLoading !== null}
+        typedConfirmation={emergencyAction?.mode === "replace_everything" ? {
+          phrase: "CONFIRM",
+          value: typedConfirmation,
+          onChange: setTypedConfirmation,
+        } : undefined}
+      />
 
       {/* View Campaign Modal */}
       {viewModalOpen && selectedCampaign && (
@@ -259,11 +332,11 @@ export default function AdminCampaignsPage() {
                   <tr key={campaign.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-4 py-3">
                       <div className="font-medium text-slate-900">{campaign.name}</div>
-                      <div className="text-xs text-slate-500">ID: #{campaign.id} • User: {campaign.user_id}</div>
+                      <div className="text-xs text-slate-500">ID: #{campaign.id} - User: {campaign.user_id}</div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="font-medium text-slate-900 capitalize">{campaign.type}</div>
-                      <div className="text-xs text-slate-500">Budget: ${campaign.budget} • CPM: ${campaign.cpm}</div>
+                      <div className="text-xs text-slate-500">Budget: ${campaign.budget} - CPM: ${campaign.cpm}</div>
                     </td>
                     <td className="px-4 py-3">
                       <a href={campaign.link} target="_blank" className="text-blue-600 hover:underline block truncate max-w-[150px]">{campaign.link}</a>
@@ -292,7 +365,7 @@ export default function AdminCampaignsPage() {
                         {campaign.status === "pending" && (
                           <>
                             <button 
-                              onClick={() => handleAction(campaign.id, "approve")}
+                              onClick={() => openConfirmAction(campaign.id, "approve", "Approve Campaign", "Approve this campaign?")}
                               disabled={actionLoading === campaign.id}
                               className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Approve"
@@ -300,7 +373,7 @@ export default function AdminCampaignsPage() {
                               {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
                             </button>
                             <button 
-                              onClick={() => handleAction(campaign.id, "reject")}
+                              onClick={() => openConfirmAction(campaign.id, "reject", "Reject Campaign", "Reject this campaign?", true)}
                               disabled={actionLoading === campaign.id}
                               className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Reject"
@@ -312,7 +385,7 @@ export default function AdminCampaignsPage() {
                         {campaign.status === "active" && (
                           <>
                             <button
-                              onClick={() => handleEmergencyPush(campaign.id, "fill_empty_slots")}
+                              onClick={() => openEmergencyConfirm(campaign.id, "fill_empty_slots")}
                               disabled={actionLoading === campaign.id}
                               className="p-1.5 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-md transition-colors border border-blue-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Emergency Push: Fill Empty Slots"
@@ -320,7 +393,7 @@ export default function AdminCampaignsPage() {
                               {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Zap size={16} />}
                             </button>
                             <button
-                              onClick={() => handleEmergencyPush(campaign.id, "replace_everything")}
+                              onClick={() => openEmergencyConfirm(campaign.id, "replace_everything")}
                               disabled={actionLoading === campaign.id}
                               className="px-2 py-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed text-[10px] font-bold"
                               title="Emergency Push: Replace Everything"
@@ -328,7 +401,7 @@ export default function AdminCampaignsPage() {
                               Replace
                             </button>
                             <button
-                              onClick={() => handleManagementAction(campaign.id, "pause")}
+                              onClick={() => openConfirmAction(campaign.id, "pause", "Pause Campaign", "Pause this campaign?")}
                               disabled={actionLoading === campaign.id}
                               className="p-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 rounded-md transition-colors border border-amber-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Pause"
@@ -339,7 +412,7 @@ export default function AdminCampaignsPage() {
                         )}
                         {campaign.status === "paused" && (
                           <button
-                            onClick={() => handleManagementAction(campaign.id, "resume")}
+                            onClick={() => openConfirmAction(campaign.id, "resume", "Resume Campaign", "Resume this campaign?")}
                             disabled={actionLoading === campaign.id}
                             className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
                             title="Resume"
@@ -349,7 +422,7 @@ export default function AdminCampaignsPage() {
                         )}
                         {campaign.status !== "deleted" && (
                           <button
-                            onClick={() => handleManagementAction(campaign.id, "delete")}
+                            onClick={() => openConfirmAction(campaign.id, "delete", "Delete Campaign", "Delete this campaign? Active Telegram posts will be deleted and the campaign will be marked deleted.", true)}
                             disabled={actionLoading === campaign.id}
                             className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
                             title="Delete"

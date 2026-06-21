@@ -1,27 +1,71 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
+import PublicHomepage from "@/components/home/PublicHomepage";
+import AppBootState from "@/components/shared/AppBootState";
+import {
+  getSafeLastDashboard,
+  hasTelegramLaunchParams,
+  isTelegramMiniApp,
+  safePrepareTelegramWebApp,
+  waitForTelegramInitData,
+} from "@/lib/telegramWebApp";
+
+type BootView = "checking" | "web" | "error";
 
 export default function Home() {
   const router = useRouter();
+  const [view, setView] = useState<BootView>("checking");
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      const lastDashboard = localStorage.getItem("last_dashboard");
-      if (lastDashboard === "advertiser") {
-        router.replace("/advertiser");
-      } else {
-        router.replace("/publisher");
+    let cancelled = false;
+
+    async function boot() {
+      safePrepareTelegramWebApp();
+
+      if (!isTelegramMiniApp() && !hasTelegramLaunchParams()) {
+        if (!cancelled) setView("web");
+        return;
+      }
+
+      try {
+        await waitForTelegramInitData({ requireTelegram: true });
+        if (cancelled) return;
+
+        const dashboard = getSafeLastDashboard();
+        router.replace(dashboard === "advertiser" ? "/advertiser" : "/publisher");
+      } catch (error) {
+        console.error("Mini App boot failed:", error);
+        if (!cancelled) setView("error");
       }
     }
+
+    boot();
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
+  if (view === "web") {
+    return <PublicHomepage />;
+  }
+
+  if (view === "error") {
+    return (
+      <AppBootState
+        mode="error"
+        title="Unable to load AdsGalaxy"
+        message="We couldn't start the Mini App. Please reload and try again."
+        detail="If this continues, contact support."
+      />
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-4">
-      <Loader2 className="animate-spin text-[#0c9de8]" size={40} />
-      <p className="text-slate-400 font-black uppercase tracking-widest text-[10px]">Restoring Session...</p>
-    </div>
+    <AppBootState
+      title="Loading AdsGalaxy"
+      message="Preparing your Telegram Mini App session..."
+    />
   );
 }

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 
 export async function POST(request: Request) {
   try {
@@ -49,6 +49,6 @@ export async function POST(request: Request) {
 
   } catch (error: any) {
     console.error("Verify Join Error:", error);
-    return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: 500 });
+    return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: getAuthErrorStatus(error) });
   }
 }

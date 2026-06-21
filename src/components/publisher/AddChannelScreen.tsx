@@ -64,6 +64,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
   const [editedTitle, setEditedTitle] = useState(channel?.title || "");
   const [postsPerDay, setPostsPerDay] = useState(channel?.posts_per_day || 1);
   const [postingTimes, setPostingTimes] = useState<string[]>(() => getInitialPostingTimes(channel, channel?.posts_per_day || 1));
+  const [postingTimeSelectionOrder, setPostingTimeSelectionOrder] = useState<string[]>(() => getInitialPostingTimes(channel, channel?.posts_per_day || 1));
   const [postingTimesError, setPostingTimesError] = useState("");
   const [selectedContinents, setSelectedContinents] = useState<string[]>(
     channel?.audience_continents ? (typeof channel.audience_continents === 'string' ? JSON.parse(channel.audience_continents) : channel.audience_continents) : []
@@ -158,33 +159,48 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
   const handlePostsPerDayChange = (value: number) => {
     setPostsPerDay(value);
     setPostingTimesError("");
-    setPostingTimes(prev => {
-      const allowedCount = Math.min(value, 3);
-      const next = prev.slice(0, allowedCount);
-      return next.length > 0 ? next : getDefaultPostingTimes(value);
-    });
+    const allowedCount = Math.min(value, 3);
+    const next = postingTimes.slice(0, allowedCount);
+    const effectiveNext = next.length > 0 ? next : getDefaultPostingTimes(value);
+    setPostingTimes(effectiveNext);
+    setPostingTimeSelectionOrder(effectiveNext);
   };
 
   const togglePostingTime = (time: string) => {
-    setPostingTimes(prev => {
-      if (prev.includes(time)) {
-        if (prev.length === 1) {
-          setPostingTimesError("Select at least 1 posting time");
-          return prev;
-        }
-
-        setPostingTimesError("");
-        return prev.filter(item => item !== time);
+    if (postingTimes.includes(time)) {
+      if (postingTimes.length === 1) {
+        setPostingTimesError("Select at least 1 posting time");
+        return;
       }
 
-      if (prev.length >= Math.min(postsPerDay, 3)) {
-        setPostingTimesError(`Select up to ${Math.min(postsPerDay, 3)} posting ${postsPerDay === 1 ? "time" : "times"}`);
-        return prev;
-      }
-
+      const next = postingTimes.filter(item => item !== time);
       setPostingTimesError("");
-      return normalizePostingTimes([...prev, time], postsPerDay);
-    });
+      setPostingTimes(next);
+      setPostingTimeSelectionOrder(postingTimeSelectionOrder.filter(item => item !== time && next.includes(item)));
+      return;
+    }
+
+    const maxSelectable = Math.min(postsPerDay, 3);
+    if (postsPerDay === 1) {
+      setPostingTimesError("");
+      setPostingTimes([time]);
+      setPostingTimeSelectionOrder([time]);
+      return;
+    }
+
+    if (postingTimes.length >= maxSelectable) {
+      setPostingTimesError("");
+      const currentOrder = postingTimeSelectionOrder.filter(item => postingTimes.includes(item));
+      const nextOrder = [...currentOrder.slice(1), time];
+      setPostingTimeSelectionOrder(nextOrder);
+      setPostingTimes(normalizePostingTimes(nextOrder, postsPerDay));
+      return;
+    }
+
+    const nextOrder = [...postingTimeSelectionOrder.filter(item => postingTimes.includes(item)), time];
+    setPostingTimesError("");
+    setPostingTimeSelectionOrder(nextOrder);
+    setPostingTimes(normalizePostingTimes(nextOrder, postsPerDay));
   };
 
   const handleSubmit = async () => {

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { 
   PlusCircle, 
@@ -17,40 +17,68 @@ import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { useHeader } from "@/context/HeaderContext";
 import { apiFetch } from "@/lib/api";
+import AppBootState from "@/components/shared/AppBootState";
+
+type AdvertiserCampaign = {
+  id: number;
+  name: string;
+  type?: string;
+  category?: string;
+  status?: string;
+  budget?: string | number;
+};
+
+type AdvertiserStats = {
+  active_ads: number;
+  total_campaigns: number;
+  total_views: number;
+  total_spent: number;
+  total_clicks: number;
+  ad_balance: number;
+  ad_balance_locked: number;
+  recent_campaigns: AdvertiserCampaign[];
+};
+
+const defaultStats: AdvertiserStats = {
+  active_ads: 0,
+  total_campaigns: 0,
+  total_views: 0,
+  total_spent: 0,
+  total_clicks: 0,
+  ad_balance: 0,
+  ad_balance_locked: 0,
+  recent_campaigns: [],
+};
 
 export default function AdvertiserDashboard() {
   const { setTitle } = useHeader();
   const [isLoading, setIsLoading] = useState(true);
-  const [stats, setStats] = useState<any>({
-    active_ads: 0,
-    total_campaigns: 0,
-    total_views: 0,
-    total_spent: 0,
-    total_clicks: 0,
-    ad_balance: 0,
-    ad_balance_locked: 0,
-    recent_campaigns: []
-  });
+  const [loadError, setLoadError] = useState(false);
+  const [stats, setStats] = useState<AdvertiserStats>(defaultStats);
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     try {
       setIsLoading(true);
+      setLoadError(false);
       const res = await apiFetch("/api/advertiser/stats");
-      const data = await res.json();
-      if (res.ok) {
-        setStats(data);
-      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to load advertiser stats");
+      setStats(data);
     } catch (err) {
       console.error("Failed to fetch stats:", err);
+      setLoadError(true);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     setTitle("Dashboard");
-    fetchStats();
-  }, [setTitle]);
+    const timer = window.setTimeout(() => {
+      fetchStats();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [fetchStats, setTitle]);
 
   const statCards = [
     { 
@@ -92,8 +120,21 @@ export default function AdvertiserDashboard() {
           <p className="text-slate-500">Track and manage your Telegram advertising campaigns.</p>
         </div>
 
+        {loadError && (
+          <div className="-mx-4 sm:mx-0">
+            <AppBootState
+              mode="error"
+              title="Unable to load AdsGalaxy"
+              message="We couldn't start the Mini App. Please reload and try again."
+              detail="If this continues, contact support."
+              actionLabel="Retry"
+              onAction={fetchStats}
+            />
+          </div>
+        )}
+
         {/* Balance Section */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {!loadError && <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm flex items-center justify-between">
             <div className="space-y-1">
               <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Ad Balance</p>
@@ -121,11 +162,13 @@ export default function AdvertiserDashboard() {
               <Lock size={32} />
             </div>
           </div>
-        </div>
+        </div>}
 
         {/* Stats Grid */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
-          {statCards.map((stat) => (
+        {!loadError && <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
+          {isLoading ? [1, 2, 3, 4].map((item) => (
+            <div key={item} className="h-32 rounded-2xl border border-slate-100 bg-white p-4 shadow-sm animate-pulse" />
+          )) : statCards.map((stat) => (
             <div key={stat.label} className="bg-white p-4 md:p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
               <div className="flex items-center justify-between mb-4">
                 <div className={`p-2 md:p-3 rounded-xl ${stat.bg}`}>
@@ -138,10 +181,10 @@ export default function AdvertiserDashboard() {
               </div>
             </div>
           ))}
-        </div>
+        </div>}
 
         {/* Recent Campaigns Placeholder */}
-        <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+        {!loadError && <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
           <div className="flex items-center justify-between mb-6">
             <h3 className="text-lg font-bold text-slate-900">Recent Campaigns</h3>
             <Link href="/advertiser/campaigns" className="text-sm text-blue-600 font-semibold hover:underline flex items-center gap-1">
@@ -149,10 +192,14 @@ export default function AdvertiserDashboard() {
             </Link>
           </div>
           <div className="space-y-4">
-            {stats.recent_campaigns.length === 0 ? (
+            {isLoading ? (
+              [1, 2, 3].map((item) => (
+                <div key={item} className="h-16 rounded-xl bg-slate-50 animate-pulse" />
+              ))
+            ) : stats.recent_campaigns.length === 0 ? (
               <p className="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs">No recent campaigns</p>
             ) : (
-              stats.recent_campaigns.map((campaign: any) => (
+              stats.recent_campaigns.map((campaign) => (
                 <div key={campaign.id} className="flex flex-col md:flex-row md:items-center justify-between p-4 rounded-xl border border-slate-50 bg-slate-50/50 gap-4">
                   <div className="flex items-center gap-4">
                     <div className={cn(
@@ -163,7 +210,7 @@ export default function AdvertiserDashboard() {
                     </div>
                     <div className="min-w-0">
                       <p className="text-sm font-bold text-slate-900 truncate uppercase">{campaign.name}</p>
-                      <p className="text-xs text-slate-500">{campaign.type} • {campaign.category}</p>
+                      <p className="text-xs text-slate-500">{campaign.type} - {campaign.category}</p>
                     </div>
                   </div>
                   <div className="flex items-center justify-between md:text-right gap-4">
@@ -182,10 +229,10 @@ export default function AdvertiserDashboard() {
               ))
             )}
           </div>
-        </div>
+        </div>}
 
         {/* Quick Actions */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {!loadError && <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <Link 
             href="/advertiser/campaigns/new"
             className="group p-6 bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl text-white shadow-lg shadow-blue-200 flex items-center justify-between transition-transform active:scale-[0.98]"
@@ -207,7 +254,7 @@ export default function AdvertiserDashboard() {
             </div>
             <Wallet size={32} className="text-slate-200 group-hover:text-blue-600 transition-colors" />
           </Link>
-        </div>
+        </div>}
       </div>
     </DashboardLayout>
   );

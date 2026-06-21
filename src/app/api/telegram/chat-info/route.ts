@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 
 export async function GET(request: Request) {
   try {
@@ -73,6 +73,6 @@ export async function GET(request: Request) {
     });
   } catch (error: any) {
     console.error("Telegram API Error:", error);
-    return NextResponse.json({ error: error.message || "Internal server error" }, { status: 401 });
+    return NextResponse.json({ error: error.message || "Internal server error" }, { status: getAuthErrorStatus(error) === 403 ? 403 : 401 });
   }
 }

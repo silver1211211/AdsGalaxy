@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
+import { creditUserAvailableBalance } from "@/lib/earnings";
 
 export const dynamic = 'force-dynamic';
 
@@ -40,7 +41,7 @@ export async function GET(req: NextRequest) {
 
       // Find suitable bots
       const [bots]: any = await pool.query(`
-        SELECT * FROM bots 
+        SELECT * FROM bots
         WHERE status = 'active' AND is_deleted = FALSE
         AND user_id != ?
       `, [campaign.user_id]);
@@ -127,7 +128,17 @@ export async function GET(req: NextRequest) {
             await conn.query("UPDATE campaigns SET budget = budget - ? WHERE id = ?", [cost, campaign.id]);
             
             // 2. Add reward to publisher
-            await conn.query("UPDATE users SET balance_available = balance_available + ? WHERE id = ?", [reward, bot.user_id]);
+            const creditedPublisher = await creditUserAvailableBalance(conn, bot.user_id, reward);
+            if (!creditedPublisher) {
+              await conn.rollback();
+              return {
+                status: 'skipped',
+                user: user.id,
+                campaign_id: campaign.id,
+                campaign_name: campaign.name,
+                error: "Publisher credit skipped"
+              };
+            }
             
             // 3. Record delivery
             await conn.query(`

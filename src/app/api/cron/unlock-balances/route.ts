@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
+import { creditUserAvailableBalance, unlockUserBalance } from "@/lib/earnings";
 
 export const dynamic = 'force-dynamic';
 
@@ -31,23 +32,23 @@ export async function GET(req: NextRequest) {
       // 1. Process Click Settlements
       const [clickRewards]: any = await conn.query(`
         SELECT 
-          publisher_id as user_id, 
-          GROUP_CONCAT(id) as settlement_ids,
-          SUM(publisher_reward) as total_reward
+          ad_settlements.publisher_id as user_id,
+          GROUP_CONCAT(ad_settlements.id) as settlement_ids,
+          SUM(ad_settlements.publisher_reward) as total_reward
         FROM ad_settlements
-        WHERE status = 'locked' AND created_at < NOW() - INTERVAL 30 DAY
-        GROUP BY publisher_id
+        WHERE ad_settlements.status = 'locked' AND ad_settlements.created_at < NOW() - INTERVAL 30 DAY
+        GROUP BY ad_settlements.publisher_id
       `);
 
       // 2. Process View Settlements
       const [viewRewards]: any = await conn.query(`
         SELECT 
-          publisher_id as user_id, 
-          GROUP_CONCAT(id) as settlement_ids,
-          SUM(publisher_reward) as total_reward
+          ad_settlements_views.publisher_id as user_id,
+          GROUP_CONCAT(ad_settlements_views.id) as settlement_ids,
+          SUM(ad_settlements_views.publisher_reward) as total_reward
         FROM ad_settlements_views
-        WHERE status = 'locked' AND created_at < NOW() - INTERVAL 30 DAY
-        GROUP BY publisher_id
+        WHERE ad_settlements_views.status = 'locked' AND ad_settlements_views.created_at < NOW() - INTERVAL 30 DAY
+        GROUP BY ad_settlements_views.publisher_id
       `);
 
       // Combine rewards by user
@@ -91,10 +92,11 @@ export async function GET(req: NextRequest) {
 
           if (amountToTransfer > 0) {
             // A. Transfer balance for the publisher
-            await conn.query(
-              "UPDATE users SET balance_locked = balance_locked - ?, balance_available = balance_available + ? WHERE id = ?",
-              [amountToTransfer, amountToTransfer, userId]
-            );
+            const unlockedPublisher = await unlockUserBalance(conn, userId, amountToTransfer);
+            if (!unlockedPublisher) {
+              await conn.rollback();
+              continue;
+            }
 
             // B. Reward the Referrer (if any)
             const [referralRow]: any = await conn.query(
@@ -107,11 +109,14 @@ export async function GET(req: NextRequest) {
               const referralReward = amountToTransfer * referralPercent;
 
               if (referralReward > 0) {
-                await conn.query(
-                  "UPDATE users SET balance_available = balance_available + ?, total_referral_earnings = total_referral_earnings + ? WHERE id = ?",
-                  [referralReward, referralReward, referrerId]
-                );
-                results.referral_rewards_sent += referralReward;
+                const creditedReferrer = await creditUserAvailableBalance(conn, referrerId, referralReward);
+                if (creditedReferrer) {
+                  await conn.query(
+                    "UPDATE users SET total_referral_earnings = total_referral_earnings + ? WHERE id = ?",
+                    [referralReward, referrerId]
+                  );
+                  results.referral_rewards_sent += referralReward;
+                }
               }
             }
 

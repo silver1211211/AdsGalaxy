@@ -2,8 +2,18 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Bot, Search, Users, ShieldOff, Pause, Play } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Bot, Search, Users, ShieldOff, Pause, Play, Trash2 } from "lucide-react";
 import Modal from "@/components/ui/Modal";
+import ConfirmationModal from "@/components/ui/ConfirmationModal";
+
+type BotAction = "activate" | "reject" | "pause" | "delete";
+type PendingAction = {
+  bot: any;
+  action: BotAction;
+  title: string;
+  message: string;
+  danger?: boolean;
+} | null;
 
 export default function AdminBotsPage() {
   const [bots, setBots] = useState([]);
@@ -17,6 +27,7 @@ export default function AdminBotsPage() {
 
   const [viewModalOpen, setViewModalOpen] = useState(false);
   const [selectedBot, setSelectedBot] = useState<any>(null);
+  const [pendingAction, setPendingAction] = useState<PendingAction>(null);
 
   const fetchBots = async (p: number, s: string, q: string) => {
     setLoading(true);
@@ -63,6 +74,103 @@ export default function AdminBotsPage() {
     setViewModalOpen(true);
   };
 
+  const openActionConfirm = (bot: any, action: BotAction, title: string, message: string, danger = false) => {
+    setPendingAction({ bot, action, title, message, danger });
+  };
+
+  const confirmPendingAction = async () => {
+    if (!pendingAction) return;
+    const { bot, action } = pendingAction;
+    setPendingAction(null);
+    await handleAction(bot.id, action);
+  };
+
+  const StatusBadge = ({ status }: { status: string }) => (
+    <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${status === 'active' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : status === 'pending' ? 'bg-amber-50 text-amber-700 border border-amber-200' : status === 'rejected' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-700 border border-slate-200'}`}>
+      {status}
+    </span>
+  );
+
+  const ActionButtons = ({ bot }: { bot: any }) => (
+    <div className="flex flex-wrap items-center justify-end gap-2">
+      <button
+        onClick={() => openViewModal(bot)}
+        className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors cursor-pointer"
+        title="View Details"
+      >
+        <Eye size={16} />
+      </button>
+      {bot.status === "pending" && (
+        <>
+          <button
+            onClick={() => openActionConfirm(bot, "activate", "Activate Bot", "Activate this bot?")}
+            disabled={actionLoading === bot.id}
+            className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
+            title="Approve"
+          >
+            {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
+          </button>
+          <button
+            onClick={() => openActionConfirm(bot, "reject", "Reject Bot", "Reject this bot?", true)}
+            disabled={actionLoading === bot.id}
+            className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
+            title="Reject"
+          >
+            {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
+          </button>
+        </>
+      )}
+      {bot.status === "active" && (
+        <button
+          onClick={() => openActionConfirm(bot, "pause", "Pause Bot", "Pause this bot?")}
+          disabled={actionLoading === bot.id}
+          className="p-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 rounded-md transition-colors border border-amber-100 cursor-pointer disabled:cursor-not-allowed"
+          title="Pause"
+        >
+          {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Pause size={16} />}
+        </button>
+      )}
+      {bot.status === "paused" && (
+        <button
+          onClick={() => openActionConfirm(bot, "activate", "Resume Bot", "Resume this bot?")}
+          disabled={actionLoading === bot.id}
+          className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
+          title="Resume"
+        >
+          {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Play size={16} />}
+        </button>
+      )}
+      {bot.status === "rejected" && (
+        <button
+          onClick={() => openActionConfirm(bot, "activate", "Activate Bot", "Activate this rejected bot?")}
+          disabled={actionLoading === bot.id}
+          className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
+          title="Activate"
+        >
+          {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
+        </button>
+      )}
+      {bot.status !== "rejected" && bot.status !== "pending" && (
+        <button
+          onClick={() => openActionConfirm(bot, "reject", "Reject Bot", "Reject this bot?", true)}
+          disabled={actionLoading === bot.id}
+          className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
+          title="Reject"
+        >
+          {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
+        </button>
+      )}
+      <button
+        onClick={() => openActionConfirm(bot, "delete", "Delete Bot", "Delete this bot from monetization?", true)}
+        disabled={actionLoading === bot.id}
+        className="p-1.5 bg-red-50 text-red-700 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
+        title="Delete"
+      >
+        {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Trash2 size={16} />}
+      </button>
+    </div>
+  );
+
   const renderContinents = (continentsStr: string) => {
     if (!continentsStr) return <span className="font-medium text-slate-900">All</span>;
     try {
@@ -104,6 +212,16 @@ export default function AdminBotsPage() {
   return (
     <AdminLayout>
       <Modal isOpen={!!error} onClose={() => setError("")} type="error" title="Error">{error}</Modal>
+      <ConfirmationModal
+        isOpen={!!pendingAction}
+        onClose={() => setPendingAction(null)}
+        onConfirm={confirmPendingAction}
+        title={pendingAction?.title || ""}
+        message={pendingAction?.message || ""}
+        confirmBtnText="Confirm"
+        confirmBtnVariant={pendingAction?.danger ? "danger" : "primary"}
+        isLoading={actionLoading !== null}
+      />
 
       {/* View Bot Modal */}
       {viewModalOpen && selectedBot && (
@@ -207,7 +325,7 @@ export default function AdminBotsPage() {
           </div>
         </div>
         
-        <div className="overflow-x-auto">
+        <div className="hidden overflow-x-auto md:block">
           <table className="w-full text-left text-sm whitespace-nowrap min-w-[800px]">
             <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
               <tr>
@@ -222,9 +340,9 @@ export default function AdminBotsPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <tr><td colSpan={5} className="p-8 text-center"><Loader2 className="animate-spin text-blue-600 mx-auto" size={20} /></td></tr>
+                <tr><td colSpan={7} className="p-8 text-center"><Loader2 className="animate-spin text-blue-600 mx-auto" size={20} /></td></tr>
               ) : bots.length === 0 ? (
-                <tr><td colSpan={5} className="p-8 text-center text-slate-500">No bots found.</td></tr>
+                <tr><td colSpan={7} className="p-8 text-center text-slate-500">No bots found.</td></tr>
               ) : (
                 bots.map((bot: any) => (
                   <tr key={bot.id} className="hover:bg-slate-50 transition-colors">
@@ -233,7 +351,7 @@ export default function AdminBotsPage() {
                         <Bot size={14} className="text-indigo-500" />
                         @{bot.bot_username || "N/A"}
                       </div>
-                      <div className="text-xs text-slate-500">ID: #{bot.id} • User: {bot.user_id}</div>
+                      <div className="text-xs text-slate-500">ID: #{bot.id} - User: {bot.user_id}</div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="font-medium text-slate-900 truncate max-w-[150px]" title={bot.bot_name}>{bot.bot_name || "N/A"}</div>
@@ -248,86 +366,47 @@ export default function AdminBotsPage() {
                       <div className="font-medium text-slate-900">{bot.posts_per_day}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${bot.status === 'active' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : bot.status === 'pending' ? 'bg-amber-50 text-amber-700 border border-amber-200' : bot.status === 'rejected' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-700 border border-slate-200'}`}>
-                        {bot.status}
-                      </span>
+                      <StatusBadge status={bot.status} />
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <button 
-                          onClick={() => openViewModal(bot)}
-                          className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors cursor-pointer"
-                          title="View Details"
-                        >
-                          <Eye size={16} />
-                        </button>
-                        {bot.status === "pending" && (
-                          <>
-                            <button 
-                              onClick={() => window.confirm("Activate this bot?") && handleAction(bot.id, "activate")}
-                              disabled={actionLoading === bot.id}
-                              className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
-                              title="Approve"
-                            >
-                              {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
-                            </button>
-                            <button 
-                              onClick={() => window.confirm("Reject this bot?") && handleAction(bot.id, "reject")}
-                              disabled={actionLoading === bot.id}
-                              className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
-                              title="Reject"
-                            >
-                              {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
-                            </button>
-                          </>
-                        )}
-                        {bot.status === "active" && (
-                          <button
-                            onClick={() => window.confirm("Pause this bot?") && handleAction(bot.id, "pause")}
-                            disabled={actionLoading === bot.id}
-                            className="p-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 rounded-md transition-colors border border-amber-100 cursor-pointer disabled:cursor-not-allowed"
-                            title="Pause"
-                          >
-                            {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Pause size={16} />}
-                          </button>
-                        )}
-                        {bot.status === "paused" && (
-                          <button
-                            onClick={() => window.confirm("Resume this bot?") && handleAction(bot.id, "activate")}
-                            disabled={actionLoading === bot.id}
-                            className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
-                            title="Resume"
-                          >
-                            {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Play size={16} />}
-                          </button>
-                        )}
-                        {bot.status === "rejected" && (
-                          <button
-                            onClick={() => window.confirm("Activate this rejected bot?") && handleAction(bot.id, "activate")}
-                            disabled={actionLoading === bot.id}
-                            className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
-                            title="Activate"
-                          >
-                            {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
-                          </button>
-                        )}
-                        {bot.status !== "rejected" && bot.status !== "pending" && (
-                          <button
-                            onClick={() => window.confirm("Reject this bot?") && handleAction(bot.id, "reject")}
-                            disabled={actionLoading === bot.id}
-                            className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
-                            title="Reject"
-                          >
-                            {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
-                          </button>
-                        )}
-                      </div>
+                      <ActionButtons bot={bot} />
                     </td>
                   </tr>
                 ))
               )}
             </tbody>
           </table>
+        </div>
+
+        <div className="space-y-3 p-3 md:hidden">
+          {loading ? (
+            <div className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></div>
+          ) : bots.length === 0 ? (
+            <div className="p-8 text-center text-sm text-slate-500">No bots found.</div>
+          ) : (
+            bots.map((bot: any) => (
+              <div key={bot.id} className="rounded-lg border border-slate-200 p-3 shadow-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 font-semibold text-slate-900">
+                      <Bot size={14} className="text-indigo-500" />
+                      <span className="truncate">{bot.bot_name || "N/A"}</span>
+                    </div>
+                    <div className="text-xs text-slate-500">@{bot.bot_username || "N/A"}</div>
+                    <div className="text-xs text-slate-400">User #{bot.user_id}</div>
+                  </div>
+                  <StatusBadge status={bot.status} />
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Active</div><div className="font-semibold text-emerald-700">{(bot.active_count || 0).toLocaleString()}</div></div>
+                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Blocked</div><div className="font-semibold text-red-700">{(bot.blocked_count || 0).toLocaleString()}</div></div>
+                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Posts/Day</div><div className="font-semibold text-slate-900">{bot.posts_per_day || 0}</div></div>
+                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Updated</div><div className="font-semibold text-slate-900">{bot.updated_at ? new Date(bot.updated_at).toLocaleDateString() : bot.created_at ? new Date(bot.created_at).toLocaleDateString() : "N/A"}</div></div>
+                </div>
+                <div className="mt-3"><ActionButtons bot={bot} /></div>
+              </div>
+            ))
+          )}
         </div>
 
         <div className="px-4 py-3 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500">

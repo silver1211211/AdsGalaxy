@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 
 const OXAPAY_STATUS_URL = "https://api.oxapay.com/v1/payment/";
 const OXAPAY_KEY = process.env.OXAPAY_MERCHANT_API_KEY;
@@ -86,7 +86,7 @@ export async function GET(
     return NextResponse.json(deposit);
   } catch (error: any) {
     console.error("Deposit Status Check Error:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
   }
 }
 
@@ -110,6 +110,6 @@ export async function PATCH(
 
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
   }
 }

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 
 export async function GET(
   request: Request,
@@ -33,7 +33,7 @@ export async function GET(
       blocked: counts[0].blocked || 0
     });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
   }
 }
 
@@ -126,6 +126,6 @@ export async function POST(
     });
   } catch (error: any) {
     console.error("Bulk Add Bot Users Error:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
   }
 }

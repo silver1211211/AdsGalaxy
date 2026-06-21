@@ -48,19 +48,23 @@ function decodeAdminCookie(value: string) {
 }
 
 export async function checkAdminAuth() {
+  return Boolean(await getAuthenticatedAdmin());
+}
+
+export async function getAuthenticatedAdmin() {
   const cookieStore = await cookies();
   const adminCookie = await cookieStore.get("admin_auth");
   console.info("Admin auth check", { cookie_exists: !!adminCookie });
 
   if (!adminCookie) {
-    return false;
+    return null;
   }
 
   try {
     const credentials = decodeAdminCookie(adminCookie.value);
     if (!credentials) {
       console.warn("Admin auth cookie decode failed");
-      return false;
+      return null;
     }
 
     const { username, password } = credentials;
@@ -73,11 +77,11 @@ export async function checkAdminAuth() {
     console.info("Admin auth database match", { username, matched: rows.length > 0 });
 
     if (rows.length > 0) {
-      return true;
+      return rows[0];
     }
   } catch (error: unknown) {
     console.error("Admin auth check error:", error);
   }
 
-  return false;
+  return null;
 }

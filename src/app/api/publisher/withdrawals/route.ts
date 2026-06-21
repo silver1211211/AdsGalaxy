@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { sendTelegramMessage } from "@/lib/telegram";
 
 export async function GET(request: Request) {
@@ -25,7 +25,7 @@ export async function GET(request: Request) {
     });
   } catch (error: any) {
     console.error("GET Withdrawals Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to fetch data" }, { status: 500 });
+    return NextResponse.json({ error: error.message || "Failed to fetch data" }, { status: getAuthErrorStatus(error) });
   }
 }
 
@@ -55,24 +55,32 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: `Maximum withdrawal is $${settings.max_withdraw}` }, { status: 400 });
     }
 
-    // Check balance
-    const [userRows]: any = await pool.query("SELECT balance_available, telegram_id FROM users WHERE id = ?", [user.id]);
-    const availableBalance = parseFloat(userRows[0].balance_available);
-
-    if (availableBalance < withdrawAmount) {
-      return NextResponse.json({ error: "Insufficient available balance" }, { status: 400 });
-    }
-
     // Process Withdrawal (Transactional)
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
 
-      // Deduct from available, add to locked (or just record as pending)
-      await connection.query(
-        "UPDATE users SET balance_available = balance_available - ?, balance_locked = balance_locked + ? WHERE id = ?",
-        [withdrawAmount, withdrawAmount, user.id]
+      const [userRows]: any = await connection.query(
+        "SELECT balance_available, telegram_id FROM users WHERE id = ? FOR UPDATE",
+        [user.id]
       );
+      const availableBalance = parseFloat(userRows[0]?.balance_available || "0");
+
+      if (availableBalance < withdrawAmount) {
+        await connection.rollback();
+        return NextResponse.json({ error: "Insufficient available balance" }, { status: 400 });
+      }
+
+      // Deduct from available, add to locked (or just record as pending)
+      const [deductionResult]: any = await connection.query(
+        "UPDATE users SET balance_available = balance_available - ?, balance_locked = balance_locked + ? WHERE id = ? AND balance_available >= ?",
+        [withdrawAmount, withdrawAmount, user.id, withdrawAmount]
+      );
+
+      if (deductionResult.affectedRows !== 1) {
+        await connection.rollback();
+        return NextResponse.json({ error: "Insufficient available balance" }, { status: 400 });
+      }
 
       await connection.query(
         "INSERT INTO withdrawals (user_id, amount, network, address, status) VALUES (?, ?, ?, ?, 'pending')",
@@ -99,6 +107,6 @@ export async function POST(request: Request) {
     }
   } catch (error: any) {
     console.error("POST Withdrawal Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to place withdrawal" }, { status: 500 });
+    return NextResponse.json({ error: error.message || "Failed to place withdrawal" }, { status: getAuthErrorStatus(error) });
   }
 }

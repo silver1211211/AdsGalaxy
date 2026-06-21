@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { assertCampaignLifecycleColumns } from "@/lib/campaignLifecycle";
 import { deleteActiveCampaignPosts } from "@/lib/campaignPostDeletion";
 
@@ -101,7 +101,7 @@ export async function GET(
       chart_data: chartData
     });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
   }
 }
 
@@ -251,6 +251,6 @@ export async function PATCH(
 
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
   }
 }

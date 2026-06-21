@@ -1,5 +1,4 @@
 import { Geist, Geist_Mono } from "next/font/google";
-import Script from "next/script";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -16,6 +15,8 @@ import { HeaderProvider } from "@/context/HeaderContext";
 
 import TelegramScript from "@/components/shared/TelegramScript";
 
+const appBuildMarker = process.env.NEXT_PUBLIC_APP_VERSION || "ui-render-stability-20260621";
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -29,6 +30,7 @@ export default function RootLayout({
     >
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+        <meta name="adsgalaxy-build" content={appBuildMarker} />
       </head>
       <body className="min-h-full flex flex-col" suppressHydrationWarning>
         <TelegramScript />

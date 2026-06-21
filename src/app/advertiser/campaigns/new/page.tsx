@@ -16,16 +16,16 @@ import {
   Send,
   Trash2,
   ChevronRight,
-  ChevronLeft
+  ChevronLeft,
+  ChevronDown
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
 import { useHeader } from "@/context/HeaderContext";
 import { useRouter } from "next/navigation";
 import Modal from "@/components/ui/Modal";
-import { ALL_CATEGORIES, CAMPAIGN_CATEGORIES } from "@/lib/campaignCategories";
+import { CAMPAIGN_CATEGORIES } from "@/lib/campaignCategories";
 
-const CATEGORIES = CAMPAIGN_CATEGORIES.filter(category => category !== ALL_CATEGORIES);
 const BUTTON_TEXTS = ["Learn more", "Get started", "Join channel", "Join group", "Start bot", "Buy Now", "Sign Up", "Download", "Visit site", "Play now", "Shop now"];
 const CONTINENTS = [
   { id: "global", name: "Global", countries: "All countries" },
@@ -72,11 +72,26 @@ export default function NewCampaignPage() {
   const [image, setImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [categoryDropdownOpen, setCategoryDropdownOpen] = useState(false);
+  const categoryDropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setTitle("Create Campaign");
     fetchSettings();
   }, [setTitle]);
+
+  useEffect(() => {
+    if (!categoryDropdownOpen) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!categoryDropdownRef.current?.contains(event.target as Node)) {
+        setCategoryDropdownOpen(false);
+      }
+    };
+
+    window.addEventListener("click", handleClickOutside);
+    return () => window.removeEventListener("click", handleClickOutside);
+  }, [categoryDropdownOpen]);
 
   const fetchSettings = async () => {
     try {
@@ -299,17 +314,39 @@ export default function NewCampaignPage() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="space-y-3">
                   <label className="text-xs font-black uppercase tracking-widest text-slate-400">Category</label>
-                  <div className="relative">
+                  <div className="relative" ref={categoryDropdownRef}>
                     <Globe size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 z-10 pointer-events-none" />
-                    <select
-                      value={formData.category}
-                      onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                      className="w-full pl-12 pr-6 py-3 bg-white border border-slate-200 rounded-2xl focus:border-blue-500 outline-none font-bold text-slate-900 appearance-none cursor-pointer"
+                    <button
+                      type="button"
+                      onClick={() => setCategoryDropdownOpen((prev) => !prev)}
+                      className="w-full pl-12 pr-6 py-3 bg-white border border-slate-200 rounded-2xl focus:border-blue-500 outline-none font-bold text-slate-900 cursor-pointer flex items-center justify-between text-left"
                     >
-                      <option value="" disabled>Select category</option>
-                      <option value={ALL_CATEGORIES}>{ALL_CATEGORIES}</option>
-                      {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-                    </select>
+                      <span className={cn(!formData.category && "text-slate-400")}>
+                        {formData.category || "Select category"}
+                      </span>
+                      <ChevronDown size={18} className={cn("text-slate-400 transition-transform shrink-0", categoryDropdownOpen && "rotate-180")} />
+                    </button>
+
+                    {categoryDropdownOpen && (
+                      <div className="absolute left-0 right-0 top-[calc(100%+8px)] z-30 max-h-64 overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-xl">
+                        {CAMPAIGN_CATEGORIES.map((cat) => (
+                          <button
+                            key={cat}
+                            type="button"
+                            onClick={() => {
+                              setFormData({ ...formData, category: cat });
+                              setCategoryDropdownOpen(false);
+                            }}
+                            className={cn(
+                              "w-full px-4 py-3 text-left text-sm font-bold transition-colors hover:bg-slate-50",
+                              formData.category === cat ? "bg-blue-50 text-blue-600" : "text-slate-700"
+                            )}
+                          >
+                            {cat}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
                   <div className="grid grid-cols-3 gap-2 bg-slate-100 p-1 rounded-2xl border border-slate-300 h-[50px]">

@@ -1,61 +1,102 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import Header from "./Header";
 import Sidebar from "./Sidebar";
-import { Loader2 } from "lucide-react";
+import { apiFetch } from "@/lib/api";
+import BannedScreen from "@/components/auth/BannedScreen";
+import AppBootState from "@/components/shared/AppBootState";
+import { isTelegramMiniApp, safePrepareTelegramWebApp, waitForTelegramInitData } from "@/lib/telegramWebApp";
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
   type: "publisher" | "advertiser";
 }
 
+type BootState = "checking" | "ready" | "banned" | "error";
+
 export default function DashboardLayout({ children, type }: DashboardLayoutProps) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isReady, setIsReady] = useState(false);
+  const [bootState, setBootState] = useState<BootState>("checking");
 
   useEffect(() => {
-    const webapp = (window as any).Telegram?.WebApp;
-    if (webapp) {
-      webapp.ready();
-      webapp.expand();
-      // Small delay to ensure initData is populated
-      const timer = setTimeout(() => setIsReady(true), 100);
-      return () => clearTimeout(timer);
-    } else {
-      // For local browser testing, we still need to show something
-      // but initData will be missing. 
-      setIsReady(true);
-    }
-  }, []);
+    let cancelled = false;
 
-  // Save dashboard preference
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      localStorage.setItem("last_dashboard", type);
+    const handleRestricted = () => {
+      if (!cancelled) setBootState("banned");
+    };
+
+    async function bootDashboard() {
+      window.addEventListener("adsgalaxy:account-restricted", handleRestricted);
+      safePrepareTelegramWebApp();
+
+      try {
+        await waitForTelegramInitData({ requireTelegram: isTelegramMiniApp() });
+
+        const res = await apiFetch("/api/me/status", { timeoutMs: 12000 });
+        const data = await res.json().catch(() => ({}));
+
+        if (cancelled) return;
+        if (res.status === 403 || data.status === "banned" || data.is_banned) {
+          setBootState("banned");
+          return;
+        }
+
+        if (!res.ok && isTelegramMiniApp()) {
+          throw new Error(data.error || "Unable to verify account status");
+        }
+
+        window.localStorage.setItem("last_dashboard", type);
+        setBootState("ready");
+      } catch (error) {
+        console.error("Dashboard boot failed:", error);
+        if (!cancelled) setBootState("error");
+      }
     }
+
+    bootDashboard();
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener("adsgalaxy:account-restricted", handleRestricted);
+    };
   }, [type]);
 
-  if (!isReady) {
+  if (bootState === "checking") {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-4">
-        <Loader2 className="animate-spin text-[#0c9de8]" size={40} />
-        <p className="text-slate-400 font-black uppercase tracking-widest text-[10px]">Initializing...</p>
-      </div>
+      <AppBootState
+        title="Loading AdsGalaxy"
+        message="Verifying your Mini App session..."
+      />
     );
+  }
+
+  if (bootState === "error") {
+    return (
+      <AppBootState
+        mode="error"
+        title="Unable to load AdsGalaxy"
+        message="We couldn't start the Mini App. Please reload and try again."
+        detail="If this continues, contact support."
+      />
+    );
+  }
+
+  if (bootState === "banned") {
+    return <BannedScreen />;
   }
 
   return (
     <div className="min-h-screen bg-slate-50">
       <Header toggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)} />
-      <Sidebar 
-        type={type} 
-        isOpen={isSidebarOpen} 
-        onClose={() => setIsSidebarOpen(false)} 
+      <Sidebar
+        type={type}
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
       />
-      
-      <main className="lg:pl-64 pt-16 min-h-screen transition-all duration-300">
-        <div className="p-4 lg:p-8 max-w-7xl mx-auto">
+
+      <main className="min-h-screen pt-16 transition-all duration-300 lg:pl-64">
+        <div className="mx-auto max-w-7xl p-4 lg:p-8">
           {children}
         </div>
       </main>

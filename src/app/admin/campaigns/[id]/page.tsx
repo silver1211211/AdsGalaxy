@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import AdminLayout from "@/components/layout/AdminLayout";
 import Modal from "@/components/ui/Modal";
+import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import { ArrowLeft, Loader2, Pause, Play, Trash2, Zap } from "lucide-react";
 
 function formatValue(value: unknown) {
@@ -80,6 +81,16 @@ type CampaignDetailsData = {
   placements?: PlacementRow[];
 };
 
+type ConfirmAction = "pause" | "resume" | "delete";
+type PendingConfirm = {
+  action: ConfirmAction;
+  title: string;
+  message: string;
+  danger?: boolean;
+} | null;
+
+type PendingEmergency = "fill_empty_slots" | "replace_everything" | null;
+
 export default function AdminCampaignDetailsPage() {
   const params = useParams<{ id: string }>();
   const [loading, setLoading] = useState(true);
@@ -87,6 +98,9 @@ export default function AdminCampaignDetailsPage() {
   const [error, setError] = useState("");
   const [summary, setSummary] = useState<EmergencyPushSummary | null>(null);
   const [data, setData] = useState<CampaignDetailsData | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm>(null);
+  const [pendingEmergency, setPendingEmergency] = useState<PendingEmergency>(null);
+  const [typedConfirmation, setTypedConfirmation] = useState("");
 
   const fetchDetails = async () => {
     setLoading(true);
@@ -107,12 +121,6 @@ export default function AdminCampaignDetailsPage() {
   }, [params.id]);
 
   const runAction = async (action: "pause" | "resume" | "delete") => {
-    const message = action === "delete"
-      ? "Delete this campaign? Active Telegram posts will be deleted and the campaign will be marked deleted."
-      : `${action === "pause" ? "Pause" : "Resume"} this campaign?`;
-
-    if (!window.confirm(message)) return;
-
     setActionLoading(action);
     try {
       const res = await fetch(`/api/admin/campaigns/${params.id}/actions`, {
@@ -133,19 +141,7 @@ export default function AdminCampaignDetailsPage() {
   const runEmergencyPush = async (mode: "fill_empty_slots" | "replace_everything") => {
     const label = mode === "fill_empty_slots" ? "Fill Empty Slots" : "Replace Everything";
     const actionKey = mode === "fill_empty_slots" ? "emergency-fill" : "emergency-replace";
-    let confirmation: string | undefined;
-
-    if (mode === "fill_empty_slots") {
-      const proceed = window.confirm(
-        "You are about to immediately push this campaign to all eligible empty channels. Normal posting schedules will be bypassed for this emergency action only. Continue?"
-      );
-      if (!proceed) return;
-    } else {
-      confirmation = window.prompt(
-        "Danger: This will delete all currently active ads from Telegram channels, then immediately push this campaign to eligible channels. This may affect all advertisers. Type CONFIRM to continue."
-      ) || "";
-      if (confirmation !== "CONFIRM") return;
-    }
+    const confirmation = mode === "replace_everything" ? typedConfirmation : undefined;
 
     setActionLoading(actionKey);
     try {
@@ -169,9 +165,67 @@ export default function AdminCampaignDetailsPage() {
   const metrics = data?.metrics || {};
   const placements = data?.placements || [];
 
+  const openActionConfirm = (action: ConfirmAction) => {
+    setPendingConfirm({
+      action,
+      title: action === "delete" ? "Delete Campaign" : `${action === "pause" ? "Pause" : "Resume"} Campaign`,
+      message: action === "delete"
+        ? "Delete this campaign? Active Telegram posts will be deleted and the campaign will be marked deleted."
+        : `${action === "pause" ? "Pause" : "Resume"} this campaign?`,
+      danger: action === "delete",
+    });
+  };
+
+  const confirmAction = async () => {
+    if (!pendingConfirm) return;
+    const action = pendingConfirm.action;
+    setPendingConfirm(null);
+    await runAction(action);
+  };
+
+  const openEmergencyConfirm = (mode: "fill_empty_slots" | "replace_everything") => {
+    setTypedConfirmation("");
+    setPendingEmergency(mode);
+  };
+
+  const confirmEmergency = async () => {
+    if (!pendingEmergency) return;
+    const mode = pendingEmergency;
+    setPendingEmergency(null);
+    await runEmergencyPush(mode);
+    setTypedConfirmation("");
+  };
+
   return (
     <AdminLayout>
       <Modal isOpen={!!error} onClose={() => setError("")} type="error" title="Error">{error}</Modal>
+      <ConfirmationModal
+        isOpen={!!pendingConfirm}
+        onClose={() => setPendingConfirm(null)}
+        onConfirm={confirmAction}
+        title={pendingConfirm?.title || ""}
+        message={pendingConfirm?.message || ""}
+        confirmBtnText="Confirm"
+        confirmBtnVariant={pendingConfirm?.danger ? "danger" : "primary"}
+        isLoading={!!actionLoading}
+      />
+      <ConfirmationModal
+        isOpen={!!pendingEmergency}
+        onClose={() => { setPendingEmergency(null); setTypedConfirmation(""); }}
+        onConfirm={confirmEmergency}
+        title={pendingEmergency === "replace_everything" ? "Emergency Push: Replace Everything" : "Emergency Push: Fill Empty Slots"}
+        message={pendingEmergency === "replace_everything"
+          ? "Danger: This will delete all currently active ads from Telegram channels, then immediately push this campaign to eligible channels. This may affect all advertisers. Type CONFIRM to continue."
+          : "You are about to immediately push this campaign to all eligible empty channels. Normal posting schedules will be bypassed for this emergency action only. Continue?"}
+        confirmBtnText={pendingEmergency === "replace_everything" ? "Replace Everything" : "Push Now"}
+        confirmBtnVariant={pendingEmergency === "replace_everything" ? "danger" : "primary"}
+        isLoading={!!actionLoading}
+        typedConfirmation={pendingEmergency === "replace_everything" ? {
+          phrase: "CONFIRM",
+          value: typedConfirmation,
+          onChange: setTypedConfirmation,
+        } : undefined}
+      />
       <Modal isOpen={!!summary} onClose={() => setSummary(null)} type="success" title="Emergency Push Summary">
         {summary && (
           <div className="space-y-3 text-sm">
@@ -215,26 +269,26 @@ export default function AdminCampaignDetailsPage() {
             <div className="flex items-center gap-2">
               {campaign.status === "active" && (
                 <>
-                  <button onClick={() => runEmergencyPush("fill_empty_slots")} disabled={!!actionLoading} className="px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
+                  <button onClick={() => openEmergencyConfirm("fill_empty_slots")} disabled={!!actionLoading} className="px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                     {actionLoading === "emergency-fill" ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />} Emergency Push: Fill Empty Slots
                   </button>
-                  <button onClick={() => runEmergencyPush("replace_everything")} disabled={!!actionLoading} className="px-3 py-1.5 bg-red-50 text-red-700 border border-red-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
+                  <button onClick={() => openEmergencyConfirm("replace_everything")} disabled={!!actionLoading} className="px-3 py-1.5 bg-red-50 text-red-700 border border-red-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                     {actionLoading === "emergency-replace" ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />} Emergency Push: Replace Everything
                   </button>
                 </>
               )}
               {campaign.status === "active" && (
-                <button onClick={() => runAction("pause")} disabled={!!actionLoading} className="px-3 py-1.5 bg-amber-50 text-amber-700 border border-amber-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
+                <button onClick={() => openActionConfirm("pause")} disabled={!!actionLoading} className="px-3 py-1.5 bg-amber-50 text-amber-700 border border-amber-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                   {actionLoading === "pause" ? <Loader2 size={14} className="animate-spin" /> : <Pause size={14} />} Pause
                 </button>
               )}
               {campaign.status === "paused" && (
-                <button onClick={() => runAction("resume")} disabled={!!actionLoading} className="px-3 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
+                <button onClick={() => openActionConfirm("resume")} disabled={!!actionLoading} className="px-3 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                   {actionLoading === "resume" ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />} Resume
                 </button>
               )}
               {campaign.status !== "deleted" && (
-                <button onClick={() => runAction("delete")} disabled={!!actionLoading} className="px-3 py-1.5 bg-red-50 text-red-700 border border-red-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
+                <button onClick={() => openActionConfirm("delete")} disabled={!!actionLoading} className="px-3 py-1.5 bg-red-50 text-red-700 border border-red-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                   {actionLoading === "delete" ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />} Delete
                 </button>
               )}

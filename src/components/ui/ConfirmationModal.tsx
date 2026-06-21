@@ -10,10 +10,17 @@ interface ConfirmationModalProps {
   onConfirm: () => void;
   title: string;
   message: string;
+  children?: React.ReactNode;
   confirmBtnText?: string;
   closeBtnText?: string;
   confirmBtnVariant?: "danger" | "primary";
   isLoading?: boolean;
+  typedConfirmation?: {
+    phrase: string;
+    value: string;
+    onChange: (value: string) => void;
+    label?: string;
+  };
 }
 
 export default function ConfirmationModal({
@@ -22,12 +29,15 @@ export default function ConfirmationModal({
   onConfirm,
   title,
   message,
+  children,
   confirmBtnText = "Confirm",
   closeBtnText = "Close",
   confirmBtnVariant = "primary",
   isLoading = false,
+  typedConfirmation,
 }: ConfirmationModalProps) {
   if (!isOpen) return null;
+  const typedConfirmationMatches = !typedConfirmation || typedConfirmation.value === typedConfirmation.phrase;
 
   return (
     <AnimatePresence>
@@ -63,6 +73,22 @@ export default function ConfirmationModal({
               {message}
             </p>
 
+            {children}
+
+            {typedConfirmation && (
+              <div className="space-y-2">
+                <label className="block text-xs font-black uppercase tracking-wide text-slate-500">
+                  {typedConfirmation.label || `Type ${typedConfirmation.phrase} to continue`}
+                </label>
+                <input
+                  value={typedConfirmation.value}
+                  onChange={(event) => typedConfirmation.onChange(event.target.value)}
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:border-blue-500"
+                  placeholder={typedConfirmation.phrase}
+                />
+              </div>
+            )}
+
             <div className="flex gap-3 w-full pt-2">
               <button
                 disabled={isLoading}
@@ -72,13 +98,13 @@ export default function ConfirmationModal({
                 {closeBtnText}
               </button>
               <button
-                disabled={isLoading}
+                disabled={isLoading || !typedConfirmationMatches}
                 onClick={onConfirm}
                 className={`flex-1 py-3.5 rounded-2xl font-black text-sm transition-all flex items-center justify-center ${
                   confirmBtnVariant === "danger"
                     ? "bg-red-500 text-white hover:bg-red-600"
                     : "bg-[#0c9de8] text-white hover:bg-blue-600"
-                }`}
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
               >
                 {isLoading ? (
                   <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />

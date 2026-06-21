@@ -86,7 +86,7 @@ export async function PATCH(request: Request) {
 
   try {
     const { id, action } = await request.json();
-    const normalizedAction = action === "deny" ? "reject" : action;
+    const normalizedAction = action === "deny" ? "reject" : action === "approve" ? "activate" : action;
 
     // Fetch bot and owner details
     const [rows]: any = await pool.query(
@@ -102,16 +102,35 @@ export async function PATCH(request: Request) {
     }
 
     const bot = rows[0];
-    const status = normalizedAction === "approve" ? "active" : "rejected";
-    
-    await pool.query("UPDATE bots SET status = ? WHERE id = ?", [status, id]);
+    const statusMap: Record<string, string> = {
+      activate: "active",
+      pause: "paused",
+      reject: "rejected",
+      delete: "deleted",
+    };
+
+    if (!statusMap[normalizedAction]) {
+      return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+    }
+
+    const status = statusMap[normalizedAction];
+
+    if (normalizedAction === "activate") {
+      await pool.query("UPDATE bots SET status = ?, is_deleted = FALSE WHERE id = ?", [status, id]);
+    } else if (normalizedAction === "delete") {
+      await pool.query("UPDATE bots SET status = ?, is_deleted = TRUE WHERE id = ?", [status, id]);
+    } else {
+      await pool.query("UPDATE bots SET status = ? WHERE id = ?", [status, id]);
+    }
 
     // Send Telegram Notification
-    const message = normalizedAction === "approve" 
+    const message = normalizedAction === "activate"
       ? `🤖 <b>Bot Approved!</b>\n\nYour bot <b>${bot.bot_name}</b> (@${bot.bot_username}) has been approved for monetization. You can now start serving ads.`
       : `❌ <b>Bot Rejected</b>\n\nUnfortunately, your bot <b>${bot.bot_name}</b> (@${bot.bot_username}) was not approved for monetization at this time.`;
 
-    await sendTelegramMessage(bot.telegram_id, message);
+    if (normalizedAction === "activate" || normalizedAction === "reject") {
+      await sendTelegramMessage(bot.telegram_id, message);
+    }
 
     return NextResponse.json({ success: true });
   } catch (error: any) {

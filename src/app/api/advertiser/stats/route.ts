@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 
 export async function GET(request: Request) {
   try {
@@ -79,6 +79,6 @@ export async function GET(request: Request) {
 
   } catch (error: any) {
     console.error("Stats API Error:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
   }
 }

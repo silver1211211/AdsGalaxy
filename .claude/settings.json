@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mysql -h localhost -P 3306 -u adsfusion -padsfusion adsfusion -e ' *)",
+      "Bash(echo \"---EXIT:$?---\")",
+      "Bash(tee /tmp/build_output.txt)",
+      "Bash(npm run *)",
+      "Read(//tmp/**)",
+      "Bash(echo \"---exit:$?---\")",
+      "Bash(tee /tmp/build2.txt)"
+    ],
+    "additionalDirectories": [
+      "\\tmp"
+    ]
+  }
+}

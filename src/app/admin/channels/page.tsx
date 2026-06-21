@@ -2,8 +2,18 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Trash2 } from "lucide-react";
 import Modal from "@/components/ui/Modal";
+import ConfirmationModal from "@/components/ui/ConfirmationModal";
+
+type ChannelAction = "activate" | "reject" | "pause" | "delete";
+type PendingAction = {
+  channel: any;
+  action: ChannelAction;
+  title: string;
+  message: string;
+  danger?: boolean;
+} | null;
 
 export default function AdminChannelsPage() {
   const [channels, setChannels] = useState([]);
@@ -17,6 +27,7 @@ export default function AdminChannelsPage() {
 
   const [viewModalOpen, setViewModalOpen] = useState(false);
   const [selectedChannel, setSelectedChannel] = useState<any>(null);
+  const [pendingAction, setPendingAction] = useState<PendingAction>(null);
 
   const fetchChannels = async (p: number, s: string, q: string) => {
     setLoading(true);
@@ -63,6 +74,103 @@ export default function AdminChannelsPage() {
     setViewModalOpen(true);
   };
 
+  const openActionConfirm = (channel: any, action: ChannelAction, title: string, message: string, danger = false) => {
+    setPendingAction({ channel, action, title, message, danger });
+  };
+
+  const confirmPendingAction = async () => {
+    if (!pendingAction) return;
+    const { channel, action } = pendingAction;
+    setPendingAction(null);
+    await handleAction(channel.id, action);
+  };
+
+  const StatusBadge = ({ status }: { status: string }) => (
+    <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${status === 'active' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : status === 'pending' ? 'bg-amber-50 text-amber-700 border border-amber-200' : status === 'rejected' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-700 border border-slate-200'}`}>
+      {status}
+    </span>
+  );
+
+  const ActionButtons = ({ channel }: { channel: any }) => (
+    <div className="flex flex-wrap items-center justify-end gap-2">
+      <button
+        onClick={() => openViewModal(channel)}
+        className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors cursor-pointer"
+        title="View Details"
+      >
+        <Eye size={16} />
+      </button>
+      {channel.status === "pending" && (
+        <>
+          <button
+            onClick={() => openActionConfirm(channel, "activate", "Activate Channel", "Activate this channel?")}
+            disabled={actionLoading === channel.id}
+            className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
+            title="Approve"
+          >
+            {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
+          </button>
+          <button
+            onClick={() => openActionConfirm(channel, "reject", "Reject Channel", "Reject this channel?", true)}
+            disabled={actionLoading === channel.id}
+            className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
+            title="Reject"
+          >
+            {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
+          </button>
+        </>
+      )}
+      {channel.status === "active" && (
+        <button
+          onClick={() => openActionConfirm(channel, "pause", "Pause Channel", "Pause this channel?")}
+          disabled={actionLoading === channel.id}
+          className="p-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 rounded-md transition-colors border border-amber-100 cursor-pointer disabled:cursor-not-allowed"
+          title="Pause"
+        >
+          {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <Pause size={16} />}
+        </button>
+      )}
+      {channel.status === "paused" && (
+        <button
+          onClick={() => openActionConfirm(channel, "activate", "Reactivate Channel", "Reactivate this channel?")}
+          disabled={actionLoading === channel.id}
+          className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
+          title="Reactivate"
+        >
+          {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <Play size={16} />}
+        </button>
+      )}
+      {channel.status === "rejected" && (
+        <button
+          onClick={() => openActionConfirm(channel, "activate", "Activate Channel", "Activate this rejected channel?")}
+          disabled={actionLoading === channel.id}
+          className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
+          title="Activate"
+        >
+          {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
+        </button>
+      )}
+      {channel.status !== "rejected" && channel.status !== "pending" && (
+        <button
+          onClick={() => openActionConfirm(channel, "reject", "Reject Channel", "Reject this channel?", true)}
+          disabled={actionLoading === channel.id}
+          className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
+          title="Reject"
+        >
+          {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
+        </button>
+      )}
+      <button
+        onClick={() => openActionConfirm(channel, "delete", "Delete Channel", "Delete this channel from monetization?", true)}
+        disabled={actionLoading === channel.id}
+        className="p-1.5 bg-red-50 text-red-700 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
+        title="Delete"
+      >
+        {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <Trash2 size={16} />}
+      </button>
+    </div>
+  );
+
   const renderContinents = (continentsStr: string) => {
     if (!continentsStr) return <span className="font-medium text-slate-900">All</span>;
     try {
@@ -104,6 +212,16 @@ export default function AdminChannelsPage() {
   return (
     <AdminLayout>
       <Modal isOpen={!!error} onClose={() => setError("")} type="error" title="Error">{error}</Modal>
+      <ConfirmationModal
+        isOpen={!!pendingAction}
+        onClose={() => setPendingAction(null)}
+        onConfirm={confirmPendingAction}
+        title={pendingAction?.title || ""}
+        message={pendingAction?.message || ""}
+        confirmBtnText="Confirm"
+        confirmBtnVariant={pendingAction?.danger ? "danger" : "primary"}
+        isLoading={actionLoading !== null}
+      />
 
       {/* View Channel Modal */}
       {viewModalOpen && selectedChannel && (
@@ -187,7 +305,7 @@ export default function AdminChannelsPage() {
           </div>
         </div>
         
-        <div className="overflow-x-auto">
+        <div className="hidden overflow-x-auto md:block">
           <table className="w-full text-left text-sm whitespace-nowrap min-w-[800px]">
             <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
               <tr>
@@ -201,15 +319,15 @@ export default function AdminChannelsPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <tr><td colSpan={5} className="p-8 text-center"><Loader2 className="animate-spin text-blue-600 mx-auto" size={20} /></td></tr>
+                <tr><td colSpan={6} className="p-8 text-center"><Loader2 className="animate-spin text-blue-600 mx-auto" size={20} /></td></tr>
               ) : channels.length === 0 ? (
-                <tr><td colSpan={5} className="p-8 text-center text-slate-500">No channels found.</td></tr>
+                <tr><td colSpan={6} className="p-8 text-center text-slate-500">No channels found.</td></tr>
               ) : (
                 channels.map((channel: any) => (
                   <tr key={channel.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-4 py-3">
                       <div className="font-medium text-slate-900">@{channel.username || "Private"}</div>
-                      <div className="text-xs text-slate-500">ID: #{channel.id} • User: {channel.user_id}</div>
+                      <div className="text-xs text-slate-500">ID: #{channel.id} - User: {channel.user_id}</div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="font-medium text-slate-900 truncate max-w-[200px]" title={channel.title}>{channel.title || "N/A"}</div>
@@ -222,86 +340,46 @@ export default function AdminChannelsPage() {
                       <div className="font-medium text-slate-900">{channel.posts_per_day}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${channel.status === 'active' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : channel.status === 'pending' ? 'bg-amber-50 text-amber-700 border border-amber-200' : channel.status === 'rejected' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-700 border border-slate-200'}`}>
-                        {channel.status}
-                      </span>
+                      <StatusBadge status={channel.status} />
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <button 
-                          onClick={() => openViewModal(channel)}
-                          className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors cursor-pointer"
-                          title="View Details"
-                        >
-                          <Eye size={16} />
-                        </button>
-                        {channel.status === "pending" && (
-                          <>
-                            <button 
-                              onClick={() => window.confirm("Activate this channel?") && handleAction(channel.id, "activate")}
-                              disabled={actionLoading === channel.id}
-                              className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
-                              title="Approve"
-                            >
-                              {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
-                            </button>
-                            <button 
-                              onClick={() => window.confirm("Reject this channel?") && handleAction(channel.id, "reject")}
-                              disabled={actionLoading === channel.id}
-                              className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
-                              title="Reject"
-                            >
-                              {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
-                            </button>
-                          </>
-                        )}
-                        {channel.status === "active" && (
-                          <button
-                            onClick={() => window.confirm("Pause this channel?") && handleAction(channel.id, "pause")}
-                            disabled={actionLoading === channel.id}
-                            className="p-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 rounded-md transition-colors border border-amber-100 cursor-pointer disabled:cursor-not-allowed"
-                            title="Pause"
-                          >
-                            {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <Pause size={16} />}
-                          </button>
-                        )}
-                        {channel.status === "paused" && (
-                          <button
-                            onClick={() => window.confirm("Reactivate this channel?") && handleAction(channel.id, "activate")}
-                            disabled={actionLoading === channel.id}
-                            className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
-                            title="Reactivate"
-                          >
-                            {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <Play size={16} />}
-                          </button>
-                        )}
-                        {channel.status === "rejected" && (
-                          <button
-                            onClick={() => window.confirm("Activate this rejected channel?") && handleAction(channel.id, "activate")}
-                            disabled={actionLoading === channel.id}
-                            className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
-                            title="Activate"
-                          >
-                            {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
-                          </button>
-                        )}
-                        {channel.status !== "rejected" && channel.status !== "pending" && (
-                          <button
-                            onClick={() => window.confirm("Reject this channel?") && handleAction(channel.id, "reject")}
-                            disabled={actionLoading === channel.id}
-                            className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
-                            title="Reject"
-                          >
-                            {actionLoading === channel.id ? <Loader2 size={16} className="animate-spin"/> : <X size={16} />}
-                          </button>
-                        )}
-                      </div>
+                      <ActionButtons channel={channel} />
                     </td>
                   </tr>
                 ))
               )}
             </tbody>
           </table>
+        </div>
+
+        <div className="space-y-3 p-3 md:hidden">
+          {loading ? (
+            <div className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></div>
+          ) : channels.length === 0 ? (
+            <div className="p-8 text-center text-sm text-slate-500">No channels found.</div>
+          ) : (
+            channels.map((channel: any) => (
+              <div key={channel.id} className="rounded-lg border border-slate-200 p-3 shadow-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="truncate font-semibold text-slate-900">{channel.title || "N/A"}</div>
+                    <div className="text-xs text-slate-500">@{channel.username || "Private"}</div>
+                    <div className="text-xs text-slate-400">User #{channel.user_id}</div>
+                  </div>
+                  <StatusBadge status={channel.status} />
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Audience</div><div className="font-semibold text-slate-900">{channel.subscriber_count?.toLocaleString() || "0"}</div></div>
+                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Posts/Day</div><div className="font-semibold text-slate-900">{channel.posts_per_day || 0}</div></div>
+                </div>
+                <div className="mt-3">
+                  <div className="text-[10px] font-bold uppercase text-slate-400">Categories</div>
+                  {renderCategories(channel.categories)}
+                </div>
+                <div className="mt-3"><ActionButtons channel={channel} /></div>
+              </div>
+            ))
+          )}
         </div>
 
         <div className="px-4 py-3 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500">

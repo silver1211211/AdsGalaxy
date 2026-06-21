@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { normalizePostingTimes, normalizePostsPerDay } from "@/lib/postingTimes";
 
 async function hasPostingTimesColumn() {
@@ -28,7 +28,7 @@ export async function GET(request: Request) {
     return NextResponse.json(rows);
   } catch (error: any) {
     console.error("API Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to fetch channels" }, { status: 500 });
+    return NextResponse.json({ error: error.message || "Failed to fetch channels" }, { status: getAuthErrorStatus(error) });
   }
 }
 
@@ -159,6 +159,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ success: true, id: (result as any).insertId });
   } catch (error: any) {
     console.error("API Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to add channel" }, { status: 500 });
+    return NextResponse.json({ error: error.message || "Failed to add channel" }, { status: getAuthErrorStatus(error) });
   }
 }
