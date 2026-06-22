@@ -49,7 +49,26 @@ export async function GET(request: Request) {
     `, [user.id]);
 
     // Merge and sort
-    const allEarnings = [...clickSettlements, ...viewSettlements].sort((a, b) => {
+    const [miniappSettlements]: any = await pool.query(`
+      SELECT
+        mes.id,
+        NULL as post_id,
+        mes.impressions as count,
+        mes.publisher_revenue as amount,
+        mes.created_at,
+        mes.status,
+        'miniapp' as type,
+        CONCAT('Mini App - ', mes.network_name) as campaign_name,
+        ma.miniapp_username as channel_username
+      FROM miniapp_earnings_settlements mes
+      LEFT JOIN miniapps ma ON mes.miniapp_id = ma.id
+      WHERE mes.user_id = ?
+      ORDER BY mes.created_at DESC
+    `, [user.id]);
+
+    // Merge and sort. Deposits, manual credits, refunds, and admin balance
+    // adjustments are intentionally not included here.
+    const allEarnings = [...clickSettlements, ...viewSettlements, ...miniappSettlements].sort((a, b) => {
       return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
     });
 

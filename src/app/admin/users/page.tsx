@@ -20,6 +20,7 @@ type UserRow = {
   is_banned?: boolean | number;
   banned_at?: string | null;
   ban_reason?: string | null;
+  miniapp_beta_access?: boolean | number;
 };
 
 type UserAction = {
@@ -66,6 +67,7 @@ export default function AdminUsersPage() {
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [error, setError] = useState("");
+  const [miniappBetaUsersCount, setMiniappBetaUsersCount] = useState(0);
 
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<UserRow | null>(null);
@@ -81,6 +83,7 @@ export default function AdminUsersPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to fetch users");
       setUsers(data.users || []);
+      setMiniappBetaUsersCount(Number(data.miniapp_beta_users_count || 0));
       setTotalPages(data.totalPages || 1);
     } catch (err: unknown) {
       setError(errorMessage(err, "Failed to fetch users"));
@@ -166,6 +169,28 @@ export default function AdminUsersPage() {
     }
   };
 
+  const toggleMiniAppBeta = async (user: UserRow) => {
+    setIsUpdating(true);
+    try {
+      const enabled = Number(user.miniapp_beta_access || 0) === 1;
+      const res = await fetch("/api/admin/users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: user.id,
+          action: enabled ? "disable_miniapp_beta" : "enable_miniapp_beta",
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to update Mini App beta access");
+      await fetchUsers(page, searchQuery);
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to update Mini App beta access"));
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
   const ActionButtons = ({ user }: { user: UserRow }) => {
     const banned = isUserBanned(user);
     return (
@@ -192,6 +217,18 @@ export default function AdminUsersPage() {
             <Ban size={14} /> Ban User
           </button>
         )}
+        <button
+          onClick={() => toggleMiniAppBeta(user)}
+          disabled={isUpdating}
+          className={`inline-flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs font-semibold ${
+            Number(user.miniapp_beta_access || 0) === 1
+              ? "border-blue-100 bg-blue-50 text-blue-700 hover:bg-blue-100"
+              : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+          } disabled:opacity-50`}
+          title="Mini App Beta Access"
+        >
+          Mini Apps {Number(user.miniapp_beta_access || 0) === 1 ? "On" : "Off"}
+        </button>
       </div>
     );
   };
@@ -257,7 +294,7 @@ export default function AdminUsersPage() {
         <div className="flex flex-col gap-3 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-sm font-semibold text-slate-900">Users Directory</h2>
-            <p className="text-xs text-slate-500">Manage balances, bans, and Mini App access.</p>
+            <p className="text-xs text-slate-500">Manage balances, bans, and Mini App access. Beta users: {miniappBetaUsersCount}</p>
           </div>
           <form onSubmit={handleSearch} className="relative w-full sm:max-w-xs">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
@@ -281,14 +318,15 @@ export default function AdminUsersPage() {
                 <th className="px-4 py-3 text-right font-medium">Available</th>
                 <th className="px-4 py-3 text-right font-medium">Ad Balance</th>
                 <th className="px-4 py-3 font-medium">Status</th>
+                <th className="px-4 py-3 font-medium">Mini Apps</th>
                 <th className="px-4 py-3 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <tr><td colSpan={7} className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></td></tr>
+                <tr><td colSpan={8} className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></td></tr>
               ) : users.length === 0 ? (
-                <tr><td colSpan={7} className="p-8 text-center text-slate-500">No users found.</td></tr>
+                <tr><td colSpan={8} className="p-8 text-center text-slate-500">No users found.</td></tr>
               ) : users.map((user) => (
                 <tr key={user.id} className="hover:bg-slate-50">
                   <td className="px-4 py-3">
@@ -303,6 +341,11 @@ export default function AdminUsersPage() {
                   <td className="px-4 py-3 text-right text-slate-700">{money(user.balance_available)}</td>
                   <td className="px-4 py-3 text-right text-slate-700">{money(user.ad_balance)}</td>
                   <td className="px-4 py-3"><StatusBadge user={user} /></td>
+                  <td className="px-4 py-3">
+                    <span className={`rounded-full border px-2 py-0.5 text-[11px] font-bold ${Number(user.miniapp_beta_access || 0) === 1 ? "border-blue-200 bg-blue-50 text-blue-700" : "border-slate-200 bg-slate-50 text-slate-500"}`}>
+                      {Number(user.miniapp_beta_access || 0) === 1 ? "Beta" : "No Access"}
+                    </span>
+                  </td>
                   <td className="px-4 py-3 text-right"><ActionButtons user={user} /></td>
                 </tr>
               ))}
@@ -334,6 +377,7 @@ export default function AdminUsersPage() {
                 <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Locked</div><div className="font-semibold text-slate-900">{money(user.balance_locked)}</div></div>
                 <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Available</div><div className="font-semibold text-slate-900">{money(user.balance_available)}</div></div>
                 <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Ads</div><div className="font-semibold text-slate-900">{money(user.ad_balance)}</div></div>
+                <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Mini Apps</div><div className="font-semibold text-slate-900">{Number(user.miniapp_beta_access || 0) === 1 ? "Beta" : "Off"}</div></div>
               </div>
               <div className="mt-3"><ActionButtons user={user} /></div>
             </div>

@@ -3,15 +3,17 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LayoutDashboard, Users, Megaphone, Tv, CreditCard, Wallet, Activity, HelpCircle, Settings, LogOut, Menu, X, Bot, Moon, Sun, Radio, ShieldCheck } from "lucide-react";
+import { LayoutDashboard, Users, Megaphone, Tv, CreditCard, Wallet, Activity, HelpCircle, Settings, LogOut, Menu, X, Bot, Moon, Sun, Radio, ShieldCheck, Smartphone } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const menuItems = [
   { href: "/admin", icon: LayoutDashboard, label: "Dashboard" },
   { href: "/admin/users", icon: Users, label: "Users" },
   { href: "/admin/campaigns", icon: Megaphone, label: "Campaigns" },
+  { href: "/admin/miniapp-rewarded", icon: Smartphone, label: "Mini App Ads" },
   { href: "/admin/channels", icon: Tv, label: "Channels" },
   { href: "/admin/bots", icon: Bot, label: "Bots" },
+  { href: "/admin/miniapps", icon: Smartphone, label: "Mini Apps" },
   { href: "/admin/withdrawals", icon: CreditCard, label: "Withdrawals" },
   { href: "/admin/deposits", icon: Wallet, label: "Deposits" },
   { href: "/admin/audits", icon: Activity, label: "Views Audit" },

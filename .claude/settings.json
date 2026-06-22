@@ -7,7 +7,8 @@
       "Bash(npm run *)",
       "Read(//tmp/**)",
       "Bash(echo \"---exit:$?---\")",
-      "Bash(tee /tmp/build2.txt)"
+      "Bash(tee /tmp/build2.txt)",
+      "Bash(echo \"exit:$?\")"
     ],
     "additionalDirectories": [
       "\\tmp"

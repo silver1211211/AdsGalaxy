@@ -69,13 +69,15 @@ export async function GET(request: Request) {
         : "'active'";
     const bannedAtExpr = columns.has("banned_at") ? "banned_at" : "NULL";
     const banReasonExpr = columns.has("ban_reason") ? "ban_reason" : "NULL";
+    const betaAccessExpr = columns.has("miniapp_beta_access") ? "miniapp_beta_access" : "0";
 
     let query = `
       SELECT id, telegram_id, first_name, last_name, username, balance_locked, balance_available,
         ad_balance, created_at, ${statusExpr} as status,
         CASE WHEN ${statusExpr} = 'banned' THEN 1 ELSE 0 END as is_banned,
         ${bannedAtExpr} as banned_at,
-        ${banReasonExpr} as ban_reason
+        ${banReasonExpr} as ban_reason,
+        ${betaAccessExpr} as miniapp_beta_access
       FROM users
     `;
     let countQuery = "SELECT COUNT(*) as total FROM users";
@@ -95,9 +97,15 @@ export async function GET(request: Request) {
 
     const [rows] = await pool.query(query, [...queryParams, limit, offset]);
     const [[countRow]]: any = await pool.query(countQuery, countParams);
+    const [[betaRow]]: any = await pool.query(
+      columns.has("miniapp_beta_access")
+        ? "SELECT COUNT(*) as count FROM users WHERE miniapp_beta_access = 1"
+        : "SELECT 0 as count"
+    );
 
     return NextResponse.json({
       users: rows,
+      miniapp_beta_users_count: betaRow.count || 0,
       total: countRow.total,
       page,
       totalPages: Math.ceil(countRow.total / limit),
@@ -122,6 +130,10 @@ export async function PATCH(request: Request) {
 
     await ensureUserBanColumns(conn);
 
+    if (!(await columnExists(conn, "users", "miniapp_beta_access"))) {
+      await conn.query("ALTER TABLE users ADD COLUMN miniapp_beta_access TINYINT(1) NOT NULL DEFAULT 0");
+    }
+
     if (action === "ban") {
       await conn.query(
         "UPDATE users SET status = 'banned', is_banned = 1, banned_at = NOW(), ban_reason = ? WHERE id = ?",
@@ -134,6 +146,14 @@ export async function PATCH(request: Request) {
       await conn.query(
         "UPDATE users SET status = 'active', is_banned = 0, banned_at = NULL, ban_reason = NULL WHERE id = ?",
         [id]
+      );
+      return NextResponse.json({ success: true });
+    }
+
+    if (action === "enable_miniapp_beta" || action === "disable_miniapp_beta") {
+      await conn.query(
+        "UPDATE users SET miniapp_beta_access = ? WHERE id = ?",
+        [action === "enable_miniapp_beta" ? 1 : 0, id]
       );
       return NextResponse.json({ success: true });
     }

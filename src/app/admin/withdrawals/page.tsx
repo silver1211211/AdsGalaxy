@@ -27,6 +27,9 @@ type WithdrawalRow = {
   total_withdrawal_amount?: string | number;
   withdrawal_count?: string | number;
   total_earnings?: string | number;
+  miniapp_count?: string | number;
+  miniapp_impressions?: string | number;
+  miniapp_earnings?: string | number;
   balance_locked?: string | number;
   balance_available?: string | number;
 };
@@ -78,6 +81,9 @@ function FraudMetrics({ withdrawal, dense = false }: { withdrawal: WithdrawalRow
     ["Requests", compact(withdrawal.withdrawal_count)],
     ["Channels", compact(withdrawal.channel_count)],
     ["Audience", compact(withdrawal.total_audience)],
+    ["Mini Apps", compact(withdrawal.miniapp_count)],
+    ["Mini App Impressions", compact(withdrawal.miniapp_impressions)],
+    ["Mini App Earnings", money(withdrawal.miniapp_earnings)],
   ];
 
   return (

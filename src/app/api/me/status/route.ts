@@ -10,6 +10,7 @@ export async function GET(request: Request) {
       id: user.id,
       status: user.status || "active",
       is_banned: String(user.status || "").toLowerCase() === "banned",
+      miniapp_beta_access: Number(user.miniapp_beta_access || 0) === 1,
       banned_at: user.banned_at || null,
       ban_reason: user.ban_reason || null,
     });

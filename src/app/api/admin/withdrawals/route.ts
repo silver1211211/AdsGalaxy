@@ -127,6 +127,17 @@ export async function GET(request: Request) {
         : "0";
     const bannedAtExpr = userColumns.has("banned_at") ? "u.banned_at" : "NULL";
     const banReasonExpr = userColumns.has("ban_reason") ? "u.ban_reason" : "NULL";
+    const referralEarningsExpr = userColumns.has("total_referral_earnings") ? "u.total_referral_earnings" : "0";
+
+    // Real platform earnings only: never manual/admin credits, deposits, or
+    // current balance snapshots. Each term is one actual reward source.
+    const realEarningsExpr = `(
+        COALESCE((SELECT SUM(ads.publisher_reward) FROM ad_settlements ads WHERE ads.publisher_id = w.user_id), 0)
+        + COALESCE((SELECT SUM(adsv.publisher_reward) FROM ad_settlements_views adsv WHERE adsv.publisher_id = w.user_id), 0)
+        + COALESCE((SELECT SUM(bd.publisher_reward) FROM broadcast_deliveries bd JOIN bots b ON bd.bot_id = b.id WHERE b.user_id = w.user_id), 0)
+        + COALESCE((SELECT SUM(mes.publisher_revenue) FROM miniapp_earnings_settlements mes WHERE mes.user_id = w.user_id), 0)
+        + COALESCE(${referralEarningsExpr}, 0)
+      )`;
 
     let query = `
       SELECT
@@ -150,9 +161,12 @@ export async function GET(request: Request) {
         ${banReasonExpr} as ban_reason,
         COALESCE((SELECT COUNT(*) FROM channels c WHERE c.user_id = w.user_id AND c.is_deleted = FALSE), 0) as channel_count,
         COALESCE((SELECT SUM(c.subscriber_count) FROM channels c WHERE c.user_id = w.user_id AND c.is_deleted = FALSE), 0) as total_audience,
+        COALESCE((SELECT COUNT(*) FROM miniapps ma WHERE ma.user_id = w.user_id AND ma.is_deleted = FALSE), 0) as miniapp_count,
+        COALESCE((SELECT SUM(mes.impressions) FROM miniapp_earnings_settlements mes WHERE mes.user_id = w.user_id), 0) as miniapp_impressions,
+        COALESCE((SELECT SUM(mes.publisher_revenue) FROM miniapp_earnings_settlements mes WHERE mes.user_id = w.user_id), 0) as miniapp_earnings,
         COALESCE((SELECT SUM(w2.amount) FROM withdrawals w2 WHERE w2.user_id = w.user_id), 0) as total_withdrawal_amount,
         COALESCE((SELECT COUNT(*) FROM withdrawals w2 WHERE w2.user_id = w.user_id), 0) as withdrawal_count,
-        (COALESCE(u.balance_available, 0) + COALESCE(u.balance_locked, 0) + COALESCE(u.total_withdrawn, 0)) as total_earnings
+        ${realEarningsExpr} as total_earnings
       FROM withdrawals w
       LEFT JOIN users u ON w.user_id = u.id
     `;

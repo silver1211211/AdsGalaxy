@@ -18,6 +18,7 @@ type BootState = "checking" | "ready" | "banned" | "error";
 export default function DashboardLayout({ children, type }: DashboardLayoutProps) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [bootState, setBootState] = useState<BootState>("checking");
+  const [miniappBetaAccess, setMiniappBetaAccess] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,6 +47,7 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
           throw new Error(data.error || "Unable to verify account status");
         }
 
+        setMiniappBetaAccess(Boolean(data.miniapp_beta_access));
         window.localStorage.setItem("last_dashboard", type);
         setBootState("ready");
       } catch (error) {
@@ -93,6 +95,7 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
         type={type}
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
+        miniappBetaAccess={miniappBetaAccess}
       />
 
       <main className="min-h-screen pt-16 transition-all duration-300 lg:pl-64">

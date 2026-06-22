@@ -14,7 +14,8 @@ import {
   Menu,
   X,
   PlusCircle,
-  Bot
+  Bot,
+  Smartphone
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -22,15 +23,17 @@ interface SidebarProps {
   type: "publisher" | "advertiser";
   isOpen: boolean;
   onClose: () => void;
+  miniappBetaAccess?: boolean;
 }
 
-export default function Sidebar({ type, isOpen, onClose }: SidebarProps) {
+export default function Sidebar({ type, isOpen, onClose, miniappBetaAccess = false }: SidebarProps) {
   const pathname = usePathname();
 
   const publisherLinks = [
     { name: "Dashboard", href: "/publisher", icon: LayoutDashboard },
     { name: "My Channels", href: "/publisher/channels", icon: Tv },
     { name: "My Bots", href: "/publisher/bots", icon: Bot },
+    ...(miniappBetaAccess ? [{ name: "Mini Apps (Beta)", href: "/publisher/miniapps", icon: Smartphone }] : []),
     { name: "Earnings", href: "/publisher/earnings", icon: Wallet },
     { name: "Withdraw", href: "/publisher/withdraw", icon: ArrowUpRight },
     { name: "Referral", href: "/publisher/referral", icon: Users },
@@ -41,6 +44,7 @@ export default function Sidebar({ type, isOpen, onClose }: SidebarProps) {
     { name: "Dashboard", href: "/advertiser", icon: LayoutDashboard },
     { name: "My Campaigns", href: "/advertiser/campaigns", icon: Tv },
     { name: "Add Campaign", href: "/advertiser/campaigns/new", icon: PlusCircle },
+    { name: "Mini App Ads", href: "/advertiser/miniapp-rewarded", icon: Smartphone },
     { name: "Deposit Fund", href: "/advertiser/deposit", icon: Wallet },
     { name: "FAQs", href: "/advertiser/faqs", icon: HelpCircle },
   ];
