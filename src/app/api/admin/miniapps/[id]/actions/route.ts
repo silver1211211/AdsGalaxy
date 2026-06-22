@@ -27,9 +27,10 @@ export async function POST(
     const statusMap: Record<string, string> = {
       approve: "approved",
       reject: "rejected",
+      pause: "paused",
     };
 
-    if (!statusMap[action]) {
+    if (!statusMap[action] && action !== "resume") {
       return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
 
@@ -43,7 +44,14 @@ export async function POST(
     }
 
     const previousState = rows[0];
-    const newStatus = statusMap[action];
+    let newStatus = statusMap[action];
+    if (action === "resume") {
+      const [[networkRow]]: any = await pool.query(
+        "SELECT COUNT(*) as active_networks FROM miniapp_ad_networks WHERE miniapp_id = ? AND enabled = TRUE",
+        [id]
+      );
+      newStatus = Number(networkRow?.active_networks || 0) > 0 ? "monetized" : "approved";
+    }
 
     await pool.query("UPDATE miniapps SET status = ? WHERE id = ?", [newStatus, id]);
 

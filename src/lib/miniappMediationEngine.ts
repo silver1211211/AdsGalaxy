@@ -125,14 +125,15 @@ export async function selectMediationNetwork(input: {
 }) {
   const networks = await getMiniappNetworksForMediation(input.miniappId, input.conn);
   const enabledNetworks = networks.filter((network) => Boolean(network.enabled));
-  const internalCampaign = input.adFormat === "rewarded"
+  const internalEnabled = networks.some((network) => network.network_name === INTERNAL_NETWORK_NAME && Boolean(network.enabled));
+  const internalCampaign = input.adFormat === "rewarded" && internalEnabled
     ? await selectInternalRewardedCampaign({
         conn: input.conn,
         miniappId: input.miniappId,
         telegramUserId: input.telegramUserId,
         country: input.country || null,
       })
-    : { campaign: null, skip_reason: "unsupported_ad_format" };
+    : { campaign: null, skip_reason: input.adFormat === "rewarded" ? "internal_network_disabled" : "unsupported_ad_format" };
   const scoreRows = await getMiniAppNetworkHealthScores(input.miniappId, input.conn).catch(() => []);
   const scoreMap = new Map(scoreRows.map((row) => [row.network_name, row.health_score]));
 

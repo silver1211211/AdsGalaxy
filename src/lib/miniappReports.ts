@@ -97,10 +97,39 @@ export async function buildMiniAppReport(miniappId: number | string, startDate: 
   );
 
   const [todayRows]: any = await pool.query(
-    `SELECT COALESCE(SUM(publisher_revenue), 0) as today_earnings
+    `SELECT
+       COALESCE(SUM(impressions), 0) as today_impressions,
+       COALESCE(SUM(publisher_revenue), 0) as today_earnings
      FROM miniapp_daily_stats
      WHERE miniapp_id = ? AND date = CURDATE()`,
     [miniappId]
+  );
+
+  const [yesterdayRows]: any = await pool.query(
+    `SELECT
+       COALESCE(SUM(impressions), 0) as yesterday_impressions,
+       COALESCE(SUM(publisher_revenue), 0) as yesterday_earnings
+     FROM miniapp_daily_stats
+     WHERE miniapp_id = ? AND date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)`,
+    [miniappId]
+  );
+
+  const [lifetimeRows]: any = await pool.query(
+    `SELECT
+       COALESCE(SUM(impressions), 0) as lifetime_impressions,
+       COALESCE(SUM(publisher_revenue), 0) as lifetime_revenue
+     FROM miniapp_daily_stats
+     WHERE miniapp_id = ?`,
+    [miniappId]
+  );
+
+  const [internalSourceRows]: any = await pool.query(
+    `SELECT
+       COALESCE(COUNT(*), 0) as source_internal_impressions,
+       COALESCE(SUM(cost), 0) as source_internal_cost
+     FROM miniapp_internal_ad_impressions
+     WHERE miniapp_id = ? AND created_at BETWEEN ? AND DATE_ADD(?, INTERVAL 1 DAY)`,
+    [miniappId, startDate, endDate]
   );
 
   const [countryRows]: any = await pool.query(
@@ -129,9 +158,15 @@ export async function buildMiniAppReport(miniappId: number | string, startDate: 
   return {
     range: { startDate, endDate, dateSearch },
     summary: {
+      today_impressions: toNumber(todayRows[0]?.today_impressions),
+      yesterday_impressions: toNumber(yesterdayRows[0]?.yesterday_impressions),
       today_earnings: toNumber(todayRows[0]?.today_earnings),
+      today_revenue: toNumber(todayRows[0]?.today_earnings),
+      yesterday_revenue: toNumber(yesterdayRows[0]?.yesterday_earnings),
       total_earnings: totalRevenue,
       total_impressions: toNumber(totalRows[0]?.total_impressions),
+      lifetime_impressions: toNumber(lifetimeRows[0]?.lifetime_impressions),
+      lifetime_revenue: toNumber(lifetimeRows[0]?.lifetime_revenue),
       external_impressions: toNumber(totalRows[0]?.external_impressions),
       external_revenue: toNumber(totalRows[0]?.external_gross_revenue),
       external_gross_revenue: toNumber(totalRows[0]?.external_gross_revenue),
@@ -149,6 +184,8 @@ export async function buildMiniAppReport(miniappId: number | string, startDate: 
       locked_earnings: toNumber(settlementRows[0]?.locked_earnings),
       unlocked_earnings: toNumber(settlementRows[0]?.unlocked_earnings),
       unsettled_earnings: Math.max(totalRevenue - totalSettledEarnings, 0),
+      source_internal_impressions: toNumber(internalSourceRows[0]?.source_internal_impressions),
+      source_internal_cost: toNumber(internalSourceRows[0]?.source_internal_cost),
       ...reconciliation,
     },
     daily: dailyRows.map((row: any) => {

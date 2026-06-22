@@ -4,10 +4,12 @@ import React, { useEffect, useState } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Toast from "@/components/ui/Toast";
+import Link from "next/link";
 import { apiFetch } from "@/lib/api";
+import { MiniAppSubmissionValidationError, validateMiniAppSubmission } from "@/lib/miniappSubmissionValidation";
 import { cn } from "@/lib/utils";
 import { useHeader } from "@/context/HeaderContext";
-import { BarChart3, CheckCircle2, Clock, Edit3, Loader2, MoreVertical, Plus, Smartphone, Trash2, X, XCircle } from "lucide-react";
+import { BarChart3, CheckCircle2, Clock, Edit3, HelpCircle, Loader2, MoreVertical, PauseCircle, Plus, Smartphone, Trash2, X, XCircle } from "lucide-react";
 
 type MiniApp = {
   id: number;
@@ -16,20 +18,17 @@ type MiniApp = {
   bot_id: string;
   webapp_url: string;
   miniapp_url: string;
-  status: "pending" | "approved" | "rejected";
+  status: "pending" | "approved" | "monetized" | "paused" | "rejected";
   created_at?: string;
   updated_at?: string;
   mediation_request_count?: string | number;
   confirmed_impression_count?: string | number;
+  total_requests?: string | number;
+  total_impressions?: string | number;
+  last_activity_at?: string | null;
   no_fill_count?: string | number;
   fill_rate?: string | number;
-  enabled_network_names?: string;
-  temporarily_disabled_network_count?: string | number;
-  recent_network_failures?: string | number;
-  monetag_status?: string;
-  monetag_opportunity_count?: string | number;
-  monetag_next_allowed_opportunity?: string | number;
-  monetag_locked_until?: string | null;
+  active_network_count?: string | number;
 };
 
 type MiniAppForm = {
@@ -56,15 +55,27 @@ const emptyForm: MiniAppForm = {
 };
 
 function statusIcon(status: MiniApp["status"]) {
-  if (status === "approved") return <CheckCircle2 className="text-emerald-500" size={14} />;
+  if (status === "monetized") return <CheckCircle2 className="text-emerald-500" size={14} />;
+  if (status === "approved") return <CheckCircle2 className="text-blue-500" size={14} />;
+  if (status === "paused") return <PauseCircle className="text-slate-400" size={14} />;
   if (status === "rejected") return <XCircle className="text-red-500" size={14} />;
   return <Clock className="text-amber-500" size={14} />;
 }
 
 function statusClass(status: MiniApp["status"]) {
-  if (status === "approved") return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  if (status === "monetized") return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  if (status === "approved") return "bg-blue-50 text-blue-700 border-blue-200";
+  if (status === "paused") return "bg-slate-100 text-slate-600 border-slate-200";
   if (status === "rejected") return "bg-red-50 text-red-700 border-red-200";
   return "bg-amber-50 text-amber-700 border-amber-200";
+}
+
+function statusLabel(status: MiniApp["status"]) {
+  if (status === "pending") return "Pending Review";
+  if (status === "monetized") return "Monetized";
+  if (status === "approved") return "Approved";
+  if (status === "paused") return "Paused";
+  return "Rejected";
 }
 
 function money(value: unknown) {
@@ -76,7 +87,7 @@ function numberValue(value: unknown) {
 }
 
 function formatDate(value: string | null | undefined) {
-  if (!value) return "";
+  if (!value) return "No activity";
   return new Date(value).toLocaleString();
 }
 
@@ -146,6 +157,7 @@ export default function PublisherMiniAppsPage() {
   const saveMiniApp = async () => {
     setIsSaving(true);
     try {
+      validateMiniAppSubmission(form);
       const res = await apiFetch(editing ? `/api/publisher/miniapps/${editing.id}` : "/api/publisher/miniapps", {
         method: editing ? "PATCH" : "POST",
         body: JSON.stringify(form),
@@ -156,7 +168,11 @@ export default function PublisherMiniAppsPage() {
       await fetchMiniApps(true);
       setNotification({ type: "success", title: editing ? "Mini App Updated" : "Mini App Submitted", message: "Your Mini App is pending admin review." });
     } catch (error: any) {
-      setNotification({ type: "error", title: "Save Failed", message: error.message });
+      setNotification({
+        type: "error",
+        title: error instanceof MiniAppSubmissionValidationError ? "Invalid Mini App Details" : "Save Failed",
+        message: error.message,
+      });
     } finally {
       setIsSaving(false);
     }
@@ -215,11 +231,16 @@ export default function PublisherMiniAppsPage() {
       <div className="space-y-6">
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-black text-slate-900 uppercase tracking-tight">Mini Apps (Beta)</h1>
-          {hasBetaAccess !== false && (
-            <button onClick={openCreate} className="flex h-10 w-10 items-center justify-center rounded-full bg-[#0c9de8] text-white transition-all hover:bg-blue-600 active:scale-95">
-              <Plus size={24} />
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            <Link href="/docs/publisher/miniapps#overview" className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-400 transition-all hover:text-blue-600">
+              <HelpCircle size={18} />
+            </Link>
+            {hasBetaAccess !== false && (
+              <button onClick={openCreate} className="flex h-10 w-10 items-center justify-center rounded-full bg-[#0c9de8] text-white transition-all hover:bg-blue-600 active:scale-95">
+                <Plus size={24} />
+              </button>
+            )}
+          </div>
         </div>
 
         {hasBetaAccess === false ? (
@@ -251,12 +272,13 @@ export default function PublisherMiniAppsPage() {
         ) : (
           <div className="space-y-3">
             {miniapps.map((miniapp) => (
-              <div key={miniapp.id} className="relative flex items-center gap-4 rounded-3xl border border-slate-100 bg-white p-4">
+              <div key={miniapp.id} className="relative rounded-3xl border border-slate-100 bg-white p-4 shadow-sm">
+                <div className="flex items-start gap-4">
                 <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-blue-600">
                   <Smartphone size={24} />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 pr-12">
                     <h3 className="truncate text-sm font-black text-slate-900">{miniapp.miniapp_name}</h3>
                     {statusIcon(miniapp.status)}
                   </div>
@@ -264,19 +286,25 @@ export default function PublisherMiniAppsPage() {
                     <span>@{miniapp.miniapp_username}</span>
                     <span className="h-1 w-1 rounded-full bg-slate-200" />
                     <span>Bot {miniapp.bot_id}</span>
-                    <span className={cn("rounded border px-1.5 py-0.5 capitalize", statusClass(miniapp.status))}>{miniapp.status}</span>
+                    <span className={cn("rounded border px-1.5 py-0.5", statusClass(miniapp.status))}>{statusLabel(miniapp.status)}</span>
                   </div>
-                  <div className="mt-1 text-[10px] font-semibold text-slate-400">
-                    Requests: {numberValue(miniapp.mediation_request_count)} · Networks: {miniapp.enabled_network_names || "None enabled"}
-                  </div>
-                  <div className="mt-1 text-[10px] font-semibold text-slate-400">
-                    Monetag: {miniapp.monetag_status || "Active"} · {miniapp.monetag_status === "Locked" ? `Until ${formatDate(miniapp.monetag_locked_until)}` : `Next ${numberValue(miniapp.monetag_next_allowed_opportunity)} / Now ${numberValue(miniapp.monetag_opportunity_count)}`}
-                  </div>
-                  <div className="mt-1 text-[10px] font-semibold text-slate-400">
-                    Fill: {numberValue(miniapp.fill_rate)}% - {numberValue(miniapp.confirmed_impression_count)} impressions - {numberValue(miniapp.no_fill_count)} no-fill
+                  <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
+                    {[
+                      ["Networks Active", numberValue(miniapp.active_network_count)],
+                      ["Total Requests", numberValue(miniapp.total_requests ?? miniapp.mediation_request_count)],
+                      ["Total Impressions", numberValue(miniapp.total_impressions ?? miniapp.confirmed_impression_count)],
+                      ["Fill Rate", `${numberValue(miniapp.fill_rate)}%`],
+                      ["Last Activity", formatDate(miniapp.last_activity_at)],
+                    ].map(([label, value]) => (
+                      <div key={label} className="rounded-2xl bg-slate-50 px-3 py-2">
+                        <div className="text-[9px] font-black uppercase tracking-wide text-slate-400">{label}</div>
+                        <div className="mt-1 truncate text-[11px] font-black text-slate-900" title={String(value)}>{value}</div>
+                      </div>
+                    ))}
                   </div>
                 </div>
-                <div className="relative">
+                </div>
+                <div className="absolute right-3 top-3">
                   <button
                     onClick={(event) => {
                       event.stopPropagation();
@@ -315,17 +343,18 @@ export default function PublisherMiniAppsPage() {
             </div>
             <div className="space-y-4">
               {[
-                ["miniapp_name", "Mini App Name"],
-                ["miniapp_username", "Mini App Username"],
-                ["bot_id", "Bot ID"],
-                ["webapp_url", "Web App URL"],
-                ["miniapp_url", "Direct Mini App URL"],
-              ].map(([key, label]) => (
+                ["miniapp_name", "Mini App Name", "My Mini App"],
+                ["miniapp_username", "Mini App Username", "@GameTreasureXBot"],
+                ["bot_id", "Bot ID", "1234567890"],
+                ["webapp_url", "Web App URL", "https://example.com/app"],
+                ["miniapp_url", "Direct Mini App URL", "https://t.me/GameTreasureXBot/app"],
+              ].map(([key, label, placeholder]) => (
                 <div key={key} className="space-y-1">
                   <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</label>
                   <input
                     value={form[key as keyof MiniAppForm]}
                     onChange={(event) => setForm((prev) => ({ ...prev, [key]: event.target.value }))}
+                    placeholder={placeholder}
                     className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-semibold text-slate-900 outline-none transition-all focus:border-blue-500 focus:bg-white"
                   />
                 </div>
@@ -366,17 +395,15 @@ export default function PublisherMiniAppsPage() {
                 <div className="space-y-5">
                   <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
                     {[
-                      ["Today's Earnings", money(report.summary.today_earnings)],
-                      ["Total Earnings", money(report.summary.total_earnings)],
-                      ["External Revenue", money(report.summary.external_revenue)],
-                      ["Internal Revenue", money(report.summary.internal_revenue)],
-                      ["AdsGalaxy Fee", money(report.summary.ads_galaxy_fee)],
-                      ["Net Revenue", money(report.summary.net_revenue)],
+                      ["Today Impressions", numberValue(report.summary.today_impressions)],
+                      ["Yesterday Impressions", numberValue(report.summary.yesterday_impressions)],
+                      ["Total Impressions", numberValue(report.summary.total_impressions)],
+                      ["Today's Revenue", money(report.summary.today_revenue)],
+                      ["Lifetime Revenue", money(report.summary.lifetime_revenue)],
                       ["Settled Earnings", money(report.summary.total_settled_earnings)],
                       ["Locked Earnings", money(report.summary.locked_earnings)],
                       ["Unlocked/Available", money(report.summary.unlocked_earnings)],
                       ["Unsettled Earnings", money(report.summary.unsettled_earnings)],
-                      ["Total Impressions", numberValue(report.summary.total_impressions)],
                       ["Blended CPM", money(report.summary.blended_cpm)],
                     ].map(([label, value]) => (
                       <div key={label} className="rounded-lg border border-slate-200 bg-slate-50 p-3">

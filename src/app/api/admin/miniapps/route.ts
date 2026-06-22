@@ -30,6 +30,8 @@ export async function GET(request: Request) {
         m.status,
         m.created_at,
         m.updated_at,
+        COALESCE((SELECT COUNT(*) FROM miniapp_ad_networks mn WHERE mn.miniapp_id = m.id AND mn.enabled = TRUE), 0) as active_network_count,
+        COALESCE((SELECT SUM(ds.impressions) FROM miniapp_daily_stats ds WHERE ds.miniapp_id = m.id), 0) as total_impressions,
         COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = m.id), 0) as mediation_request_count,
         COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = m.id AND mr.final_result = 'no_fill'), 0) as no_fill_count,
         (SELECT MAX(mr.created_at) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = m.id) as last_mediation_request_at,

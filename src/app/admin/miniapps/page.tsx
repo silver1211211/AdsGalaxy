@@ -4,7 +4,7 @@ import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Modal from "@/components/ui/Modal";
-import { BarChart3, Check, ChevronLeft, ChevronRight, Loader2, Search, Settings2, Smartphone, X } from "lucide-react";
+import { BarChart3, Check, ChevronLeft, ChevronRight, Loader2, Pause, Play, Search, Settings2, Smartphone, X } from "lucide-react";
 
 type MiniApp = {
   id: number;
@@ -14,7 +14,7 @@ type MiniApp = {
   bot_id: string;
   webapp_url: string;
   miniapp_url: string;
-  status: "pending" | "approved" | "rejected";
+  status: "pending" | "approved" | "monetized" | "paused" | "rejected";
   owner_username?: string | null;
   first_name?: string | null;
   last_name?: string | null;
@@ -22,6 +22,8 @@ type MiniApp = {
   created_at?: string;
   updated_at?: string;
   mediation_request_count?: string | number;
+  active_network_count?: string | number;
+  total_impressions?: string | number;
   no_fill_count?: string | number;
   last_mediation_request_at?: string | null;
   recent_selected_network?: string | null;
@@ -59,23 +61,42 @@ type RevenueSummary = Record<string, number>;
 
 type PendingAction = {
   miniapp: MiniApp;
-  action: "approve" | "reject";
+  action: "approve" | "reject" | "pause" | "resume";
   title: string;
   message: string;
   danger?: boolean;
 } | null;
 
 const placementLabels: Record<string, string> = {
-  AdsGram: "Placement ID",
   Monetag: "Zone ID",
-  AdExium: "Widget ID",
+  AdsGram: "Placement ID",
   RichAds: "Widget ID",
+  AdExium: "Widget ID",
+  AdsGalaxyInternal: "Internal AdsGalaxy Ads",
+};
+
+const networkLabels: Record<string, string> = {
+  Monetag: "Monetag",
+  AdsGram: "AdsGram",
+  RichAds: "RichAds",
+  AdExium: "AdExium",
+  AdsGalaxyInternal: "Internal AdsGalaxy Ads",
 };
 
 function statusClass(status: MiniApp["status"]) {
-  if (status === "approved") return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  if (status === "monetized") return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  if (status === "approved") return "bg-blue-50 text-blue-700 border-blue-200";
+  if (status === "paused") return "bg-slate-100 text-slate-600 border-slate-200";
   if (status === "rejected") return "bg-red-50 text-red-700 border-red-200";
   return "bg-amber-50 text-amber-700 border-amber-200";
+}
+
+function statusLabel(status: MiniApp["status"]) {
+  if (status === "pending") return "Pending Review";
+  if (status === "monetized") return "Monetized";
+  if (status === "approved") return "Approved";
+  if (status === "paused") return "Paused";
+  return "Rejected";
 }
 
 function displayOwner(miniapp: MiniApp) {
@@ -192,6 +213,7 @@ export default function AdminMiniAppsPage() {
       if (!res.ok) throw new Error(data.error || "Failed to save networks");
       setNetworks(data.networks || networks);
       setNetworkMiniApp(null);
+      await fetchMiniApps(page, statusFilter, search);
     } catch (err: any) {
       setError(err.message || "Failed to save networks");
     } finally {
@@ -251,12 +273,12 @@ export default function AdminMiniAppsPage() {
   };
 
   const StatusBadge = ({ status }: { status: MiniApp["status"] }) => (
-    <span className={`rounded border px-2 py-0.5 text-xs font-semibold capitalize ${statusClass(status)}`}>{status}</span>
+    <span className={`rounded border px-2 py-0.5 text-xs font-semibold ${statusClass(status)}`}>{statusLabel(status)}</span>
   );
 
   const ActionButtons = ({ miniapp }: { miniapp: MiniApp }) => (
     <div className="flex flex-wrap items-center justify-end gap-2">
-      {miniapp.status !== "approved" && (
+      {miniapp.status !== "approved" && miniapp.status !== "monetized" && miniapp.status !== "paused" && (
         <button
           onClick={() => setPendingAction({ miniapp, action: "approve", title: "Approve Mini App", message: `Approve ${miniapp.miniapp_name}?` })}
           disabled={actionLoading === miniapp.id}
@@ -264,6 +286,22 @@ export default function AdminMiniAppsPage() {
           title="Approve"
         >
           {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />}
+        </button>
+      )}
+      {miniapp.status !== "pending" && miniapp.status !== "rejected" && (
+        <button
+          onClick={() => setPendingAction({
+            miniapp,
+            action: miniapp.status === "paused" ? "resume" : "pause",
+            title: miniapp.status === "paused" ? "Resume Mini App" : "Pause Mini App",
+            message: `${miniapp.status === "paused" ? "Resume" : "Pause"} ${miniapp.miniapp_name}?`,
+            danger: miniapp.status !== "paused",
+          })}
+          disabled={actionLoading === miniapp.id}
+          className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:bg-slate-50 hover:text-blue-600 disabled:opacity-50"
+          title={miniapp.status === "paused" ? "Resume" : "Pause"}
+        >
+          {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={16} /> : miniapp.status === "paused" ? <Play size={16} /> : <Pause size={16} />}
         </button>
       )}
       {miniapp.status !== "rejected" && (
@@ -285,7 +323,7 @@ export default function AdminMiniAppsPage() {
       </button>
       <button
         onClick={() => openNetworks(miniapp)}
-        disabled={miniapp.status !== "approved"}
+        disabled={miniapp.status !== "approved" && miniapp.status !== "monetized"}
         className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:bg-slate-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
         title="Network configuration"
       >
@@ -325,7 +363,7 @@ export default function AdminMiniAppsPage() {
                 <div key={network.network_name} className="rounded-lg border border-slate-200 p-3">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <div className="text-sm font-bold text-slate-900">{network.network_name}</div>
+                      <div className="text-sm font-bold text-slate-900">{networkLabels[network.network_name] || network.network_name}</div>
                       <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{placementLabels[network.network_name]}</div>
                     </div>
                     <button
@@ -335,12 +373,14 @@ export default function AdminMiniAppsPage() {
                       <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${network.enabled ? "translate-x-6" : "translate-x-1"}`} />
                     </button>
                   </div>
-                  <input
-                    value={network.network_placement_id}
-                    onChange={(event) => setNetworks((prev) => prev.map((item, itemIndex) => itemIndex === index ? { ...item, network_placement_id: event.target.value } : item))}
-                    className="mt-3 w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                    placeholder={placementLabels[network.network_name]}
-                  />
+                  {network.network_name !== "AdsGalaxyInternal" && (
+                    <input
+                      value={network.network_placement_id}
+                      onChange={(event) => setNetworks((prev) => prev.map((item, itemIndex) => itemIndex === index ? { ...item, network_placement_id: event.target.value } : item))}
+                      className="mt-3 w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                      placeholder={placementLabels[network.network_name]}
+                    />
+                  )}
                   <label className="mt-3 block text-[10px] font-bold uppercase tracking-wide text-slate-400">
                     Priority
                     <input
@@ -353,14 +393,16 @@ export default function AdminMiniAppsPage() {
                     />
                   </label>
                   <div className="mt-3 flex items-center gap-2">
-                    <button
-                      onClick={() => testNetwork(network.network_name)}
-                      disabled={networkTestLoading === network.network_name || networksLoading}
-                      className="inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-                    >
-                      {networkTestLoading === network.network_name && <Loader2 className="animate-spin" size={14} />}
-                      Test Init
-                    </button>
+                    {network.network_name !== "AdsGalaxyInternal" && (
+                      <button
+                        onClick={() => testNetwork(network.network_name)}
+                        disabled={networkTestLoading === network.network_name || networksLoading}
+                        className="inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                      >
+                        {networkTestLoading === network.network_name && <Loader2 className="animate-spin" size={14} />}
+                        Test Init
+                      </button>
+                    )}
                     {networkTestResult[network.network_name] && (
                       <span className="min-w-0 truncate text-xs text-slate-500" title={networkTestResult[network.network_name]}>
                         {networkTestResult[network.network_name]}
@@ -407,9 +449,11 @@ export default function AdminMiniAppsPage() {
                 <div className="space-y-5">
                   <div className="grid grid-cols-2 gap-2 lg:grid-cols-4 xl:grid-cols-8">
                     {[
-                      ["Today's Earnings", money(report.summary.today_earnings)],
-                      ["Total Earnings", money(report.summary.total_earnings)],
+                      ["Today Impressions", numberValue(report.summary.today_impressions)],
+                      ["Yesterday Impressions", numberValue(report.summary.yesterday_impressions)],
                       ["Total Impressions", numberValue(report.summary.total_impressions)],
+                      ["Today's Revenue", money(report.summary.today_revenue)],
+                      ["Lifetime Revenue", money(report.summary.lifetime_revenue)],
                       ["External Ad Revenue", money(report.summary.external_revenue)],
                       ["Platform Fee Revenue", money(report.summary.ads_galaxy_fee)],
                       ["Internal Ad Revenue", money(report.summary.internal_revenue)],
@@ -439,7 +483,7 @@ export default function AdminMiniAppsPage() {
                             {report.networks.length === 0 ? (
                               <tr><td colSpan={5} className="p-6 text-center text-slate-500">No network stats.</td></tr>
                             ) : report.networks.map((row) => (
-                              <tr key={String(row.network_name)}><td className="px-3 py-2 font-semibold">{row.network_name}</td><td className="px-3 py-2">{numberValue(row.impressions)}</td><td className="px-3 py-2">{money(row.gross_revenue)}</td><td className="px-3 py-2">{money(row.publisher_revenue)}</td><td className="px-3 py-2">{money(row.gross_cpm)}</td></tr>
+                              <tr key={String(row.network_name)}><td className="px-3 py-2 font-semibold">{networkLabels[String(row.network_name)] || row.network_name}</td><td className="px-3 py-2">{numberValue(row.impressions)}</td><td className="px-3 py-2">{money(row.gross_revenue)}</td><td className="px-3 py-2">{money(row.publisher_revenue)}</td><td className="px-3 py-2">{money(row.gross_cpm)}</td></tr>
                             ))}
                           </tbody>
                         </table>
@@ -453,7 +497,7 @@ export default function AdminMiniAppsPage() {
                           <div className="p-6 text-center text-sm text-slate-500">No network configuration.</div>
                         ) : report.enabled_networks.map((network) => (
                           <div key={network.network_name} className="flex items-center justify-between gap-3 p-3 text-sm">
-                            <div><div className="font-semibold text-slate-900">{network.network_name}</div><div className="text-xs text-slate-500">{network.network_placement_id || "No placement ID"}</div></div>
+                            <div><div className="font-semibold text-slate-900">{networkLabels[network.network_name] || network.network_name}</div><div className="text-xs text-slate-500">{network.network_name === "AdsGalaxyInternal" ? "Internal demand toggle" : network.network_placement_id || "No placement ID"}</div></div>
                             <span className={`rounded border px-2 py-0.5 text-xs font-semibold ${network.enabled ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-slate-50 text-slate-500"}`}>{network.enabled ? "Enabled" : "Disabled"}</span>
                           </div>
                         ))}
@@ -523,9 +567,9 @@ export default function AdminMiniAppsPage() {
               <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search Mini Apps..." className="w-full rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-10 pr-4 text-xs outline-none focus:ring-2 focus:ring-blue-500" />
             </div>
             <div className="flex rounded-md border border-slate-200/50 bg-slate-100 p-0.5">
-              {["all", "pending", "approved", "rejected"].map((filter) => (
-                <button key={filter} onClick={() => { setPage(1); setStatusFilter(filter); }} className={`flex-1 rounded px-3 py-1.5 text-xs font-medium capitalize ${statusFilter === filter ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}>
-                  {filter}
+              {["all", "pending", "approved", "monetized", "paused", "rejected"].map((filter) => (
+                <button key={filter} onClick={() => { setPage(1); setStatusFilter(filter); }} className={`flex-1 rounded px-3 py-1.5 text-xs font-medium ${statusFilter === filter ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}>
+                  {filter === "all" ? "All" : statusLabel(filter as MiniApp["status"])}
                 </button>
               ))}
             </div>

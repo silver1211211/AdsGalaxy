@@ -68,7 +68,7 @@ export async function GET(request: Request) {
     `, params);
 
     const enabledNetworks = networkRows
-      .filter((row) => isMiniAppNetworkName(row.network_name))
+      .filter((row) => isMiniAppNetworkName(row.network_name) && row.network_name !== "AdsGalaxyInternal")
       .map((row) => {
         try {
           return buildMiniAppNetworkClientConfig(row.network_name as MiniAppNetworkName, row.network_placement_id || "");

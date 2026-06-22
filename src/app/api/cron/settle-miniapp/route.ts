@@ -34,7 +34,7 @@ export async function GET(_req: NextRequest) {
       JOIN miniapps m ON ds.miniapp_id = m.id
       LEFT JOIN miniapp_earnings_settlements s ON s.daily_stat_id = ds.id
       WHERE s.id IS NULL
-        AND m.status = 'approved'
+        AND m.status IN ('approved', 'monetized')
         AND m.is_deleted = FALSE
         AND ds.publisher_revenue > 0
       ORDER BY ds.date ASC, ds.id ASC
@@ -66,7 +66,7 @@ export async function GET(_req: NextRequest) {
             FROM miniapp_daily_stats ds
             JOIN miniapps m ON ds.miniapp_id = m.id
             WHERE ds.id = ?
-              AND m.status = 'approved'
+              AND m.status IN ('approved', 'monetized')
               AND m.is_deleted = FALSE
             FOR UPDATE
           `, [stat.id]);

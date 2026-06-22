@@ -87,7 +87,7 @@ export async function recordMiniAppStats(input: MiniAppStatInput) {
     throw new Error("Mini App not found");
   }
 
-  if (miniapps[0].status !== "approved") {
+  if (miniapps[0].status !== "approved" && miniapps[0].status !== "monetized") {
     throw new Error("Mini App must be approved before stats can be recorded");
   }
 
