@@ -3,6 +3,8 @@ import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { assertCampaignLifecycleColumns } from "@/lib/campaignLifecycle";
 import { deleteActiveCampaignPosts } from "@/lib/campaignPostDeletion";
+import { publicQualityRating } from "@/lib/trafficQuality";
+import { publicInventoryQuality } from "@/lib/inventoryOptimization";
 
 export async function GET(
   request: Request,
@@ -33,6 +35,13 @@ export async function GET(
         "SELECT COUNT(*) as count, SUM(cost) as total_cost FROM broadcast_deliveries WHERE campaign_id = ?",
         [id]
       );
+      const [[qualityRow]]: any = await pool.query(
+        `SELECT AVG(b.traffic_quality_score) as avg_quality, AVG(b.inventory_score) as avg_inventory
+         FROM broadcast_deliveries bd
+         JOIN bots b ON bd.bot_id = b.id
+         WHERE bd.campaign_id = ?`,
+        [id]
+      );
       
       // Get stats by bot
       const [botStats]: any = await pool.query(
@@ -49,6 +58,8 @@ export async function GET(
       extraData = {
         total_deliveries: broadcastSummary[0].count || 0,
         total_spent: broadcastSummary[0].total_cost || 0,
+        traffic_quality_rating: publicQualityRating(qualityRow?.avg_quality),
+        inventory_quality_rating: publicInventoryQuality(qualityRow?.avg_inventory),
         broadcast_stats: botStats
       };
     } else {
@@ -76,10 +87,19 @@ export async function GET(
          ORDER BY cp.created_at DESC`,
         [id]
       );
+      const [[qualityRow]]: any = await pool.query(
+        `SELECT AVG(ch.traffic_quality_score) as avg_quality, AVG(ch.inventory_score) as avg_inventory
+         FROM campaign_posts cp
+         JOIN channels ch ON cp.channel_id = ch.id
+         WHERE cp.campaign_id = ?`,
+        [id]
+      );
 
       extraData = {
         total_clicks: clickCount[0].count,
         total_views: viewCount[0].count || 0,
+        traffic_quality_rating: publicQualityRating(qualityRow?.avg_quality),
+        inventory_quality_rating: publicInventoryQuality(qualityRow?.avg_inventory),
         posts: posts
       };
     }

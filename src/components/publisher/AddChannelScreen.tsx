@@ -204,6 +204,24 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
   };
 
   const handleSubmit = async () => {
+    const trimmedTitle = editedTitle.trim();
+    if (trimmedTitle.length < 3) {
+      setNotification({
+        type: "error",
+        title: isEdit ? "Update Failed" : "Registration Failed",
+        message: "Channel name must be at least 3 characters."
+      });
+      return;
+    }
+    if (trimmedTitle.length > 50) {
+      setNotification({
+        type: "error",
+        title: isEdit ? "Update Failed" : "Registration Failed",
+        message: "Channel name must be at most 50 characters."
+      });
+      return;
+    }
+
     setIsLoading(true);
     setNotification(null);
     try {
@@ -212,7 +230,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
         body: JSON.stringify({
           chat_id: isEdit ? channel.chat_id : channelInfo.id,
           username: isEdit ? channel.username : channelInfo.username,
-          title: editedTitle,
+          title: trimmedTitle,
           posts_per_day: postsPerDay,
           posting_times: postingTimes,
           audience_continents: selectedContinents,

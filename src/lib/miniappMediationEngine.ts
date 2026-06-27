@@ -22,6 +22,7 @@ const FALLBACK_ERROR_CODES = new Set([
   "TIMEOUT",
   "INVALID_CONFIG",
   "NETWORK_ERROR",
+  "NO_FILL",
 ]);
 
 type NetworkRow = RowDataPacket & {
@@ -41,9 +42,17 @@ type RequestRow = RowDataPacket & {
   telegram_user_id: string | number;
   country: string | null;
   ad_format: string;
+  selected_network: string;
   root_request_id: string | null;
   attempted_networks: string | null;
   fallback_attempts: string | null;
+};
+
+type MiniAppEligibilityRow = RowDataPacket & {
+  status: string;
+  traffic_quality_score: number | null;
+  traffic_risk_level: string | null;
+  inventory_override: string | null;
 };
 
 export type SkippedNetwork = {
@@ -91,6 +100,18 @@ function supportsFormat(networkName: MiniAppNetworkName, adFormat: MiniAppAdForm
   return false;
 }
 
+function rankCandidatePool(candidates: NetworkRow[]) {
+  return [...candidates].sort((a, b) => {
+    const priorityA = Number(a.priority_order || 99);
+    const priorityB = Number(b.priority_order || 99);
+    const scoreA = Number(a.health_score ?? 100);
+    const scoreB = Number(b.health_score ?? 100);
+    const effectiveA = scoreA - ((priorityA - 1) * 8);
+    const effectiveB = scoreB - ((priorityB - 1) * 8);
+    return effectiveB - effectiveA || priorityA - priorityB;
+  });
+}
+
 export function isFallbackErrorCode(errorCode: string) {
   return FALLBACK_ERROR_CODES.has(errorCode);
 }
@@ -101,7 +122,7 @@ export async function getMiniappNetworksForMediation(miniappId: number | string,
       mn.network_name,
       mn.network_placement_id,
       mn.enabled,
-      COALESCE(NULLIF(mn.priority_order, 0), FIELD(mn.network_name, 'AdsGram', 'Monetag', 'AdExium', 'RichAds', 'AdsGalaxyInternal')) as priority_order,
+      COALESCE(NULLIF(mn.priority_order, 0), FIELD(mn.network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')) as priority_order,
       mh.recent_failures,
       mh.temporarily_disabled_until
     FROM miniapp_ad_networks mn
@@ -109,7 +130,7 @@ export async function getMiniappNetworksForMediation(miniappId: number | string,
       ON mh.miniapp_id = mn.miniapp_id AND mh.network_name = mn.network_name
     WHERE mn.miniapp_id = ?
       AND mn.network_name IN (?)
-    ORDER BY priority_order ASC, FIELD(mn.network_name, 'AdsGram', 'Monetag', 'AdExium', 'RichAds', 'AdsGalaxyInternal')
+    ORDER BY priority_order ASC, FIELD(mn.network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')
   `, [miniappId, [...MINIAPP_NETWORKS]]);
 
   return rows;
@@ -124,58 +145,85 @@ export async function selectMediationNetwork(input: {
   alreadyAttempted?: string[];
 }) {
   const networks = await getMiniappNetworksForMediation(input.miniappId, input.conn);
-  const enabledNetworks = networks.filter((network) => Boolean(network.enabled));
-  const internalEnabled = networks.some((network) => network.network_name === INTERNAL_NETWORK_NAME && Boolean(network.enabled));
-  const internalCampaign = input.adFormat === "rewarded" && internalEnabled
-    ? await selectInternalRewardedCampaign({
+  const scoreRows = await getMiniAppNetworkHealthScores(input.miniappId, input.conn).catch(() => []);
+  const scoreMap = new Map(scoreRows.map((row) => [row.network_name, row.health_score]));
+  const [[miniapp]] = await input.conn.query<MiniAppEligibilityRow[]>(
+    "SELECT status, traffic_quality_score, traffic_risk_level, inventory_override FROM miniapps WHERE id = ? FOR UPDATE",
+    [input.miniappId]
+  );
+  const enabledNetworkNames = networks.filter((network) => Boolean(network.enabled)).map((network) => network.network_name);
+  const attempted = new Set((input.alreadyAttempted || []).filter(Boolean));
+  const skipped: SkippedNetwork[] = [];
+  const candidatePool: NetworkRow[] = [];
+
+  for (const network of networks) {
+    if (!isMiniAppNetworkName(network.network_name)) {
+      skipped.push({ network_name: network.network_name, reason: "unsupported_network" });
+      continue;
+    }
+
+    network.health_score = scoreMap.get(network.network_name as MiniAppNetworkName) ?? 100;
+
+    if (!Boolean(network.enabled)) {
+      skipped.push({ network_name: network.network_name, reason: "disabled" });
+      continue;
+    }
+
+    if (isFuture(network.temporarily_disabled_until) || Number(network.health_score ?? 100) <= 0) {
+      skipped.push({ network_name: network.network_name, reason: "unhealthy" });
+      continue;
+    }
+
+    if (network.network_name === "Monetag") {
+      const monetagState = await canShowMonetag(input.miniappId, input.telegramUserId, input.conn);
+      if (!monetagState.allowed) {
+        skipped.push({ network_name: "Monetag", reason: `protected_${monetagState.reason}` });
+        continue;
+      }
+    }
+
+    if (network.network_name === INTERNAL_NETWORK_NAME) {
+      if (input.adFormat !== "rewarded") {
+        skipped.push({ network_name: INTERNAL_NETWORK_NAME, reason: "unsupported_ad_format" });
+        continue;
+      }
+      const internalCampaign = await selectInternalRewardedCampaign({
         conn: input.conn,
         miniappId: input.miniappId,
         telegramUserId: input.telegramUserId,
         country: input.country || null,
-      })
-    : { campaign: null, skip_reason: input.adFormat === "rewarded" ? "internal_network_disabled" : "unsupported_ad_format" };
-  const scoreRows = await getMiniAppNetworkHealthScores(input.miniappId, input.conn).catch(() => []);
-  const scoreMap = new Map(scoreRows.map((row) => [row.network_name, row.health_score]));
+      });
+      if (!internalCampaign.campaign) {
+        skipped.push({ network_name: INTERNAL_NETWORK_NAME, reason: internalCampaign.skip_reason || "no_internal_campaign" });
+        continue;
+      }
+      network.network_placement_id = String(internalCampaign.campaign.id);
+      network.internal_campaign_id = internalCampaign.campaign.id;
+      network.internal_ad = internalCampaign.campaign;
+    } else {
+      try {
+        if (!supportsFormat(network.network_name, input.adFormat, network.network_placement_id || "")) {
+          skipped.push({ network_name: network.network_name, reason: "unsupported_ad_format" });
+          continue;
+        }
+      } catch (error: any) {
+        skipped.push({ network_name: network.network_name, reason: error?.message || "invalid_config" });
+        continue;
+      }
+    }
 
-  if (internalCampaign.campaign) {
-    enabledNetworks.push({
-      network_name: INTERNAL_NETWORK_NAME,
-      network_placement_id: String(internalCampaign.campaign.id),
-      enabled: true,
-      priority_order: 5,
-      recent_failures: null,
-      temporarily_disabled_until: null,
-      health_score: scoreMap.get(INTERNAL_NETWORK_NAME) ?? 100,
-      internal_campaign_id: internalCampaign.campaign.id,
-      internal_ad: internalCampaign.campaign,
-    } as NetworkRow);
-  }
+    if (!miniapp || (miniapp.status !== "approved" && miniapp.status !== "monetized")) {
+      skipped.push({ network_name: network.network_name, reason: "publisher_ineligible" });
+      continue;
+    }
 
-  for (const network of enabledNetworks) {
-    network.health_score = scoreMap.get(network.network_name as MiniAppNetworkName) ?? 100;
-  }
+    if (miniapp.inventory_override === "pause" || miniapp.inventory_override === "blacklist") {
+      skipped.push({ network_name: network.network_name, reason: "publisher_inventory_protected" });
+      continue;
+    }
 
-  enabledNetworks.sort((a, b) => {
-    const priorityA = Number(a.priority_order || 99);
-    const priorityB = Number(b.priority_order || 99);
-    const scoreA = Number(a.health_score ?? 100);
-    const scoreB = Number(b.health_score ?? 100);
-    const effectiveA = scoreA - ((priorityA - 1) * 8);
-    const effectiveB = scoreB - ((priorityB - 1) * 8);
-    return effectiveB - effectiveA || priorityA - priorityB;
-  });
-
-  const attempted = new Set((input.alreadyAttempted || []).filter(Boolean));
-  const skipped: SkippedNetwork[] = [];
-  const candidates: NetworkRow[] = [];
-
-  if (!internalCampaign.campaign && !attempted.has(INTERNAL_NETWORK_NAME)) {
-    skipped.push({ network_name: INTERNAL_NETWORK_NAME, reason: internalCampaign.skip_reason || "no_internal_campaign" });
-  }
-
-  for (const network of enabledNetworks) {
-    if (!isMiniAppNetworkName(network.network_name)) {
-      skipped.push({ network_name: network.network_name, reason: "unsupported_network" });
+    if (String(miniapp.traffic_risk_level || "low") === "critical") {
+      skipped.push({ network_name: network.network_name, reason: "traffic_quality_ineligible" });
       continue;
     }
 
@@ -184,46 +232,19 @@ export async function selectMediationNetwork(input: {
       continue;
     }
 
-    if (network.network_name === INTERNAL_NETWORK_NAME) {
-      candidates.push(network);
-      continue;
-    }
-
-    if (isFuture(network.temporarily_disabled_until)) {
-      skipped.push({ network_name: network.network_name, reason: "temporarily_disabled" });
-      continue;
-    }
-
-    try {
-      if (!supportsFormat(network.network_name, input.adFormat, network.network_placement_id || "")) {
-        skipped.push({ network_name: network.network_name, reason: "unsupported_ad_format" });
-        continue;
-      }
-    } catch (error: any) {
-      skipped.push({ network_name: network.network_name, reason: error?.message || "invalid_config" });
-      continue;
-    }
-
-    if (network.network_name === "Monetag") {
-      const monetagState = await canShowMonetag(input.miniappId, input.telegramUserId, input.conn);
-      if (!monetagState.allowed) {
-        skipped.push({ network_name: "Monetag", reason: `monetag_${monetagState.reason}` });
-        continue;
-      }
-    }
-
-    candidates.push(network);
+    candidatePool.push(network);
   }
 
-  const selected = candidates[0];
+  const rankedCandidates = rankCandidatePool(candidatePool);
+  const selected = rankedCandidates[0];
   if (selected?.network_name === "Monetag") {
     await recordMonetagShown(input.miniappId, input.telegramUserId, input.conn);
   }
 
   return {
     selected,
-    enabled_networks: enabledNetworks.map((network) => network.network_name),
-    candidate_networks: candidates.map((network) => network.network_name),
+    enabled_networks: enabledNetworkNames,
+    candidate_networks: rankedCandidates.map((network) => network.network_name),
     skipped_networks: skipped,
   };
 }
@@ -301,7 +322,7 @@ export async function createMediationAttempt(input: {
   }
 
   const fallbackAvailable = decision.candidate_networks.length > 1;
-  const decisionReason = input.parentRequestId ? "fallback_selected" : "priority_selected";
+  const decisionReason = input.parentRequestId ? "fallback_candidate_ranked" : "candidate_pool_ranked";
 
   await input.conn.query(
     `INSERT INTO miniapp_mediation_requests
@@ -346,7 +367,7 @@ export async function createMediationAttempt(input: {
 
 export async function getMediationRequestForFallback(requestId: string, conn: PoolConnection) {
   const [rows] = await conn.query<RequestRow[]>(`
-    SELECT miniapp_id, telegram_user_id, country, ad_format, root_request_id, attempted_networks, fallback_attempts
+    SELECT miniapp_id, telegram_user_id, country, ad_format, selected_network, root_request_id, attempted_networks, fallback_attempts
     FROM miniapp_mediation_requests
     WHERE request_id = ?
     FOR UPDATE

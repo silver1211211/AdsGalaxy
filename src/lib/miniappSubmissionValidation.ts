@@ -125,6 +125,9 @@ export function validateMiniAppSubmission(input: MiniAppSubmissionInput): Valida
   if (miniappName.length < 3) {
     fail("Mini App name must be at least 3 characters");
   }
+  if (miniappName.length > 50) {
+    fail("Mini App name must be at most 50 characters");
+  }
 
   const username = normalizeBotUsername(input.miniapp_username);
   const botId = validateBotId(input.bot_id);

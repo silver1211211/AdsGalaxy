@@ -3,6 +3,17 @@ import pool from "@/lib/db";
 import { getAuthenticatedAdmin } from "@/lib/adminAuth";
 import { buildMiniAppAdminBreakdown, buildMiniAppReport, getMiniAppReportParams } from "@/lib/miniappReports";
 
+function parseJsonArray(value: unknown) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(String(value));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -28,8 +39,27 @@ export async function GET(
       buildMiniAppReport(id, startDate, endDate, dateSearch),
       buildMiniAppAdminBreakdown(id, startDate, endDate, dateSearch),
     ]);
+    const [diagnosticRows]: any = await pool.query(`
+      SELECT request_id, selected_network, candidate_networks, skipped_networks, decision_reason, final_result, created_at
+      FROM miniapp_mediation_requests
+      WHERE miniapp_id = ?
+      ORDER BY created_at DESC
+      LIMIT 25
+    `, [id]);
 
-    return NextResponse.json({ ...report, ...breakdown });
+    return NextResponse.json({
+      ...report,
+      ...breakdown,
+      network_diagnostics: diagnosticRows.map((row: any) => ({
+        request_id: row.request_id,
+        selected_network: row.selected_network || null,
+        candidate_pool: parseJsonArray(row.candidate_networks).map(String),
+        excluded_networks: parseJsonArray(row.skipped_networks),
+        decision_reason: row.decision_reason,
+        final_result: row.final_result,
+        created_at: row.created_at,
+      })),
+    });
   } catch (error: unknown) {
     console.error("Admin Mini App Report Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });

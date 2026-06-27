@@ -141,8 +141,8 @@ CREATE TABLE \`withdrawals\` (
 
     console.log(" -> Populating table: admins");
     await pool.query(`
-INSERT INTO \`admins\` (\`id\`, \`username\`, \`password\`, \`created_at\`) VALUES
-(1, 'admin', 'admin123', '2026-05-02 09:03:54');
+INSERT INTO \`admins\` (\`id\`, \`username\`, \`password\`, \`password_hash\`, \`password_migrated_at\`, \`created_at\`) VALUES
+(1, 'admin', '[migrated]', '$2b$12$OeVbk9w3XYEloyRXEUj7cebHFDxlJ8XKbT8J1OXIAWK/YONQ7XXWa', NOW(), '2026-05-02 09:03:54');
     `);
 
     console.log(" -> Populating table: campaign_limits");

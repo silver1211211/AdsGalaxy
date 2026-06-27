@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
+import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 
 export const dynamic = 'force-dynamic';
 
@@ -20,6 +21,14 @@ async function getChat(chatId: string | number) {
 }
 
 export async function GET(req: NextRequest) {
+  const unauthorized = requireCronSecret(req);
+  if (unauthorized) return unauthorized;
+
+  const lock = await acquireCronLock("update-views", 900);
+  if (!lock) {
+    return NextResponse.json({ success: false, message: "Views update cron is already running" }, { status: 409 });
+  }
+
   try {
     const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
     const [posts]: any = await pool.query(`
@@ -41,7 +50,8 @@ export async function GET(req: NextRequest) {
 
     for (const post of posts) {
       try {
-        const apiUrl = `https://php.adsgalaxy.online/views/api.php?channel=${post.channel_username}&post=${post.message_id}`;
+        const viewsApiBaseUrl = process.env.PHP_VIEWS_API_URL || "https://php.adsgalaxy.online/views/api.php";
+        const apiUrl = `${viewsApiBaseUrl}?channel=${encodeURIComponent(post.channel_username)}&post=${encodeURIComponent(String(post.message_id))}`;
         const res = await fetch(apiUrl);
         const data = await res.json();
 
@@ -102,5 +112,7 @@ export async function GET(req: NextRequest) {
   } catch (error: any) {
     console.error("Views Update Cron Error:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
+  } finally {
+    await releaseCronLock(lock);
   }
 }

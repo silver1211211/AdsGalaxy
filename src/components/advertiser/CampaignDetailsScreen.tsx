@@ -18,6 +18,15 @@ interface Campaign {
   button_text: string;
   category: string;
   continents: string;
+  countries?: string | null;
+  languages?: string | null;
+  vpn_policy?: string | null;
+  device_policy?: string | null;
+  os_policy?: string | null;
+  start_at?: string | null;
+  end_at?: string | null;
+  daily_budget_limit?: string | number | null;
+  frequency_cap_per_user?: string | number | null;
   created_at: string;
   total_clicks?: number;
   total_views?: number;
@@ -26,6 +35,8 @@ interface Campaign {
   posts?: any[];
   broadcast_stats?: any[];
   chart_data?: any[];
+  traffic_quality_rating?: string;
+  inventory_quality_rating?: string;
 }
 
 interface CampaignDetailsScreenProps {
@@ -35,6 +46,38 @@ interface CampaignDetailsScreenProps {
 
 import { apiFetch } from "@/lib/api";
 import { Loader2, PlayCircle, Eye, MousePointer2, Send, Bot } from "lucide-react";
+
+function targetingList(value: unknown) {
+  if (Array.isArray(value)) return value.length > 0 ? value.join(", ") : "All";
+  if (!value) return "All";
+  try {
+    const parsed = JSON.parse(String(value));
+    if (Array.isArray(parsed)) return parsed.length > 0 ? parsed.join(", ") : "All";
+  } catch {
+    // Plain strings are displayed directly.
+  }
+  return String(value) || "All";
+}
+
+function policyLabel(value: unknown) {
+  const labels: Record<string, string> = {
+    allow_all: "Allow all traffic",
+    prefer_non_vpn: "Prefer non-VPN traffic",
+    exclude_vpn: "Exclude VPN/proxy traffic",
+    all: "All",
+    mobile: "Mobile only",
+    desktop: "Desktop only",
+    android: "Android",
+    ios: "iOS",
+    desktop_web: "Desktop/Web",
+  };
+  return labels[String(value || "all")] || "All";
+}
+
+function shortDate(value: unknown) {
+  if (!value) return "No restriction";
+  return new Date(String(value)).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
 
 export default function CampaignDetailsScreen({ campaign: initialCampaign, onClose }: CampaignDetailsScreenProps) {
   const [campaign, setCampaign] = React.useState<Campaign>(initialCampaign);
@@ -156,6 +199,18 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
               <Target size={10} /> Goal
             </p>
             <p className="text-lg font-black text-slate-900 uppercase">{campaign.type}</p>
+          </div>
+          <div className="p-4 bg-slate-50 rounded-3xl border border-slate-100 space-y-1">
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+              <AlertTriangle size={10} /> Traffic Quality
+            </p>
+            <p className="text-sm font-black text-slate-900">{campaign.traffic_quality_rating || "Good"}</p>
+          </div>
+          <div className="p-4 bg-slate-50 rounded-3xl border border-slate-100 space-y-1">
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+              <AlertTriangle size={10} /> Inventory Quality
+            </p>
+            <p className="text-sm font-black text-slate-900">{campaign.inventory_quality_rating || "Good"}</p>
           </div>
           <div className="p-4 bg-slate-50 rounded-3xl border border-slate-100 space-y-1">
             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
@@ -323,6 +378,25 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
                     <p className="text-sm font-black text-slate-900 truncate">
                       {continents.length === 7 ? "Global" : continents.join(", ")}
                     </p>
+                  </div>
+                </div>
+                <div className="p-4 bg-slate-50/80 border border-slate-200/60 rounded-2xl shadow-sm space-y-3">
+                  <div className="flex items-center gap-4">
+                    <Target size={18} className="text-emerald-500" />
+                    <div>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none mb-1">Selected Targeting</p>
+                      <p className="text-sm font-black text-slate-900">Countries: {targetingList(campaign.countries)}</p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2 pl-9 text-xs font-bold text-slate-500 sm:grid-cols-2">
+                    <div>Languages: {targetingList(campaign.languages)}</div>
+                    <div>VPN: {policyLabel(campaign.vpn_policy)}</div>
+                    <div>Device: {policyLabel(campaign.device_policy)}</div>
+                    <div>Platform: {policyLabel(campaign.os_policy)}</div>
+                    <div>Start: {shortDate(campaign.start_at)}</div>
+                    <div>End: {shortDate(campaign.end_at)}</div>
+                    <div>Daily cap: {campaign.daily_budget_limit ? `$${campaign.daily_budget_limit}` : "No cap"}</div>
+                    <div>Frequency cap: {campaign.frequency_cap_per_user || "No cap"}</div>
                   </div>
                 </div>
                 <div className="flex items-center gap-4 p-4 bg-slate-50/80 border border-slate-200/60 rounded-2xl shadow-sm">

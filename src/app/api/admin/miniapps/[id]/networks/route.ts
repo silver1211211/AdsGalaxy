@@ -4,7 +4,7 @@ import pool from "@/lib/db";
 import { getAuthenticatedAdmin } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 
-const NETWORKS = ["Monetag", "AdsGram", "RichAds", "AdExium", "AdsGalaxyInternal"];
+const NETWORKS = ["AdsGram", "Monetag", "RichAds", "AdExium", "GigaPub", "AdsGalaxyInternal"];
 
 type NetworkRow = RowDataPacket & {
   network_name: string;
@@ -18,8 +18,8 @@ async function getNetworkState(miniappId: string) {
     `SELECT network_name, network_placement_id, enabled, priority_order
      FROM miniapp_ad_networks
      WHERE miniapp_id = ?
-     ORDER BY COALESCE(NULLIF(priority_order, 0), FIELD(network_name, 'Monetag', 'AdsGram', 'RichAds', 'AdExium', 'AdsGalaxyInternal')),
-       FIELD(network_name, 'Monetag', 'AdsGram', 'RichAds', 'AdExium', 'AdsGalaxyInternal'), network_name`,
+     ORDER BY COALESCE(NULLIF(priority_order, 0), FIELD(network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')),
+       FIELD(network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal'), network_name`,
     [miniappId]
   );
 
@@ -85,10 +85,6 @@ export async function PUT(
       return NextResponse.json({ error: "Mini App not found" }, { status: 404 });
     }
 
-    if (miniapps[0].status !== "approved" && miniapps[0].status !== "monetized") {
-      return NextResponse.json({ error: "Approve the Mini App before configuring networks" }, { status: 400 });
-    }
-
     const previousState = await getNetworkState(id);
 
     for (const networkName of NETWORKS) {
@@ -112,11 +108,19 @@ export async function PUT(
     }
 
     const newState = await getNetworkState(id);
-    const enabledCount = newState.filter((network) => network.enabled).length;
-    const newStatus = enabledCount > 0 ? "monetized" : "approved";
+    const configuredNetworkCount = newState.filter((network) => network.enabled && network.network_name !== "AdsGalaxyInternal").length;
+    const enabledNetworkCount = newState.filter((network) => network.enabled).length;
+    const currentStatus = String(miniapps[0].status || "");
+    const newStatus = currentStatus === "paused" || currentStatus === "rejected"
+      ? currentStatus
+      : configuredNetworkCount > 0
+        ? "approved"
+        : currentStatus === "pending"
+          ? "awaiting"
+          : currentStatus;
 
     await pool.query(
-      "UPDATE miniapps SET status = ? WHERE id = ? AND status IN ('approved', 'monetized')",
+      "UPDATE miniapps SET status = ? WHERE id = ? AND status IN ('pending', 'awaiting', 'approved', 'monetized')",
       [newStatus, id]
     );
 
@@ -132,10 +136,18 @@ export async function PUT(
         previous_state: previousState,
         new_state: newState,
         status: newStatus,
+        configured_network_count: configuredNetworkCount,
+        enabled_network_count: enabledNetworkCount,
       },
     });
 
-    return NextResponse.json({ success: true, networks: newState, status: newStatus });
+    return NextResponse.json({
+      success: true,
+      networks: newState,
+      status: newStatus,
+      configured_network_count: configuredNetworkCount,
+      enabled_network_count: enabledNetworkCount,
+    });
   } catch (error: unknown) {
     console.error("Admin Mini App Networks PUT Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });

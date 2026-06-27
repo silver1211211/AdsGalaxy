@@ -29,10 +29,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Message text is required" }, { status: 400 });
     }
 
+    const botUsername = process.env.TELEGRAM_BOT_USERNAME || process.env.NEXT_PUBLIC_BOT_USERNAME || "Ads_Galaxy_bot";
+    const advertiseUrl = `https://t.me/${botUsername}?start=advertise`;
     const reply_markup = {
       inline_keyboard: [
-        [{ text: button_text || "Click Here", url: link || "https://t.me/Ads_Galaxy_bot" }],
-        [{ text: "Advertise with Ads galaxy", url: "https://t.me/Ads_Galaxy_bot?start=advertise" }]
+        [{ text: button_text || "Click Here", url: link || `https://t.me/${botUsername}` }],
+        [{ text: "Advertise with Ads galaxy", url: advertiseUrl }]
       ]
     };
 

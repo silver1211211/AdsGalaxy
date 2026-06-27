@@ -1,21 +1,22 @@
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { checkAdminAuth } from "@/lib/adminAuth";
+import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
+import { reactivateChannelAfterHealthCheck } from "@/lib/channelLifecycle";
 
 type StatusRow = RowDataPacket & {
   id: number;
   status: string;
+  chat_id: string | number;
 };
 
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const { id } = await params;
@@ -33,7 +34,7 @@ export async function POST(
       return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
 
-    const [rows] = await pool.query<StatusRow[]>("SELECT id, status FROM channels WHERE id = ?", [id]);
+    const [rows] = await pool.query<StatusRow[]>("SELECT id, status, chat_id FROM channels WHERE id = ?", [id]);
     if (rows.length === 0) {
       return NextResponse.json({ error: "Channel not found" }, { status: 404 });
     }
@@ -42,11 +43,16 @@ export async function POST(
     const newStatus = statusMap[normalizedAction];
 
     if (normalizedAction === "activate") {
-      await pool.query("UPDATE channels SET status = ?, is_deleted = FALSE WHERE id = ?", [newStatus, id]);
+      await reactivateChannelAfterHealthCheck(id, rows[0].chat_id);
     } else if (normalizedAction === "delete") {
-      await pool.query("UPDATE channels SET status = ?, is_deleted = TRUE WHERE id = ?", [newStatus, id]);
+      await pool.query("UPDATE channels SET status = ?, is_deleted = TRUE, paused_reason = 'Deleted by admin.', suggested_fix = NULL WHERE id = ?", [newStatus, id]);
     } else {
-      await pool.query("UPDATE channels SET status = ? WHERE id = ?", [newStatus, id]);
+      await pool.query("UPDATE channels SET status = ?, paused_reason = ?, suggested_fix = ? WHERE id = ?", [
+        newStatus,
+        newStatus === "paused" ? "Paused by admin." : null,
+        newStatus === "paused" ? "Contact support or reactivate after fixing channel access." : null,
+        id,
+      ]);
     }
 
     await recordAdminActionAudit({

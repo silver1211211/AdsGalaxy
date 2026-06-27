@@ -2,6 +2,8 @@
 
 import type { MiniAppAdFormat, MiniAppNetworkName, MiniAppSdkErrorCode } from "@/lib/miniappNetworkAdapters";
 
+const ADSGALAXY_BOT_URL = `https://t.me/${process.env.NEXT_PUBLIC_BOT_USERNAME || "Ads_Galaxy_bot"}`;
+
 type NetworkClientConfig = {
   network_name: MiniAppNetworkName;
   network_placement_id: string;
@@ -9,16 +11,21 @@ type NetworkClientConfig = {
     network_name: MiniAppNetworkName;
     network_placement_id: string;
     ad_format_support?: Record<MiniAppAdFormat, boolean>;
-    sdk?: {
-      script_url?: string | null;
-      global_name?: string | null;
-      richads_publisher_id?: string;
-      id?: number;
-      title?: string;
-      description?: string;
-      image_url?: string | null;
-      landing_url?: string;
-      admin_cpm?: number;
+      sdk?: {
+        script_url?: string | null;
+        global_name?: string | null;
+        backup_script_url?: string | null;
+        script_timeout_ms?: number;
+        richads_publisher_id?: string;
+        id?: number;
+        title?: string;
+        description?: string;
+        cta_text?: string;
+        title_color?: string | null;
+        body_color?: string | null;
+        image_url?: string | null;
+        landing_url?: string;
+        admin_cpm?: number;
     };
   };
 };
@@ -40,6 +47,9 @@ type InternalAdPayload = {
   id: number;
   title: string;
   description: string;
+  cta_text?: string;
+  title_color?: string | null;
+  body_color?: string | null;
   image_url?: string | null;
   landing_url: string;
   admin_cpm?: number;
@@ -70,6 +80,20 @@ type AdapterRequest = {
   request_id: string;
   telegram_user_id: string;
   timeout_ms?: number;
+  internal_lifecycle?: InternalAdLifecycle;
+};
+
+type InternalAdQualityEvent = {
+  event_type: "impression_recorded" | "watch_update" | "completed" | "app_minimized" | "app_backgrounded" | "session_abandoned" | "ad_abandoned";
+  watch_duration_seconds: number;
+  completed?: boolean;
+  abandonment_reason?: string;
+};
+
+type InternalAdLifecycle = {
+  onImpression?: (event: InternalAdQualityEvent) => Promise<unknown>;
+  onQualityEvent?: (event: InternalAdQualityEvent) => Promise<unknown>;
+  onAdClick?: () => Promise<string | null>;
 };
 
 type RuntimeAdapter = {
@@ -100,6 +124,7 @@ declare global {
       triggerInterstitialBanner: () => Promise<unknown>;
       triggerNativeNotification: () => Promise<unknown>;
     };
+    showGiga?: () => Promise<unknown>;
   }
 }
 
@@ -119,7 +144,8 @@ function isRetryableSdkError(errorCode: string | undefined) {
     || errorCode === "AD_UNAVAILABLE"
     || errorCode === "TIMEOUT"
     || errorCode === "INVALID_CONFIG"
-    || errorCode === "NETWORK_ERROR";
+    || errorCode === "NETWORK_ERROR"
+    || errorCode === "NO_FILL";
 }
 
 function timeout<T>(promise: Promise<T>, timeoutMs: number, message = "Ad request timed out") {
@@ -182,6 +208,36 @@ function loadScriptOnce(src: string, options: { globalName?: string | null; time
 
   sdkLoads.set(key, promise);
   return promise;
+}
+
+async function loadGigaPubScript(projectId: string, config: NetworkClientConfig, timeoutMs?: number) {
+  const sdk = config.client_config?.sdk || {};
+  const scriptTimeout = sdk.script_timeout_ms || 15000;
+  const bases = [
+    sdk.script_url || "https://ad.gigapub.tech/script",
+    sdk.backup_script_url || "https://ru-ad.gigapub.tech/script",
+  ].filter(Boolean) as string[];
+  const errors: string[] = [];
+
+  for (const base of bases) {
+    const url = `${base}${base.includes("?") ? "&" : "?"}id=${encodeURIComponent(projectId)}`;
+    try {
+      await loadScriptOnce(url, {
+        globalName: null,
+        timeoutMs: scriptTimeout,
+        attrs: {
+          "data-network": "GigaPub",
+          "data-project-id": projectId,
+        },
+      });
+      if (typeof window.showGiga === "function") return;
+      errors.push(`${base} loaded without window.showGiga`);
+    } catch (error: any) {
+      errors.push(error?.message || `${base} failed`);
+    }
+  }
+
+  throw new Error(errors.join("; ") || "GigaPub SDK failed to load");
 }
 
 function assertPlacement(config: NetworkClientConfig): MiniAppSdkResult {
@@ -422,25 +478,72 @@ const richAdsAdapter: RuntimeAdapter = {
   },
 };
 
+const gigaPubAdapter: RuntimeAdapter = {
+  network_name: "GigaPub",
+  validateConfig: assertPlacement,
+  async loadSdk(config, timeoutMs) {
+    const validation = assertPlacement(config);
+    if (!validation.success) return validation;
+
+    try {
+      await loadGigaPubScript(config.network_placement_id, config, timeoutMs);
+      if (typeof window.showGiga !== "function") {
+        return errorResult("GigaPub", "SDK_LOAD_FAILED", "GigaPub SDK loaded without window.showGiga");
+      }
+      return { success: true, network: "GigaPub" };
+    } catch (error: any) {
+      return errorResult("GigaPub", error?.message?.includes("timed out") ? "TIMEOUT" : "SDK_LOAD_FAILED", error?.message || "Failed to load GigaPub SDK");
+    }
+  },
+  async requestRewardedAd({ config, request_id, timeout_ms }) {
+    const loaded = await this.loadSdk(config, timeout_ms);
+    if (!loaded.success) return loaded;
+
+    try {
+      if (typeof window.showGiga !== "function") {
+        return errorResult("GigaPub", "SDK_LOAD_FAILED", "GigaPub showGiga is unavailable");
+      }
+      const result = await timeout(window.showGiga(), timeout_ms || 30000);
+      return successResult("GigaPub", request_id, result);
+    } catch (error: any) {
+      const message = error?.message || "GigaPub ad was not available";
+      const lower = message.toLowerCase();
+      const code = lower.includes("timed out")
+        ? "TIMEOUT"
+        : lower.includes("no fill") || lower.includes("nofill") || lower.includes("no ad")
+          ? "NO_FILL"
+          : "AD_UNAVAILABLE";
+      return errorResult("GigaPub", code, message);
+    }
+  },
+  requestInterstitialAd(input) {
+    return this.requestRewardedAd(input);
+  },
+  async requestBannerAd() {
+    return unsupported("GigaPub", "banner");
+  },
+};
+
 const runtimeAdapters: Record<MiniAppNetworkName, RuntimeAdapter> = {
   AdsGram: adsGramAdapter,
   Monetag: monetagAdapter,
   AdExium: adExiumAdapter,
   RichAds: richAdsAdapter,
+  GigaPub: gigaPubAdapter,
   AdsGalaxyInternal: {
     network_name: "AdsGalaxyInternal",
     validateConfig: assertPlacement,
     async loadSdk() {
       return { success: true, network: "AdsGalaxyInternal" };
     },
-    async requestRewardedAd({ request_id, config }) {
+    async requestRewardedAd({ request_id, config, internal_lifecycle }) {
       const ad = config.client_config?.sdk as unknown as InternalAdPayload | undefined;
       if (!ad?.title || !ad.landing_url) {
         return errorResult("AdsGalaxyInternal", "INVALID_CONFIG", "Internal ad payload is missing");
       }
 
       try {
-        await showInternalRewardedAd(ad);
+        await showInternalRewardedAd(ad, internal_lifecycle);
         return successResult("AdsGalaxyInternal", request_id, ad);
       } catch (error: any) {
         return errorResult(
@@ -461,7 +564,10 @@ const runtimeAdapters: Record<MiniAppNetworkName, RuntimeAdapter> = {
 
 async function confirmImpression(input: MediationRequestInput, selectedNetwork: MiniAppNetworkName, requestId: string) {
   if (selectedNetwork === "AdsGalaxyInternal") {
-    return confirmInternalImpression(input, requestId);
+    return confirmInternalImpression(input, requestId, {
+      event_type: "impression_recorded",
+      watch_duration_seconds: 1.5,
+    });
   }
 
   const response = await fetch("/api/miniapp/mediation/impression", {
@@ -493,9 +599,10 @@ async function confirmImpression(input: MediationRequestInput, selectedNetwork: 
   return data;
 }
 
-async function confirmInternalImpression(input: MediationRequestInput, requestId: string) {
+async function confirmInternalImpression(input: MediationRequestInput, requestId: string, quality?: Partial<InternalAdQualityEvent>) {
   const response = await fetch("/api/miniapp/internal-ads/impression", {
     method: "POST",
+    keepalive: true,
     headers: {
       "Content-Type": "application/json",
       "x-telegram-init-data": input.initData,
@@ -504,6 +611,10 @@ async function confirmInternalImpression(input: MediationRequestInput, requestId
       request_id: requestId,
       miniapp_id: input.miniapp_id,
       telegram_user_id: input.telegram_user_id,
+      event_type: quality?.event_type || "impression_recorded",
+      watch_duration_seconds: quality?.watch_duration_seconds ?? 1.5,
+      completed: Boolean(quality?.completed),
+      abandonment_reason: quality?.abandonment_reason,
     }),
   });
 
@@ -515,57 +626,152 @@ async function confirmInternalImpression(input: MediationRequestInput, requestId
   return data;
 }
 
-function showInternalRewardedAd(ad: InternalAdPayload) {
+function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLifecycle) {
   return new Promise<void>((resolve, reject) => {
+    const startedAt = Date.now();
+    let settled = false;
+    let impressionSent = false;
+    let lastQualityEvent = "";
+    const maxSeconds = 15;
+
+    const elapsedSeconds = () => Math.min(maxSeconds, (Date.now() - startedAt) / 1000);
+    const openTrackedLanding = async () => {
+      try {
+        const trackedUrl = await lifecycle?.onAdClick?.();
+        window.open(trackedUrl || ad.landing_url, "_blank", "noopener,noreferrer");
+      } catch {
+        window.open(ad.landing_url, "_blank", "noopener,noreferrer");
+      }
+    };
+    const sendQualityEvent = (event: InternalAdQualityEvent) => {
+      const eventKey = `${event.event_type}:${Math.floor(event.watch_duration_seconds)}`;
+      if (eventKey === lastQualityEvent && event.event_type !== "completed") return;
+      lastQualityEvent = eventKey;
+      lifecycle?.onQualityEvent?.(event).catch(() => undefined);
+    };
+    const cleanup = () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("pagehide", onPageHide);
+      window.clearInterval(countdownTimer);
+      if (impressionTimer !== undefined) window.clearTimeout(impressionTimer);
+    };
+    const complete = () => {
+      if (settled) return;
+      settled = true;
+      sendQualityEvent({ event_type: "completed", watch_duration_seconds: maxSeconds, completed: true });
+      cleanup();
+      overlay.remove();
+      resolve();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden" && !settled) {
+        sendQualityEvent({
+          event_type: "app_backgrounded",
+          watch_duration_seconds: elapsedSeconds(),
+          abandonment_reason: "app_backgrounded",
+        });
+      }
+    };
+    const onBlur = () => {
+      if (!settled && elapsedSeconds() < maxSeconds) {
+        sendQualityEvent({
+          event_type: "app_minimized",
+          watch_duration_seconds: elapsedSeconds(),
+          abandonment_reason: "app_minimized",
+        });
+      }
+    };
+    const onPageHide = () => {
+      if (!settled) {
+        sendQualityEvent({
+          event_type: "session_abandoned",
+          watch_duration_seconds: elapsedSeconds(),
+          abandonment_reason: "session_abandoned",
+        });
+      }
+    };
+
     const overlay = document.createElement("div");
-    overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(15,23,42,.72);display:flex;align-items:center;justify-content:center;padding:16px;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;";
+    overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(2,6,23,.94);display:flex;align-items:center;justify-content:center;padding:14px;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;";
     const panel = document.createElement("div");
-    panel.style.cssText = "width:min(420px,100%);background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 24px 80px rgba(15,23,42,.35);border:1px solid #e2e8f0;";
+    panel.style.cssText = "position:relative;width:min(448px,100%);max-height:calc(100vh - 28px);overflow-y:auto;background:#111821;border-radius:18px;box-shadow:0 24px 90px rgba(59,130,246,.22);border:1px solid rgba(148,163,184,.12);padding:16px 12px 14px;color:#fff;";
+    const header = document.createElement("div");
+    header.textContent = "Ads";
+    header.style.cssText = "height:34px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:900;color:#fff;letter-spacing:0;";
+    const close = document.createElement("button");
+    close.textContent = "X";
+    close.setAttribute("aria-label", "Close ad");
+    close.style.cssText = "display:none;position:absolute;right:16px;top:14px;z-index:2;width:32px;height:32px;border:0;background:transparent;color:#fff;font-size:28px;line-height:28px;font-weight:300;cursor:pointer;";
+    panel.append(header, close);
 
     if (ad.image_url) {
       const image = document.createElement("img");
       image.src = ad.image_url;
       image.alt = ad.title;
-      image.style.cssText = "display:block;width:100%;height:180px;object-fit:cover;background:#f1f5f9;";
+      image.style.cssText = "display:block;width:100%;aspect-ratio:1/1;max-height:360px;object-fit:cover;background:#e0f2fe;border-radius:8px;margin-top:4px;";
+      image.onclick = () => {
+        openTrackedLanding();
+      };
       panel.appendChild(image);
     }
 
     const body = document.createElement("div");
-    body.style.cssText = "padding:16px;";
+    body.style.cssText = "padding:18px 10px 0;text-align:center;";
     const title = document.createElement("div");
     title.textContent = ad.title;
-    title.style.cssText = "font-size:16px;font-weight:800;color:#0f172a;margin-bottom:8px;";
+    title.style.cssText = `font-size:17px;font-weight:900;color:${ad.title_color || "#646cff"};margin-bottom:8px;letter-spacing:0;`;
     const description = document.createElement("div");
     description.textContent = ad.description;
-    description.style.cssText = "font-size:13px;line-height:1.45;color:#475569;margin-bottom:16px;";
-    const actions = document.createElement("div");
-    actions.style.cssText = "display:flex;gap:8px;";
-    const visit = document.createElement("button");
-    visit.textContent = "Open";
-    visit.style.cssText = "flex:1;border:0;border-radius:8px;background:#2563eb;color:#fff;font-size:13px;font-weight:700;padding:10px;cursor:pointer;";
-    const close = document.createElement("button");
-    close.textContent = "Done";
-    close.style.cssText = "flex:1;border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:#334155;font-size:13px;font-weight:700;padding:10px;cursor:pointer;";
-
-    visit.onclick = () => {
-      window.open(ad.landing_url, "_blank", "noopener,noreferrer");
-    };
-    close.onclick = () => {
-      overlay.remove();
-      resolve();
-    };
-    overlay.onclick = (event) => {
-      if (event.target === overlay) {
-        overlay.remove();
-        reject(new Error("Internal rewarded ad was dismissed"));
-      }
-    };
-
-    actions.append(visit, close);
-    body.append(title, description, actions);
+    description.style.cssText = `font-size:14px;line-height:1.45;color:${ad.body_color || "#a7adbc"};margin:0 auto 18px;max-width:330px;`;
+    const cta = document.createElement("button");
+    cta.textContent = `${ad.cta_text || "Learn More"}  ↗`;
+    cta.style.cssText = "width:100%;border:0;border-radius:9px;background:#4f46ff;color:#fff;font-size:16px;font-weight:900;padding:14px 12px;cursor:pointer;box-shadow:0 10px 22px rgba(79,70,255,.25);";
+    cta.onclick = () => openTrackedLanding();
+    const attribution = document.createElement("a");
+    attribution.href = ADSGALAXY_BOT_URL;
+    attribution.target = "_blank";
+    attribution.rel = "noopener noreferrer";
+    attribution.innerHTML = `<span style="display:inline-flex;width:34px;height:34px;border-radius:999px;align-items:center;justify-content:center;background:rgba(79,70,255,.12);color:#6d5cff;font-size:23px;font-weight:900;">◎</span><span style="color:#747b8d;">Sponsored by</span><strong style="color:#676bff;">AdsGalaxy</strong>`;
+    attribution.style.cssText = "display:flex;align-items:center;justify-content:center;gap:10px;margin:16px 0 14px;padding-top:14px;border-top:1px solid rgba(148,163,184,.12);text-decoration:none;font-size:15px;font-weight:800;";
+    const countdownBox = document.createElement("div");
+    countdownBox.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid rgba(148,163,184,.16);border-radius:14px;background:rgba(15,23,42,.38);padding:10px 10px 10px 16px;";
+    const countdownLabel = document.createElement("div");
+    countdownLabel.innerHTML = `<span style="display:inline-flex;width:24px;height:24px;border:2px solid #8791a5;border-radius:999px;align-items:center;justify-content:center;margin-right:9px;font-size:12px;color:#8791a5;">◷</span><span>Skip in <strong>15s</strong></span>`;
+    countdownLabel.style.cssText = "display:flex;align-items:center;color:#9aa3b5;font-size:15px;font-weight:800;";
+    const countdown = document.createElement("div");
+    countdown.textContent = "15";
+    countdown.style.cssText = "display:flex;align-items:center;justify-content:center;width:52px;height:52px;border:4px solid #5956ff;border-radius:999px;color:#fff;font-size:18px;font-weight:900;background:#1b2230;";
+    const helper = document.createElement("div");
+    helper.textContent = "You can skip this ad after the countdown to claim your reward.";
+    helper.style.cssText = "padding-top:10px;color:#747b8d;font-size:12px;font-weight:700;line-height:1.35;";
+    countdownBox.append(countdownLabel, countdown);
+    body.append(title, description, cta, attribution, countdownBox, helper);
     panel.appendChild(body);
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
+
+    const impressionTimer = window.setTimeout(() => {
+      impressionSent = true;
+      const event = { event_type: "impression_recorded" as const, watch_duration_seconds: 1.5 };
+      lifecycle?.onImpression?.(event).catch(() => undefined);
+    }, 1500);
+    const countdownTimer = window.setInterval(() => {
+      const remaining = Math.max(0, Math.ceil(maxSeconds - elapsedSeconds()));
+      countdown.textContent = String(remaining);
+      countdownLabel.innerHTML = `<span style="display:inline-flex;width:24px;height:24px;border:2px solid #8791a5;border-radius:999px;align-items:center;justify-content:center;margin-right:9px;font-size:12px;color:#8791a5;">◷</span><span>Skip in <strong>${remaining}s</strong></span>`;
+      if (remaining <= 0) {
+        close.style.display = "block";
+        window.clearInterval(countdownTimer);
+      } else if (impressionSent && remaining % 5 === 0) {
+        sendQualityEvent({ event_type: "watch_update", watch_duration_seconds: elapsedSeconds() });
+      }
+    }, 250);
+
+    close.onclick = complete;
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("pagehide", onPageHide);
   });
 }
 
@@ -617,11 +823,40 @@ export async function requestMiniAppAd(input: MediationRequestInput): Promise<Mi
 
     if (internalNetworkConfig) {
       const adapter = runtimeAdapters[selectedNetwork];
+      let internalImpressionConfirmed = false;
+      const sendInternalQuality = async (event: InternalAdQualityEvent) => {
+        await confirmInternalImpression(input, currentDecision.request_id!, event);
+      };
       const adResult = await adapter.requestRewardedAd({
         config: internalNetworkConfig,
         request_id: currentDecision.request_id,
         telegram_user_id: String(input.telegram_user_id),
         timeout_ms: input.timeout_ms,
+        internal_lifecycle: {
+          onImpression: async (event) => {
+            internalImpressionConfirmed = true;
+            await sendInternalQuality(event);
+          },
+          onQualityEvent: sendInternalQuality,
+          onAdClick: async () => {
+            const response = await fetch("/api/conversions/click", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-telegram-init-data": input.initData,
+              },
+              body: JSON.stringify({
+                campaign_type: "miniapp",
+                campaign_id: currentDecision.internal_ad?.id,
+                miniapp_id: input.miniapp_id,
+                request_id: currentDecision.request_id,
+                session_id: String(input.telegram_user_id),
+              }),
+            });
+            const data = await response.json().catch(() => ({}));
+            return response.ok ? data.url || null : null;
+          },
+        },
       });
 
       if (!adResult.success) {
@@ -631,9 +866,15 @@ export async function requestMiniAppAd(input: MediationRequestInput): Promise<Mi
       }
 
       try {
-        await confirmImpression(input, selectedNetwork, currentDecision.request_id);
+        await confirmInternalImpression(input, currentDecision.request_id, {
+          event_type: "completed",
+          watch_duration_seconds: 15,
+          completed: true,
+        });
+        internalImpressionConfirmed = true;
         return adResult;
       } catch (error: any) {
+        if (internalImpressionConfirmed) return adResult;
         return errorResult(selectedNetwork, "IMPRESSION_FAILED", error?.message || "Ad displayed but impression confirmation failed");
       }
     }

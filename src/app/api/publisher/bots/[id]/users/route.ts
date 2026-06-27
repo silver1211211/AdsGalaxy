@@ -21,8 +21,8 @@ export async function GET(
     const [counts]: any = await pool.query(
       `SELECT 
         COUNT(*) as total,
-        SUM(CASE WHEN is_active = TRUE THEN 1 ELSE 0 END) as active,
-        SUM(CASE WHEN is_active = FALSE THEN 1 ELSE 0 END) as blocked
+        SUM(CASE WHEN is_active = TRUE AND status = 'active' THEN 1 ELSE 0 END) as active,
+        SUM(CASE WHEN is_active = FALSE OR status != 'active' THEN 1 ELSE 0 END) as blocked
        FROM bot_users WHERE bot_id = ?`, 
       [botId]
     );
@@ -71,7 +71,7 @@ export async function POST(
     // Reactivate existing users if they were blocked
     if (alreadyAddedCount > 0) {
       await pool.query(
-        "UPDATE bot_users SET is_active = TRUE WHERE bot_id = ? AND chat_id IN (?)",
+        "UPDATE bot_users SET is_active = TRUE, status = 'active', inactive_reason = NULL WHERE bot_id = ? AND chat_id IN (?)",
         [botId, Array.from(existingIds)]
       );
     }
@@ -113,8 +113,8 @@ export async function POST(
 
       if (validIds.length > 0) {
         // Bulk insert valid IDs
-        const values = validIds.map(id => [botId, id, true]);
-        await pool.query("INSERT IGNORE INTO bot_users (bot_id, chat_id, is_active) VALUES ?", [values]);
+        const values = validIds.map(id => [botId, id, true, "active"]);
+        await pool.query("INSERT IGNORE INTO bot_users (bot_id, chat_id, is_active, status) VALUES ?", [values]);
         newlyAddedCount += validIds.length;
       }
     }

@@ -16,7 +16,7 @@ export async function GET(request: Request) {
 
   try {
     if (type === "broadcast") {
-      const [bots]: any = await pool.query("SELECT id, categories, continents, posts_per_day FROM bots WHERE status = 'active' AND is_deleted = FALSE");
+      const [bots]: any = await pool.query("SELECT id, categories, continents, posts_per_day FROM bots WHERE status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'active') = 'active'");
       
       const filteredBots = bots.filter((bot: any) => {
         let catMatch = true;
@@ -44,6 +44,7 @@ export async function GET(request: Request) {
         const [userCount]: any = await pool.query(`
           SELECT COUNT(*) as count FROM bot_users bu
           WHERE bu.bot_id IN (?) AND bu.is_active = TRUE
+          AND bu.status = 'active'
           AND (
             bu.last_broadcast_at IS NULL 
             OR bu.last_broadcast_at < (NOW() + INTERVAL ? MINUTE) - INTERVAL ? HOUR
@@ -69,6 +70,7 @@ export async function GET(request: Request) {
         (SELECT MAX(created_at) FROM campaign_posts cp WHERE cp.channel_id = c.id) as last_post_at
         FROM channels c
         WHERE c.status = 'active' AND c.is_deleted = FALSE
+        AND COALESCE(c.health_status, 'active') = 'active'
       `, [predictionMinutes]);
 
       const filteredChannels = channels.filter((ch: any) => {

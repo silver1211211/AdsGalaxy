@@ -12,6 +12,8 @@ export async function GET(request: Request) {
   const page = parseInt(searchParams.get("page") || "1");
   const limit = parseInt(searchParams.get("limit") || "10");
   const statusFilter = searchParams.get("status") || "all";
+  const qualityFilter = searchParams.get("quality") || "all";
+  const riskFilter = searchParams.get("risk") || "all";
   const search = searchParams.get("search") || "";
   const offset = (page - 1) * limit;
 
@@ -29,6 +31,16 @@ export async function GET(request: Request) {
     if (statusFilter !== "all") {
       whereClause += " AND c.status = ?";
       queryParams.push(statusFilter);
+    }
+
+    if (qualityFilter !== "all") {
+      whereClause += " AND COALESCE(c.traffic_quality_tier, 'good') = ?";
+      queryParams.push(qualityFilter);
+    }
+
+    if (riskFilter !== "all") {
+      whereClause += " AND COALESCE(c.traffic_risk_level, 'low') = ?";
+      queryParams.push(riskFilter);
     }
 
     if (search) {
@@ -51,12 +63,22 @@ export async function GET(request: Request) {
 
     const [rows]: any = await pool.query(query, [...queryParams, limit, offset]);
     const [[countRow]]: any = await pool.query(countQuery, queryParams);
+    const [[summary]]: any = await pool.query(`
+      SELECT
+        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'active') = 'active' THEN 1 ELSE 0 END) as active_channels,
+        SUM(CASE WHEN status IN ('paused', 'bot_removed', 'channel_not_found', 'permission_missing') AND is_deleted = FALSE THEN 1 ELSE 0 END) as paused_channels,
+        SUM(CASE WHEN status IN ('bot_removed', 'channel_not_found', 'permission_missing') AND is_deleted = FALSE THEN 1 ELSE 0 END) as failed_channels,
+        SUM(CASE WHEN status = 'deleted' OR is_deleted = TRUE THEN 1 ELSE 0 END) as deleted_channels,
+        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'active') = 'active' THEN subscriber_count ELSE 0 END) as active_subscribers
+      FROM channels
+    `);
 
     return NextResponse.json({
       channels: rows,
       total: countRow.total,
       page,
       totalPages: Math.ceil(countRow.total / limit),
+      summary,
     });
   } catch (error: any) {
     console.error("Admin Channels API Error:", error);
@@ -101,11 +123,16 @@ export async function PATCH(request: Request) {
     const status = statusMap[normalizedAction];
 
     if (normalizedAction === "activate") {
-      await pool.query("UPDATE channels SET status = ?, is_deleted = FALSE WHERE id = ?", [status, id]);
+      await pool.query("UPDATE channels SET status = ?, is_deleted = FALSE, paused_reason = NULL, suggested_fix = NULL, failure_reason = NULL WHERE id = ?", [status, id]);
     } else if (normalizedAction === "delete") {
-      await pool.query("UPDATE channels SET status = ?, is_deleted = TRUE WHERE id = ?", [status, id]);
+      await pool.query("UPDATE channels SET status = ?, is_deleted = TRUE, paused_reason = 'Deleted by admin.', suggested_fix = NULL WHERE id = ?", [status, id]);
     } else {
-      await pool.query("UPDATE channels SET status = ? WHERE id = ?", [status, id]);
+      await pool.query("UPDATE channels SET status = ?, paused_reason = ?, suggested_fix = ? WHERE id = ?", [
+        status,
+        status === "paused" ? "Paused by admin." : null,
+        status === "paused" ? "Contact support or reactivate after fixing channel access." : null,
+        id,
+      ]);
     }
 
     // Send Telegram Notification

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
 import { sendTelegramMessage } from "@/lib/telegram";
+import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
 
 export async function GET(request: Request) {
   if (!(await checkAdminAuth())) {
@@ -12,6 +13,8 @@ export async function GET(request: Request) {
   const page = parseInt(searchParams.get("page") || "1");
   const limit = parseInt(searchParams.get("limit") || "10");
   const statusFilter = searchParams.get("status") || "all";
+  const qualityFilter = searchParams.get("quality") || "all";
+  const riskFilter = searchParams.get("risk") || "all";
   const search = searchParams.get("search") || "";
   const offset = (page - 1) * limit;
 
@@ -26,6 +29,16 @@ export async function GET(request: Request) {
         b.continents,
         b.categories,
         b.status,
+        b.paused_reason,
+        b.suggested_fix,
+        b.health_status,
+        b.last_successful_broadcast_at,
+        b.last_failure_at,
+        b.failure_reason,
+        COALESCE(b.traffic_quality_score, 60) as traffic_quality_score,
+        COALESCE(b.traffic_quality_tier, 'good') as traffic_quality_tier,
+        COALESCE(b.traffic_risk_level, 'low') as traffic_risk_level,
+        b.traffic_quality_updated_at,
         b.is_deleted,
         b.created_at,
         b.updated_at,
@@ -33,8 +46,12 @@ export async function GET(request: Request) {
         u.last_name,
         u.username AS owner_username,
         u.telegram_id as owner_telegram_id,
-        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND is_active = TRUE) as active_count,
-        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND is_active = FALSE) as blocked_count
+        CASE
+          WHEN b.status = 'active' AND COALESCE(b.health_status, 'active') = 'active'
+            THEN (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND is_active = TRUE AND status = 'active')
+          ELSE 0
+        END as active_count,
+        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND (is_active = FALSE OR status != 'active')) as blocked_count
       FROM bots b
       LEFT JOIN users u ON b.user_id = u.id
     `;
@@ -46,6 +63,16 @@ export async function GET(request: Request) {
     if (statusFilter !== "all") {
       whereClause += " AND b.status = ?";
       queryParams.push(statusFilter);
+    }
+
+    if (qualityFilter !== "all") {
+      whereClause += " AND COALESCE(b.traffic_quality_tier, 'good') = ?";
+      queryParams.push(qualityFilter);
+    }
+
+    if (riskFilter !== "all") {
+      whereClause += " AND COALESCE(b.traffic_risk_level, 'low') = ?";
+      queryParams.push(riskFilter);
     }
 
     if (search) {
@@ -66,12 +93,44 @@ export async function GET(request: Request) {
     
     const [rows]: any = await pool.query(query, [...queryParams, limit, offset]);
     const [[countRow]]: any = await pool.query(countQuery, queryParams);
+    const [[summary]]: any = await pool.query(`
+      SELECT
+        SUM(CASE WHEN b.status = 'active' AND b.is_deleted = FALSE AND COALESCE(b.health_status, 'active') = 'active' THEN 1 ELSE 0 END) as monetized_bots,
+        SUM(CASE WHEN b.status IN ('paused', 'token_invalid', 'bot_deleted', 'unreachable') AND b.is_deleted = FALSE THEN 1 ELSE 0 END) as paused_bots,
+        SUM(CASE WHEN b.status IN ('token_invalid', 'bot_deleted', 'unreachable') AND b.is_deleted = FALSE THEN 1 ELSE 0 END) as failed_bots,
+        (SELECT COUNT(*) FROM bot_users) as total_bot_users,
+        (SELECT COUNT(*)
+         FROM bot_users bu
+         JOIN bots active_bots ON active_bots.id = bu.bot_id
+         WHERE active_bots.status = 'active'
+           AND active_bots.is_deleted = FALSE
+           AND COALESCE(active_bots.health_status, 'active') = 'active'
+           AND bu.is_active = TRUE
+           AND bu.status = 'active') as active_bot_users,
+        (SELECT COUNT(*)
+         FROM bot_users bu
+         JOIN bots parent_bots ON parent_bots.id = bu.bot_id
+         WHERE bu.is_active = FALSE
+            OR bu.status != 'active'
+            OR parent_bots.status != 'active'
+            OR COALESCE(parent_bots.health_status, 'active') != 'active'
+            OR parent_bots.is_deleted = TRUE) as inactive_bot_users
+      FROM bots b
+    `);
 
     return NextResponse.json({
       bots: rows,
       total: countRow.total,
       page,
       totalPages: Math.ceil(countRow.total / limit),
+      summary: {
+        monetized_bots: Number(summary?.monetized_bots || 0),
+        paused_bots: Number(summary?.paused_bots || 0),
+        failed_bots: Number(summary?.failed_bots || 0),
+        total_bot_users: Number(summary?.total_bot_users || 0),
+        active_bot_users: Number(summary?.active_bot_users || 0),
+        inactive_bot_users: Number(summary?.inactive_bot_users || 0),
+      },
     });
   } catch (error: any) {
     console.error("Admin Bots API Error:", error);
@@ -90,7 +149,7 @@ export async function PATCH(request: Request) {
 
     // Fetch bot and owner details
     const [rows]: any = await pool.query(
-      `SELECT b.bot_name, b.bot_username, u.telegram_id 
+      `SELECT b.bot_name, b.bot_username, b.bot_token, u.telegram_id 
        FROM bots b 
        JOIN users u ON b.user_id = u.id 
        WHERE b.id = ?`,
@@ -116,9 +175,21 @@ export async function PATCH(request: Request) {
     const status = statusMap[normalizedAction];
 
     if (normalizedAction === "activate") {
-      await pool.query("UPDATE bots SET status = ?, is_deleted = FALSE WHERE id = ?", [status, id]);
+      await reactivateBotAfterHealthCheck(id, bot.bot_token);
     } else if (normalizedAction === "delete") {
-      await pool.query("UPDATE bots SET status = ?, is_deleted = TRUE WHERE id = ?", [status, id]);
+      await pool.query(
+        `UPDATE bots
+         SET status = ?, is_deleted = TRUE, paused_reason = 'Bot removed by admin.', suggested_fix = 'Contact support if this was unexpected.', health_status = 'paused'
+         WHERE id = ?`,
+        [status, id]
+      );
+    } else if (normalizedAction === "pause") {
+      await pool.query(
+        `UPDATE bots
+         SET status = ?, paused_reason = 'Paused by admin.', suggested_fix = 'Resolve the admin review item, then reactivate.', health_status = 'paused'
+         WHERE id = ?`,
+        [status, id]
+      );
     } else {
       await pool.query("UPDATE bots SET status = ? WHERE id = ?", [status, id]);
     }

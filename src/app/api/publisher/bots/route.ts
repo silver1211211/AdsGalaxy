@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { requireUserWritesAllowed } from "@/lib/productionSafety";
 
 export async function GET(request: Request) {
   try {
@@ -10,8 +11,12 @@ export async function GET(request: Request) {
     const [rows] = await pool.query(
       `SELECT b.*, 
         (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id) as subscriber_count,
-        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND is_active = TRUE) as active_count,
-        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND is_active = FALSE) as blocked_count
+        CASE
+          WHEN b.status = 'active' AND COALESCE(b.health_status, 'active') = 'active'
+            THEN (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND is_active = TRUE AND status = 'active')
+          ELSE 0
+        END as active_count,
+        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND (is_active = FALSE OR status != 'active')) as blocked_count
        FROM bots b 
        WHERE b.user_id = ? AND b.is_deleted = FALSE 
        ORDER BY b.created_at DESC`, 
@@ -26,6 +31,9 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const blocked = await requireUserWritesAllowed();
+    if (blocked) return blocked;
+
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
 
@@ -71,8 +79,13 @@ export async function POST(request: Request) {
           posts_per_day = ?, 
           continents = ?, 
           categories = ?,
-          is_deleted = FALSE, 
-          status = 'pending' 
+          is_deleted = FALSE,
+          status = 'pending',
+          paused_reason = NULL,
+          suggested_fix = NULL,
+          health_status = NULL,
+          failure_reason = NULL,
+          reactivated_at = NOW()
          WHERE id = ?`,
         [bot_username, bot_name, posts_per_day, JSON.stringify(continents), JSON.stringify(categories || []), bot.id]
       );

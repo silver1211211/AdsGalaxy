@@ -10,6 +10,7 @@ import {
 } from "@/lib/miniappMediationEngine";
 import { isMiniAppNetworkName, type MiniAppAdFormat } from "@/lib/miniappNetworkAdapters";
 import { assertMiniAppOwnerBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
+import { isMiniappNetworkGloballyDisabled, requireAdServingAllowed } from "@/lib/productionSafety";
 
 function cleanText(value: unknown) {
   return String(value || "").trim();
@@ -24,6 +25,9 @@ export async function POST(request: Request) {
   const conn = await pool.getConnection();
 
   try {
+    const blocked = await requireAdServingAllowed();
+    if (blocked) return blocked;
+
     const body = await request.json();
     const requestId = cleanText(body.request_id);
     const failedNetwork = cleanText(body.failed_network);
@@ -108,6 +112,19 @@ export async function POST(request: Request) {
       fallbackAttempts,
     });
 
+    if (await isMiniappNetworkGloballyDisabled(nextDecision.selected_network, conn)) {
+      await conn.commit();
+      return NextResponse.json({
+        success: false,
+        error_code: "NO_FILL",
+        message: "No ad available right now.",
+        request_id: nextDecision.request_id,
+        fallback_available: false,
+        ad_format: nextDecision.ad_format,
+        decision_reason: "globally_disabled",
+      });
+    }
+
     await conn.commit();
 
     if (!nextDecision.success) {
@@ -116,10 +133,6 @@ export async function POST(request: Request) {
         error_code: "NO_FILL",
         message: "No ad available right now.",
         request_id: nextDecision.request_id,
-        enabled_networks: nextDecision.enabled_networks,
-        attempted_networks: nextDecision.attempted_networks,
-        skipped_networks: nextDecision.skipped_networks,
-        fallback_attempts: nextDecision.fallback_attempts,
         fallback_available: false,
         ad_format: nextDecision.ad_format,
         decision_reason: nextDecision.decision_reason,
@@ -131,11 +144,6 @@ export async function POST(request: Request) {
       selected_network: nextDecision.selected_network,
       network_placement_id: nextDecision.network_placement_id || "",
       internal_ad: nextDecision.internal_ad || null,
-      enabled_networks: nextDecision.enabled_networks,
-      candidate_networks: nextDecision.candidate_networks,
-      attempted_networks: nextDecision.attempted_networks,
-      skipped_networks: nextDecision.skipped_networks,
-      fallback_attempts: nextDecision.fallback_attempts,
       fallback_available: nextDecision.fallback_available,
       request_id: nextDecision.request_id,
       ad_format: nextDecision.ad_format,

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
 
 export async function PATCH(
   request: Request,
@@ -14,10 +15,22 @@ export async function PATCH(
     const body = await request.json().catch(() => ({}));
     const { posts_per_day, continents, categories, action } = body;
 
+    if (action === "set_marketplace_visibility") {
+      const visible = body.visible ? 1 : 0;
+      const [result]: any = await pool.query(
+        "UPDATE bots SET marketplace_visible = ? WHERE id = ? AND user_id = ? AND is_deleted = FALSE",
+        [visible, id, user.id]
+      );
+      if (result.affectedRows === 0) {
+        return NextResponse.json({ error: "Bot not found" }, { status: 404 });
+      }
+      return NextResponse.json({ success: true, marketplace_visible: visible });
+    }
+
     // Handle status toggle
     if (action === "toggle_status") {
       const [rows]: any = await pool.query(
-        "SELECT status FROM bots WHERE id = ? AND user_id = ? AND is_deleted = FALSE",
+        "SELECT status, bot_token FROM bots WHERE id = ? AND user_id = ? AND is_deleted = FALSE",
         [id, user.id]
       );
 
@@ -31,8 +44,18 @@ export async function PATCH(
       }
 
       const newStatus = currentStatus === "active" ? "paused" : "active";
+      if (newStatus === "active") {
+        await reactivateBotAfterHealthCheck(id, rows[0].bot_token);
+        return NextResponse.json({ success: true, status: "active" });
+      }
+
       await pool.query(
-        "UPDATE bots SET status = ? WHERE id = ? AND user_id = ?",
+        `UPDATE bots
+         SET status = ?,
+             paused_reason = 'Paused by publisher.',
+             suggested_fix = 'Reactivate the bot when you want AdsGalaxy to resume delivery.',
+             health_status = 'paused'
+         WHERE id = ? AND user_id = ?`,
         [newStatus, id, user.id]
       );
       return NextResponse.json({ success: true, status: newStatus });
@@ -68,7 +91,13 @@ export async function DELETE(
     const { id } = await params;
 
     await pool.query(
-      "UPDATE bots SET is_deleted = TRUE, status = 'paused' WHERE id = ? AND user_id = ?",
+      `UPDATE bots
+       SET is_deleted = TRUE,
+           status = 'deleted',
+           paused_reason = 'Bot removed by publisher.',
+           suggested_fix = 'Add the bot again if you want to monetize it later.',
+           health_status = 'paused'
+       WHERE id = ? AND user_id = ?`,
       [id, user.id]
     );
 

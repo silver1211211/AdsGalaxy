@@ -42,6 +42,9 @@ export default function BotDetailsScreen({ bot, onClose }: BotDetailsScreenProps
       case "pending": return { icon: <Clock size={24} />, color: "text-amber-700", label: "Pending Review", bg: "bg-amber-100/50" };
       case "rejected": return { icon: <XCircle size={24} />, color: "text-red-700", label: "Rejected", bg: "bg-red-100/50" };
       case "paused": return { icon: <PauseCircle size={24} />, color: "text-slate-600", label: "Paused", bg: "bg-slate-100" };
+      case "token_invalid": return { icon: <XCircle size={24} />, color: "text-red-700", label: "Token Invalid", bg: "bg-red-100/50" };
+      case "bot_deleted": return { icon: <XCircle size={24} />, color: "text-red-700", label: "Bot Deleted", bg: "bg-red-100/50" };
+      case "unreachable": return { icon: <XCircle size={24} />, color: "text-red-700", label: "Unreachable", bg: "bg-red-100/50" };
       default: return { icon: <Clock size={24} />, color: "text-slate-600", label: "Unknown", bg: "bg-slate-100" };
     }
   };
@@ -77,6 +80,12 @@ export default function BotDetailsScreen({ bot, onClose }: BotDetailsScreenProps
             <div>
               <p className={cn("text-[10px] font-black uppercase tracking-widest", statusInfo.color, "opacity-70")}>Bot Status</p>
               <p className={cn("text-lg font-black", statusInfo.color)}>{statusInfo.label}</p>
+              {(bot.paused_reason || bot.failure_reason || bot.suggested_fix) && (
+                <div className="mt-2 space-y-1 text-left">
+                  {(bot.paused_reason || bot.failure_reason) && <p className="text-xs font-bold text-slate-700">{bot.paused_reason || bot.failure_reason}</p>}
+                  {bot.suggested_fix && <p className="text-xs font-semibold text-slate-500">{bot.suggested_fix}</p>}
+                </div>
+              )}
             </div>
           </div>
 

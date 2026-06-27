@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
 import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Bot, Search, Users, ShieldOff, Pause, Play, Trash2 } from "lucide-react";
 import Modal from "@/components/ui/Modal";
@@ -17,6 +18,7 @@ type PendingAction = {
 
 export default function AdminBotsPage() {
   const [bots, setBots] = useState([]);
+  const [summary, setSummary] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -36,6 +38,7 @@ export default function AdminBotsPage() {
       const data = await res.json();
       setBots(data.bots);
       setTotalPages(data.totalPages);
+      setSummary(data.summary || null);
     } catch (err) {
       console.error(err);
     } finally {
@@ -86,8 +89,8 @@ export default function AdminBotsPage() {
   };
 
   const StatusBadge = ({ status }: { status: string }) => (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${status === 'active' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : status === 'pending' ? 'bg-amber-50 text-amber-700 border border-amber-200' : status === 'rejected' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-700 border border-slate-200'}`}>
-      {status}
+    <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${status === 'active' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : status === 'pending' ? 'bg-amber-50 text-amber-700 border border-amber-200' : status === 'rejected' || status === 'token_invalid' || status === 'bot_deleted' || status === 'unreachable' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-700 border border-slate-200'}`}>
+      {String(status || "unknown").replace(/_/g, " ")}
     </span>
   );
 
@@ -130,7 +133,7 @@ export default function AdminBotsPage() {
           {actionLoading === bot.id ? <Loader2 size={16} className="animate-spin"/> : <Pause size={16} />}
         </button>
       )}
-      {bot.status === "paused" && (
+      {["paused", "token_invalid", "bot_deleted", "unreachable"].includes(bot.status) && (
         <button
           onClick={() => openActionConfirm(bot, "activate", "Resume Bot", "Resume this bot?")}
           disabled={actionLoading === bot.id}
@@ -209,6 +212,8 @@ export default function AdminBotsPage() {
     return <span className="text-slate-400 italic">None selected</span>;
   };
 
+  const qualityLabel = (value?: string) => String(value || "good").replace(/_/g, " ");
+
   return (
     <AdminLayout>
       <Modal isOpen={!!error} onClose={() => setError("")} type="error" title="Error">{error}</Modal>
@@ -257,6 +262,12 @@ export default function AdminBotsPage() {
                     <div><span className="text-slate-500">Username:</span> <span className="font-medium text-blue-600">@{selectedBot.bot_username || "N/A"}</span></div>
                     <div className="col-span-2"><span className="text-slate-500">API Token:</span> <span className="font-mono text-[10px] break-all">Hidden</span></div>
                     <div><span className="text-slate-500">Status:</span> <span className="font-medium text-slate-900 capitalize">{selectedBot.status}</span></div>
+                    <div><span className="text-slate-500">Last Successful Post:</span> <span className="font-medium text-slate-900">{selectedBot.last_successful_broadcast_at ? new Date(selectedBot.last_successful_broadcast_at).toLocaleString() : "N/A"}</span></div>
+                    <div><span className="text-slate-500">Last Failure:</span> <span className="font-medium text-slate-900">{selectedBot.last_failure_at ? new Date(selectedBot.last_failure_at).toLocaleString() : "N/A"}</span></div>
+                    <div className="col-span-2"><span className="text-slate-500">Failure Reason:</span> <span className="font-medium text-slate-900">{selectedBot.paused_reason || selectedBot.failure_reason || "N/A"}</span></div>
+                    <div className="col-span-2"><span className="text-slate-500">Suggested Fix:</span> <span className="font-medium text-slate-900">{selectedBot.suggested_fix || "N/A"}</span></div>
+                    <div><span className="text-slate-500">Traffic Quality:</span> <span className="font-medium text-slate-900 capitalize">{selectedBot.traffic_quality_score || 60} / {qualityLabel(selectedBot.traffic_quality_tier)}</span></div>
+                    <div><span className="text-slate-500">Risk:</span> <span className="font-medium text-slate-900 capitalize">{qualityLabel(selectedBot.traffic_risk_level)} risk</span></div>
                     <div><span className="text-slate-500">Posts / Day:</span> <span className="font-medium text-slate-900">{selectedBot.posts_per_day}</span></div>
                     <div className="col-span-1">
                       <span className="text-slate-500 block">Categories:</span> 
@@ -295,6 +306,20 @@ export default function AdminBotsPage() {
         </div>
       )}
 
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 mb-4">
+        {[
+          ["Monetized Bots", summary?.monetized_bots || 0],
+          ["Active Bot Users", summary?.active_bot_users || 0],
+          ["Paused Bots", summary?.paused_bots || 0],
+          ["Inactive Bot Users", summary?.inactive_bot_users || 0],
+        ].map(([label, value]) => (
+          <div key={label as string} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+            <div className="text-[10px] font-bold uppercase text-slate-400">{label}</div>
+            <div className="mt-1 text-xl font-black text-slate-900">{Number(value).toLocaleString()}</div>
+          </div>
+        ))}
+      </div>
+
       <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <h2 className="text-sm font-semibold text-slate-900">Monetized Bots</h2>
@@ -312,7 +337,7 @@ export default function AdminBotsPage() {
             </div>
 
             <div className="flex bg-slate-100 p-0.5 rounded-md border border-slate-200/50 w-full sm:w-auto">
-              {["all", "pending", "active", "rejected", "paused"].map(f => (
+              {["all", "pending", "active", "rejected", "paused", "token_invalid", "bot_deleted", "unreachable"].map(f => (
                 <button
                   key={f}
                   onClick={() => { setPage(1); setStatusFilter(f); }}
@@ -333,6 +358,7 @@ export default function AdminBotsPage() {
                 <th className="px-4 py-3 font-medium">Bot Name</th>
                 <th className="px-4 py-3 font-medium text-center">Active</th>
                 <th className="px-4 py-3 font-medium text-center">Blocked</th>
+                <th className="px-4 py-3 font-medium">Quality</th>
                 <th className="px-4 py-3 font-medium">Posts/Day</th>
                 <th className="px-4 py-3 font-medium">Status</th>
                 <th className="px-4 py-3 font-medium text-right">Actions</th>
@@ -340,9 +366,9 @@ export default function AdminBotsPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <tr><td colSpan={7} className="p-8 text-center"><Loader2 className="animate-spin text-blue-600 mx-auto" size={20} /></td></tr>
+                <tr><td colSpan={8} className="p-8 text-center"><Loader2 className="animate-spin text-blue-600 mx-auto" size={20} /></td></tr>
               ) : bots.length === 0 ? (
-                <tr><td colSpan={7} className="p-8 text-center text-slate-500">No bots found.</td></tr>
+                <tr><td colSpan={8} className="p-8 text-center text-slate-500">No bots found.</td></tr>
               ) : (
                 bots.map((bot: any) => (
                   <tr key={bot.id} className="hover:bg-slate-50 transition-colors">
@@ -363,10 +389,19 @@ export default function AdminBotsPage() {
                       <div className="font-bold text-red-600">{(bot.blocked_count || 0).toLocaleString()}</div>
                     </td>
                     <td className="px-4 py-3">
+                      <Link href={`/admin/traffic-quality/bot/${bot.id}`} className="font-black text-blue-700 hover:text-blue-900">{bot.traffic_quality_score || 60}</Link>
+                      <div className="text-xs capitalize text-slate-500">{qualityLabel(bot.traffic_quality_tier)} / {qualityLabel(bot.traffic_risk_level)} risk</div>
+                    </td>
+                    <td className="px-4 py-3">
                       <div className="font-medium text-slate-900">{bot.posts_per_day}</div>
                     </td>
                     <td className="px-4 py-3">
                       <StatusBadge status={bot.status} />
+                      {(bot.paused_reason || bot.failure_reason) && (
+                        <div className="mt-1 max-w-[180px] truncate text-[11px] font-medium text-slate-500" title={bot.paused_reason || bot.failure_reason}>
+                          {bot.paused_reason || bot.failure_reason}
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right">
                       <ActionButtons bot={bot} />
@@ -397,11 +432,17 @@ export default function AdminBotsPage() {
                   </div>
                   <StatusBadge status={bot.status} />
                 </div>
+                {(bot.paused_reason || bot.failure_reason) && (
+                  <div className="mt-2 text-xs font-medium text-slate-500">
+                    {bot.paused_reason || bot.failure_reason}
+                  </div>
+                )}
                 <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
                   <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Active</div><div className="font-semibold text-emerald-700">{(bot.active_count || 0).toLocaleString()}</div></div>
                   <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Blocked</div><div className="font-semibold text-red-700">{(bot.blocked_count || 0).toLocaleString()}</div></div>
                   <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Posts/Day</div><div className="font-semibold text-slate-900">{bot.posts_per_day || 0}</div></div>
                   <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Updated</div><div className="font-semibold text-slate-900">{bot.updated_at ? new Date(bot.updated_at).toLocaleDateString() : bot.created_at ? new Date(bot.created_at).toLocaleDateString() : "N/A"}</div></div>
+                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Quality</div><Link href={`/admin/traffic-quality/bot/${bot.id}`} className="font-semibold text-blue-700 hover:text-blue-900">{bot.traffic_quality_score || 60} / {qualityLabel(bot.traffic_risk_level)}</Link></div>
                 </div>
                 <div className="mt-3"><ActionButtons bot={bot} /></div>
               </div>

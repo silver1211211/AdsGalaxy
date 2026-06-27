@@ -2,9 +2,18 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { normalizeCampaignCategory } from "@/lib/campaignCategories";
+import { normalizeAdvertiserTargeting, targetingDbParams } from "@/lib/advertiserTargeting";
+import { calculateCampaignQualityScore } from "@/lib/advertiserTrust";
+import { validatePostbackUrl } from "@/lib/conversionTracking";
+import { normalizeMarketplaceType, publicSelectionMetadata, recordMarketplaceEvent, validateDirectPlacementTargets } from "@/lib/publisherMarketplace";
+import { evaluateCampaignAutomation } from "@/lib/approvalAutomation";
+import { requireUserWritesAllowed } from "@/lib/productionSafety";
 
 export async function POST(request: Request) {
   try {
+    const blocked = await requireUserWritesAllowed();
+    if (blocked) return blocked;
+
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
 
@@ -14,6 +23,7 @@ export async function POST(request: Request) {
     const parse_mode = formData.get("parse_mode") as string;
     const message_text = formData.get("message_text") as string;
     const link = formData.get("link") as string;
+    const postbackUrl = validatePostbackUrl(formData.get("postback_url"));
     const button_text = formData.get("button_text") as string;
     const type = formData.get("type") as string;
     const budget = parseFloat(formData.get("budget") as string);
@@ -21,6 +31,28 @@ export async function POST(request: Request) {
     const category = normalizeCampaignCategory(formData.get("category"));
     const continents = formData.get("continents") as string;
     const imageFile = formData.get("image") as File | null;
+    const directPlacementMode = String(formData.get("direct_placement_mode") || "network") === "direct" ? "direct" : "network";
+    const directInventoryScope = String(formData.get("direct_inventory_scope") || "network");
+    const directInventoryType = normalizeMarketplaceType(formData.get("direct_inventory_type") || (type === "broadcast" ? "bot" : "channel"));
+    const directInventoryIds = JSON.parse(String(formData.get("direct_inventory_ids") || "[]"));
+    const directSelectionMetadata = publicSelectionMetadata({
+      direct_placement_mode: directPlacementMode,
+      direct_inventory_scope: directInventoryScope,
+      direct_categories: formData.get("direct_categories"),
+      direct_countries: formData.get("direct_countries"),
+      direct_languages: formData.get("direct_languages"),
+    });
+    const targeting = normalizeAdvertiserTargeting({
+      countries: formData.get("countries"),
+      languages: formData.get("languages"),
+      vpn_policy: formData.get("vpn_policy"),
+      device_policy: formData.get("device_policy"),
+      os_policy: formData.get("os_policy"),
+      start_at: formData.get("start_at"),
+      end_at: formData.get("end_at"),
+      daily_budget_limit: formData.get("daily_budget_limit"),
+      frequency_cap_per_user: formData.get("frequency_cap_per_user"),
+    }, budget);
 
     // 1. Validation
     if (!name || !message_text || !link || !budget || !cpm) {
@@ -43,7 +75,7 @@ export async function POST(request: Request) {
     }
 
     // 2. Check Ad Balance
-    const [userRows]: any = await pool.query("SELECT ad_balance FROM users WHERE id = ?", [user.id]);
+    const [userRows]: any = await pool.query("SELECT ad_balance, advertiser_trust_level, telegram_id FROM users WHERE id = ?", [user.id]);
     const adBalance = parseFloat(userRows[0].ad_balance || "0");
     if (adBalance < budget) {
       return NextResponse.json({ error: "Insufficient ad balance. Please deposit funds." }, { status: 400 });
@@ -81,6 +113,25 @@ export async function POST(request: Request) {
     try {
       await conn.beginTransaction();
 
+      const quality = await calculateCampaignQualityScore(user.id, {
+        name,
+        message_text,
+        image_url: imageUrl,
+        link,
+        button_text,
+        budget,
+        cpm,
+        category,
+        countries: formData.get("countries"),
+      }, conn);
+      const directTargets = await validateDirectPlacementTargets({
+        mode: directPlacementMode,
+        scope: directInventoryScope,
+        inventoryType: directInventoryType,
+        inventoryIds: Array.isArray(directInventoryIds) ? directInventoryIds : [],
+        cpm,
+      }, conn);
+
       // Deduct from balance
       await conn.query(
         "UPDATE users SET ad_balance = ad_balance - ? WHERE id = ?",
@@ -89,10 +140,69 @@ export async function POST(request: Request) {
 
       // Insert campaign
       const [result]: any = await conn.query(
-        `INSERT INTO campaigns (user_id, name, parse_mode, message_text, image_url, link, button_text, type, budget, cpm, category, continents, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
-        [user.id, name, parse_mode, message_text, imageUrl, link, button_text, type, budget, cpm, category, continents]
+        `INSERT INTO campaigns (
+          user_id, name, parse_mode, message_text, image_url, link, postback_url, button_text, type,
+          budget, cpm, category, quality_score, quality_tier, quality_metadata,
+          continents, countries, languages, vpn_policy,
+          device_policy, os_policy, start_at, end_at, daily_budget_limit,
+          frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
+          direct_inventory_metadata, status
+        )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+        [
+          user.id,
+          name,
+          parse_mode,
+          message_text,
+          imageUrl,
+          link,
+          postbackUrl,
+          button_text,
+          type,
+          budget,
+          cpm,
+          category,
+          quality.score,
+          quality.tier,
+          JSON.stringify(quality.metadata),
+          continents,
+          ...targetingDbParams(targeting),
+          directPlacementMode,
+          directInventoryScope,
+          JSON.stringify({
+            ...directSelectionMetadata,
+            inventory_type: directInventoryType,
+            required_cpm: directTargets.requiredCpm,
+          }),
+        ]
       );
+
+      for (const inventoryId of directTargets.ids) {
+        await conn.query(
+          "INSERT INTO campaign_direct_inventory_targets (campaign_type, campaign_id, inventory_type, inventory_id) VALUES ('campaign', ?, ?, ?)",
+          [result.insertId, directInventoryType, inventoryId]
+        );
+        await recordMarketplaceEvent({
+          advertiserId: user.id,
+          inventoryType: directInventoryType,
+          inventoryId,
+          eventType: "selection",
+          metadata: { campaign_type: "campaign", campaign_id: result.insertId },
+        }, conn);
+      }
+
+      await evaluateCampaignAutomation({
+        campaignType: "campaign",
+        campaignId: result.insertId,
+        advertiserId: user.id,
+        advertiserTelegramId: userRows[0]?.telegram_id,
+        advertiserTrustLevel: userRows[0]?.advertiser_trust_level,
+        qualityScore: quality.score,
+        qualityTier: quality.tier,
+        category,
+        destinationUrl: link,
+        creativeText: message_text,
+      }, conn);
 
       // Create transaction record
       await conn.query(

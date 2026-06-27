@@ -42,6 +42,10 @@ export default function ChannelDetailsScreen({ channel, onClose }: ChannelDetail
       case "pending": return { icon: <Clock size={24} />, color: "text-amber-700", label: "Pending Review", bg: "bg-amber-100/50" };
       case "rejected": return { icon: <XCircle size={24} />, color: "text-red-700", label: "Rejected", bg: "bg-red-100/50" };
       case "paused": return { icon: <PauseCircle size={24} />, color: "text-slate-600", label: "Paused", bg: "bg-slate-100" };
+      case "bot_removed": return { icon: <XCircle size={24} />, color: "text-red-700", label: "Bot Removed", bg: "bg-red-100/50" };
+      case "channel_not_found": return { icon: <XCircle size={24} />, color: "text-red-700", label: "Channel Not Found", bg: "bg-red-100/50" };
+      case "permission_missing": return { icon: <XCircle size={24} />, color: "text-red-700", label: "Permission Missing", bg: "bg-red-100/50" };
+      case "deleted": return { icon: <XCircle size={24} />, color: "text-red-700", label: "Deleted", bg: "bg-red-100/50" };
       default: return { icon: <Clock size={24} />, color: "text-slate-600", label: "Unknown", bg: "bg-slate-100" };
     }
   };
@@ -77,6 +81,12 @@ export default function ChannelDetailsScreen({ channel, onClose }: ChannelDetail
             <div>
               <p className={cn("text-[10px] font-black uppercase tracking-widest", statusInfo.color, "opacity-70")}>Channel Status</p>
               <p className={cn("text-lg font-black", statusInfo.color)}>{statusInfo.label}</p>
+              {(channel.paused_reason || channel.failure_reason || channel.suggested_fix) && (
+                <div className="mt-2 space-y-1 text-left">
+                  {(channel.paused_reason || channel.failure_reason) && <p className="text-xs font-bold text-slate-700">{channel.paused_reason || channel.failure_reason}</p>}
+                  {channel.suggested_fix && <p className="text-xs font-semibold text-slate-500">{channel.suggested_fix}</p>}
+                </div>
+              )}
             </div>
           </div>
 

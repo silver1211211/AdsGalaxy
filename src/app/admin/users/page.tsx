@@ -21,6 +21,12 @@ type UserRow = {
   banned_at?: string | null;
   ban_reason?: string | null;
   miniapp_beta_access?: boolean | number;
+  advertiser_trust_level?: string;
+  advertiser_trust_note?: string | null;
+  advertiser_total_campaigns?: string | number;
+  advertiser_approved_campaigns?: string | number;
+  advertiser_rejected_campaigns?: string | number;
+  advertiser_total_spend?: string | number;
 };
 
 type UserAction = {
@@ -66,6 +72,7 @@ export default function AdminUsersPage() {
   const [totalPages, setTotalPages] = useState(1);
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [trustFilter, setTrustFilter] = useState("all");
   const [error, setError] = useState("");
   const [miniappBetaUsersCount, setMiniappBetaUsersCount] = useState(0);
 
@@ -76,10 +83,10 @@ export default function AdminUsersPage() {
   const [userAction, setUserAction] = useState<UserAction>(null);
   const [banReason, setBanReason] = useState("");
 
-  const fetchUsers = async (p: number, q: string) => {
+  const fetchUsers = async (p: number, q: string, trust = trustFilter) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/users?page=${p}&limit=10&search=${encodeURIComponent(q)}`);
+      const res = await fetch(`/api/admin/users?page=${p}&limit=10&search=${encodeURIComponent(q)}&trust=${encodeURIComponent(trust)}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to fetch users");
       setUsers(data.users || []);
@@ -94,10 +101,10 @@ export default function AdminUsersPage() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      fetchUsers(page, searchQuery);
+      fetchUsers(page, searchQuery, trustFilter);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [page, searchQuery]);
+  }, [page, searchQuery, trustFilter]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -191,6 +198,29 @@ export default function AdminUsersPage() {
     }
   };
 
+  const setAdvertiserTrust = async (user: UserRow, level: string) => {
+    setIsUpdating(true);
+    try {
+      const res = await fetch("/api/admin/users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: user.id,
+          action: "set_advertiser_trust",
+          trust_level: level,
+          reason: `Admin set advertiser trust to ${level}`,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to update advertiser trust");
+      await fetchUsers(page, searchQuery, trustFilter);
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to update advertiser trust"));
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
   const ActionButtons = ({ user }: { user: UserRow }) => {
     const banned = isUserBanned(user);
     return (
@@ -229,6 +259,19 @@ export default function AdminUsersPage() {
         >
           Mini Apps {Number(user.miniapp_beta_access || 0) === 1 ? "On" : "Off"}
         </button>
+        <select
+          value={user.advertiser_trust_level || "new"}
+          onChange={(event) => setAdvertiserTrust(user, event.target.value)}
+          disabled={isUpdating}
+          className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-600 disabled:opacity-50"
+          title="Advertiser Trust Level"
+        >
+          <option value="new">New</option>
+          <option value="normal">Normal</option>
+          <option value="trusted">Trusted</option>
+          <option value="premium">Premium</option>
+          <option value="restricted">Restricted</option>
+        </select>
       </div>
     );
   };
@@ -306,6 +349,18 @@ export default function AdminUsersPage() {
               className="w-full rounded-md border border-slate-200 bg-slate-50 py-1.5 pl-9 pr-4 text-sm outline-none transition-all focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
             />
           </form>
+          <select
+            value={trustFilter}
+            onChange={(event) => { setTrustFilter(event.target.value); setPage(1); }}
+            className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm outline-none focus:border-blue-500"
+          >
+            <option value="all">All Trust Levels</option>
+            <option value="new">New</option>
+            <option value="normal">Normal</option>
+            <option value="trusted">Trusted</option>
+            <option value="premium">Premium</option>
+            <option value="restricted">Restricted</option>
+          </select>
         </div>
 
         <div className="hidden overflow-x-auto md:block">
@@ -318,15 +373,16 @@ export default function AdminUsersPage() {
                 <th className="px-4 py-3 text-right font-medium">Available</th>
                 <th className="px-4 py-3 text-right font-medium">Ad Balance</th>
                 <th className="px-4 py-3 font-medium">Status</th>
+                <th className="px-4 py-3 font-medium">Advertiser Trust</th>
                 <th className="px-4 py-3 font-medium">Mini Apps</th>
                 <th className="px-4 py-3 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <tr><td colSpan={8} className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></td></tr>
+                <tr><td colSpan={9} className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></td></tr>
               ) : users.length === 0 ? (
-                <tr><td colSpan={8} className="p-8 text-center text-slate-500">No users found.</td></tr>
+                <tr><td colSpan={9} className="p-8 text-center text-slate-500">No users found.</td></tr>
               ) : users.map((user) => (
                 <tr key={user.id} className="hover:bg-slate-50">
                   <td className="px-4 py-3">
@@ -341,6 +397,11 @@ export default function AdminUsersPage() {
                   <td className="px-4 py-3 text-right text-slate-700">{money(user.balance_available)}</td>
                   <td className="px-4 py-3 text-right text-slate-700">{money(user.ad_balance)}</td>
                   <td className="px-4 py-3"><StatusBadge user={user} /></td>
+                  <td className="px-4 py-3">
+                    <div className="font-semibold capitalize text-slate-900">{(user.advertiser_trust_level || "new").replace(/_/g, " ")}</div>
+                    <div className="text-xs text-slate-500">Spend {money(user.advertiser_total_spend)} · {user.advertiser_approved_campaigns || 0}/{user.advertiser_total_campaigns || 0} approved</div>
+                    <div className="text-xs text-red-500">{user.advertiser_rejected_campaigns || 0} rejected</div>
+                  </td>
                   <td className="px-4 py-3">
                     <span className={`rounded-full border px-2 py-0.5 text-[11px] font-bold ${Number(user.miniapp_beta_access || 0) === 1 ? "border-blue-200 bg-blue-50 text-blue-700" : "border-slate-200 bg-slate-50 text-slate-500"}`}>
                       {Number(user.miniapp_beta_access || 0) === 1 ? "Beta" : "No Access"}
@@ -378,6 +439,7 @@ export default function AdminUsersPage() {
                 <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Available</div><div className="font-semibold text-slate-900">{money(user.balance_available)}</div></div>
                 <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Ads</div><div className="font-semibold text-slate-900">{money(user.ad_balance)}</div></div>
                 <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Mini Apps</div><div className="font-semibold text-slate-900">{Number(user.miniapp_beta_access || 0) === 1 ? "Beta" : "Off"}</div></div>
+                <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Trust</div><div className="font-semibold capitalize text-slate-900">{user.advertiser_trust_level || "new"}</div></div>
               </div>
               <div className="mt-3"><ActionButtons user={user} /></div>
             </div>

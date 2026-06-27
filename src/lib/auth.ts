@@ -52,12 +52,7 @@ export function validateInitData(initData: string, botToken: string) {
     .update(sortedParams)
     .digest("hex");
 
-  console.log("Auth: checkHash:", checkHash);
-  console.log("Auth: receivedHash:", hash);
-
   if (checkHash !== hash) {
-    console.error("Auth: Hash mismatch detected!");
-    console.error("Auth: sortedParams used for check:", sortedParams);
     throw new Error("Invalid initData: Hash mismatch");
   }
 
@@ -85,8 +80,6 @@ export function validateInitData(initData: string, botToken: string) {
  * If user doesn't exist, it creates one.
  */
 export async function getAuthenticatedUser(initData: string | null, options: { allowBanned?: boolean } = {}) {
-  console.log("Auth: Received initData:", initData ? (initData.substring(0, 20) + "...") : "MISSING");
-
   if (!initData || initData === 'undefined' || initData === 'null') {
     throw new Error("Unauthorized: No initData provided");
   }
@@ -97,12 +90,13 @@ export async function getAuthenticatedUser(initData: string | null, options: { a
   }
 
   const tgUser = validateInitData(initData, botToken) as TelegramUser & { start_param?: string };
+  const telegramId = String(tgUser.id);
 
   try {
     // Check if user exists
     const [rows]: any = await pool.query(
       "SELECT * FROM users WHERE telegram_id = ?",
-      [tgUser.id]
+      [telegramId]
     );
 
     if (rows.length > 0) {
@@ -115,23 +109,37 @@ export async function getAuthenticatedUser(initData: string | null, options: { a
       // Update existing user info
       await pool.query(
         "UPDATE users SET first_name = ?, last_name = ?, username = ?, photo_url = ? WHERE telegram_id = ?",
-        [tgUser.first_name, tgUser.last_name || "", tgUser.username || "", tgUser.photo_url || "", tgUser.id]
+        [tgUser.first_name, tgUser.last_name || "", tgUser.username || "", tgUser.photo_url || "", telegramId]
       );
       return rows[0];
     } else {
-      // Create new user
-      // Generate a simple referral code if none exists
-      const referralCode = `REF${tgUser.id}${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
+      // Create new user — ON DUPLICATE KEY UPDATE guards against concurrent first-login races.
+      const referralCode = `AGX${telegramId}`;
 
       const [result]: any = await pool.query(
-        "INSERT INTO users (telegram_id, first_name, last_name, username, photo_url, referral_code) VALUES (?, ?, ?, ?, ?, ?)",
-        [tgUser.id, tgUser.first_name, tgUser.last_name || "", tgUser.username || "", tgUser.photo_url || "", referralCode]
+        `INSERT INTO users (telegram_id, first_name, last_name, username, photo_url, referral_code)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           first_name = VALUES(first_name),
+           last_name = VALUES(last_name),
+           username = VALUES(username),
+           photo_url = VALUES(photo_url)`,
+        [telegramId, tgUser.first_name, tgUser.last_name || "", tgUser.username || "", tgUser.photo_url || "", referralCode]
       );
 
-      const newUserId = result.insertId;
+      // insertId is 0 when the ON DUPLICATE KEY UPDATE path was taken.
+      // In that case, fetch the existing user by telegram_id instead.
+      let newUserId: number | null = result.insertId || null;
+      if (!newUserId) {
+        const [existing]: any = await pool.query(
+          "SELECT id FROM users WHERE telegram_id = ?",
+          [telegramId]
+        );
+        newUserId = existing[0]?.id || null;
+      }
 
-      // Handle referral if start_param exists
-      if (tgUser.start_param) {
+      // Handle referral if start_param exists (only for truly new users with a fresh insertId)
+      if (result.insertId && tgUser.start_param) {
         const [referrerRows]: any = await pool.query(
           "SELECT id, telegram_id, first_name FROM users WHERE referral_code = ?",
           [tgUser.start_param]
@@ -141,17 +149,16 @@ export async function getAuthenticatedUser(initData: string | null, options: { a
           const referrerTgId = referrerRows[0].telegram_id;
           const referrerName = referrerRows[0].first_name;
 
-          // Record the referral in the new separate table
-          await pool.query(
-            "INSERT IGNORE INTO referrals (user_id, invited_by) VALUES (?, ?)",
-            [newUserId, invitedBy]
-          );
+          if (Number(invitedBy) !== Number(newUserId)) {
+            await pool.query(
+              "INSERT IGNORE INTO referrals (user_id, invited_by) VALUES (?, ?)",
+              [newUserId, invitedBy]
+            );
+          }
 
-          // Notify Referrer
-          const joinerName = tgUser.username ? `@${tgUser.username}` : tgUser.first_name;
           await sendTelegramMessage(
             referrerTgId,
-            `<b>New Referral Joined!</b> 🚀\n\nHi ${referrerName}, <b>${joinerName}</b> just joined this platform using your referral link. You'll earn commissions from their future ad activities!`
+            `<b>New Referral Joined!</b>\n\nHi ${referrerName}, someone joined with your referral code. Reward is pending required channel verification.`
           );
         }
       }
@@ -164,7 +171,6 @@ export async function getAuthenticatedUser(initData: string | null, options: { a
       throw error;
     }
 
-    console.error("Auth Database Error:", error);
     throw new Error("Internal authentication error");
   }
 }

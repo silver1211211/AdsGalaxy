@@ -1,10 +1,11 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Modal from "@/components/ui/Modal";
-import { BarChart3, Check, ChevronLeft, ChevronRight, Loader2, Pause, Play, Search, Settings2, Smartphone, X } from "lucide-react";
+import { BarChart3, Check, ChevronLeft, ChevronRight, Loader2, Pause, Play, Search, Settings2, Smartphone, Trash2, X } from "lucide-react";
 
 type MiniApp = {
   id: number;
@@ -14,7 +15,11 @@ type MiniApp = {
   bot_id: string;
   webapp_url: string;
   miniapp_url: string;
-  status: "pending" | "approved" | "monetized" | "paused" | "rejected";
+  status: "pending" | "awaiting" | "approved" | "paused" | "rejected";
+  traffic_quality_score?: string | number;
+  traffic_quality_tier?: string;
+  traffic_risk_level?: string;
+  traffic_quality_updated_at?: string | null;
   owner_username?: string | null;
   first_name?: string | null;
   last_name?: string | null;
@@ -22,7 +27,9 @@ type MiniApp = {
   created_at?: string;
   updated_at?: string;
   mediation_request_count?: string | number;
-  active_network_count?: string | number;
+  configured_network_count?: string | number;
+  enabled_network_count?: string | number;
+  enabled_network_names?: string;
   total_impressions?: string | number;
   no_fill_count?: string | number;
   last_mediation_request_at?: string | null;
@@ -54,6 +61,15 @@ type MiniAppReport = {
   countries: Array<{ country: string; impressions: number }>;
   networks: Array<Record<string, number | string>>;
   enabled_networks: NetworkConfig[];
+  network_diagnostics?: Array<{
+    request_id: string;
+    selected_network: string | null;
+    candidate_pool: string[];
+    excluded_networks: Array<{ network_name: string; reason: string }>;
+    decision_reason: string;
+    final_result: string;
+    created_at: string;
+  }>;
   range: { startDate: string; endDate: string; dateSearch: string };
 };
 
@@ -61,7 +77,7 @@ type RevenueSummary = Record<string, number>;
 
 type PendingAction = {
   miniapp: MiniApp;
-  action: "approve" | "reject" | "pause" | "resume";
+  action: "await" | "reject" | "pause" | "resume" | "delete";
   title: string;
   message: string;
   danger?: boolean;
@@ -72,6 +88,7 @@ const placementLabels: Record<string, string> = {
   AdsGram: "Placement ID",
   RichAds: "Widget ID",
   AdExium: "Widget ID",
+  GigaPub: "Project ID",
   AdsGalaxyInternal: "Internal AdsGalaxy Ads",
 };
 
@@ -80,12 +97,13 @@ const networkLabels: Record<string, string> = {
   AdsGram: "AdsGram",
   RichAds: "RichAds",
   AdExium: "AdExium",
+  GigaPub: "GigaPub",
   AdsGalaxyInternal: "Internal AdsGalaxy Ads",
 };
 
 function statusClass(status: MiniApp["status"]) {
-  if (status === "monetized") return "bg-emerald-50 text-emerald-700 border-emerald-200";
-  if (status === "approved") return "bg-blue-50 text-blue-700 border-blue-200";
+  if (status === "approved") return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  if (status === "awaiting") return "bg-blue-50 text-blue-700 border-blue-200";
   if (status === "paused") return "bg-slate-100 text-slate-600 border-slate-200";
   if (status === "rejected") return "bg-red-50 text-red-700 border-red-200";
   return "bg-amber-50 text-amber-700 border-amber-200";
@@ -93,7 +111,7 @@ function statusClass(status: MiniApp["status"]) {
 
 function statusLabel(status: MiniApp["status"]) {
   if (status === "pending") return "Pending Review";
-  if (status === "monetized") return "Monetized";
+  if (status === "awaiting") return "Awaiting";
   if (status === "approved") return "Approved";
   if (status === "paused") return "Paused";
   return "Rejected";
@@ -116,12 +134,17 @@ function formatDate(value: string | null | undefined) {
   return new Date(value).toLocaleString();
 }
 
+function qualityLabel(value?: string) {
+  return String(value || "good").replace(/_/g, " ");
+}
+
 export default function AdminMiniAppsPage() {
   const [miniapps, setMiniapps] = useState<MiniApp[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [networkCountFilter, setNetworkCountFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -139,10 +162,10 @@ export default function AdminMiniAppsPage() {
   const [reportDateSearch, setReportDateSearch] = useState("");
   const [revenueSummary, setRevenueSummary] = useState<RevenueSummary | null>(null);
 
-  const fetchMiniApps = async (p: number, s: string, q: string) => {
+  const fetchMiniApps = async (p: number, s: string, q: string, n: string) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/miniapps?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`);
+      const res = await fetch(`/api/admin/miniapps?page=${p}&limit=10&status=${s}&network_count=${n}&search=${encodeURIComponent(q)}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to fetch Mini Apps");
       setMiniapps(data.miniapps || []);
@@ -157,10 +180,10 @@ export default function AdminMiniAppsPage() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      fetchMiniApps(page, statusFilter, search);
+      fetchMiniApps(page, statusFilter, search, networkCountFilter);
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [page, statusFilter, search]);
+  }, [page, statusFilter, networkCountFilter, search]);
 
   const runAction = async () => {
     if (!pendingAction) return;
@@ -175,7 +198,7 @@ export default function AdminMiniAppsPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Action failed");
       setPendingAction(null);
-      await fetchMiniApps(page, statusFilter, search);
+      await fetchMiniApps(page, statusFilter, search, networkCountFilter);
     } catch (err: any) {
       setError(err.message || "Action failed");
     } finally {
@@ -213,7 +236,7 @@ export default function AdminMiniAppsPage() {
       if (!res.ok) throw new Error(data.error || "Failed to save networks");
       setNetworks(data.networks || networks);
       setNetworkMiniApp(null);
-      await fetchMiniApps(page, statusFilter, search);
+      await fetchMiniApps(page, statusFilter, search, networkCountFilter);
     } catch (err: any) {
       setError(err.message || "Failed to save networks");
     } finally {
@@ -278,12 +301,12 @@ export default function AdminMiniAppsPage() {
 
   const ActionButtons = ({ miniapp }: { miniapp: MiniApp }) => (
     <div className="flex flex-wrap items-center justify-end gap-2">
-      {miniapp.status !== "approved" && miniapp.status !== "monetized" && miniapp.status !== "paused" && (
+      {miniapp.status === "pending" && (
         <button
-          onClick={() => setPendingAction({ miniapp, action: "approve", title: "Approve Mini App", message: `Approve ${miniapp.miniapp_name}?` })}
+          onClick={() => setPendingAction({ miniapp, action: "await", title: "Begin Network Onboarding", message: `Move ${miniapp.miniapp_name} to Awaiting while AdsGalaxy prepares network configuration?` })}
           disabled={actionLoading === miniapp.id}
-          className="rounded-md border border-emerald-100 bg-emerald-50 p-1.5 text-emerald-600 transition-colors hover:bg-emerald-100 disabled:opacity-50"
-          title="Approve"
+          className="rounded-md border border-blue-100 bg-blue-50 p-1.5 text-blue-600 transition-colors hover:bg-blue-100 disabled:opacity-50"
+          title="Begin onboarding"
         >
           {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />}
         </button>
@@ -323,11 +346,24 @@ export default function AdminMiniAppsPage() {
       </button>
       <button
         onClick={() => openNetworks(miniapp)}
-        disabled={miniapp.status !== "approved" && miniapp.status !== "monetized"}
-        className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:bg-slate-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
+        className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:bg-slate-50 hover:text-blue-600"
         title="Network configuration"
       >
         <Settings2 size={16} />
+      </button>
+      <button
+        onClick={() => setPendingAction({
+          miniapp,
+          action: "delete",
+          title: "Delete Mini App",
+          message: `Delete ${miniapp.miniapp_name}? This removes it from publisher access and admin lists. Only admins can perform this action.`,
+          danger: true,
+        })}
+        disabled={actionLoading === miniapp.id}
+        className="rounded-md border border-red-100 bg-red-50 p-1.5 text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
+        title="Delete Mini App"
+      >
+        {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={16} /> : <Trash2 size={16} />}
       </button>
     </div>
   );
@@ -353,6 +389,14 @@ export default function AdminMiniAppsPage() {
               <div>
                 <h3 className="text-lg font-bold text-slate-900">Network Configuration</h3>
                 <p className="text-xs text-slate-500">{networkMiniApp.miniapp_name}</p>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  <span className="rounded border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-bold text-blue-700">
+                    Configured {networks.filter((network) => network.enabled).length} / 6
+                  </span>
+                  <span className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-bold text-slate-600">
+                    Enabled {networks.filter((network) => network.enabled).length}
+                  </span>
+                </div>
               </div>
               <button onClick={() => setNetworkMiniApp(null)} className="text-slate-400 hover:text-slate-600"><X size={20} /></button>
             </div>
@@ -505,6 +549,30 @@ export default function AdminMiniAppsPage() {
                     </div>
                   </div>
 
+                  <div className="rounded-lg border border-slate-200">
+                    <div className="border-b border-slate-200 px-3 py-2 text-xs font-bold uppercase text-slate-400">Network Selection Diagnostics</div>
+                    <div className="max-h-80 overflow-auto">
+                      <table className="w-full min-w-[860px] text-left text-sm">
+                        <thead className="sticky top-0 bg-slate-50 text-xs text-slate-500">
+                          <tr><th className="px-3 py-2">Time</th><th className="px-3 py-2">Selected</th><th className="px-3 py-2">Candidate Pool</th><th className="px-3 py-2">Excluded Networks</th><th className="px-3 py-2">Reason</th></tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {(!report.network_diagnostics || report.network_diagnostics.length === 0) ? (
+                            <tr><td colSpan={5} className="p-6 text-center text-slate-500">No recent selection diagnostics.</td></tr>
+                          ) : report.network_diagnostics.map((row) => (
+                            <tr key={row.request_id}>
+                              <td className="px-3 py-2 text-xs">{formatDate(row.created_at)}</td>
+                              <td className="px-3 py-2 font-semibold">{row.selected_network || "None"}</td>
+                              <td className="px-3 py-2 text-xs">{row.candidate_pool.length ? row.candidate_pool.join(", ") : "None"}</td>
+                              <td className="px-3 py-2 text-xs">{row.excluded_networks.length ? row.excluded_networks.map((item) => `${item.network_name}: ${item.reason}`).join(" / ") : "None"}</td>
+                              <td className="px-3 py-2 text-xs">{row.decision_reason || row.final_result}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
                   <div className="overflow-x-auto rounded-lg border border-slate-200">
                     <table className="w-full min-w-[1060px] text-left text-sm">
                       <thead className="bg-slate-50 text-xs text-slate-500">
@@ -566,10 +634,17 @@ export default function AdminMiniAppsPage() {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
               <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search Mini Apps..." className="w-full rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-10 pr-4 text-xs outline-none focus:ring-2 focus:ring-blue-500" />
             </div>
-            <div className="flex rounded-md border border-slate-200/50 bg-slate-100 p-0.5">
-              {["all", "pending", "approved", "monetized", "paused", "rejected"].map((filter) => (
+            <div className="flex flex-wrap rounded-md border border-slate-200/50 bg-slate-100 p-0.5">
+              {["all", "pending", "awaiting", "approved", "rejected", "paused"].map((filter) => (
                 <button key={filter} onClick={() => { setPage(1); setStatusFilter(filter); }} className={`flex-1 rounded px-3 py-1.5 text-xs font-medium ${statusFilter === filter ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}>
                   {filter === "all" ? "All" : statusLabel(filter as MiniApp["status"])}
+                </button>
+              ))}
+            </div>
+            <div className="flex flex-wrap rounded-md border border-slate-200/50 bg-slate-100 p-0.5">
+              {["all", "0", "1", "2", "3", "4"].map((filter) => (
+                <button key={filter} onClick={() => { setPage(1); setNetworkCountFilter(filter); }} className={`flex-1 rounded px-3 py-1.5 text-xs font-medium ${networkCountFilter === filter ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}>
+                  {filter === "all" ? "All Config" : `${filter} ${filter === "1" ? "Network" : "Networks"}`}
                 </button>
               ))}
             </div>
@@ -584,16 +659,17 @@ export default function AdminMiniAppsPage() {
                 <th className="px-4 py-3 font-medium">Publisher</th>
                 <th className="px-4 py-3 font-medium">Bot ID</th>
                 <th className="px-4 py-3 font-medium">URLs</th>
-                <th className="px-4 py-3 font-medium">Requests</th>
-                <th className="px-4 py-3 font-medium">Status</th>
+                <th className="px-4 py-3 font-medium">Network Status</th>
+                <th className="px-4 py-3 font-medium">Traffic Quality</th>
+                <th className="px-4 py-3 font-medium">Status / Updated</th>
                 <th className="px-4 py-3 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <tr><td colSpan={7} className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></td></tr>
+                <tr><td colSpan={8} className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></td></tr>
               ) : miniapps.length === 0 ? (
-                <tr><td colSpan={7} className="p-8 text-center text-slate-500">No Mini Apps found.</td></tr>
+                <tr><td colSpan={8} className="p-8 text-center text-slate-500">No Mini Apps found.</td></tr>
               ) : miniapps.map((miniapp) => (
                 <tr key={miniapp.id} className="hover:bg-slate-50">
                   <td className="px-4 py-3">
@@ -610,8 +686,18 @@ export default function AdminMiniAppsPage() {
                     <div className="max-w-[240px] truncate text-xs text-slate-500" title={miniapp.miniapp_url}>{miniapp.miniapp_url}</div>
                   </td>
                   <td className="px-4 py-3">
-                    <div className="font-semibold text-slate-900">{numberValue(miniapp.mediation_request_count)}</div>
-                    <div className="text-xs text-slate-500">{miniapp.recent_selected_network || "No network yet"}</div>
+                    <div className="flex flex-wrap gap-1">
+                      <span className="rounded border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-bold text-blue-700">
+                        Configured {numberValue(miniapp.enabled_network_count ?? miniapp.configured_network_count)} / 6
+                      </span>
+                      <span className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-bold text-slate-600">
+                        Enabled {numberValue(miniapp.enabled_network_count)}
+                      </span>
+                    </div>
+                    <div className="mt-1 max-w-[240px] truncate text-xs text-slate-500" title={miniapp.enabled_network_names || "No networks enabled"}>
+                      {miniapp.enabled_network_names || "No networks enabled"}
+                    </div>
+                    <div className="mt-1 text-[10px] text-slate-500">Requests {numberValue(miniapp.mediation_request_count)}</div>
                     <div className="text-[10px] text-slate-400">{formatDate(miniapp.last_mediation_request_at)}</div>
                     <div className="text-[10px] text-slate-500">
                       No-fill {numberValue(miniapp.no_fill_count)} · Failures {numberValue(miniapp.recent_network_failures)}
@@ -636,7 +722,15 @@ export default function AdminMiniAppsPage() {
                       <div className="text-[10px] text-slate-400">Last user {miniapp.monetag_last_user_masked}</div>
                     )}
                   </td>
-                  <td className="px-4 py-3"><StatusBadge status={miniapp.status} /></td>
+                  <td className="px-4 py-3">
+                    <Link href={`/admin/traffic-quality/miniapp/${miniapp.id}`} className="font-black text-blue-700 hover:text-blue-900">{numberValue(miniapp.traffic_quality_score)}</Link>
+                    <div className="text-xs capitalize text-slate-500">{qualityLabel(miniapp.traffic_quality_tier)} / {qualityLabel(miniapp.traffic_risk_level)} risk</div>
+                    <div className="text-[10px] text-slate-400">{formatDate(miniapp.traffic_quality_updated_at)}</div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <StatusBadge status={miniapp.status} />
+                    <div className="mt-1 text-[10px] text-slate-400">Updated {formatDate(miniapp.updated_at)}</div>
+                  </td>
                   <td className="px-4 py-3 text-right"><ActionButtons miniapp={miniapp} /></td>
                 </tr>
               ))}
@@ -662,14 +756,17 @@ export default function AdminMiniAppsPage() {
               <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
                   <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Bot ID</div><div className="truncate font-semibold text-slate-900">{miniapp.bot_id}</div></div>
                   <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">User</div><div className="font-semibold text-slate-900">#{miniapp.user_id}</div></div>
+                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Configured Networks</div><div className="font-semibold text-slate-900">{numberValue(miniapp.enabled_network_count ?? miniapp.configured_network_count)} / 6</div></div>
+                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Networks Enabled</div><div className="font-semibold text-slate-900">{numberValue(miniapp.enabled_network_count)}</div></div>
+                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Last Updated</div><div className="truncate font-semibold text-slate-900">{formatDate(miniapp.updated_at)}</div></div>
                   <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Requests</div><div className="font-semibold text-slate-900">{numberValue(miniapp.mediation_request_count)}</div></div>
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Recent Network</div><div className="font-semibold text-slate-900">{miniapp.recent_selected_network || "N/A"}</div></div>
                   <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">No-fill</div><div className="font-semibold text-slate-900">{numberValue(miniapp.no_fill_count)}</div></div>
                   <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Failures</div><div className="font-semibold text-slate-900">{numberValue(miniapp.recent_network_failures)}</div></div>
                   <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Fill Rate</div><div className="font-semibold text-slate-900">{numberValue(miniapp.fill_rate)}%</div></div>
                   <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Flags</div><div className="font-semibold text-slate-900">{numberValue(miniapp.suspicious_flag_count)}</div></div>
                   <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Monetag</div><div className="font-semibold text-slate-900">{miniapp.monetag_status || "Active"}</div></div>
                   <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Last User</div><div className="font-semibold text-slate-900">{miniapp.monetag_last_user_masked || "N/A"}</div></div>
+                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Quality</div><Link href={`/admin/traffic-quality/miniapp/${miniapp.id}`} className="font-semibold text-blue-700 hover:text-blue-900">{numberValue(miniapp.traffic_quality_score)} / {qualityLabel(miniapp.traffic_risk_level)}</Link></div>
                 </div>
               <div className="mt-3"><ActionButtons miniapp={miniapp} /></div>
             </div>

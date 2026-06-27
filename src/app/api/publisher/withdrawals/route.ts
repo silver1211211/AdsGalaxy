@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { sendTelegramMessage } from "@/lib/telegram";
+import { requireWithdrawalsAllowed } from "@/lib/productionSafety";
+import { ensureWithdrawalSubmissionColumns } from "@/lib/schemaGuards";
 
 export async function GET(request: Request) {
   try {
@@ -34,6 +36,8 @@ export async function POST(request: Request) {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
     const { amount, network, address } = await request.json();
+    const blocked = await requireWithdrawalsAllowed(network);
+    if (blocked) return blocked;
 
     if (!amount || !network || !address) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
@@ -58,6 +62,7 @@ export async function POST(request: Request) {
     // Process Withdrawal (Transactional)
     const connection = await pool.getConnection();
     try {
+      await ensureWithdrawalSubmissionColumns(connection);
       await connection.beginTransaction();
 
       const [userRows]: any = await connection.query(

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +17,14 @@ function toNumber(value: unknown) {
 }
 
 export async function GET(_req: NextRequest) {
+  const unauthorized = requireCronSecret(_req);
+  if (unauthorized) return unauthorized;
+
+  const lock = await acquireCronLock("unlock-miniapp", 1800);
+  if (!lock) {
+    return NextResponse.json({ success: false, message: "Mini App unlock cron is already running" }, { status: 409 });
+  }
+
   try {
     const [settlements] = await pool.query<SettlementRow[]>(`
       SELECT id, user_id, publisher_revenue, status
@@ -103,5 +112,7 @@ export async function GET(_req: NextRequest) {
   } catch (error: any) {
     console.error("Mini App Unlock Cron Error:", error);
     return NextResponse.json({ error: error.message || "Mini App unlock failed" }, { status: 500 });
+  } finally {
+    await releaseCronLock(lock);
   }
 }

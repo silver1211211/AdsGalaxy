@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { requireUserWritesAllowed } from "@/lib/productionSafety";
 
 const OXAPAY_API_URL = "https://api.oxapay.com/v1/payment/white-label";
 const OXAPAY_KEY = process.env.OXAPAY_MERCHANT_API_KEY;
@@ -37,6 +38,9 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const blocked = await requireUserWritesAllowed();
+    if (blocked) return blocked;
+
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
     const { amount, network } = await request.json();

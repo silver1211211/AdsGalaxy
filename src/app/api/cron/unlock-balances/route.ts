@@ -1,25 +1,40 @@
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { creditUserAvailableBalance, unlockUserBalance } from "@/lib/earnings";
+import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
+  const unauthorized = requireCronSecret(req);
+  if (unauthorized) return unauthorized;
+
+  const lock = await acquireCronLock("unlock-balances", 1800);
+  if (!lock) {
+    return NextResponse.json({ success: false, message: "Balance unlock cron is already running" }, { status: 409 });
+  }
+
   try {
     // 0. Throttling (Default once a day, but can be run more often)
     const isDev = process.env.MODE === "DEV";
-    const [settings]: any = await pool.query("SELECT value FROM settings WHERE \`key\` = 'last_unlock_cron_run'");
-    const lastRun = parseInt(settings[0]?.value || "0");
     const now = Date.now();
     const intervalMs = 24 * 60 * 60 * 1000; // 24 hours
 
-    if (!isDev && now - lastRun < intervalMs) {
-      const hoursLeft = Math.ceil((intervalMs - (now - lastRun)) / (60 * 60 * 1000));
+    await pool.query(
+      "INSERT IGNORE INTO settings (`key`, value, description) VALUES ('last_unlock_cron_run', '0', 'Timestamp of the last balance unlock cron run')"
+    );
+    const [throttleResult]: any = await pool.query(
+      `UPDATE settings
+       SET value = ?
+       WHERE \`key\` = 'last_unlock_cron_run'
+         AND (CAST(value AS UNSIGNED) <= ? OR ? = 1)`,
+      [now.toString(), String(now - intervalMs), isDev ? 1 : 0]
+    );
+
+    if (throttleResult.affectedRows !== 1) {
+      const hoursLeft = 24;
       return NextResponse.json({ success: false, message: `Too early. Next run in ~${hoursLeft} hours.` }, { status: 429 });
     }
-
-    // Update last run
-    await pool.query("INSERT INTO settings (\`key\`, value) VALUES ('last_unlock_cron_run', ?) ON DUPLICATE KEY UPDATE value = ?", [now.toString(), now.toString()]);
 
     // Get Referral Percentage
     const [refSetting]: any = await pool.query("SELECT value FROM settings WHERE \`key\` = 'referral_reward_percentage'");
@@ -154,5 +169,7 @@ export async function GET(req: NextRequest) {
   } catch (error: any) {
     console.error("Balance Unlocker Cron Error:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
+  } finally {
+    await releaseCronLock(lock);
   }
 }

@@ -6,6 +6,7 @@ import { recordMiniappAdOpportunity } from "@/lib/miniappMonetagProtection";
 import { createMediationAttempt } from "@/lib/miniappMediationEngine";
 import type { MiniAppAdFormat } from "@/lib/miniappNetworkAdapters";
 import { assertMiniAppOwnerBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
+import { isMiniappNetworkGloballyDisabled, requireAdServingAllowed } from "@/lib/productionSafety";
 
 type MiniAppRow = RowDataPacket & {
   id: number;
@@ -37,6 +38,9 @@ export async function POST(request: Request) {
   const conn = await pool.getConnection();
 
   try {
+    const blocked = await requireAdServingAllowed();
+    if (blocked) return blocked;
+
     const body = await request.json();
     const miniappId = Number(body.miniapp_id);
     const telegramUserId = cleanText(body.telegram_user_id);
@@ -85,6 +89,19 @@ export async function POST(request: Request) {
       adFormat,
     });
 
+    if (await isMiniappNetworkGloballyDisabled(decision.selected_network, conn)) {
+      await conn.commit();
+      return NextResponse.json({
+        success: false,
+        error_code: "NO_FILL",
+        message: "No ad available right now.",
+        request_id: decision.request_id,
+        fallback_available: false,
+        ad_format: decision.ad_format,
+        decision_reason: "globally_disabled",
+      });
+    }
+
     await conn.commit();
 
     if (!decision.success) {
@@ -93,9 +110,6 @@ export async function POST(request: Request) {
         error_code: decision.error_code,
         message: "No ad available right now.",
         request_id: decision.request_id,
-        enabled_networks: decision.enabled_networks,
-        attempted_networks: decision.attempted_networks,
-        skipped_networks: decision.skipped_networks,
         fallback_available: false,
         ad_format: decision.ad_format,
         decision_reason: decision.decision_reason,
@@ -109,11 +123,6 @@ export async function POST(request: Request) {
       selected_network: decision.selected_network,
       network_placement_id: decision.network_placement_id || "",
       internal_ad: decision.internal_ad || null,
-      enabled_networks: decision.enabled_networks,
-      candidate_networks: decision.candidate_networks,
-      attempted_networks: decision.attempted_networks,
-      skipped_networks: decision.skipped_networks,
-      fallback_attempts: decision.fallback_attempts,
       fallback_available: decision.fallback_available,
       request_id: decision.request_id,
       ad_format: decision.ad_format,

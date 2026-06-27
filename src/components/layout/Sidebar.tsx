@@ -15,7 +15,12 @@ import {
   X,
   PlusCircle,
   Bot,
-  Smartphone
+  Smartphone,
+  Store,
+  BarChart3,
+  Code2,
+  Lightbulb,
+  BriefcaseBusiness
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -34,6 +39,8 @@ export default function Sidebar({ type, isOpen, onClose, miniappBetaAccess = fal
     { name: "My Channels", href: "/publisher/channels", icon: Tv },
     { name: "My Bots", href: "/publisher/bots", icon: Bot },
     ...(miniappBetaAccess ? [{ name: "Mini Apps (Beta)", href: "/publisher/miniapps", icon: Smartphone }] : []),
+    { name: "Recommendations", href: "/publisher/recommendations", icon: Lightbulb },
+    { name: "Developer Center", href: "/publisher/developer", icon: Code2 },
     { name: "Earnings", href: "/publisher/earnings", icon: Wallet },
     { name: "Withdraw", href: "/publisher/withdraw", icon: ArrowUpRight },
     { name: "Referral", href: "/publisher/referral", icon: Users },
@@ -43,8 +50,11 @@ export default function Sidebar({ type, isOpen, onClose, miniappBetaAccess = fal
   const advertiserLinks = [
     { name: "Dashboard", href: "/advertiser", icon: LayoutDashboard },
     { name: "My Campaigns", href: "/advertiser/campaigns", icon: Tv },
-    { name: "Add Campaign", href: "/advertiser/campaigns/new", icon: PlusCircle },
-    { name: "Mini App Ads", href: "/advertiser/miniapp-rewarded", icon: Smartphone },
+    { name: "Intelligence", href: "/advertiser/intelligence", icon: BarChart3 },
+    { name: "Recommendations", href: "/advertiser/recommendations", icon: Lightbulb },
+    { name: "Marketplace", href: "/advertiser/marketplace", icon: Store },
+    { name: "Enterprise", href: "/advertiser/enterprise", icon: BriefcaseBusiness },
+    { name: "Create Campaign", href: "/advertiser/campaigns/new", icon: PlusCircle },
     { name: "Deposit Fund", href: "/advertiser/deposit", icon: Wallet },
     { name: "FAQs", href: "/advertiser/faqs", icon: HelpCircle },
   ];

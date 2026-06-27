@@ -61,6 +61,16 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
   };
 
   const handleSubmit = async () => {
+    const trimmedTitle = editedTitle.trim();
+    if (trimmedTitle.length < 3) {
+      setError("Channel name must be at least 3 characters.");
+      return;
+    }
+    if (trimmedTitle.length > 50) {
+      setError("Channel name must be at most 50 characters.");
+      return;
+    }
+
     setIsLoading(true);
     setError("");
     try {
@@ -157,6 +167,7 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
                     type="text"
                     value={editedTitle}
                     onChange={(e) => setEditedTitle(e.target.value)}
+                    maxLength={50}
                     className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                   />
                 </div>

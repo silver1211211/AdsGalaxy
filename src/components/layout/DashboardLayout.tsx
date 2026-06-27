@@ -1,11 +1,13 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import Link from "next/link";
 import Header from "./Header";
 import Sidebar from "./Sidebar";
 import { apiFetch } from "@/lib/api";
 import BannedScreen from "@/components/auth/BannedScreen";
 import AppBootState from "@/components/shared/AppBootState";
+import SelfPromotionAd from "@/components/shared/SelfPromotionAd";
 import { isTelegramMiniApp, safePrepareTelegramWebApp, waitForTelegramInitData } from "@/lib/telegramWebApp";
 
 interface DashboardLayoutProps {
@@ -90,6 +92,7 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
 
   return (
     <div className="min-h-screen bg-slate-50">
+      <SelfPromotionAd />
       <Header toggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)} />
       <Sidebar
         type={type}
@@ -100,6 +103,17 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
 
       <main className="min-h-screen pt-16 transition-all duration-300 lg:pl-64">
         <div className="mx-auto max-w-7xl p-4 lg:p-8">
+          <div className="mb-6 rounded-2xl border border-blue-100 bg-gradient-to-r from-blue-600 to-cyan-600 p-5 text-white shadow-lg shadow-blue-100">
+            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h2 className="text-lg font-black uppercase tracking-tight">Invite Friends & Earn</h2>
+                <p className="text-sm font-semibold text-blue-50">Earn rewards for every verified referral. Join the Referral Sprint and compete for bonus rewards.</p>
+              </div>
+              <Link href="/publisher/referral" className="rounded-xl bg-white px-5 py-3 text-center text-xs font-black uppercase tracking-widest text-blue-600 shadow-sm transition-all active:scale-95">
+                Invite Friends
+              </Link>
+            </div>
+          </div>
           {children}
         </div>
       </main>

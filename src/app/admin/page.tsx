@@ -113,11 +113,43 @@ export default function AdminDashboard() {
         {/* Network Reach */}
         <div>
           <SectionHeader title="Network Reach" icon={Activity} />
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             <StatCard title="Total Subscribers" value={stats.channels.totalSubscribers.toLocaleString()} icon={Users} bgClass="bg-blue-100" textClass="text-blue-600" subtitle="Across all active channels" />
             <StatCard title="Monetized Bots" value={stats.bots.total} icon={Bot} bgClass="bg-purple-100" textClass="text-purple-600" subtitle="Active in network" />
             <StatCard title="Active Bot Users" value={stats.bots.activeUsers.toLocaleString()} icon={ShieldCheck} bgClass="bg-emerald-100" textClass="text-emerald-600" subtitle="Users receiving ads" />
             <StatCard title="Total Bot Users" value={stats.bots.totalUsers.toLocaleString()} icon={Activity} bgClass="bg-indigo-100" textClass="text-indigo-600" subtitle="All users across bots" />
+            <StatCard title="Paused Bots" value={(stats.bots.paused || 0).toLocaleString()} icon={AlertCircle} bgClass="bg-amber-100" textClass="text-amber-600" subtitle="Excluded from delivery" />
+            <StatCard title="Inactive Bot Users" value={(stats.bots.inactiveUsers || 0).toLocaleString()} icon={XCircle} bgClass="bg-red-100" textClass="text-red-600" subtitle="Blocked, unreachable, or under inactive bots" />
+          </div>
+        </div>
+
+        {/* Conversion Analytics */}
+        <div>
+          <SectionHeader title="Conversion Analytics" icon={TrendingUp} />
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <StatCard title="Conversions" value={Number(stats.conversions?.total || 0).toLocaleString()} icon={TrendingUp} bgClass="bg-purple-100" textClass="text-purple-600" />
+            <StatCard title="Conversion Value" value={`$${Number(stats.conversions?.value || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} icon={DollarSign} bgClass="bg-emerald-100" textClass="text-emerald-600" />
+            <StatCard title="Review Queue" value={Number(stats.conversions?.open_reviews || 0).toLocaleString()} icon={AlertCircle} bgClass="bg-amber-100" textClass="text-amber-600" subtitle="Suspicious activity" />
+            <StatCard title="Attribution Window" value={`${stats.conversions?.attribution_window_days || 7} days`} icon={Clock} bgClass="bg-blue-100" textClass="text-blue-600" />
+          </div>
+          <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
+            {[
+              ["Top Campaigns", stats.conversions?.top_campaigns || [], (row: any) => `${row.campaign_type} #${row.campaign_id}`],
+              ["Top Categories", stats.conversions?.top_categories || [], (row: any) => row.category],
+              ["Top Inventory", stats.conversions?.top_inventory || [], (row: any) => `${row.inventory_type} #${row.inventory_id}`],
+            ].map(([title, rows, labeler]: any) => (
+              <div key={title} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                <h3 className="mb-3 text-sm font-bold text-slate-900">{title}</h3>
+                {rows.length === 0 ? (
+                  <p className="text-xs font-semibold text-slate-400">No conversion data yet.</p>
+                ) : rows.map((row: any, index: number) => (
+                  <div key={`${title}-${index}`} className="flex items-center justify-between border-t border-slate-100 py-2 text-sm first:border-t-0">
+                    <span className="font-semibold text-slate-600">{labeler(row)}</span>
+                    <span className="font-black text-slate-900">{Number(row.conversions || 0).toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
           </div>
         </div>
 

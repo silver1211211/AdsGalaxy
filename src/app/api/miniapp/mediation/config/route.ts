@@ -8,6 +8,7 @@ import {
   type MiniAppNetworkName,
 } from "@/lib/miniappNetworkAdapters";
 import { assertMiniAppOwnerBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
+import { getDisabledMiniappNetworks, requireAdServingAllowed } from "@/lib/productionSafety";
 
 type MiniAppRow = RowDataPacket & {
   id: number;
@@ -21,6 +22,9 @@ type NetworkRow = RowDataPacket & {
 
 export async function GET(request: Request) {
   try {
+    const blocked = await requireAdServingAllowed();
+    if (blocked) return blocked;
+
     const { searchParams } = new URL(request.url);
     const miniappId = Number(searchParams.get("miniapp_id"));
     const requestedNetwork = searchParams.get("network_name")?.trim();
@@ -63,12 +67,14 @@ export async function GET(request: Request) {
         AND enabled = TRUE
         AND network_name IN (?)
         ${networkFilter}
-      ORDER BY COALESCE(NULLIF(priority_order, 0), FIELD(network_name, 'AdsGram', 'Monetag', 'AdExium', 'RichAds')),
-        FIELD(network_name, 'AdsGram', 'Monetag', 'AdExium', 'RichAds')
+      ORDER BY COALESCE(NULLIF(priority_order, 0), FIELD(network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')),
+        FIELD(network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')
     `, params);
 
+    const globallyDisabledNetworks = await getDisabledMiniappNetworks();
     const enabledNetworks = networkRows
       .filter((row) => isMiniAppNetworkName(row.network_name) && row.network_name !== "AdsGalaxyInternal")
+      .filter((row) => !globallyDisabledNetworks.has(row.network_name))
       .map((row) => {
         try {
           return buildMiniAppNetworkClientConfig(row.network_name as MiniAppNetworkName, row.network_placement_id || "");

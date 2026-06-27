@@ -1,4 +1,5 @@
 import pool from "@/lib/db";
+import { getInternalAdCompletionAnalytics } from "@/lib/internalAdCompletionQuality";
 
 function todayDate() {
   return new Date().toISOString().slice(0, 10);
@@ -131,6 +132,12 @@ export async function buildMiniAppReport(miniappId: number | string, startDate: 
      WHERE miniapp_id = ? AND created_at BETWEEN ? AND DATE_ADD(?, INTERVAL 1 DAY)`,
     [miniappId, startDate, endDate]
   );
+  const completionAnalytics = await getInternalAdCompletionAnalytics({
+    conn: pool,
+    miniappId,
+    startDate,
+    endDate,
+  });
 
   const [countryRows]: any = await pool.query(
     `SELECT country, SUM(impressions) as impressions
@@ -186,6 +193,9 @@ export async function buildMiniAppReport(miniappId: number | string, startDate: 
       unsettled_earnings: Math.max(totalRevenue - totalSettledEarnings, 0),
       source_internal_impressions: toNumber(internalSourceRows[0]?.source_internal_impressions),
       source_internal_cost: toNumber(internalSourceRows[0]?.source_internal_cost),
+      completion_rate: completionAnalytics.completion_rate,
+      average_watch_duration: completionAnalytics.average_watch_duration,
+      incomplete_rate: completionAnalytics.incomplete_rate,
       ...reconciliation,
     },
     daily: dailyRows.map((row: any) => {
@@ -224,6 +234,7 @@ export async function buildMiniAppAdminBreakdown(miniappId: number | string, sta
        SUM(impressions) as impressions,
        SUM(gross_revenue) as gross_revenue,
        SUM(ads_galaxy_fee) as ads_galaxy_fee,
+       SUM(reserve_revenue) as reserve_revenue,
        SUM(publisher_revenue) as publisher_revenue,
        CASE WHEN SUM(impressions) > 0 THEN (SUM(gross_revenue) / SUM(impressions)) * 1000 ELSE 0 END as gross_cpm,
        CASE WHEN SUM(impressions) > 0 THEN (SUM(publisher_revenue) / SUM(impressions)) * 1000 ELSE 0 END as net_cpm
@@ -238,7 +249,7 @@ export async function buildMiniAppAdminBreakdown(miniappId: number | string, sta
     `SELECT network_name, enabled, network_placement_id
      FROM miniapp_ad_networks
      WHERE miniapp_id = ?
-     ORDER BY FIELD(network_name, 'AdsGram', 'Monetag', 'AdExium', 'RichAds'), network_name`,
+     ORDER BY FIELD(network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal'), network_name`,
     [miniappId]
   );
 
@@ -248,6 +259,7 @@ export async function buildMiniAppAdminBreakdown(miniappId: number | string, sta
       impressions: toNumber(row.impressions),
       gross_revenue: toNumber(row.gross_revenue),
       ads_galaxy_fee: toNumber(row.ads_galaxy_fee),
+      reserve_revenue: toNumber(row.reserve_revenue),
       publisher_revenue: toNumber(row.publisher_revenue),
       gross_cpm: toNumber(row.gross_cpm),
       net_cpm: toNumber(row.net_cpm),

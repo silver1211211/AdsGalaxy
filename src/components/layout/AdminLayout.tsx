@@ -3,24 +3,87 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LayoutDashboard, Users, Megaphone, Tv, CreditCard, Wallet, Activity, HelpCircle, Settings, LogOut, Menu, X, Bot, Moon, Sun, Radio, ShieldCheck, Smartphone } from "lucide-react";
+import { LayoutDashboard, Users, Megaphone, Tv, CreditCard, Wallet, Activity, HelpCircle, Settings, LogOut, Menu, X, Bot, Moon, Sun, Radio, ShieldCheck, ShieldAlert, Smartphone, Radar, Trophy, Store, BarChart3, Gift, Code2, FileText, Lightbulb, BriefcaseBusiness, Power, Zap, Server, Sliders } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const menuItems = [
-  { href: "/admin", icon: LayoutDashboard, label: "Dashboard" },
-  { href: "/admin/users", icon: Users, label: "Users" },
-  { href: "/admin/campaigns", icon: Megaphone, label: "Campaigns" },
-  { href: "/admin/miniapp-rewarded", icon: Smartphone, label: "Mini App Ads" },
-  { href: "/admin/channels", icon: Tv, label: "Channels" },
-  { href: "/admin/bots", icon: Bot, label: "Bots" },
-  { href: "/admin/miniapps", icon: Smartphone, label: "Mini Apps" },
-  { href: "/admin/withdrawals", icon: CreditCard, label: "Withdrawals" },
-  { href: "/admin/deposits", icon: Wallet, label: "Deposits" },
-  { href: "/admin/audits", icon: Activity, label: "Views Audit" },
-  { href: "/admin/broadcasts", icon: Radio, label: "Broadcast Audit" },
-  { href: "/admin/availability", icon: ShieldCheck, label: "Availability Checker" },
-  { href: "/admin/faqs", icon: HelpCircle, label: "Manage FAQs" },
-  { href: "/admin/settings", icon: Settings, label: "System Settings" },
+const menuSections = [
+  {
+    label: null,
+    items: [
+      { href: "/admin", icon: LayoutDashboard, label: "Dashboard" },
+    ],
+  },
+  {
+    label: "OPERATIONS",
+    items: [
+      { href: "/admin/users", icon: Users, label: "Users" },
+      { href: "/admin/channels", icon: Tv, label: "Channels" },
+      { href: "/admin/bots", icon: Bot, label: "Bots" },
+      { href: "/admin/campaigns", icon: Megaphone, label: "Campaigns" },
+      { href: "/admin/miniapps", icon: Smartphone, label: "Mini Apps" },
+      { href: "/admin/miniapp-rewarded", icon: Zap, label: "Rewarded Ads" },
+    ],
+  },
+  {
+    label: "PAYMENTS",
+    items: [
+      { href: "/admin/withdrawals", icon: CreditCard, label: "Withdrawals" },
+      { href: "/admin/deposits", icon: Wallet, label: "Deposits" },
+    ],
+  },
+  {
+    label: "TRUST & SAFETY",
+    items: [
+      { href: "/admin/traffic-quality", icon: Radar, label: "Traffic Quality" },
+      { href: "/admin/revenue-protection", icon: ShieldAlert, label: "Revenue Protection" },
+      { href: "/admin/automation", icon: ShieldCheck, label: "Moderation Rules" },
+    ],
+  },
+  {
+    label: "ANALYTICS",
+    items: [
+      { href: "/admin/advertiser-analytics", icon: BarChart3, label: "Campaign Analytics" },
+    ],
+  },
+  {
+    label: "GROWTH",
+    items: [
+      { href: "/admin/referrals", icon: Gift, label: "Referrals" },
+      { href: "/admin/marketplace", icon: Store, label: "Marketplace" },
+      { href: "/admin/enterprise", icon: BriefcaseBusiness, label: "Enterprise" },
+    ],
+  },
+  {
+    label: "OPTIMIZATION",
+    items: [
+      { href: "/admin/inventory-optimization", icon: Trophy, label: "Inventory Scoring" },
+      { href: "/admin/placement-logic", icon: Sliders, label: "Ad Placement Rules" },
+      { href: "/admin/smart-recommendations", icon: Lightbulb, label: "Recommendations" },
+    ],
+  },
+  {
+    label: "PLATFORM",
+    items: [
+      { href: "/admin/developer-platform", icon: Code2, label: "Developer Hub" },
+      { href: "/admin/broadcasts", icon: Radio, label: "Broadcasts" },
+    ],
+  },
+  {
+    label: "AUDIT LOGS",
+    items: [
+      { href: "/admin/audits", icon: Activity, label: "View Audit" },
+      { href: "/admin/system-logs", icon: FileText, label: "System Logs" },
+    ],
+  },
+  {
+    label: "CONFIGURATION",
+    items: [
+      { href: "/admin/settings", icon: Settings, label: "Platform Settings" },
+      { href: "/admin/faqs", icon: HelpCircle, label: "FAQs" },
+      { href: "/admin/availability", icon: Server, label: "Service Status" },
+      { href: "/admin/production-readiness", icon: Power, label: "System Health" },
+    ],
+  },
 ];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
@@ -77,31 +140,41 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   };
 
   useEffect(() => {
-    const hasAuth = document.cookie.includes("admin_auth=");
-    if (!hasAuth && pathname !== "/admin/login") {
-      router.push("/admin/login");
-    } else {
+    let cancelled = false;
+    const checkSession = async () => {
+      if (pathname === "/admin/login") {
+        setIsAuthenticated(true);
+        return;
+      }
+
+      const response = await fetch("/api/admin/session", { cache: "no-store" });
+      if (cancelled) return;
+      if (!response.ok) {
+        router.push("/admin/login");
+        return;
+      }
       setIsAuthenticated(true);
-    }
+    };
+    checkSession().catch(() => router.push("/admin/login"));
 
     // Global fetch interceptor to catch 401 Unauthorized API responses
     const originalFetch = window.fetch;
     window.fetch = async (...args) => {
       const response = await originalFetch(...args);
       if (response.status === 401) {
-        document.cookie = "admin_auth=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
         window.location.href = "/admin/login";
       }
       return response;
     };
 
     return () => {
+      cancelled = true;
       window.fetch = originalFetch;
     };
   }, [pathname, router]);
 
-  const handleLogout = () => {
-    document.cookie = "admin_auth=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+  const handleLogout = async () => {
+    await fetch("/api/admin/logout", { method: "POST" }).catch(() => undefined);
     router.push("/admin/login");
   };
 
@@ -282,24 +355,37 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           </button>
         </div>
 
-        <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-0.5">
-          {menuItems.map((item) => {
-            const isActive = pathname === item.href || (item.href !== "/admin" && pathname?.startsWith(item.href));
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={cn(
-                  "flex items-center gap-2.5 px-3 py-2 rounded-md font-medium text-xs transition-colors cursor-pointer sidebar-item",
-                  isActive && "sidebar-item-active"
-                )}
-                onClick={() => setIsSidebarOpen(false)}
-              >
-                <item.icon size={16} />
-                {item.label}
-              </Link>
-            );
-          })}
+        <nav className="flex-1 overflow-y-auto py-3 px-3">
+          {menuSections.map((section, sectionIndex) => (
+            <div key={sectionIndex} className={sectionIndex > 0 ? "mt-3" : ""}>
+              {section.label && (
+                <div className="px-3 pt-1 pb-1.5">
+                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
+                    {section.label}
+                  </span>
+                </div>
+              )}
+              <div className="space-y-0.5">
+                {section.items.map((item) => {
+                  const isActive = pathname === item.href || (item.href !== "/admin" && pathname?.startsWith(item.href));
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      className={cn(
+                        "flex items-center gap-2.5 px-3 py-2 rounded-md font-medium text-xs transition-colors cursor-pointer sidebar-item",
+                        isActive && "sidebar-item-active"
+                      )}
+                      onClick={() => setIsSidebarOpen(false)}
+                    >
+                      <item.icon size={16} />
+                      {item.label}
+                    </Link>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </nav>
 
         <div className="p-3 border-t border-slate-200 space-y-3">
@@ -335,7 +421,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           </button>
           <div className="flex-1 flex items-center text-sm text-slate-600">
             <span className="text-slate-400 mr-2">/</span>
-            {menuItems.find(i => pathname === i.href || (i.href !== "/admin" && pathname?.startsWith(i.href)))?.label || "Overview"}
+            {menuSections.flatMap(s => s.items).find(i => pathname === i.href || (i.href !== "/admin" && pathname?.startsWith(i.href)))?.label || "Overview"}
           </div>
         </header>
 

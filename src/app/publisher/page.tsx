@@ -23,6 +23,9 @@ type PublisherStats = {
   total_withdrawn?: string | number;
   join_rewarded?: number | boolean;
   referral_percent?: string | number;
+  referral_reward_amount?: string | number;
+  referral_sprint_enabled?: boolean;
+  referral_dashboard_promotion_enabled?: boolean;
   recent_channels?: Array<{
     id: number;
     title: string;
@@ -244,18 +247,20 @@ export default function PublisherDashboard() {
           </div>
 
           <div className="space-y-6">
-            <div className="bg-gradient-to-br from-[#0c9de8] to-blue-700 p-6 rounded-[32px] text-white shadow-xl shadow-blue-100">
-              <h3 className="text-lg font-black mb-2 uppercase tracking-tight">Refer & Earn</h3>
-              <p className="text-blue-50 text-sm mb-6 font-medium leading-relaxed">
-                Invite your fellow publishers and earn <span className="font-black text-white">{stats?.referral_percent || 5}%</span> of their lifetime earnings!
-              </p>
-              <Link 
-                href="/publisher/referral"
-                className="w-full py-3.5 bg-white text-[#0c9de8] font-black rounded-2xl hover:bg-blue-50 transition-all flex items-center justify-center gap-2 text-sm shadow-lg shadow-blue-900/10 active:scale-95"
-              >
-                Invite Friends
-              </Link>
-            </div>
+            {stats?.referral_sprint_enabled && stats?.referral_dashboard_promotion_enabled && (
+              <div className="rounded-[32px] bg-gradient-to-br from-[#0c9de8] to-blue-700 p-6 text-white shadow-xl shadow-blue-100">
+                <h3 className="mb-2 text-lg font-black uppercase tracking-tight">Referral Sprint</h3>
+                <p className="mb-6 text-sm font-medium leading-relaxed text-blue-50">
+                  Invite friends, earn <span className="font-black text-white">{toFixedMoney(stats?.referral_reward_amount || 0.015)}</span> per verified referral, and climb the sprint leaderboard.
+                </p>
+                <Link
+                  href="/publisher/referral"
+                  className="flex w-full items-center justify-center gap-2 rounded-2xl bg-white py-3.5 text-sm font-black text-[#0c9de8] shadow-lg shadow-blue-900/10 transition-all hover:bg-blue-50 active:scale-95"
+                >
+                  Join Sprint
+                </Link>
+              </div>
+            )}
           </div>
         </div>
       </div>

@@ -3,6 +3,7 @@ import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { assertMiniAppBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
 import { MiniAppSubmissionValidationError, validateMiniAppSubmission } from "@/lib/miniappSubmissionValidation";
+import { requireUserWritesAllowed } from "@/lib/productionSafety";
 
 export async function GET(request: Request) {
   try {
@@ -19,9 +20,14 @@ export async function GET(request: Request) {
         bot_id,
         webapp_url,
         miniapp_url,
-        status,
+        CASE
+          WHEN status = 'awaiting' THEN 'pending'
+          WHEN status = 'monetized' THEN 'approved'
+          ELSE status
+        END as status,
         created_at,
         updated_at,
+        marketplace_visible,
         COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id), 0) as mediation_request_count,
         COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id AND mr.impression_confirmed = 1), 0) as confirmed_impression_count,
         COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id), 0) as total_requests,
@@ -39,8 +45,7 @@ export async function GET(request: Request) {
               / COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id), 1)
             ) * 100
           ELSE 0
-        END as fill_rate,
-        COALESCE((SELECT COUNT(*) FROM miniapp_ad_networks mn WHERE mn.miniapp_id = miniapps.id AND mn.enabled = TRUE), 0) as active_network_count
+        END as fill_rate
        FROM miniapps
        WHERE user_id = ? AND is_deleted = FALSE
        ORDER BY created_at DESC`,
@@ -57,6 +62,9 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const blocked = await requireUserWritesAllowed();
+    if (blocked) return blocked;
+
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
     await assertMiniAppBetaAccess(user);

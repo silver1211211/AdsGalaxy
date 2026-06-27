@@ -1,4 +1,5 @@
 import type { RowDataPacket } from "mysql2";
+import type { ResultSetHeader } from "mysql2/promise";
 import pool from "@/lib/db";
 
 const DEFAULT_BATCH_SIZE = 30;
@@ -320,4 +321,23 @@ export async function deleteCampaignPosts(options: {
 
 export async function deleteActiveCampaignPosts(campaignId: number | string) {
   return deleteCampaignPosts({ campaignId });
+}
+
+export async function markStalePendingDeliveryPosts(timeoutMinutes: number) {
+  const safeTimeoutMinutes = Math.max(1, Math.floor(timeoutMinutes || 10));
+  const [result] = await pool.query<ResultSetHeader>(
+    `UPDATE campaign_posts
+     SET status = 'delivery_failed',
+         delivery_failed_at = COALESCE(delivery_failed_at, NOW()),
+         delivery_failure_reason = 'Pending delivery timed out before Telegram confirmation'
+     WHERE status = 'pending_delivery'
+       AND delivery_confirmed_at IS NULL
+       AND created_at <= DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
+    [safeTimeoutMinutes]
+  );
+
+  return {
+    timeout_minutes: safeTimeoutMinutes,
+    recovered: result.affectedRows,
+  };
 }

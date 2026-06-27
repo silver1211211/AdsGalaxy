@@ -22,12 +22,45 @@ type EmergencyAction = {
   mode: "fill_empty_slots" | "replace_everything";
 } | null;
 
+function renderTargetingList(value: unknown) {
+  if (Array.isArray(value)) return value.length > 0 ? value.join(", ") : "All";
+  if (!value) return "All";
+  try {
+    const parsed = JSON.parse(String(value));
+    if (Array.isArray(parsed)) return parsed.length > 0 ? parsed.join(", ") : "All";
+  } catch {
+    // Plain strings are displayed directly.
+  }
+  return String(value) || "All";
+}
+
+function renderPolicy(value: unknown) {
+  const labels: Record<string, string> = {
+    allow_all: "Allow all traffic",
+    prefer_non_vpn: "Prefer non-VPN traffic",
+    exclude_vpn: "Exclude VPN/proxy traffic",
+    all: "All",
+    mobile: "Mobile only",
+    desktop: "Desktop only",
+    android: "Android",
+    ios: "iOS",
+    desktop_web: "Desktop/Web",
+  };
+  return labels[String(value || "all")] || "All";
+}
+
+function renderDateRestriction(value: unknown) {
+  if (!value) return "No restriction";
+  return new Date(String(value)).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
 export default function AdminCampaignsPage() {
   const [campaigns, setCampaigns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [trustFilter, setTrustFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -39,10 +72,10 @@ export default function AdminCampaignsPage() {
   const [viewModalOpen, setViewModalOpen] = useState(false);
   const [selectedCampaign, setSelectedCampaign] = useState<any>(null);
 
-  const fetchCampaigns = async (p: number, s: string, q: string) => {
+  const fetchCampaigns = async (p: number, s: string, q: string, trust = trustFilter) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/campaigns?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`);
+      const res = await fetch(`/api/admin/campaigns?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}&trust=${encodeURIComponent(trust)}`);
       const data = await res.json();
       setCampaigns(data.campaigns);
       setTotalPages(data.totalPages);
@@ -55,10 +88,10 @@ export default function AdminCampaignsPage() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      fetchCampaigns(page, statusFilter, search);
+      fetchCampaigns(page, statusFilter, search, trustFilter);
     }, 500);
     return () => clearTimeout(timer);
-  }, [page, statusFilter, search]);
+  }, [page, statusFilter, trustFilter, search]);
 
   const handleAction = async (id: number, action: string) => {
     setActionLoading(id);
@@ -69,7 +102,7 @@ export default function AdminCampaignsPage() {
         body: JSON.stringify({ id, action })
       });
       if (!res.ok) throw new Error("Action failed");
-      await fetchCampaigns(page, statusFilter, search);
+      await fetchCampaigns(page, statusFilter, search, trustFilter);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -87,7 +120,7 @@ export default function AdminCampaignsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Action failed");
-      await fetchCampaigns(page, statusFilter, search);
+      await fetchCampaigns(page, statusFilter, search, trustFilter);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -112,7 +145,7 @@ export default function AdminCampaignsPage() {
         title: `${label} complete`,
         message: `Posted: ${data.posted || 0}, Failed: ${data.failed || 0}, Skipped: ${data.skipped || 0}`,
       });
-      await fetchCampaigns(page, statusFilter, search);
+      await fetchCampaigns(page, statusFilter, search, trustFilter);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -268,11 +301,30 @@ export default function AdminCampaignsPage() {
                     <div><span className="text-slate-500">Budget:</span> <span className="font-medium text-slate-900">${selectedCampaign.budget}</span></div>
                     <div><span className="text-slate-500">CPM:</span> <span className="font-medium text-slate-900">${selectedCampaign.cpm}</span></div>
                     <div><span className="text-slate-500">Status:</span> <span className="font-medium text-slate-900 capitalize">{selectedCampaign.status}</span></div>
+                    <div><span className="text-slate-500">Trust:</span> <span className="font-medium text-slate-900 capitalize">{selectedCampaign.advertiser_trust_level || "new"}</span></div>
+                    <div><span className="text-slate-500">Quality:</span> <span className="font-medium text-slate-900 capitalize">{selectedCampaign.quality_score || 50} / {selectedCampaign.quality_tier || "average"}</span></div>
+                    <div><span className="text-slate-500">Spend:</span> <span className="font-medium text-slate-900">${selectedCampaign.advertiser_total_spend || 0}</span></div>
+                    <div><span className="text-slate-500">Approved:</span> <span className="font-medium text-slate-900">{selectedCampaign.advertiser_approved_campaigns || 0}</span></div>
+                    <div><span className="text-slate-500">Rejected:</span> <span className="font-medium text-slate-900">{selectedCampaign.advertiser_rejected_campaigns || 0}</span></div>
                     <div className="col-span-2">
                       <span className="text-slate-500 block">Continents:</span> 
                       {renderContinents(selectedCampaign.continents)}
                     </div>
                     <div className="col-span-2"><span className="text-slate-500">Category:</span> <span className="font-medium text-slate-900">{selectedCampaign.category || "All"}</span></div>
+                    <div className="col-span-2 border-t border-slate-200 pt-3">
+                      <span className="text-slate-500 block mb-2">Full Targeting Configuration:</span>
+                      <div className="grid grid-cols-2 gap-2 rounded-md bg-white p-3 text-xs">
+                        <div><span className="text-slate-500">Countries:</span> <span className="font-medium text-slate-900">{renderTargetingList(selectedCampaign.countries)}</span></div>
+                        <div><span className="text-slate-500">Languages:</span> <span className="font-medium text-slate-900">{renderTargetingList(selectedCampaign.languages)}</span></div>
+                        <div><span className="text-slate-500">VPN:</span> <span className="font-medium text-slate-900">{renderPolicy(selectedCampaign.vpn_policy)}</span></div>
+                        <div><span className="text-slate-500">Device:</span> <span className="font-medium text-slate-900">{renderPolicy(selectedCampaign.device_policy)}</span></div>
+                        <div><span className="text-slate-500">Platform:</span> <span className="font-medium text-slate-900">{renderPolicy(selectedCampaign.os_policy)}</span></div>
+                        <div><span className="text-slate-500">Frequency Cap:</span> <span className="font-medium text-slate-900">{selectedCampaign.frequency_cap_per_user || "No cap"}</span></div>
+                        <div><span className="text-slate-500">Start:</span> <span className="font-medium text-slate-900">{renderDateRestriction(selectedCampaign.start_at)}</span></div>
+                        <div><span className="text-slate-500">End:</span> <span className="font-medium text-slate-900">{renderDateRestriction(selectedCampaign.end_at)}</span></div>
+                        <div className="col-span-2"><span className="text-slate-500">Daily Budget:</span> <span className="font-medium text-slate-900">{selectedCampaign.daily_budget_limit ? `$${selectedCampaign.daily_budget_limit}` : "No cap"}</span></div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -308,6 +360,18 @@ export default function AdminCampaignsPage() {
                 </button>
               ))}
             </div>
+            <select
+              value={trustFilter}
+              onChange={(event) => { setPage(1); setTrustFilter(event.target.value); }}
+              className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs outline-none focus:ring-2 focus:ring-blue-500 sm:w-auto"
+            >
+              <option value="all">All Trust</option>
+              <option value="new">New</option>
+              <option value="normal">Normal</option>
+              <option value="trusted">Trusted</option>
+              <option value="premium">Premium</option>
+              <option value="restricted">Restricted</option>
+            </select>
           </div>
         </div>
         
@@ -333,6 +397,7 @@ export default function AdminCampaignsPage() {
                     <td className="px-4 py-3">
                       <div className="font-medium text-slate-900">{campaign.name}</div>
                       <div className="text-xs text-slate-500">ID: #{campaign.id} - User: {campaign.user_id}</div>
+                      <div className="text-xs text-slate-500 capitalize">Trust: {campaign.advertiser_trust_level || "new"} - Quality: {campaign.quality_score || 50}</div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="font-medium text-slate-900 capitalize">{campaign.type}</div>

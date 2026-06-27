@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
+import { ADVERTISER_TRUST_LEVELS, normalizeAdvertiserTrustLevel } from "@/lib/advertiserTrust";
 
 type ColumnRow = RowDataPacket & {
   COLUMN_NAME: string;
@@ -58,6 +59,8 @@ export async function GET(request: Request) {
   const page = parseInt(searchParams.get("page") || "1");
   const limit = parseInt(searchParams.get("limit") || "10");
   const search = searchParams.get("search") || "";
+  const trustFilter = normalizeAdvertiserTrustLevel(searchParams.get("trust") || "all");
+  const rawTrustFilter = searchParams.get("trust") || "all";
   const offset = (page - 1) * limit;
 
   try {
@@ -70,6 +73,9 @@ export async function GET(request: Request) {
     const bannedAtExpr = columns.has("banned_at") ? "banned_at" : "NULL";
     const banReasonExpr = columns.has("ban_reason") ? "ban_reason" : "NULL";
     const betaAccessExpr = columns.has("miniapp_beta_access") ? "miniapp_beta_access" : "0";
+    const trustExpr = columns.has("advertiser_trust_level") ? "advertiser_trust_level" : "'new'";
+    const trustUpdatedExpr = columns.has("advertiser_trust_updated_at") ? "advertiser_trust_updated_at" : "NULL";
+    const trustNoteExpr = columns.has("advertiser_trust_note") ? "advertiser_trust_note" : "NULL";
 
     let query = `
       SELECT id, telegram_id, first_name, last_name, username, balance_locked, balance_available,
@@ -77,20 +83,52 @@ export async function GET(request: Request) {
         CASE WHEN ${statusExpr} = 'banned' THEN 1 ELSE 0 END as is_banned,
         ${bannedAtExpr} as banned_at,
         ${banReasonExpr} as ban_reason,
-        ${betaAccessExpr} as miniapp_beta_access
+        ${betaAccessExpr} as miniapp_beta_access,
+        ${trustExpr} as advertiser_trust_level,
+        ${trustUpdatedExpr} as advertiser_trust_updated_at,
+        ${trustNoteExpr} as advertiser_trust_note,
+        (
+          SELECT COUNT(*) FROM campaigns c WHERE c.user_id = users.id
+        ) + (
+          SELECT COUNT(*) FROM miniapp_rewarded_campaigns mrc WHERE mrc.advertiser_id = users.id
+        ) as advertiser_total_campaigns,
+        (
+          SELECT COUNT(*) FROM campaigns c WHERE c.user_id = users.id AND c.status IN ('active', 'completed', 'budget_exhausted')
+        ) + (
+          SELECT COUNT(*) FROM miniapp_rewarded_campaigns mrc WHERE mrc.advertiser_id = users.id AND mrc.status IN ('approved', 'completed')
+        ) as advertiser_approved_campaigns,
+        (
+          SELECT COUNT(*) FROM campaigns c WHERE c.user_id = users.id AND c.status = 'rejected'
+        ) + (
+          SELECT COUNT(*) FROM miniapp_rewarded_campaigns mrc WHERE mrc.advertiser_id = users.id AND mrc.status = 'rejected'
+        ) as advertiser_rejected_campaigns,
+        (
+          SELECT COALESCE(SUM(amount), 0) FROM advertiser_transactions atx WHERE atx.user_id = users.id AND atx.type = 'debit'
+        ) as advertiser_total_spend
       FROM users
     `;
     let countQuery = "SELECT COUNT(*) as total FROM users";
     const queryParams: Array<string | number> = [];
     const countParams: string[] = [];
 
+    const whereParts: string[] = [];
+    if (rawTrustFilter !== "all") {
+      whereParts.push(`${trustExpr} = ?`);
+      queryParams.push(trustFilter);
+      countParams.push(trustFilter);
+    }
+
     if (search) {
       const searchPattern = `%${search}%`;
-      const searchWhere = " WHERE username LIKE ? OR telegram_id LIKE ? OR first_name LIKE ? OR last_name LIKE ?";
-      query += searchWhere;
-      countQuery += searchWhere;
+      whereParts.push("(username LIKE ? OR telegram_id LIKE ? OR first_name LIKE ? OR last_name LIKE ?)");
       queryParams.push(searchPattern, searchPattern, searchPattern, searchPattern);
       countParams.push(searchPattern, searchPattern, searchPattern, searchPattern);
+    }
+
+    if (whereParts.length > 0) {
+      const where = ` WHERE ${whereParts.join(" AND ")}`;
+      query += where;
+      countQuery += where;
     }
 
     query += " ORDER BY id DESC LIMIT ? OFFSET ?";
@@ -124,7 +162,7 @@ export async function PATCH(request: Request) {
   const conn = await pool.getConnection();
 
   try {
-    const { id, balance_locked, balance_available, ad_balance, action, reason } = await request.json();
+    const { id, balance_locked, balance_available, ad_balance, action, reason, trust_level } = await request.json();
 
     if (!id) return NextResponse.json({ error: "User ID required" }, { status: 400 });
 
@@ -132,6 +170,18 @@ export async function PATCH(request: Request) {
 
     if (!(await columnExists(conn, "users", "miniapp_beta_access"))) {
       await conn.query("ALTER TABLE users ADD COLUMN miniapp_beta_access TINYINT(1) NOT NULL DEFAULT 0");
+    }
+
+    if (!(await columnExists(conn, "users", "advertiser_trust_level"))) {
+      await conn.query("ALTER TABLE users ADD COLUMN advertiser_trust_level VARCHAR(20) NOT NULL DEFAULT 'new'");
+    }
+
+    if (!(await columnExists(conn, "users", "advertiser_trust_updated_at"))) {
+      await conn.query("ALTER TABLE users ADD COLUMN advertiser_trust_updated_at DATETIME NULL");
+    }
+
+    if (!(await columnExists(conn, "users", "advertiser_trust_note"))) {
+      await conn.query("ALTER TABLE users ADD COLUMN advertiser_trust_note VARCHAR(255) NULL");
     }
 
     if (action === "ban") {
@@ -155,6 +205,22 @@ export async function PATCH(request: Request) {
         "UPDATE users SET miniapp_beta_access = ? WHERE id = ?",
         [action === "enable_miniapp_beta" ? 1 : 0, id]
       );
+      return NextResponse.json({ success: true });
+    }
+
+    if (action === "set_advertiser_trust") {
+      const level = normalizeAdvertiserTrustLevel(trust_level);
+      if (!ADVERTISER_TRUST_LEVELS.includes(level)) {
+        return NextResponse.json({ error: "Invalid advertiser trust level" }, { status: 400 });
+      }
+      await conn.query(
+        "UPDATE users SET advertiser_trust_level = ?, advertiser_trust_updated_at = NOW(), advertiser_trust_note = ? WHERE id = ?",
+        [level, reason || null, id]
+      );
+      if (level === "restricted") {
+        await conn.query("UPDATE campaigns SET status = 'paused' WHERE user_id = ? AND status = 'active'", [id]);
+        await conn.query("UPDATE miniapp_rewarded_campaigns SET status = 'paused' WHERE advertiser_id = ? AND status = 'approved'", [id]);
+      }
       return NextResponse.json({ success: true });
     }
 

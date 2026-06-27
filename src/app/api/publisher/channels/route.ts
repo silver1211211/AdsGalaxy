@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { normalizePostingTimes, normalizePostsPerDay } from "@/lib/postingTimes";
+import { requireUserWritesAllowed } from "@/lib/productionSafety";
 
 async function hasPostingTimesColumn() {
   const [rows]: any = await pool.query(`
@@ -34,11 +35,24 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const blocked = await requireUserWritesAllowed();
+    if (blocked) return blocked;
+
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
 
     const body = await request.json();
     const { chat_id, username, title, posts_per_day, audience_continents, categories, posting_times } = body;
+    const normalizedTitle = String(title ?? "").trim();
+
+    if (normalizedTitle.length < 3) {
+      return NextResponse.json({ error: "Channel name must be at least 3 characters." }, { status: 400 });
+    }
+
+    if (normalizedTitle.length > 50) {
+      return NextResponse.json({ error: "Channel name must be at most 50 characters." }, { status: 400 });
+    }
+
     const normalizedPostsPerDay = normalizePostsPerDay(posts_per_day);
     const normalizedPostingTimes = normalizePostingTimes(posting_times, normalizedPostsPerDay);
     const canStorePostingTimes = await hasPostingTimesColumn();
@@ -95,11 +109,16 @@ export async function POST(request: Request) {
         "audience_continents = ?",
         "categories = ?",
         "is_deleted = FALSE",
-        "status = 'pending'"
+        "status = 'pending'",
+        "paused_reason = NULL",
+        "suggested_fix = NULL",
+        "failure_reason = NULL",
+        "health_status = NULL",
+        "auto_paused_at = NULL"
       ];
       const updateParams = [
         username,
-        title,
+        normalizedTitle,
         subscriberCount,
         normalizedPostsPerDay,
         JSON.stringify(audience_continents),
@@ -137,7 +156,7 @@ export async function POST(request: Request) {
       user.id,
       chat_id,
       username,
-      title,
+      normalizedTitle,
       subscriberCount,
       normalizedPostsPerDay,
       JSON.stringify(audience_continents),

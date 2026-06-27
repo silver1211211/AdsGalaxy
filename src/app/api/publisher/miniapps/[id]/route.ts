@@ -2,24 +2,7 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { assertMiniAppBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
-
-function cleanText(value: unknown) {
-  return String(value || "").trim();
-}
-
-function validateMiniAppInput(body: Record<string, unknown>) {
-  const miniapp_name = cleanText(body.miniapp_name);
-  const miniapp_username = cleanText(body.miniapp_username).replace(/^@/, "");
-  const bot_id = cleanText(body.bot_id);
-  const webapp_url = cleanText(body.webapp_url);
-  const miniapp_url = cleanText(body.miniapp_url);
-
-  if (!miniapp_name || !miniapp_username || !bot_id || !webapp_url || !miniapp_url) {
-    throw new Error("All Mini App fields are required");
-  }
-
-  return { miniapp_name, miniapp_username, bot_id, webapp_url, miniapp_url };
-}
+import { MiniAppSubmissionValidationError, validateMiniAppSubmission } from "@/lib/miniappSubmissionValidation";
 
 export async function PATCH(
   request: Request,
@@ -30,7 +13,21 @@ export async function PATCH(
     const user = await getAuthenticatedUser(initData);
     await assertMiniAppBetaAccess(user);
     const { id } = await params;
-    const input = validateMiniAppInput(await request.json());
+    const body = await request.json();
+
+    if (body?.action === "set_marketplace_visibility") {
+      const visible = body.visible ? 1 : 0;
+      const [result]: any = await pool.query(
+        "UPDATE miniapps SET marketplace_visible = ? WHERE id = ? AND user_id = ? AND is_deleted = FALSE",
+        [visible, id, user.id]
+      );
+      if (result.affectedRows === 0) {
+        return NextResponse.json({ error: "Mini App not found" }, { status: 404 });
+      }
+      return NextResponse.json({ success: true, marketplace_visible: visible });
+    }
+
+    const input = validateMiniAppSubmission(body);
 
     const [existing]: any = await pool.query(
       "SELECT id FROM miniapps WHERE user_id = ? AND miniapp_username = ? AND id <> ? AND is_deleted = FALSE",
@@ -55,7 +52,11 @@ export async function PATCH(
     return NextResponse.json({ success: true });
   } catch (error: any) {
     console.error("Publisher Mini Apps PATCH Error:", error);
-    const status = error instanceof MiniAppBetaAccessError ? 403 : getAuthErrorStatus(error);
+    const status = error instanceof MiniAppBetaAccessError
+      ? 403
+      : error instanceof MiniAppSubmissionValidationError
+        ? 400
+        : getAuthErrorStatus(error);
     return NextResponse.json({ error: error.message || "Failed to update Mini App" }, { status });
   }
 }
@@ -70,19 +71,19 @@ export async function DELETE(
     await assertMiniAppBetaAccess(user);
     const { id } = await params;
 
-    const [result]: any = await pool.query(
-      "UPDATE miniapps SET is_deleted = TRUE WHERE id = ? AND user_id = ?",
+    const [rows]: any = await pool.query(
+      "SELECT id FROM miniapps WHERE id = ? AND user_id = ? AND is_deleted = FALSE",
       [id, user.id]
     );
 
-    if (result.affectedRows === 0) {
+    if (rows.length === 0) {
       return NextResponse.json({ error: "Mini App not found" }, { status: 404 });
     }
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ error: "Mini Apps submitted for integration can only be removed by an admin." }, { status: 403 });
   } catch (error: any) {
     console.error("Publisher Mini Apps DELETE Error:", error);
     const status = error instanceof MiniAppBetaAccessError ? 403 : getAuthErrorStatus(error);
-    return NextResponse.json({ error: error.message || "Failed to delete Mini App" }, { status });
+    return NextResponse.json({ error: error.message || "Failed to process Mini App delete request" }, { status });
   }
 }

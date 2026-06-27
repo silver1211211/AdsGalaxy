@@ -372,3 +372,15 @@ body {
   scrollbar-width: thin !important;
   scrollbar-color: var(--admin-scrollbar-thumb) var(--admin-scrollbar-track) !important;
 }
+
+/* ─── Mobile Input Zoom Prevention ───────────────────────────────────────────
+   iOS Safari zooms the viewport when a focused input has font-size < 16px.
+   The viewport meta maximum-scale=1 does not stop this system behaviour.
+   This floor applies to all user-facing forms on small screens. ─────────── */
+@media screen and (max-width: 767px) {
+  input,
+  textarea,
+  select {
+    font-size: max(16px, 1em);
+  }
+}

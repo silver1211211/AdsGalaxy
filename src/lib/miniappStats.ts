@@ -1,6 +1,7 @@
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { MINIAPP_NETWORKS, isMiniAppNetworkName } from "@/lib/miniappNetworkAdapters";
+import { validateMiniappRevenue } from "@/lib/miniappRevenueValidation";
 
 export { MINIAPP_NETWORKS, isMiniAppNetworkName };
 export type { MiniAppNetworkName } from "@/lib/miniappNetworkAdapters";
@@ -103,6 +104,22 @@ export async function recordMiniAppStats(input: MiniAppStatInput) {
   }
 
   const feePercent = await getMiniAppFeePercent();
+  const conn = await pool.getConnection();
+  let validation;
+  try {
+    validation = await validateMiniappRevenue({
+      conn,
+      networkName: input.network_name,
+      impressions: wholeImpressions,
+      grossRevenue,
+    });
+  } finally {
+    conn.release();
+  }
+  if (validation.status === "rejected") {
+    throw new Error(`Revenue validation failed: ${validation.reason}`);
+  }
+
   const adsGalaxyFee = grossRevenue * feePercent / 100;
   const publisherRevenue = grossRevenue - adsGalaxyFee;
   const grossCpm = wholeImpressions > 0 ? (grossRevenue / wholeImpressions) * 1000 : 0;
@@ -110,8 +127,9 @@ export async function recordMiniAppStats(input: MiniAppStatInput) {
 
   await pool.query(
     `INSERT INTO miniapp_daily_stats
-      (miniapp_id, network_name, date, impressions, gross_revenue, ads_galaxy_fee, publisher_revenue, gross_cpm, net_cpm)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (miniapp_id, network_name, date, impressions, gross_revenue, ads_galaxy_fee, publisher_revenue, gross_cpm, net_cpm,
+       revenue_validation_status, revenue_validation_reason, revenue_validation_metadata, revenue_validated_at, revenue_review_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)
      ON DUPLICATE KEY UPDATE
       gross_cpm = CASE
         WHEN (impressions + VALUES(impressions)) > 0
@@ -126,8 +144,35 @@ export async function recordMiniAppStats(input: MiniAppStatInput) {
       impressions = impressions + VALUES(impressions),
       gross_revenue = gross_revenue + VALUES(gross_revenue),
       ads_galaxy_fee = ads_galaxy_fee + VALUES(ads_galaxy_fee),
-      publisher_revenue = publisher_revenue + VALUES(publisher_revenue)`,
-    [input.miniapp_id, input.network_name, date, wholeImpressions, grossRevenue, adsGalaxyFee, publisherRevenue, grossCpm, netCpm]
+      publisher_revenue = publisher_revenue + VALUES(publisher_revenue),
+      revenue_validation_status = CASE
+        WHEN revenue_validation_status = 'rejected' OR VALUES(revenue_validation_status) = 'rejected' THEN 'rejected'
+        WHEN revenue_validation_status = 'suspicious' OR VALUES(revenue_validation_status) = 'suspicious' THEN 'suspicious'
+        ELSE 'passed'
+      END,
+      revenue_validation_reason = VALUES(revenue_validation_reason),
+      revenue_validation_metadata = VALUES(revenue_validation_metadata),
+      revenue_validated_at = NOW(),
+      revenue_review_status = CASE
+        WHEN VALUES(revenue_validation_status) = 'suspicious' AND revenue_review_status = 'not_required' THEN 'pending_review'
+        WHEN VALUES(revenue_validation_status) = 'passed' AND revenue_review_status = 'pending_review' THEN 'not_required'
+        ELSE revenue_review_status
+      END`,
+    [
+      input.miniapp_id,
+      input.network_name,
+      date,
+      wholeImpressions,
+      grossRevenue,
+      adsGalaxyFee,
+      publisherRevenue,
+      grossCpm,
+      netCpm,
+      validation.status,
+      validation.reason,
+      JSON.stringify(validation.metadata),
+      validation.status === "suspicious" ? "pending_review" : "not_required",
+    ]
   );
 
   if (country) {
@@ -151,5 +196,6 @@ export async function recordMiniAppStats(input: MiniAppStatInput) {
     gross_cpm: grossCpm,
     net_cpm: netCpm,
     fee_percent: feePercent,
+    revenue_validation: validation,
   };
 }

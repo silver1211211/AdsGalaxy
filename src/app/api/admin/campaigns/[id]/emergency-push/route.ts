@@ -6,6 +6,15 @@ import { ALL_CATEGORIES } from "@/lib/campaignCategories";
 import { deleteCampaignPosts, type CampaignPostDeletionSummary } from "@/lib/campaignPostDeletion";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { sendTelegramMessage } from "@/lib/telegram";
+import {
+  autoPauseBot,
+  checkBotHealth,
+  classifyBotTokenFailure,
+  markBotUserDeliverySuccess,
+  markBotUserInactive,
+  recordBotBroadcastSuccess,
+  sendWithRetries,
+} from "@/lib/botLifecycle";
 
 export const dynamic = "force-dynamic";
 
@@ -298,11 +307,12 @@ async function postCampaignToChannel(options: {
   const buttonUrl = campaign.type === "clicks"
     ? `${host}/api/clicks/${campaign.id}/${postId}`
     : campaign.link;
+  const botUsername = process.env.TELEGRAM_BOT_USERNAME || process.env.NEXT_PUBLIC_BOT_USERNAME || "Ads_Galaxy_bot";
 
   const replyMarkup = {
     inline_keyboard: [
       [{ text: campaign.button_text, url: buttonUrl }],
-      [{ text: "Advertise with Ads galaxy", url: "https://t.me/Ads_Galaxy_bot?start=advertise" }],
+      [{ text: "Advertise with Ads galaxy", url: `https://t.me/${botUsername}?start=advertise` }],
     ],
   };
 
@@ -350,11 +360,18 @@ async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: Bro
     FROM bots
     WHERE status = 'active'
       AND is_deleted = FALSE
+      AND COALESCE(health_status, 'active') = 'active'
       AND user_id != ?
     ORDER BY id ASC
   `, [campaign.user_id]);
 
-  const eligibleBots = bots.filter((bot) => campaignMatchesBot(campaign, bot));
+  const healthyBots: BotRow[] = [];
+  for (const bot of bots) {
+    const health = await checkBotHealth({ id: bot.id, bot_token: bot.bot_token });
+    if (health.ok) healthyBots.push(bot);
+  }
+
+  const eligibleBots = healthyBots.filter((bot) => campaignMatchesBot(campaign, bot));
   const dispatches: Array<{ bot: BotRow; user: BroadcastUserRow }> = [];
 
   for (const bot of eligibleBots) {
@@ -367,6 +384,7 @@ async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: Bro
       FROM bot_users bu
       WHERE bu.bot_id = ?
         AND bu.is_active = TRUE
+        AND bu.status = 'active'
         AND (${chatIdExpression} IS NOT NULL AND ${chatIdExpression} != '')
         AND (bu.last_broadcast_at IS NULL OR bu.last_broadcast_at < NOW() - INTERVAL ? HOUR)
         AND (
@@ -438,22 +456,30 @@ async function postBroadcastToBotUser(options: {
     ]],
   };
 
-  const result = await sendTelegramMessage(user.chat_id, campaign.message_text, {
+  const sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, campaign.message_text, {
     photo: campaign.image_url,
     parse_mode: parseMode,
     reply_markup: replyMarkup,
     token: bot.bot_token,
-  }) as TelegramSendResponse | undefined;
+  }) as Promise<TelegramSendResponse | undefined>);
+  const result = sendResult.result;
 
   if (result?.ok) {
     await recordBroadcastDelivery(schema, campaign.id, bot.id, user.id, user.chat_id);
     await pool.query("UPDATE bot_users SET last_broadcast_at = NOW() WHERE id = ?", [user.id]);
+    await markBotUserDeliverySuccess(user.id);
+    await recordBotBroadcastSuccess(bot.id);
     return { ok: true };
   }
 
   const reason = result?.description || "Telegram send failed";
-  if (reason.includes("Forbidden: bot was blocked by the user")) {
-    await pool.query("UPDATE bot_users SET is_active = FALSE WHERE id = ?", [user.id]);
+  if (sendResult.failure) {
+    const botFailure = classifyBotTokenFailure(result?.description);
+    if (botFailure) {
+      await autoPauseBot(bot.id, botFailure);
+    } else {
+      await markBotUserInactive(user.id, sendResult.failure);
+    }
   }
 
   return { ok: false, reason };

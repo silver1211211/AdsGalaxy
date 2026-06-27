@@ -17,8 +17,11 @@ import {
   PauseCircle,
   FileText,
   Loader2,
-  Edit3
+  Edit3,
+  HelpCircle,
+  Eye
 } from "lucide-react";
+import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
 import { AnimatePresence, motion } from "framer-motion";
@@ -115,6 +118,30 @@ export default function MyChannels() {
     }
   };
 
+  const handleMarketplaceVisibility = async (channel: any) => {
+    setProcessingId(channel.id);
+    try {
+      const visible = !Boolean(channel.marketplace_visible);
+      const res = await apiFetch(`/api/publisher/channels/${channel.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ action: "set_marketplace_visibility", visible }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to update marketplace visibility");
+      await fetchChannels(true);
+      setNotification({
+        type: "success",
+        title: "Marketplace Updated",
+        message: visible ? "Channel is visible in the marketplace." : "Channel is hidden from the marketplace.",
+      });
+    } catch (error: any) {
+      setNotification({ type: "error", title: "Update Failed", message: error.message });
+    } finally {
+      setProcessingId(null);
+      setMenuOpenId(null);
+    }
+  };
+
   const handleRemove = async (id: number) => {
     setIsActionLoading(true);
     setProcessingId(id);
@@ -153,9 +180,16 @@ export default function MyChannels() {
       case "pending": return <Clock className="text-amber-500" size={14} />;
       case "rejected": return <XCircle className="text-red-500" size={14} />;
       case "paused": return <PauseCircle className="text-slate-400" size={14} />;
+      case "bot_removed":
+      case "channel_not_found":
+      case "permission_missing":
+      case "deleted":
+        return <XCircle className="text-red-500" size={14} />;
       default: return null;
     }
   };
+
+  const canReactivate = (status: string) => ["paused", "bot_removed", "channel_not_found", "permission_missing"].includes(status);
 
   return (
     <DashboardLayout type="publisher">
@@ -163,12 +197,17 @@ export default function MyChannels() {
         {/* Header */}
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-black text-slate-900 uppercase tracking-tight">Channels</h1>
-          <button
-            onClick={() => setIsAddingChannel(true)}
-            className="w-10 h-10 bg-[#0c9de8] text-white rounded-full flex items-center justify-center hover:bg-blue-600 transition-all active:scale-95"
-          >
-            <Plus size={24} />
-          </button>
+          <div className="flex items-center gap-2">
+            <Link href="/docs/publisher/channels#overview" className="w-10 h-10 rounded-full border border-slate-200 bg-white text-slate-400 flex items-center justify-center hover:text-blue-600 transition-all">
+              <HelpCircle size={18} />
+            </Link>
+            <button
+              onClick={() => setIsAddingChannel(true)}
+              className="w-10 h-10 bg-[#0c9de8] text-white rounded-full flex items-center justify-center hover:bg-blue-600 transition-all active:scale-95"
+            >
+              <Plus size={24} />
+            </button>
+          </div>
         </div>
 
         {/* Channels List */}
@@ -218,6 +257,12 @@ export default function MyChannels() {
                     <span className="w-1 h-1 bg-slate-200 rounded-full" />
                     <span>{channel.posts_per_day} post/day</span>
                   </div>
+                  {(channel.paused_reason || channel.failure_reason) && (
+                    <div className="mt-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
+                      <div>{channel.paused_reason || channel.failure_reason}</div>
+                      {channel.suggested_fix && <div className="mt-1 text-amber-700">{channel.suggested_fix}</div>}
+                    </div>
+                  )}
                 </div>
 
                 <div className="relative">
@@ -259,22 +304,28 @@ export default function MyChannels() {
                           <Edit3 size={16} /> Edit Channel
                         </button>
                         <button
-                          disabled={channel.status === "pending" || processingId === channel.id}
+                          disabled={channel.status === "pending" || channel.status === "deleted" || processingId === channel.id}
                           onClick={() => handleToggleStatus(channel.id)}
                           className={cn(
                             "w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold rounded-xl transition-all mt-1",
-                            channel.status === "pending" || processingId === channel.id
+                            channel.status === "pending" || channel.status === "deleted" || processingId === channel.id
                               ? "text-slate-300 cursor-not-allowed"
                               : "text-slate-700 hover:bg-slate-50"
                           )}
                         >
                           {processingId === channel.id ? (
                             <><Loader2 className="animate-spin" size={16} /> Processing...</>
-                          ) : channel.status === "paused" ? (
+                          ) : canReactivate(channel.status) ? (
                             <><Play size={16} /> Resume Channel</>
                           ) : (
                             <><Pause size={16} /> Pause Channel</>
                           )}
+                        </button>
+                        <button
+                          onClick={() => handleMarketplaceVisibility(channel)}
+                          className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all mt-1"
+                        >
+                          <Eye size={16} /> {channel.marketplace_visible ? "Hide from Marketplace" : "Visible in Marketplace"}
                         </button>
                         <button
                           onClick={() => setConfirmModal({

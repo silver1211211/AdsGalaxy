@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { getAuthenticatedAdmin } from "@/lib/adminAuth";
+import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 
 type MiniAppState = RowDataPacket & {
@@ -16,21 +16,19 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const admin = await getAuthenticatedAdmin();
-  if (!admin) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { admin, response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const { id } = await params;
     const { action } = await request.json();
     const statusMap: Record<string, string> = {
-      approve: "approved",
+      await: "awaiting",
       reject: "rejected",
       pause: "paused",
     };
 
-    if (!statusMap[action] && action !== "resume") {
+    if (!statusMap[action] && action !== "resume" && action !== "delete") {
       return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
 
@@ -44,13 +42,37 @@ export async function POST(
     }
 
     const previousState = rows[0];
+    if (action === "delete") {
+      await pool.query("UPDATE miniapps SET is_deleted = TRUE, status = 'deleted' WHERE id = ?", [id]);
+
+      await recordAdminActionAudit({
+        adminId: admin.id,
+        action: "delete_miniapp",
+        entityType: "miniapp",
+        entityId: id,
+        reason: "admin_delete",
+        metadata: {
+          admin_username: admin.username,
+          miniapp_id: Number(id),
+          previous_state: previousState,
+          new_state: {
+            ...previousState,
+            status: "deleted",
+            is_deleted: true,
+          },
+        },
+      });
+
+      return NextResponse.json({ success: true, status: "deleted" });
+    }
+
     let newStatus = statusMap[action];
     if (action === "resume") {
       const [[networkRow]]: any = await pool.query(
-        "SELECT COUNT(*) as active_networks FROM miniapp_ad_networks WHERE miniapp_id = ? AND enabled = TRUE",
+        "SELECT COUNT(*) as configured_networks FROM miniapp_ad_networks WHERE miniapp_id = ? AND enabled = TRUE AND network_name IN ('AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub')",
         [id]
       );
-      newStatus = Number(networkRow?.active_networks || 0) > 0 ? "monetized" : "approved";
+      newStatus = Number(networkRow?.configured_networks || 0) > 0 ? "approved" : "awaiting";
     }
 
     await pool.query("UPDATE miniapps SET status = ? WHERE id = ?", [newStatus, id]);

@@ -31,7 +31,7 @@ export default function AddBotUsersScreen({ bot, onClose }: AddBotUsersScreenPro
   const [stats, setStats] = useState<{ newlyAdded: number; alreadyAdded: number; invalid: number } | null>(null);
   const [totalSubscribers, setTotalSubscribers] = useState<{ total: number; active: number; blocked: number }>({ total: 0, active: 0, blocked: 0 });
 
-  const apiEndpoint = `${window.location.origin}/api/bot/add-user?bot_token=${bot.bot_token}&chat_id={CHAT_ID}`;
+  const apiEndpoint = `POST ${window.location.origin}/api/bot/add-user`;
 
   useEffect(() => {
     fetchStats();
@@ -172,11 +172,11 @@ export default function AddBotUsersScreen({ bot, onClose }: AddBotUsersScreenPro
                     <span className="text-slate-900 font-bold">Recommendation:</span> Call this API within your bot's <code className="bg-slate-200 px-1 rounded text-slate-700">/start</code> command handler. This ensures every new user is automatically registered in the database.
                   </p>
                   <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest bg-slate-100 px-2 py-1 rounded inline-block">
-                    Supports GET requests only
+                    Requires POST JSON body and x-bot-add-user-secret header
                   </p>
                   <div className="relative group">
                     <div className="w-full p-4 bg-slate-900 rounded-2xl text-[10px] font-mono text-indigo-300 break-all pr-12">
-                      {apiEndpoint}
+                      {`${apiEndpoint}\n{"bot_token":"<server-side token>","chat_id":"{CHAT_ID}"}`}
                     </div>
                     <button 
                       onClick={copyApi}

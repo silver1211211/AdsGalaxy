@@ -3,34 +3,148 @@ import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
 import { creditUserAvailableBalance } from "@/lib/earnings";
+import { getAdvertiserTrustMultipliers, normalizeAdvertiserTrustLevel, qualityMultiplier } from "@/lib/advertiserTrust";
+import {
+  calculateAdvertiserPerformanceScore,
+  calculateCampaignPriorityScore,
+  getDeliveryOptimizationSettings,
+  rankInventoryForDelivery
+} from "@/lib/inventoryOptimization";
+import {
+  autoPauseBot,
+  checkBotHealth,
+  classifyBotTokenFailure,
+  markBotUserDeliverySuccess,
+  markBotUserInactive,
+  recordBotBroadcastSuccess,
+  sendWithRetries,
+} from "@/lib/botLifecycle";
+import { createSystemLog, upsertBroadcastHourlyLog } from "@/lib/systemLogs";
+import { requireAdServingAllowed, upsertAdminAlert } from "@/lib/productionSafety";
+import { processBoundedQueue } from "@/lib/concurrency";
+import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 
 export const dynamic = 'force-dynamic';
 
+function getClockHourPeriod(date = new Date()) {
+  const start = new Date(date);
+  start.setMinutes(0, 0, 0);
+  const end = new Date(start);
+  end.setMinutes(59, 59, 999);
+  const format = (value: Date) => {
+    const pad = (part: number) => String(part).padStart(2, "0");
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
+  };
+  return {
+    periodStart: format(start),
+    periodEnd: format(end),
+  };
+}
+
+function normalizeFailureReason(value?: string) {
+  const text = String(value || "").toLowerCase();
+  if (text.includes("blocked")) return "user_blocked_bot";
+  if (text.includes("user not found")) return "user_not_found";
+  if (text.includes("chat not found")) return "chat_not_found";
+  if (text.includes("forbidden") || text.includes("initiate conversation")) return "forbidden";
+  if (text.includes("token") || text.includes("unauthorized")) return "bot_token_invalid";
+  if (text.includes("timeout")) return "telegram_timeout";
+  if (text.includes("paused")) return "bot_paused";
+  if (text.includes("error")) return "system_error";
+  return "unknown_error";
+}
+
 export async function GET(req: NextRequest) {
+  const unauthorized = requireCronSecret(req);
+  if (unauthorized) return unauthorized;
+
+  const lock = await acquireCronLock("process-broadcast", 900);
+  if (!lock) {
+    return NextResponse.json({ success: false, message: "Broadcast cron is already running" }, { status: 409 });
+  }
+
   try {
+    const blocked = await requireAdServingAllowed();
+    if (blocked) return blocked;
+
     const isDev = process.env.MODE === "DEV";
-    const [cronSettings]: any = await pool.query("SELECT value FROM settings WHERE \`key\` = 'last_broadcast_cron_run'");
-    const lastRun = parseInt(cronSettings[0]?.value || "0");
     const now = Date.now();
     const intervalMinutes = parseInt(process.env.CRON_BROADCAST_INTERVAL || "1"); // Default to 1 min if not set
     const intervalMs = intervalMinutes * 60 * 1000;
 
-    if (!isDev && now - lastRun < intervalMs) {
+    const [throttleResult]: any = await pool.query(
+      `UPDATE settings
+       SET value = ?
+       WHERE \`key\` = 'last_broadcast_cron_run'
+         AND (CAST(value AS UNSIGNED) <= ? OR ? = 1)`,
+      [now.toString(), String(now - intervalMs), isDev ? 1 : 0]
+    );
+
+    if (throttleResult.affectedRows !== 1) {
       return NextResponse.json({ success: false, message: "Too early" }, { status: 429 });
     }
-
-    await pool.query("UPDATE settings SET value = ? WHERE \`key\` = 'last_broadcast_cron_run'", [now.toString()]);
 
     // Get reward percentage
     const [rewardSetting]: any = await pool.query("SELECT value FROM settings WHERE \`key\` = 'broadcast_ad_reward_percentage'");
     const rewardPercentage = parseFloat(rewardSetting[0]?.value || "50") / 100;
 
     // 1. Find active broadcast campaigns with budget
-    const [campaigns]: any = await pool.query(`
-      SELECT * FROM campaigns 
-      WHERE type = 'broadcast' AND status = 'active' AND budget > 0 
-      ORDER BY cpm DESC
+    const trustMultipliers = await getAdvertiserTrustMultipliers();
+    const deliverySettings = await getDeliveryOptimizationSettings();
+    const hourlyLogPeriod = getClockHourPeriod();
+    const failureReasons: Record<string, number> = {};
+    let pausedBotsSkipped = 0;
+    let failedBots = 0;
+    const incrementFailure = (reason: string) => {
+      failureReasons[reason] = (failureReasons[reason] || 0) + 1;
+    };
+
+    const [campaignRows]: any = await pool.query(`
+      SELECT c.*, COALESCE(u.advertiser_trust_level, 'new') as advertiser_trust_level
+      FROM campaigns c
+      JOIN users u ON c.user_id = u.id
+      WHERE c.type = 'broadcast' AND c.status = 'active' AND c.budget > 0
+        AND COALESCE(u.advertiser_trust_level, 'new') != 'restricted'
+        AND (c.start_at IS NULL OR c.start_at <= NOW())
+        AND (c.end_at IS NULL OR c.end_at >= NOW())
+        AND (
+          c.daily_budget_limit IS NULL
+          OR c.daily_budget_limit <= 0
+          OR COALESCE((
+            SELECT SUM(bd.cost)
+            FROM broadcast_deliveries bd
+            WHERE bd.campaign_id = c.id
+              AND bd.created_at >= CURDATE()
+          ), 0) < c.daily_budget_limit
+        )
+      ORDER BY c.cpm DESC
     `);
+    const campaigns = campaignRows.map((campaign: any) => {
+      const trustMultiplier = trustMultipliers[normalizeAdvertiserTrustLevel(campaign.advertiser_trust_level)] || 1;
+      const advertiserPerformance = calculateAdvertiserPerformanceScore({
+        trustLevel: campaign.advertiser_trust_level,
+        campaignQuality: campaign.quality_score,
+        spend: campaign.budget,
+        approvedCampaigns: 1,
+      });
+      return {
+        ...campaign,
+        advertiser_performance_score: advertiserPerformance,
+        campaign_priority_score: calculateCampaignPriorityScore({
+          advertiserTrustMultiplier: trustMultiplier,
+          campaignQuality: campaign.quality_score,
+          cpmBid: campaign.cpm,
+          historicalPerformance: 50,
+          advertiserPerformance,
+        }),
+      };
+    }).sort((a: any, b: any) => {
+      const aTrust = trustMultipliers[normalizeAdvertiserTrustLevel(a.advertiser_trust_level)] || 1;
+      const bTrust = trustMultipliers[normalizeAdvertiserTrustLevel(b.advertiser_trust_level)] || 1;
+      const aScore = (Number(a.cpm || 0) || 0) * aTrust * qualityMultiplier(a.quality_score) * (Number(a.campaign_priority_score || 50) / 50);
+      const bScore = (Number(b.cpm || 0) || 0) * bTrust * qualityMultiplier(b.quality_score) * (Number(b.campaign_priority_score || 50) / 50);
+      return bScore - aScore;
+    });
 
     let totalDispatched = 0;
     const limit = 20;
@@ -43,10 +157,23 @@ export async function GET(req: NextRequest) {
       const [bots]: any = await pool.query(`
         SELECT * FROM bots
         WHERE status = 'active' AND is_deleted = FALSE
+        AND COALESCE(health_status, 'active') = 'active'
         AND user_id != ?
       `, [campaign.user_id]);
 
-      const suitableBots = bots.filter((bot: any) => {
+      const healthyBots = [];
+      for (const bot of bots) {
+        const health = await checkBotHealth({ id: bot.id, bot_token: bot.bot_token });
+        if (health.ok) {
+          healthyBots.push(bot);
+        } else {
+          pausedBotsSkipped++;
+          failedBots++;
+          incrementFailure(normalizeFailureReason(health.reason || health.status));
+        }
+      }
+
+      const suitableBots = rankInventoryForDelivery(healthyBots.filter((bot: any) => {
         // Category match
         const botCats = bot.categories ? (typeof bot.categories === 'string' ? JSON.parse(bot.categories) : bot.categories) : [];
         if (!botCats.includes(campaign.category)) return false;
@@ -59,7 +186,7 @@ export async function GET(req: NextRequest) {
           if (!hasMatch) return false;
         }
         return true;
-      });
+      }), deliverySettings, Number(campaign.campaign_priority_score || 50)) as any[];
 
       for (const bot of suitableBots) {
         if (totalDispatched >= limit) break;
@@ -76,13 +203,31 @@ export async function GET(req: NextRequest) {
           SELECT bu.* 
           FROM bot_users bu
           WHERE bu.bot_id = ? AND bu.is_active = TRUE
+          AND bu.status = 'active'
           AND (bu.last_broadcast_at IS NULL OR bu.last_broadcast_at < NOW() - INTERVAL ? HOUR)
           AND (
             SELECT COUNT(*) FROM broadcast_deliveries bd 
             WHERE bd.user_id = bu.id AND bd.created_at > NOW() - INTERVAL 1 DAY
           ) < ?
+          AND (
+            ? IS NULL
+            OR (
+              SELECT COUNT(*) FROM broadcast_deliveries bd
+              WHERE bd.campaign_id = ?
+                AND bd.user_id = bu.id
+                AND bd.created_at >= CURDATE()
+            ) < ?
+          )
           LIMIT ?
-        `, [bot.id, hoursInterval, bot.posts_per_day, limit - totalDispatched]);
+        `, [
+          bot.id,
+          hoursInterval,
+          bot.posts_per_day,
+          campaign.frequency_cap_per_user || null,
+          campaign.id,
+          campaign.frequency_cap_per_user || null,
+          limit - totalDispatched
+        ]);
 
         for (const user of users) {
           dispatches.push({ campaign, bot, user });
@@ -92,11 +237,30 @@ export async function GET(req: NextRequest) {
     }
 
     if (dispatches.length === 0) {
+      await upsertBroadcastHourlyLog({
+        ...hourlyLogPeriod,
+        summary: "Broadcast cron ran with no eligible users to send.",
+        attemptedCount: 0,
+        successCount: 0,
+        failedCount: 0,
+        skippedCount: 0,
+        inactiveUsersCount: 0,
+        pausedBotsCount: pausedBotsSkipped,
+        failedBotsCount: failedBots,
+        failureReasons,
+        metadata: {
+          eligible_campaigns_count: campaigns.length,
+          selected_dispatches_count: 0,
+        },
+      });
       return NextResponse.json({ success: true, processed: 0 });
     }
 
     // Execute dispatches "together"
-    const results = await Promise.all(dispatches.map(async ({ campaign, bot, user }) => {
+    const requestedWorkerCount = Math.max(1, parseInt(process.env.CRON_BROADCAST_WORKERS || "3", 10) || 3);
+    const maxWorkerCount = Math.max(1, parseInt(process.env.CRON_BROADCAST_WORKER_MAX || "5", 10) || 5);
+    const workerCount = Math.min(requestedWorkerCount, maxWorkerCount);
+    const results = await processBoundedQueue(dispatches, workerCount, async ({ campaign, bot, user }) => {
       try {
         const parseModeMap: any = { 'html': 'HTML', 'markdown': 'MarkdownV2', 'none': undefined };
         const parseMode = parseModeMap[campaign.parse_mode] || 'HTML';
@@ -108,14 +272,15 @@ export async function GET(req: NextRequest) {
         };
 
         // We use the bot's token to send the message
-        const res = await sendTelegramMessage(user.chat_id, campaign.message_text, {
+        const sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, campaign.message_text, {
           photo: campaign.image_url,
           parse_mode: parseMode,
           reply_markup: replyMarkup,
-          token: bot.bot_token // Need to update sendTelegramMessage to support custom token
-        });
+          token: bot.bot_token
+        }));
+        const res = sendResult.result;
 
-        if (res && res.ok) {
+        if (sendResult.ok && res && res.ok) {
           const cost = parseFloat(campaign.cpm) / 1000;
           const reward = cost * rewardPercentage;
 
@@ -123,9 +288,57 @@ export async function GET(req: NextRequest) {
           const conn = await pool.getConnection();
           try {
             await conn.beginTransaction();
-            
-            // 1. Deduct budget
-            await conn.query("UPDATE campaigns SET budget = budget - ? WHERE id = ?", [cost, campaign.id]);
+
+            const [campaignRows]: any = await conn.query(
+              "SELECT budget, status FROM campaigns WHERE id = ? FOR UPDATE",
+              [campaign.id]
+            );
+            const lockedCampaign = campaignRows[0];
+            if (!lockedCampaign || lockedCampaign.status !== "active" || Number(lockedCampaign.budget || 0) < cost) {
+              await conn.rollback();
+              return {
+                status: 'skipped',
+                user: user.id,
+                campaign_id: campaign.id,
+                campaign_name: campaign.name,
+                error: "Campaign budget exhausted",
+                failure_reason: "campaign_budget_exhausted",
+              };
+            }
+
+            if (Number(campaign.daily_budget_limit || 0) > 0) {
+              const [[dailySpendRow]]: any = await conn.query(
+                "SELECT COALESCE(SUM(cost), 0) as spend FROM broadcast_deliveries WHERE campaign_id = ? AND created_at >= CURDATE()",
+                [campaign.id]
+              );
+              if (Number(dailySpendRow?.spend || 0) + cost > Number(campaign.daily_budget_limit)) {
+                await conn.rollback();
+                return {
+                  status: 'skipped',
+                  user: user.id,
+                  campaign_id: campaign.id,
+                  campaign_name: campaign.name,
+                  error: "Daily budget limit reached",
+                  failure_reason: "daily_budget_limit",
+                };
+              }
+            }
+
+            const [budgetResult]: any = await conn.query(
+              "UPDATE campaigns SET budget = budget - ? WHERE id = ? AND budget >= ? AND status = 'active'",
+              [cost, campaign.id, cost]
+            );
+            if (budgetResult.affectedRows !== 1) {
+              await conn.rollback();
+              return {
+                status: 'skipped',
+                user: user.id,
+                campaign_id: campaign.id,
+                campaign_name: campaign.name,
+                error: "Campaign budget changed concurrently",
+                failure_reason: "campaign_budget_race",
+              };
+            }
             
             // 2. Add reward to publisher
             const creditedPublisher = await creditUserAvailableBalance(conn, bot.user_id, reward);
@@ -136,7 +349,8 @@ export async function GET(req: NextRequest) {
                 user: user.id,
                 campaign_id: campaign.id,
                 campaign_name: campaign.name,
-                error: "Publisher credit skipped"
+                error: "Publisher credit skipped",
+                failure_reason: "publisher_credit_skipped",
               };
             }
             
@@ -148,6 +362,8 @@ export async function GET(req: NextRequest) {
             
             // 4. Update last_broadcast_at
             await conn.query("UPDATE bot_users SET last_broadcast_at = NOW() WHERE id = ?", [user.id]);
+            await markBotUserDeliverySuccess(user.id, conn);
+            await recordBotBroadcastSuccess(bot.id, conn);
 
             // 5. Check if budget is exhausted
             const [updatedCampaign]: any = await conn.query("SELECT budget, status FROM campaigns WHERE id = ?", [campaign.id]);
@@ -190,43 +406,68 @@ export async function GET(req: NextRequest) {
             conn.release();
           }
         }
-        if (!res?.ok && res?.description?.includes("Forbidden: bot was blocked by the user")) {
-          await pool.query("UPDATE bot_users SET is_active = FALSE WHERE id = ?", [user.id]);
+        if (!res?.ok) {
+          let botFailure = null;
+          if (sendResult.failure) {
+            botFailure = classifyBotTokenFailure(res?.description);
+            if (botFailure) {
+              await autoPauseBot(bot.id, botFailure);
+            } else {
+              await markBotUserInactive(user.id, sendResult.failure);
+            }
+          }
           return { 
             status: 'failed', 
             user: user.id, 
             campaign_id: campaign.id,
             campaign_name: campaign.name,
-            error: "Bot blocked by user - deactivated" 
+            error: res?.description || 'Unknown error',
+            inactive_detected: !botFailure,
+            bot_failed: Boolean(botFailure),
+            failure_reason: normalizeFailureReason(res?.description || sendResult.failure?.reason)
           };
         }
-        return { 
-          status: 'failed', 
-          user: user.id, 
-          campaign_id: campaign.id,
-          campaign_name: campaign.name,
-          error: res?.description || 'Unknown error' 
-        };
+        return { status: 'failed', user: user.id, campaign_id: campaign.id, campaign_name: campaign.name, error: 'Unknown error', failure_reason: "unknown_error" };
       } catch (err: any) {
-        if (err.message?.includes("Forbidden: bot was blocked by the user")) {
-          await pool.query("UPDATE bot_users SET is_active = FALSE WHERE id = ?", [user.id]);
-          return { 
-            status: 'error', 
-            user: user.id, 
-            campaign_id: campaign.id,
-            campaign_name: campaign.name,
-            error: "Bot blocked by user - deactivated" 
-          };
-        }
         return { 
           status: 'error', 
           user: user.id, 
           campaign_id: campaign.id,
           campaign_name: campaign.name,
-          error: err.message 
+          error: err.message,
+          failure_reason: normalizeFailureReason(err.message)
         };
       }
-    }));
+    });
+
+    for (const result of results) {
+      if (result.status !== "success") {
+        incrementFailure(result.failure_reason || normalizeFailureReason(result.error));
+      }
+    }
+
+    const successCount = results.filter((result: any) => result.status === "success").length;
+    const failedCount = results.filter((result: any) => result.status === "failed" || result.status === "error").length;
+    const skippedCount = results.filter((result: any) => result.status === "skipped").length;
+    const inactiveUsers = results.filter((result: any) => result.inactive_detected).length;
+    const failedBotSends = results.filter((result: any) => result.bot_failed).length;
+
+    await upsertBroadcastHourlyLog({
+      ...hourlyLogPeriod,
+      summary: `Broadcast hour ${hourlyLogPeriod.periodStart} attempted ${dispatches.length} sends.`,
+      attemptedCount: dispatches.length,
+      successCount,
+      failedCount,
+      skippedCount,
+      inactiveUsersCount: inactiveUsers,
+      pausedBotsCount: pausedBotsSkipped,
+      failedBotsCount: failedBots + failedBotSends,
+      failureReasons,
+      metadata: {
+        eligible_campaigns_count: campaigns.length,
+        selected_dispatches_count: dispatches.length,
+      },
+    });
 
     return NextResponse.json({
       success: true,
@@ -236,6 +477,24 @@ export async function GET(req: NextRequest) {
 
   } catch (error: any) {
     console.error("Broadcast Cron Error:", error);
+    await upsertAdminAlert({
+      alertType: "broadcast_failed",
+      severity: "high",
+      title: "Bot broadcasts failed",
+      details: error?.message || "Broadcast cron failed.",
+      metadata: { route: "/api/cron/process-broadcast" },
+    });
+    await createSystemLog({
+      logType: "system_error",
+      status: "failed",
+      title: "Bot broadcast cron failed",
+      summary: error?.message || "Broadcast cron failed.",
+      failedCount: 1,
+      failureReasons: { system_error: 1 },
+      metadata: { route: "/api/cron/process-broadcast" },
+    });
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  } finally {
+    await releaseCronLock(lock);
   }
 }

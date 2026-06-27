@@ -1,21 +1,22 @@
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { checkAdminAuth } from "@/lib/adminAuth";
+import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
+import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
 
 type StatusRow = RowDataPacket & {
   id: number;
   status: string;
+  bot_token: string;
 };
 
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const { id } = await params;
@@ -33,7 +34,7 @@ export async function POST(
       return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
 
-    const [rows] = await pool.query<StatusRow[]>("SELECT id, status FROM bots WHERE id = ?", [id]);
+    const [rows] = await pool.query<StatusRow[]>("SELECT id, status, bot_token FROM bots WHERE id = ?", [id]);
     if (rows.length === 0) {
       return NextResponse.json({ error: "Bot not found" }, { status: 404 });
     }
@@ -42,9 +43,21 @@ export async function POST(
     const newStatus = statusMap[normalizedAction];
 
     if (normalizedAction === "activate") {
-      await pool.query("UPDATE bots SET status = ?, is_deleted = FALSE WHERE id = ?", [newStatus, id]);
+      await reactivateBotAfterHealthCheck(id, rows[0].bot_token);
     } else if (normalizedAction === "delete") {
-      await pool.query("UPDATE bots SET status = ?, is_deleted = TRUE WHERE id = ?", [newStatus, id]);
+      await pool.query(
+        `UPDATE bots
+         SET status = ?, is_deleted = TRUE, paused_reason = 'Bot removed by admin.', suggested_fix = 'Contact support if this was unexpected.', health_status = 'paused'
+         WHERE id = ?`,
+        [newStatus, id]
+      );
+    } else if (normalizedAction === "pause") {
+      await pool.query(
+        `UPDATE bots
+         SET status = ?, paused_reason = 'Paused by admin.', suggested_fix = 'Resolve the admin review item, then reactivate.', health_status = 'paused'
+         WHERE id = ?`,
+        [newStatus, id]
+      );
     } else {
       await pool.query("UPDATE bots SET status = ? WHERE id = ?", [newStatus, id]);
     }

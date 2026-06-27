@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { processVerifiedReferralForUser } from "@/lib/referralSprint";
 
 export async function POST(request: Request) {
   try {
@@ -14,7 +15,13 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Already rewarded" }, { status: 400 });
     }
 
-    const channelUsername = process.env.NEXT_PUBLIC_CHANNEL;
+    const [[referralChannelSetting]]: any = await pool.query(
+      "SELECT value FROM referral_growth_settings WHERE `key` = 'required_channel_username' LIMIT 1"
+    );
+    const channelUsername = String(referralChannelSetting?.value || process.env.TELEGRAM_NEWS_CHANNEL || process.env.NEXT_PUBLIC_CHANNEL || "AdsGalaxy_News")
+      .replace(/^https?:\/\/t\.me\//i, "")
+      .replace(/^@/, "")
+      .replace(/\/$/, "");
     const rewardAmount = parseFloat(process.env.NEXT_PUBLIC_CHANNEL_REWARD || "0.5");
     const botToken = process.env.BOT_TOKEN;
 
@@ -44,8 +51,9 @@ export async function POST(request: Request) {
       "UPDATE users SET join_rewarded = TRUE, balance_available = balance_available + ? WHERE id = ?",
       [rewardAmount, user.id]
     );
+    const referralReward = await processVerifiedReferralForUser(Number(user.id));
 
-    return NextResponse.json({ success: true, reward: rewardAmount });
+    return NextResponse.json({ success: true, reward: rewardAmount, referral_reward: referralReward });
 
   } catch (error: any) {
     console.error("Verify Join Error:", error);

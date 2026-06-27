@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import crypto from "crypto";
+import { appendClickId, recordAdClick } from "@/lib/conversionTracking";
 
 export async function GET(
   req: NextRequest,
@@ -21,7 +22,7 @@ export async function GET(
   try {
     // 1. Get campaign link
     const [rows]: any = await pool.query(
-      "SELECT link FROM campaigns WHERE id = ?",
+      "SELECT id, user_id, link, image_url, category FROM campaigns WHERE id = ?",
       [campaignId]
     );
 
@@ -29,7 +30,7 @@ export async function GET(
       return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
     }
 
-    const targetUrl = rows[0].link;
+    let targetUrl = rows[0].link;
 
     // 2. Async Tracking (Don't block the redirect)
     // We'll wrap this in a self-executing async function or just run it and not await
@@ -50,14 +51,26 @@ export async function GET(
             "INSERT INTO campaign_clicks (campaign_id, ip_address, user_agent, fingerprint, is_bot) VALUES (?, ?, ?, ?, ?)",
             [campaignId, ip, userAgent, fingerprint, isBot]
           );
-          
-          // Optionally deduct click cost here if needed
-          // await pool.query("UPDATE campaigns SET budget = budget - click_cost WHERE id = ?", [campaignId]);
         }
       } catch (err) {
         console.error("Click Processing Background Error:", err);
       }
     })();
+
+    if (!/bot|spider|crawl|slurp|github-camo|googlebot|bingbot|yandex|baidu/i.test(userAgent)) {
+      const clickId = await recordAdClick({
+        campaignType: "campaign",
+        campaignId: Number(rows[0].id),
+        advertiserId: Number(rows[0].user_id),
+        creativeId: rows[0].image_url || null,
+        category: rows[0].category || null,
+        inventoryType: "direct",
+        ipAddress: ip,
+        userAgent,
+        fingerprint,
+      });
+      targetUrl = appendClickId(targetUrl, clickId);
+    }
 
     // 3. Immediate Redirect
     return NextResponse.redirect(targetUrl, 302);

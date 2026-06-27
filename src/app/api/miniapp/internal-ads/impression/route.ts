@@ -5,6 +5,12 @@ import { getAuthenticatedUser } from "@/lib/auth";
 import { INTERNAL_NETWORK_NAME, recordInternalAdImpression } from "@/lib/miniappInternalAds";
 import { recordNetworkSuccess } from "@/lib/miniappOptimization";
 import { assertMiniAppOwnerBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
+import {
+  isCompletionEvent,
+  normalizeWatchDuration,
+  recordInternalAdCompletionEvent,
+  watchDurationQualityTier,
+} from "@/lib/internalAdCompletionQuality";
 
 type RequestRow = RowDataPacket & {
   id: number;
@@ -23,6 +29,11 @@ function cleanText(value: unknown) {
   return String(value || "").trim();
 }
 
+function cleanOptionalText(value: unknown) {
+  const text = cleanText(value);
+  return text || null;
+}
+
 export async function POST(request: Request) {
   const conn = await pool.getConnection();
 
@@ -31,6 +42,10 @@ export async function POST(request: Request) {
     const requestId = cleanText(body.request_id);
     const miniappId = Number(body.miniapp_id);
     const telegramUserId = cleanText(body.telegram_user_id);
+    const eventType = isCompletionEvent(body.event_type) ? body.event_type : "impression_recorded";
+    const completed = Boolean(body.completed) || eventType === "completed";
+    const watchDurationSeconds = normalizeWatchDuration(body.watch_duration_seconds ?? (completed ? 15 : 1.5));
+    const abandonmentReason = cleanOptionalText(body.abandonment_reason);
 
     if (!requestId) {
       return NextResponse.json({ error: "request_id is required" }, { status: 400 });
@@ -109,10 +124,33 @@ export async function POST(request: Request) {
     }
 
     if (Boolean(mediationRequest.impression_confirmed)) {
+      const quality = await recordInternalAdCompletionEvent({
+        conn,
+        requestId,
+        miniappId,
+        campaignId: Number(mediationRequest.internal_campaign_id),
+        telegramUserId,
+        eventType,
+        watchDurationSeconds,
+        completed,
+        abandonmentReason,
+        metadata: {
+          event_source: "miniapp_sdk",
+          device_id: cleanOptionalText(body.device_id),
+          session_id: cleanOptionalText(body.session_id),
+        },
+      });
       await conn.commit();
-      return NextResponse.json({ success: true, duplicate: true, idempotent: true, request_id: requestId });
+      return NextResponse.json({
+        success: true,
+        duplicate: true,
+        idempotent: true,
+        request_id: requestId,
+        ...quality,
+      });
     }
 
+    const completionQualityTier = watchDurationQualityTier(watchDurationSeconds, completed);
     const result = await recordInternalAdImpression({
       conn,
       campaignId: Number(mediationRequest.internal_campaign_id),
@@ -120,6 +158,9 @@ export async function POST(request: Request) {
       requestId,
       telegramUserId,
       country: mediationRequest.country,
+      watchDurationSeconds,
+      completionQualityTier,
+      completionStatus: completed ? "completed" : "impression_recorded",
     });
 
     await conn.query(
@@ -127,6 +168,22 @@ export async function POST(request: Request) {
       [mediationRequest.id]
     );
     await recordNetworkSuccess(conn, miniappId, INTERNAL_NETWORK_NAME);
+    const quality = await recordInternalAdCompletionEvent({
+      conn,
+      requestId,
+      miniappId,
+      campaignId: Number(mediationRequest.internal_campaign_id),
+      telegramUserId,
+      eventType,
+      watchDurationSeconds,
+      completed,
+      abandonmentReason,
+      metadata: {
+        event_source: "miniapp_sdk",
+        device_id: cleanOptionalText(body.device_id),
+        session_id: cleanOptionalText(body.session_id),
+      },
+    });
 
     await conn.commit();
 
@@ -135,6 +192,7 @@ export async function POST(request: Request) {
       request_id: requestId,
       miniapp_id: miniappId,
       network_name: INTERNAL_NETWORK_NAME,
+      ...quality,
       ...result,
     });
   } catch (error: any) {

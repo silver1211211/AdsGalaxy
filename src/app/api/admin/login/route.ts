@@ -1,19 +1,15 @@
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
+import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import pool from "@/lib/db";
+import { createAdminSessionCookieValue } from "@/lib/adminAuth";
 
 type AdminRow = RowDataPacket & {
   id: number;
   username: string;
+  password_hash: string | null;
 };
-
-function encodeAdminCookie(username: string, password: string) {
-  return Buffer.from(`${username}:${password}`, "utf-8")
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
 
 function shouldUseSecureCookie(request: Request) {
   const url = new URL(request.url);
@@ -26,38 +22,51 @@ function shouldUseSecureCookie(request: Request) {
   return url.protocol === "https:" || forwardedProto === "https";
 }
 
+function sessionMaxAgeSeconds() {
+  const configured = Number.parseInt(process.env.ADMIN_SESSION_TTL_SECONDS || "", 10);
+  return Number.isFinite(configured) && configured > 0 ? configured : 8 * 60 * 60;
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({})) as Record<string, unknown>;
     const username = String(body.username || "").trim();
     const password = String(body.password || "");
-    console.info("Admin login attempt", { username });
 
     const [rows] = await pool.query<AdminRow[]>(
-      "SELECT id, username FROM admins WHERE username = ? AND password = ?",
-      [username, password]
+      "SELECT id, username, password_hash FROM admins WHERE username = ? LIMIT 1",
+      [username]
     );
-    console.info("Admin login database match", { username, matched: rows.length > 0 });
 
-    if (rows.length === 0) {
+    if (rows.length === 0 || !rows[0].password_hash) {
       return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
     }
 
-    const authString = encodeAdminCookie(rows[0].username, password);
+    const passwordValid = await bcrypt.compare(password, rows[0].password_hash);
+    if (!passwordValid) {
+      return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
+    }
+
+    const token = crypto.randomBytes(32).toString("base64url");
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    const maxAge = sessionMaxAgeSeconds();
+    const [sessionResult]: any = await pool.query(
+      "INSERT INTO admin_sessions (admin_id, token_hash, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))",
+      [rows[0].id, tokenHash, maxAge]
+    );
+    const authString = createAdminSessionCookieValue(Number(sessionResult.insertId), token);
     
     const response = NextResponse.json({ success: true });
     response.cookies.set("admin_auth", authString, {
-      httpOnly: false,
+      httpOnly: true,
       secure: shouldUseSecureCookie(request),
-      sameSite: "lax",
-      maxAge: 30 * 24 * 60 * 60, // 30 days
+      sameSite: "strict",
+      maxAge,
       path: "/",
     });
-    console.info("Admin login cookie set", { username: rows[0].username });
 
     return response;
-  } catch (error: unknown) {
-    console.error("Admin Login Error:", error);
+  } catch {
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
 }

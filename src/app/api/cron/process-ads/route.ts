@@ -2,8 +2,28 @@ import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { getCurrentPostingSlot } from "@/lib/postingTimes";
+import {
+  autoPauseChannel,
+  checkChannelHealth,
+  classifyTelegramSendFailure,
+  ensureDefaultChannelDistribution,
+  recordChannelPostFailure,
+  recordChannelPostSuccess,
+  markChannelHealthSuccess,
+} from "@/lib/channelLifecycle";
 import { ALL_CATEGORIES } from "@/lib/campaignCategories";
 import { calculateCampaignScore, getWindowDominanceCap } from "@/lib/campaignPlacement";
+import { getAdvertiserTrustMultipliers } from "@/lib/advertiserTrust";
+import {
+  calculateAdvertiserPerformanceScore,
+  calculateCampaignPriorityScore,
+  getDeliveryOptimizationSettings,
+  publicInventoryQuality,
+  rankInventoryForDelivery
+} from "@/lib/inventoryOptimization";
+import { createSystemLog, logStatus } from "@/lib/systemLogs";
+import { requireAdServingAllowed, upsertAdminAlert } from "@/lib/productionSafety";
+import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 
 export const dynamic = 'force-dynamic';
 
@@ -14,6 +34,7 @@ interface CampaignRow {
   user_id: number;
   name: string;
   budget: string | number;
+  cpm?: string | number;
   category: string;
   continents: string;
   parse_mode: string;
@@ -22,6 +43,10 @@ interface CampaignRow {
   button_text: string;
   message_text: string;
   image_url: string | null;
+  quality_score?: number;
+  advertiser_trust_level?: string;
+  campaign_priority_score?: number;
+  advertiser_performance_score?: number;
 }
 
 interface ChannelRow {
@@ -32,6 +57,14 @@ interface ChannelRow {
   title?: string;
   categories: string | string[] | null;
   audience_continents: string | string[] | null;
+  inventory_score?: number;
+  inventory_rank?: string;
+  inventory_override?: string;
+  inventory_priority_multiplier?: string | number;
+  created_at?: string | Date;
+  scheduler_slot?: string | null;
+  paused_reason?: string | null;
+  suggested_fix?: string | null;
 }
 
 interface RecentPostRow {
@@ -48,7 +81,7 @@ async function getPostingSchedulerSchema() {
     FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA = DATABASE()
       AND (
-        (TABLE_NAME = 'channels' AND COLUMN_NAME = 'posting_times')
+        (TABLE_NAME = 'channels' AND COLUMN_NAME IN ('posting_times', 'scheduler_slot', 'last_successful_post_at', 'last_failure_at', 'failure_reason', 'paused_reason', 'suggested_fix'))
         OR (TABLE_NAME = 'campaign_posts' AND COLUMN_NAME IN ('posting_slot_date', 'posting_slot_time', 'deleted_at'))
         OR (TABLE_NAME = 'campaign_delivery_events')
       )
@@ -59,10 +92,37 @@ async function getPostingSchedulerSchema() {
 
   return {
     hasChannelPostingTimes: columns.has("channels.posting_times"),
+    hasChannelSchedulerSlot: columns.has("channels.scheduler_slot"),
+    hasChannelLifecycleColumns: columns.has("channels.last_successful_post_at") && columns.has("channels.last_failure_at") && columns.has("channels.failure_reason"),
     hasPostSlotColumns: columns.has("campaign_posts.posting_slot_date") && columns.has("campaign_posts.posting_slot_time"),
     hasPostDeletedAtColumn: columns.has("campaign_posts.deleted_at"),
     hasCampaignDeliveryEvents: tables.has("campaign_delivery_events")
   };
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendTelegramMessageWithRetries(chatId: string | number, text: string, options: any) {
+  let lastResult: any = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    lastResult = await sendTelegramMessage(chatId, text, options);
+    if (lastResult?.ok) {
+      return { ok: true, result: lastResult, attempts: attempt };
+    }
+
+    const permanent = classifyTelegramSendFailure(lastResult?.description || "");
+    if (permanent) {
+      return { ok: false, result: lastResult, attempts: attempt, permanent };
+    }
+
+    if (attempt < 3) {
+      await sleep(1000 * attempt);
+    }
+  }
+
+  return { ok: false, result: lastResult, attempts: 3, permanent: null };
 }
 
 function parseJsonArray(value: unknown): string[] {
@@ -145,23 +205,38 @@ async function recordDeliveryEvent(
 }
 
 export async function GET(req: NextRequest) {
+  const unauthorized = requireCronSecret(req);
+  if (unauthorized) return unauthorized;
+
+  const lock = await acquireCronLock("process-ads", 1800);
+  if (!lock) {
+    return NextResponse.json({ success: false, message: "Channel posting cron is already running" }, { status: 409 });
+  }
+
   try {
+    const blocked = await requireAdServingAllowed();
+    if (blocked) return blocked;
+
     const isDev = process.env.MODE === "DEV";
-    const [settings]: any = await pool.query("SELECT value FROM settings WHERE `key` = 'last_cron_run'");
-    const lastRun = parseInt(settings[0]?.value || "0");
     const now = Date.now();
     const intervalMinutes = parseInt(process.env.CRON_POSTS_INTERVAL || "10");
     const intervalMs = intervalMinutes * 60 * 1000;
 
-    if (!isDev && now - lastRun < intervalMs) {
-      const minutesLeft = Math.ceil((intervalMs - (now - lastRun)) / 60000);
+    const [throttleResult]: any = await pool.query(
+      `UPDATE settings
+       SET value = ?
+       WHERE \`key\` = 'last_cron_run'
+         AND (CAST(value AS UNSIGNED) <= ? OR ? = 1)`,
+      [now.toString(), String(now - intervalMs), isDev ? 1 : 0]
+    );
+
+    if (throttleResult.affectedRows !== 1) {
+      const minutesLeft = intervalMinutes;
       return NextResponse.json({
         success: false,
         message: `Too early. Please wait ${minutesLeft} more minutes.`
       }, { status: 429 });
     }
-
-    await pool.query("UPDATE settings SET value = ? WHERE `key` = 'last_cron_run'", [now.toString()]);
 
     const schedulerSchema = await getPostingSchedulerSchema();
     const currentSlot = getCurrentPostingSlot();
@@ -169,20 +244,59 @@ export async function GET(req: NextRequest) {
     const currentSlotStart = `${currentSlot.postingSlotDate} ${currentSlotTimeForDb}`;
     const channelSlotLimit = Math.max(1, parseInt(process.env.CRON_CHANNEL_SLOT_LIMIT || "200"));
     const campaignLimit = Math.max(1, parseInt(process.env.CRON_CAMPAIGN_LIMIT || "200"));
+    const distribution = schedulerSchema.hasChannelSchedulerSlot
+      ? await ensureDefaultChannelDistribution()
+      : null;
 
-    if (!schedulerSchema.hasChannelPostingTimes) {
-      console.warn("channels.posting_times column is missing; process-ads is using legacy 6-hour channel cooldown fallback");
+    if (!schedulerSchema.hasChannelSchedulerSlot && !schedulerSchema.hasChannelPostingTimes) {
+      console.warn("channel scheduler columns are missing; process-ads is using legacy 6-hour channel cooldown fallback");
     }
 
+    const trustMultipliers = await getAdvertiserTrustMultipliers();
+    const deliverySettings = await getDeliveryOptimizationSettings();
     const [campaigns]: any = await pool.query(`
-      SELECT *
-      FROM campaigns
-      WHERE status = 'active' AND budget > 0 AND type != 'broadcast'
+      SELECT c.*, COALESCE(u.advertiser_trust_level, 'new') as advertiser_trust_level
+      FROM campaigns c
+      JOIN users u ON c.user_id = u.id
+      WHERE c.status = 'active' AND c.budget > 0 AND c.type != 'broadcast'
+        AND (c.start_at IS NULL OR c.start_at <= NOW())
+        AND (c.end_at IS NULL OR c.end_at >= NOW())
+        AND COALESCE(u.advertiser_trust_level, 'new') != 'restricted'
       ORDER BY budget DESC
       LIMIT ?
     `, [campaignLimit]);
 
-    const timingConditions = schedulerSchema.hasChannelPostingTimes
+    for (const campaign of campaigns as CampaignRow[]) {
+      const trustMultiplier = (trustMultipliers as Record<string, number>)[String(campaign.advertiser_trust_level || "new").toLowerCase()] || 1;
+      const advertiserPerformance = calculateAdvertiserPerformanceScore({
+        trustLevel: campaign.advertiser_trust_level,
+        campaignQuality: campaign.quality_score,
+        spend: Number(campaign.budget || 0),
+        approvedCampaigns: 1,
+      });
+      const campaignPriority = calculateCampaignPriorityScore({
+        advertiserTrustMultiplier: trustMultiplier,
+        campaignQuality: campaign.quality_score,
+        cpmBid: campaign.cpm,
+        historicalPerformance: 50,
+        advertiserPerformance,
+      });
+      campaign.advertiser_performance_score = advertiserPerformance;
+      campaign.campaign_priority_score = campaignPriority;
+    }
+
+    const timingConditions = schedulerSchema.hasChannelSchedulerSlot
+      ? `
+      AND c.scheduler_slot = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM campaign_posts cp
+        WHERE cp.channel_id = c.id
+        ${schedulerSchema.hasPostSlotColumns
+          ? "AND cp.posting_slot_date = ? AND cp.posting_slot_time = ?"
+          : "AND cp.created_at >= ? AND cp.created_at < DATE_ADD(?, INTERVAL 30 MINUTE)"
+        }
+      )`
+      : schedulerSchema.hasChannelPostingTimes
       ? `
       AND (
         (JSON_VALID(c.posting_times) AND JSON_CONTAINS(c.posting_times, JSON_QUOTE(?)))
@@ -209,7 +323,14 @@ export async function GET(req: NextRequest) {
         WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 6 HOUR
       )`;
 
-    const timingParams = schedulerSchema.hasChannelPostingTimes
+    const timingParams = schedulerSchema.hasChannelSchedulerSlot
+      ? [
+          currentSlot.postingSlotTime,
+          ...(schedulerSchema.hasPostSlotColumns
+            ? [currentSlot.postingSlotDate, currentSlotTimeForDb]
+            : [currentSlotStart, currentSlotStart])
+        ]
+      : schedulerSchema.hasChannelPostingTimes
       ? [
           currentSlot.postingSlotTime,
           currentSlot.postingSlotTime,
@@ -221,10 +342,11 @@ export async function GET(req: NextRequest) {
         ]
       : [];
 
-    const [channels]: any = await pool.query(`
+    const [channelRows]: any = await pool.query(`
       SELECT c.*
       FROM channels c
       WHERE c.status = 'active' AND c.is_deleted = FALSE
+      AND COALESCE(c.health_status, 'active') = 'active'
       AND (
         SELECT COUNT(*) FROM campaign_posts cp
         WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 1 DAY
@@ -233,11 +355,40 @@ export async function GET(req: NextRequest) {
       ORDER BY c.id ASC
       LIMIT ?
     `, [...timingParams, channelSlotLimit]);
+    const assignedChannelsCount = channelRows.length;
+    const averageCampaignPriority = campaigns.length > 0
+      ? campaigns.reduce((sum: number, campaign: CampaignRow) => sum + Number(campaign.campaign_priority_score || 50), 0) / campaigns.length
+      : 50;
+    const channels = rankInventoryForDelivery(
+      channelRows as Array<ChannelRow & Record<string, unknown>>,
+      deliverySettings,
+      averageCampaignPriority
+    ) as ChannelRow[];
 
     if (campaigns.length === 0 || channels.length === 0) {
       console.info("process-ads allocation skipped", {
         eligible_campaigns_count: campaigns.length,
         eligible_channels_count: channels.length
+      });
+
+      await createSystemLog({
+        logType: "channel_posting",
+        status: "success",
+        title: "Channel posting run completed",
+        summary: campaigns.length === 0 ? "No active channel campaigns were available." : "No due channel slots were available.",
+        slotDate: currentSlot.postingSlotDate,
+        slotTime: currentSlotTimeForDb,
+        attemptedCount: 0,
+        successCount: 0,
+        failedCount: 0,
+        skippedCount: 0,
+        failureReasons: {},
+        metadata: {
+          eligible_campaigns_count: campaigns.length,
+          eligible_channels_count: channels.length,
+          skipped: campaigns.length === 0 ? "no_active_campaigns" : "no_due_channel_slots",
+          distribution,
+        },
       });
 
       return NextResponse.json({
@@ -284,6 +435,9 @@ export async function GET(req: NextRequest) {
     const results = [];
     const dominanceCap = getWindowDominanceCap(channels.length);
     let selectedPlacements = 0;
+    let attemptedPosts = 0;
+    let failedPosts = 0;
+    let autoPausedChannels = 0;
     const initialTotalPlacementsToday = Array.from(dailyCounts.values()).reduce((sum, count) => sum + count, 0);
 
     for (const campaign of campaigns as CampaignRow[]) {
@@ -301,6 +455,20 @@ export async function GET(req: NextRequest) {
     };
 
     for (const channel of channels as ChannelRow[]) {
+      const health = await checkChannelHealth({ id: channel.id, chat_id: channel.chat_id });
+      if (!health.ok) {
+        failedPosts++;
+        incrementSkip(`health_${health.status}`);
+        if (health.permanent) {
+          autoPausedChannels++;
+          await autoPauseChannel(channel.id, health);
+        } else {
+          await recordChannelPostFailure(channel.id, health.reason || "Temporary channel health failure");
+        }
+        continue;
+      }
+      await markChannelHealthSuccess(channel.id);
+
       const eligibleCampaigns = (campaigns as CampaignRow[]).filter((campaign) => {
         if (campaign.user_id === channel.user_id) {
           incrementSkip("same_owner");
@@ -347,7 +515,9 @@ export async function GET(req: NextRequest) {
             totalEligibleBudget,
             totalSuccessfulPlacementsToday: totalPlacementsToday,
             actualPlacementsToday: (dailyCounts.get(campaign.id) || 0) + (placementCounts.get(campaign.id) || 0),
-            maxUnderDelivery
+            maxUnderDelivery,
+            trustMultipliers,
+            inventoryScore: Number(channel.inventory_score || 50)
           })
         }))
         .sort((a, b) => b.score.score - a.score.score);
@@ -364,8 +534,8 @@ export async function GET(req: NextRequest) {
       const selected = dominanceEligible[0];
       const campaign = selected.campaign;
 
-      const insertColumns = ["campaign_id", "channel_id", "channel_username", "status"];
-      const insertParams = [campaign.id, channel.id, channel.username, "active"];
+      const insertColumns = ["campaign_id", "channel_id", "channel_username", "status", "delivery_attempted_at"];
+      const insertParams = [campaign.id, channel.id, channel.username, "pending_delivery", new Date()];
 
       if (schedulerSchema.hasPostSlotColumns) {
         insertColumns.push("posting_slot_date", "posting_slot_time");
@@ -373,12 +543,25 @@ export async function GET(req: NextRequest) {
       }
 
       const insertPlaceholders = insertColumns.map(() => "?").join(", ");
-      const [insertPost]: any = await pool.query(
-        `INSERT INTO campaign_posts (${insertColumns.join(", ")}) VALUES (${insertPlaceholders})`,
-        insertParams
-      );
+      const conn = await pool.getConnection();
+      let postId = 0;
+      try {
+        await conn.beginTransaction();
+        const [insertPost]: any = await conn.query(
+          `INSERT INTO campaign_posts (${insertColumns.join(", ")}) VALUES (${insertPlaceholders})`,
+          insertParams
+        );
+        postId = Number(insertPost.insertId);
+        await conn.commit();
+      } catch (error) {
+        await conn.rollback();
+        conn.release();
+        failedPosts++;
+        incrementSkip("post_insert_failed");
+        continue;
+      }
+      conn.release();
 
-      const postId = insertPost.insertId;
       const parseModeMap: any = { html: "HTML", markdown: "MarkdownV2", none: undefined };
       const parseMode = parseModeMap[campaign.parse_mode] || "HTML";
       const domain = process.env.DOMAIN;
@@ -386,27 +569,30 @@ export async function GET(req: NextRequest) {
       const buttonUrl = campaign.type === "clicks"
         ? `${host}/api/clicks/${campaign.id}/${postId}`
         : campaign.link;
+      const botUsername = process.env.TELEGRAM_BOT_USERNAME || process.env.NEXT_PUBLIC_BOT_USERNAME || "Ads_Galaxy_bot";
 
       const replyMarkup = {
         inline_keyboard: [
           [{ text: campaign.button_text, url: buttonUrl }],
-          [{ text: "Advertise with Ads galaxy", url: "https://t.me/Ads_Galaxy_bot?start=advertise" }]
+          [{ text: "Advertise with Ads galaxy", url: `https://t.me/${botUsername}?start=advertise` }]
         ]
       };
 
-      const result = await sendTelegramMessage(channel.chat_id, campaign.message_text, {
+      attemptedPosts++;
+      const result = await sendTelegramMessageWithRetries(channel.chat_id, campaign.message_text, {
         photo: campaign.image_url,
         parse_mode: parseMode,
         reply_markup: replyMarkup
       });
 
-      if (result && result.ok) {
-        const messageId = result.result.message_id;
+      if (result.ok) {
+        const messageId = result.result.result.message_id;
 
         await pool.query(
-          "UPDATE campaign_posts SET message_id = ? WHERE id = ?",
+          "UPDATE campaign_posts SET status = 'active', message_id = ?, delivery_confirmed_at = NOW(), delivery_failure_reason = NULL WHERE id = ? AND status = 'pending_delivery'",
           [messageId, postId]
         );
+        await recordChannelPostSuccess(channel.id);
 
         selectedPlacements++;
         placementCounts.set(campaign.id, (placementCounts.get(campaign.id) || 0) + 1);
@@ -418,10 +604,26 @@ export async function GET(req: NextRequest) {
           channel.id,
           "selected",
           selected.score.score,
-          "budget_weighted_placement"
+          `smart_allocation:${publicInventoryQuality(channel.inventory_score || 50)}`
         );
       } else {
-        await pool.query("DELETE FROM campaign_posts WHERE id = ?", [postId]);
+        await pool.query(
+          "UPDATE campaign_posts SET status = 'delivery_failed', delivery_failed_at = NOW(), delivery_failure_reason = ? WHERE id = ? AND status = 'pending_delivery'",
+          [String(result.result?.description || "Telegram send failed").slice(0, 255), postId]
+        );
+        failedPosts++;
+        if (result.permanent) {
+          autoPausedChannels++;
+          await autoPauseChannel(channel.id, {
+            ok: false,
+            status: result.permanent.status,
+            reason: result.permanent.reason,
+            suggestedFix: result.permanent.suggestedFix,
+            permanent: true,
+          });
+        } else {
+          await recordChannelPostFailure(channel.id, result.result?.description || "Telegram send failed");
+        }
         incrementSkip("telegram_send_failed");
         await recordDeliveryEvent(
           schedulerSchema.hasCampaignDeliveryEvents,
@@ -429,7 +631,7 @@ export async function GET(req: NextRequest) {
           channel.id,
           "send_failed",
           selected.score.score,
-          result?.description || "Telegram send failed"
+          result.result?.description || "Telegram send failed"
         );
       }
     }
@@ -448,7 +650,52 @@ export async function GET(req: NextRequest) {
       campaign_placement_distribution: Object.fromEntries(placementCounts),
       dominance_cap_per_campaign: dominanceCap,
       channel_slot_limit: channelSlotLimit,
-      campaign_limit: campaignLimit
+      campaign_limit: campaignLimit,
+      attempted_posts: attemptedPosts,
+      failed_posts: failedPosts,
+      auto_paused_channels: autoPausedChannels,
+      distribution
+    });
+
+    await pool.query(
+      `INSERT INTO channel_scheduler_runs
+        (slot_date, slot_time, assigned_channels, attempted, successful, failed, auto_paused, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        currentSlot.postingSlotDate,
+        currentSlotTimeForDb,
+        assignedChannelsCount,
+        attemptedPosts,
+        selectedPlacements,
+        failedPosts,
+        autoPausedChannels,
+        JSON.stringify({ distribution, skipped_reason_counts: skippedReasons }),
+      ]
+    ).catch(() => undefined);
+
+    const skippedChannels = Object.values(skippedReasons).reduce((sum, value) => sum + Number(value || 0), 0);
+    await createSystemLog({
+      logType: "channel_posting",
+      status: logStatus(selectedPlacements, failedPosts),
+      title: "Channel posting run completed",
+      summary: `Posting slot ${currentSlot.postingSlotTime} attempted ${attemptedPosts} channels with ${selectedPlacements} successful posts.`,
+      slotDate: currentSlot.postingSlotDate,
+      slotTime: currentSlotTimeForDb,
+      attemptedCount: attemptedPosts,
+      successCount: selectedPlacements,
+      failedCount: failedPosts,
+      skippedCount: skippedChannels,
+      autoPausedCount: autoPausedChannels,
+      failureReasons: skippedReasons,
+      metadata: {
+        assigned_channels_count: assignedChannelsCount,
+        eligible_channels_count: channels.length,
+        eligible_campaigns_count: campaigns.length,
+        campaign_placement_distribution: Object.fromEntries(placementCounts),
+        dominance_cap_per_campaign: dominanceCap,
+        delivery_mode: deliverySettings.mode,
+        distribution,
+      },
     });
 
     return NextResponse.json({
@@ -463,10 +710,36 @@ export async function GET(req: NextRequest) {
         skipped_reason_counts: skippedReasons,
         campaign_placement_distribution: Object.fromEntries(placementCounts),
         dominance_cap_per_campaign: dominanceCap
+        ,
+        delivery_mode: deliverySettings.mode,
+        exploration_allocation_percent: deliverySettings.exploration_allocation_percent,
+        assigned_channels_count: assignedChannelsCount,
+        attempted_posts: attemptedPosts,
+        failed_posts: failedPosts,
+        auto_paused_channels: autoPausedChannels,
+        distribution
       }
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Cron Processing Error:", error);
+    await upsertAdminAlert({
+      alertType: "channel_posting_failed",
+      severity: "high",
+      title: "Channel posting failed",
+      details: error?.message || "Channel posting cron failed.",
+      metadata: { route: "/api/cron/process-ads" },
+    });
+    await createSystemLog({
+      logType: "system_error",
+      status: "failed",
+      title: "Channel posting cron failed",
+      summary: error?.message || "Channel posting cron failed.",
+      failedCount: 1,
+      failureReasons: { system_error: 1 },
+      metadata: { route: "/api/cron/process-ads" },
+    });
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  } finally {
+    await releaseCronLock(lock);
   }
 }

@@ -1,4 +1,4 @@
-export const MINIAPP_NETWORKS = ["AdsGram", "Monetag", "AdExium", "RichAds", "AdsGalaxyInternal"] as const;
+export const MINIAPP_NETWORKS = ["AdsGram", "Monetag", "RichAds", "AdExium", "GigaPub", "AdsGalaxyInternal"] as const;
 export type MiniAppNetworkName = typeof MINIAPP_NETWORKS[number];
 export type MiniAppAdFormat = "rewarded" | "banner" | "interstitial";
 
@@ -38,6 +38,8 @@ export type MiniAppNetworkAdapter = {
       global_name: string | null;
       placement_id_key: string;
       richads_publisher_id?: string;
+      backup_script_url?: string | null;
+      script_timeout_ms?: number;
     };
   };
   validateConfig: (networkPlacementId: string) => { valid: boolean; error?: string };
@@ -48,6 +50,8 @@ export type MiniAppNetworkAdapter = {
 };
 
 const richAdsPublisherId = process.env.RICHADS_PUBLISHER_ID || process.env.NEXT_PUBLIC_RICHADS_PUBLISHER_ID || "";
+const gigaPubPrimaryOrigin = process.env.GIGAPUB_PRIMARY_ORIGIN || process.env.NEXT_PUBLIC_GIGAPUB_PRIMARY_ORIGIN || "https://ad.gigapub.tech";
+const gigaPubBackupOrigin = process.env.GIGAPUB_BACKUP_ORIGIN || process.env.NEXT_PUBLIC_GIGAPUB_BACKUP_ORIGIN || "https://ru-ad.gigapub.tech";
 
 const adapterDefinitions: Record<
   MiniAppNetworkName,
@@ -110,6 +114,22 @@ const adapterDefinitions: Record<
       return { valid: true };
     },
   },
+  GigaPub: {
+    network_name: "GigaPub",
+    required_id_label: "Project ID",
+    supports_rewarded: true,
+    supports_banner: false,
+    supports_interstitial: true,
+    placement_id_key: "project_id",
+    sdk_script_url: `${gigaPubPrimaryOrigin}/script`,
+    sdk_global_name: "showGiga",
+    validateConfig: (networkPlacementId) => {
+      if (!networkPlacementId.trim()) {
+        return { valid: false, error: "GigaPub requires Project ID" };
+      }
+      return { valid: true };
+    },
+  },
   AdsGalaxyInternal: {
     network_name: "AdsGalaxyInternal",
     required_id_label: "Internal Campaign",
@@ -160,6 +180,10 @@ export function getMiniAppNetworkAdapter(networkName: MiniAppNetworkName) {
         global_name: adapter.sdk_global_name,
         placement_id_key: adapter.placement_id_key,
         ...(adapter.network_name === "RichAds" && richAdsPublisherId ? { richads_publisher_id: richAdsPublisherId } : {}),
+        ...(adapter.network_name === "GigaPub" ? {
+          backup_script_url: `${gigaPubBackupOrigin}/script`,
+          script_timeout_ms: 15000,
+        } : {}),
       },
     },
   } satisfies MiniAppNetworkAdapter;

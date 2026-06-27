@@ -17,8 +17,10 @@ import {
   Eye,
   Edit3,
   FileText,
-  Users
+  Users,
+  HelpCircle
 } from "lucide-react";
+import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
 import { AnimatePresence, motion } from "framer-motion";
@@ -109,6 +111,30 @@ export default function MyBots() {
     }
   };
 
+  const handleMarketplaceVisibility = async (bot: any) => {
+    setProcessingId(bot.id);
+    try {
+      const visible = !Boolean(bot.marketplace_visible);
+      const res = await apiFetch(`/api/publisher/bots/${bot.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ action: "set_marketplace_visibility", visible }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to update marketplace visibility");
+      await fetchBots(true);
+      setNotification({
+        type: "success",
+        title: "Marketplace Updated",
+        message: visible ? "Bot is visible in the marketplace." : "Bot is hidden from the marketplace.",
+      });
+    } catch (error: any) {
+      setNotification({ type: "error", title: "Update Failed", message: error.message });
+    } finally {
+      setProcessingId(null);
+      setMenuOpenId(null);
+    }
+  };
+
   const handleRemove = async (id: number) => {
     setIsActionLoading(true);
     try {
@@ -141,6 +167,11 @@ export default function MyBots() {
       case "active": return <CheckCircle2 className="text-emerald-500" size={14} />;
       case "pending": return <Clock className="text-amber-500" size={14} />;
       case "paused": return <PauseCircle className="text-slate-400" size={14} />;
+      case "token_invalid":
+      case "bot_deleted":
+      case "unreachable":
+      case "deleted":
+        return <XCircle className="text-red-500" size={14} />;
       default: return null;
     }
   };
@@ -150,12 +181,17 @@ export default function MyBots() {
       <div className="space-y-6">
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-black text-slate-900 uppercase tracking-tight">Monetize Bots</h1>
-          <button
-            onClick={() => setIsAddingBot(true)}
-            className="w-10 h-10 bg-[#0c9de8] text-white rounded-full flex items-center justify-center hover:bg-blue-600 transition-all active:scale-95"
-          >
-            <Plus size={24} />
-          </button>
+          <div className="flex items-center gap-2">
+            <Link href="/docs/publisher/bots#overview" className="w-10 h-10 rounded-full border border-slate-200 bg-white text-slate-400 flex items-center justify-center hover:text-blue-600 transition-all">
+              <HelpCircle size={18} />
+            </Link>
+            <button
+              onClick={() => setIsAddingBot(true)}
+              className="w-10 h-10 bg-[#0c9de8] text-white rounded-full flex items-center justify-center hover:bg-blue-600 transition-all active:scale-95"
+            >
+              <Plus size={24} />
+            </button>
+          </div>
         </div>
 
         {isLoading ? (
@@ -202,6 +238,11 @@ export default function MyBots() {
                     <span className="w-1 h-1 bg-slate-200 rounded-full" />
                     <span>{bot.posts_per_day} post/day</span>
                   </div>
+                  {(bot.paused_reason || bot.suggested_fix) && (
+                    <div className="mt-1 text-[10px] font-semibold text-slate-500">
+                      {bot.paused_reason || bot.suggested_fix}
+                    </div>
+                  )}
                 </div>
 
                 <div className="relative">
@@ -263,11 +304,17 @@ export default function MyBots() {
                         >
                           {processingId === bot.id ? (
                             "Processing..."
-                          ) : bot.status === "paused" ? (
+                          ) : bot.status !== "active" ? (
                             <><Play size={16} /> Resume</>
                           ) : (
                             <><Pause size={16} /> Pause</>
                           )}
+                        </button>
+                        <button
+                          onClick={() => handleMarketplaceVisibility(bot)}
+                          className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all mt-1"
+                        >
+                          <Eye size={16} /> {bot.marketplace_visible ? "Hide from Marketplace" : "Visible in Marketplace"}
                         </button>
                         <button
                           onClick={() => setConfirmModal({
