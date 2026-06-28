@@ -37,7 +37,11 @@ function normalizeBotUsername(value: unknown) {
   if (!raw) fail("Invalid Mini App username");
 
   const withoutAt = raw.replace(/^@/, "");
-  if (withoutAt.length < 5 || withoutAt.length > 32) {
+  if (!raw.startsWith("@")) {
+    fail("Invalid Mini App username: must start with @");
+  }
+
+  if (withoutAt.length < 3 || withoutAt.length > 32) {
     fail("Invalid Mini App username");
   }
 

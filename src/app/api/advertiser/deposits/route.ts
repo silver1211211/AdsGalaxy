@@ -2,14 +2,52 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
+import { OXAPAY_DEPOSIT_NETWORKS, getOxaPayDepositNetwork } from "@/lib/oxapayNetworks";
+import { columnExists } from "@/lib/schemaGuards";
+import type { RowDataPacket } from "mysql2/promise";
 
 const OXAPAY_API_URL = "https://api.oxapay.com/v1/payment/white-label";
 const OXAPAY_KEY = process.env.OXAPAY_MERCHANT_API_KEY;
+
+type SettingRow = RowDataPacket & { value: string | null };
+type DepositRow = RowDataPacket & {
+  id: number;
+  track_id: string;
+  expired_at: number | null;
+};
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Internal Server Error";
+}
+
+async function ensureDepositSchema() {
+  const columns: Array<[string, string]> = [
+    ["user_id", "INT NULL"],
+    ["track_id", "VARCHAR(255) NULL"],
+    ["order_id", "VARCHAR(255) NULL"],
+    ["amount", "DECIMAL(18,8) NOT NULL DEFAULT 0"],
+    ["pay_amount", "DECIMAL(18,8) NOT NULL DEFAULT 0"],
+    ["currency", "VARCHAR(20) NULL"],
+    ["pay_currency", "VARCHAR(20) NULL"],
+    ["network", "VARCHAR(50) NULL"],
+    ["address", "TEXT NULL"],
+    ["status", "VARCHAR(50) NOT NULL DEFAULT 'pending'"],
+    ["expired_at", "BIGINT NULL"],
+    ["txn_id", "TEXT NULL"],
+  ];
+
+  for (const [column, definition] of columns) {
+    if (!(await columnExists(pool, "deposits", column))) {
+      await pool.query(`ALTER TABLE deposits ADD COLUMN \`${column}\` ${definition}`);
+    }
+  }
+}
 
 export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
+    await ensureDepositSchema();
 
     // Auto-cancel expired deposits
     const now = Math.floor(Date.now() / 1000);
@@ -18,21 +56,22 @@ export async function GET(request: Request) {
       [user.id, now]
     );
 
-    const [rows]: any = await pool.query(
+    const [rows] = await pool.query<DepositRow[]>(
       "SELECT * FROM deposits WHERE user_id = ? ORDER BY created_at DESC",
       [user.id]
     );
 
     // Get min deposit from settings
-    const [settings]: any = await pool.query("SELECT value FROM settings WHERE `key` = 'min_deposit_amount'");
+    const [settings] = await pool.query<SettingRow[]>("SELECT value FROM settings WHERE `key` = 'min_deposit_amount'");
     const minDeposit = parseFloat(settings[0]?.value || "5.00");
 
     return NextResponse.json({ 
       deposits: rows, 
-      minDeposit 
+      minDeposit,
+      networks: OXAPAY_DEPOSIT_NETWORKS,
     });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
+  } catch (error) {
+    return NextResponse.json({ error: errorMessage(error) }, { status: getAuthErrorStatus(error) });
   }
 }
 
@@ -43,10 +82,20 @@ export async function POST(request: Request) {
 
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
+    await ensureDepositSchema();
     const { amount, network } = await request.json();
+    const selectedNetwork = getOxaPayDepositNetwork(network || "BEP20");
+
+    if (!OXAPAY_KEY) {
+      return NextResponse.json({ error: "OxaPay merchant API key is not configured" }, { status: 500 });
+    }
+
+    if (!selectedNetwork) {
+      return NextResponse.json({ error: "Unsupported OxaPay deposit network" }, { status: 400 });
+    }
 
     // Get min deposit from settings
-    const [settings]: any = await pool.query("SELECT value FROM settings WHERE `key` = 'min_deposit_amount'");
+    const [settings] = await pool.query<SettingRow[]>("SELECT value FROM settings WHERE `key` = 'min_deposit_amount'");
     const minDeposit = parseFloat(settings[0]?.value || "5.00");
 
     if (!amount || isNaN(amount) || amount < minDeposit) {
@@ -54,7 +103,7 @@ export async function POST(request: Request) {
     }
 
     // Check for pending invoices
-    const [pending]: any = await pool.query(
+    const [pending] = await pool.query<DepositRow[]>(
       "SELECT * FROM deposits WHERE user_id = ? AND status IN ('pending', 'waiting', 'paying')",
       [user.id]
     );
@@ -62,7 +111,7 @@ export async function POST(request: Request) {
     if (pending.length > 0) {
       // Check if it's really pending or expired
       const now = Math.floor(Date.now() / 1000);
-      if (pending[0].expired_at > now) {
+      if (Number(pending[0].expired_at || 0) > now) {
         return NextResponse.json({ 
           error: "You have a pending deposit. Please pay or wait for it to expire.",
           pending_track_id: pending[0].track_id 
@@ -82,10 +131,11 @@ export async function POST(request: Request) {
         "merchant_api_key": OXAPAY_KEY || "",
       },
       body: JSON.stringify({
-        pay_currency: "USDT",
+        pay_currency: selectedNetwork.currency,
         amount: parseFloat(amount),
-        currency: "USDT",
-        network: network || "BEP20",
+        currency: "USD",
+        to_currency: "USDT",
+        network: selectedNetwork.oxapayNetwork,
         lifetime: 60,
         order_id: order_id,
       }),
@@ -118,8 +168,8 @@ export async function POST(request: Request) {
     );
 
     return NextResponse.json(invoice);
-  } catch (error: any) {
+  } catch (error) {
     console.error("Deposit Error:", error);
-    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
+    return NextResponse.json({ error: errorMessage(error) }, { status: getAuthErrorStatus(error) });
   }
 }

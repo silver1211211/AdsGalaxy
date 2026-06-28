@@ -77,7 +77,18 @@ export async function GET(
 
       // Get posts with individual stats
       const [posts]: any = await pool.query(
-        `SELECT cp.*, ch.title as channel_title, ch.username as channel_username,
+        `SELECT
+         cp.id,
+         cp.campaign_id,
+         cp.channel_id,
+         cp.status,
+         cp.created_at,
+         cp.views,
+         cp.message_id,
+         cp.settled_views,
+         cp.settled_clicks,
+         ch.title as channel_title,
+         NULL as channel_username,
          (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) as post_clicks,
          (SELECT COUNT(*) FROM campaign_views_audit cva WHERE cva.post_id = cp.id AND cva.status = 'invalid') as invalid_audit_count,
          (SELECT SUM(advertiser_paid) FROM ad_settlements asett WHERE asett.post_id = cp.id) as total_paid

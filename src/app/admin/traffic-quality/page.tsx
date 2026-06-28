@@ -138,7 +138,7 @@ export default function TrafficQualityPage() {
       <div className="space-y-4">
         <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h2 className="text-sm font-bold text-slate-900">Traffic Intelligence Dashboard</h2>
+            <h2 className="text-sm font-bold text-slate-900">Traffic Quality Dashboard</h2>
             <p className="text-xs text-slate-500">Fraud signals, quality trends, and manual review queue.</p>
           </div>
           <div className="flex flex-wrap gap-2">

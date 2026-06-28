@@ -1,75 +1,102 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useMemo, useRef } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { apiFetch } from "@/lib/api";
 import { useHeader } from "@/context/HeaderContext";
-import { Check, ChevronDown, Loader2, Plus, Smartphone, Store } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import {
+  Check, CheckCircle2, Loader2, Smartphone, ChevronLeft,
+  Globe, Shield, Monitor, Calendar, DollarSign,
+  AlertCircle, Search, Image as ImageIcon, Type,
+  Zap, Target, Wifi, WifiOff, X, Sparkles,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
 
-const MINIAPP_CREATIVE_CATEGORIES = [
-  "General",
-  "Utilities",
-  "Education",
-  "AI",
-  "Gaming",
-  "Finance",
-  "Crypto",
-  "Trading",
-  "Shopping",
-  "Entertainment",
-  "Other",
+// ── Constants ──────────────────────────────────────────────────────────────────
+
+const CATEGORIES = [
+  "General", "Utilities", "Education", "AI", "Gaming",
+  "Finance", "Crypto", "Trading", "Shopping", "Entertainment", "Other",
 ];
 
-type Campaign = {
-  id: number;
-  campaign_name: string;
-  title: string;
-  image_url: string;
-  landing_url: string;
-  cta_text?: string;
-  title_color?: string | null;
-  body_color?: string | null;
-  postback_url?: string | null;
-  budget: string | number;
-  remaining_budget: string | number;
-  advertiser_cpm_bid?: string | number;
-  campaign_budget_mode?: string | null;
-  daily_budget_mode?: string | null;
-  target_countries?: string | null;
-  status: string;
-  impressions: string | number;
-  clicks?: string | number;
-  conversions?: string | number;
-  conversion_value?: string | number;
-  today_impressions: string | number;
-  yesterday_impressions: string | number;
-  spend: string | number;
-  today_spend: string | number;
-  last_displayed_at?: string | null;
-  countries?: string | string[] | null;
-  languages?: string | string[] | null;
-  vpn_policy?: string | null;
-  device_policy?: string | null;
-  os_policy?: string | null;
-  start_at?: string | null;
-  end_at?: string | null;
-  daily_budget_limit?: string | number | null;
-  frequency_cap_per_user?: string | number | null;
-  traffic_quality_rating?: string;
-  inventory_quality_rating?: string;
-  categories?: string[] | string | null;
-};
+const COUNTRIES = [
+  { code: "US", name: "United States", flag: "🇺🇸" },
+  { code: "NG", name: "Nigeria", flag: "🇳🇬" },
+  { code: "GB", name: "United Kingdom", flag: "🇬🇧" },
+  { code: "IN", name: "India", flag: "🇮🇳" },
+  { code: "RU", name: "Russia", flag: "🇷🇺" },
+  { code: "DE", name: "Germany", flag: "🇩🇪" },
+  { code: "FR", name: "France", flag: "🇫🇷" },
+  { code: "BR", name: "Brazil", flag: "🇧🇷" },
+  { code: "ID", name: "Indonesia", flag: "🇮🇩" },
+  { code: "PK", name: "Pakistan", flag: "🇵🇰" },
+  { code: "BD", name: "Bangladesh", flag: "🇧🇩" },
+  { code: "JP", name: "Japan", flag: "🇯🇵" },
+  { code: "CN", name: "China", flag: "🇨🇳" },
+  { code: "TR", name: "Turkey", flag: "🇹🇷" },
+  { code: "MX", name: "Mexico", flag: "🇲🇽" },
+  { code: "PH", name: "Philippines", flag: "🇵🇭" },
+  { code: "EG", name: "Egypt", flag: "🇪🇬" },
+  { code: "VN", name: "Vietnam", flag: "🇻🇳" },
+  { code: "KR", name: "South Korea", flag: "🇰🇷" },
+  { code: "TH", name: "Thailand", flag: "🇹🇭" },
+  { code: "IT", name: "Italy", flag: "🇮🇹" },
+  { code: "ES", name: "Spain", flag: "🇪🇸" },
+  { code: "UA", name: "Ukraine", flag: "🇺🇦" },
+  { code: "AR", name: "Argentina", flag: "🇦🇷" },
+  { code: "CO", name: "Colombia", flag: "🇨🇴" },
+  { code: "GH", name: "Ghana", flag: "🇬🇭" },
+  { code: "KE", name: "Kenya", flag: "🇰🇪" },
+  { code: "ZA", name: "South Africa", flag: "🇿🇦" },
+  { code: "CA", name: "Canada", flag: "🇨🇦" },
+  { code: "AU", name: "Australia", flag: "🇦🇺" },
+  { code: "SA", name: "Saudi Arabia", flag: "🇸🇦" },
+  { code: "AE", name: "UAE", flag: "🇦🇪" },
+  { code: "PL", name: "Poland", flag: "🇵🇱" },
+  { code: "NL", name: "Netherlands", flag: "🇳🇱" },
+  { code: "IR", name: "Iran", flag: "🇮🇷" },
+  { code: "IQ", name: "Iraq", flag: "🇮🇶" },
+  { code: "MA", name: "Morocco", flag: "🇲🇦" },
+  { code: "DZ", name: "Algeria", flag: "🇩🇿" },
+  { code: "TN", name: "Tunisia", flag: "🇹🇳" },
+  { code: "ET", name: "Ethiopia", flag: "🇪🇹" },
+  { code: "TZ", name: "Tanzania", flag: "🇹🇿" },
+  { code: "UG", name: "Uganda", flag: "🇺🇬" },
+  { code: "SN", name: "Senegal", flag: "🇸🇳" },
+  { code: "CM", name: "Cameroon", flag: "🇨🇲" },
+];
 
-type MarketplaceItem = {
-  id: number;
-  name: string;
-  username: string;
-  category: string;
-  country: string;
-  language: string;
-  traffic_quality_rating: string;
-  monthly_impressions: number;
-};
+const LANGUAGES = [
+  { code: "en", name: "English" },
+  { code: "ru", name: "Russian" },
+  { code: "es", name: "Spanish" },
+  { code: "ar", name: "Arabic" },
+  { code: "pt", name: "Portuguese" },
+  { code: "de", name: "German" },
+  { code: "id", name: "Indonesian" },
+];
+
+const VPN_OPTIONS = [
+  { value: "allow_all",     label: "Allow All",      sub: "VPN and direct traffic",     icon: Wifi },
+  { value: "prefer_non_vpn",label: "Prefer Direct",  sub: "Prioritize non-VPN users",   icon: Shield },
+  { value: "exclude_vpn",   label: "No VPN",         sub: "Block VPN/proxy traffic",    icon: WifiOff },
+];
+
+const DEVICE_OPTIONS = [
+  { value: "all",     label: "All Devices", icon: Globe },
+  { value: "mobile",  label: "Mobile",      icon: Smartphone },
+  { value: "desktop", label: "Desktop",     icon: Monitor },
+];
+
+const OS_OPTIONS = [
+  { value: "all",         label: "All OS" },
+  { value: "android",     label: "Android" },
+  { value: "ios",         label: "iOS" },
+  { value: "desktop_web", label: "Desktop/Web" },
+];
+
+const STEPS = ["Ad Creative", "Targeting", "Budget & Launch"];
 
 const emptyForm = {
   campaign_name: "",
@@ -86,8 +113,6 @@ const emptyForm = {
   advertiser_cpm_bid: "",
   campaign_budget_mode: "custom",
   daily_budget_mode: "custom",
-  countries: "",
-  languages: "",
   vpn_policy: "allow_all",
   device_policy: "all",
   os_policy: "all",
@@ -95,420 +120,980 @@ const emptyForm = {
   end_at: "",
   daily_budget_limit: "",
   frequency_cap_per_user: "",
-  direct_placement_mode: "network",
-  direct_inventory_scope: "network",
-  direct_categories: "",
-  direct_countries: "",
-  direct_languages: "",
 };
 
-function money(value: unknown) {
-  return `$${Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
+// ── Step bar ───────────────────────────────────────────────────────────────────
+
+function StepBar({ step }: { step: number }) {
+  return (
+    <div className="mb-6 flex items-center gap-0">
+      {STEPS.map((label, i) => {
+        const idx = i + 1;
+        const done = step > idx;
+        const active = step === idx;
+        return (
+          <React.Fragment key={label}>
+            <div className="flex flex-col items-center gap-1.5">
+              <div
+                className={cn(
+                  "w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-black transition-all",
+                  done || active ? "text-white" : "bg-slate-100 text-slate-400"
+                )}
+                style={done || active ? { background: "linear-gradient(135deg,#0c9de8,#0b7ec9)" } : {}}
+              >
+                {done ? <Check size={14} /> : idx}
+              </div>
+              <span className={cn(
+                "text-[9px] font-black uppercase tracking-wide whitespace-nowrap",
+                active ? "text-[#0c9de8]" : done ? "text-slate-400" : "text-slate-300"
+              )}>
+                {label}
+              </span>
+            </div>
+            {i < STEPS.length - 1 && (
+              <div
+                className="flex-1 h-0.5 mb-5 mx-1.5"
+                style={{ background: step > idx ? "#0c9de8" : "#e2e8f0" }}
+              />
+            )}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
 }
 
-function numberValue(value: unknown) {
-  return Number(value || 0).toLocaleString();
+// ── Field component ────────────────────────────────────────────────────────────
+
+function Field({
+  label, value, onChange, placeholder, type = "text", required = false,
+}: {
+  label: string; value: string; onChange: (v: string) => void;
+  placeholder?: string; type?: string; required?: boolean;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+        {label}{required && <span className="text-red-400 ml-0.5">*</span>}
+      </label>
+      <input
+        type={type}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-semibold text-slate-900 outline-none focus:border-[#0c9de8] focus:bg-white transition-all placeholder:font-normal placeholder:text-slate-400"
+      />
+    </div>
+  );
 }
 
-function formatDateTime(value?: string | null) {
-  if (!value) return "Not displayed";
-  return new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-}
-
-function parseList(value: unknown) {
-  if (Array.isArray(value)) return value.filter(Boolean).join(", ");
-  if (!value) return "All";
-  try {
-    const parsed = JSON.parse(String(value));
-    if (Array.isArray(parsed) && parsed.length > 0) return parsed.join(", ");
-  } catch {
-    // Plain strings are displayed as-is.
-  }
-  return String(value) || "All";
-}
-
-function policyLabel(value: unknown) {
-  const labels: Record<string, string> = {
-    allow_all: "Allow all traffic",
-    prefer_non_vpn: "Prefer non-VPN traffic",
-    exclude_vpn: "Exclude VPN/proxy traffic",
-    all: "All",
-    mobile: "Mobile only",
-    desktop: "Desktop only",
-    android: "Android",
-    ios: "iOS",
-    desktop_web: "Desktop/Web",
-  };
-  return labels[String(value || "all")] || "All";
-}
+// ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function AdvertiserMiniAppRewardedPage() {
   const { setTitle } = useHeader();
-  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const editId = searchParams.get("edit");
+  const isEditMode = !!editId;
   const [form, setForm] = useState(emptyForm);
-  const [loading, setLoading] = useState(true);
+  const [selectedCountries, setSelectedCountries] = useState<string[]>([]);
+  const [selectedLanguages, setSelectedLanguages] = useState<string[]>([]);
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string>("");
+  const [imageUploading, setImageUploading] = useState(false);
+  const [imageError, setImageError] = useState<string>("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [countrySearch, setCountrySearch] = useState("");
+  const [step, setStep] = useState(1);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
-  const [targetingOpen, setTargetingOpen] = useState(false);
-  const [recommendedCpm, setRecommendedCpm] = useState("1.00");
-  const [recommendedInventory, setRecommendedInventory] = useState<MarketplaceItem[]>([]);
-  const [selectedInventoryIds, setSelectedInventoryIds] = useState<number[]>([]);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [recommendedCpm, setRecommendedCpm] = useState(1.0);
+  const [cpmPercent, setCpmPercent] = useState(50);
 
-  const fetchCampaigns = async () => {
-    setLoading(true);
-    try {
-      const res = await apiFetch("/api/advertiser/miniapp-rewarded-campaigns");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to load campaigns");
-      setCampaigns(data || []);
-    } catch (error: any) {
-      setMessage(error.message);
-    } finally {
-      setLoading(false);
+  const cpmMin = 0.1;
+  const cpmMax = 20;
+
+  const filteredCountries = useMemo(() =>
+    COUNTRIES.filter(c =>
+      c.name.toLowerCase().includes(countrySearch.toLowerCase()) ||
+      c.code.toLowerCase().includes(countrySearch.toLowerCase())
+    ), [countrySearch]);
+
+  useEffect(() => {
+    setTitle(isEditMode ? "Edit Mini App Ad" : "Mini App Campaign");
+    apiFetch("/api/settings").then(r => r.json()).then(d => {
+      const rec = parseFloat(d?.miniapp_internal_recommended_cpm || "1.00");
+      setRecommendedCpm(rec);
+      if (!isEditMode) {
+        setForm(prev => ({ ...prev, advertiser_cpm_bid: rec.toFixed(2) }));
+        setCpmPercent(Math.round(((rec - cpmMin) / (cpmMax - cpmMin)) * 100));
+      }
+    }).catch(() => {});
+  }, [setTitle, isEditMode]);
+
+  useEffect(() => {
+    if (!editId) return;
+    apiFetch(`/api/advertiser/miniapp-rewarded-campaigns/${editId}`)
+      .then(r => r.json())
+      .then((c: any) => {
+        if (c.error) return;
+        setForm({
+          campaign_name: c.campaign_name || "",
+          title: c.title || "",
+          description: c.description || "",
+          image_url: c.image_url || "",
+          landing_url: c.landing_url || "",
+          cta_text: c.cta_text || "Learn More",
+          title_color: c.title_color || "",
+          body_color: c.body_color || "",
+          postback_url: c.postback_url || "",
+          categories: (() => { try { return JSON.parse(c.categories || "[]"); } catch { return []; } })(),
+          budget: c.budget ? String(parseFloat(c.budget)) : "",
+          advertiser_cpm_bid: c.advertiser_cpm_bid ? String(parseFloat(c.advertiser_cpm_bid)) : "",
+          campaign_budget_mode: c.campaign_budget_mode || "custom",
+          daily_budget_mode: c.daily_budget_mode || "custom",
+          vpn_policy: c.vpn_policy || "allow_all",
+          device_policy: c.device_policy || "all",
+          os_policy: c.os_policy || "all",
+          start_at: c.start_at ? String(c.start_at).slice(0, 16) : "",
+          end_at: c.end_at ? String(c.end_at).slice(0, 16) : "",
+          daily_budget_limit: c.daily_budget_limit ? String(c.daily_budget_limit) : "",
+          frequency_cap_per_user: c.frequency_cap_per_user ? String(c.frequency_cap_per_user) : "",
+        });
+        if (c.countries) setSelectedCountries(String(c.countries).split(",").filter(Boolean));
+        if (c.languages) setSelectedLanguages(String(c.languages).split(",").filter(Boolean));
+        if (c.image_url) setImagePreview(c.image_url);
+        const cpm = parseFloat(c.advertiser_cpm_bid || "1.0");
+        if (!isNaN(cpm)) setCpmPercent(Math.min(100, Math.max(0, Math.round(((cpm - cpmMin) / (cpmMax - cpmMin)) * 100))));
+      })
+      .catch(() => {});
+  }, [editId]);
+
+  const handleCpmSlider = (val: number) => {
+    setCpmPercent(val);
+    const cpm = (cpmMin + (val / 100) * (cpmMax - cpmMin)).toFixed(2);
+    setForm(prev => ({ ...prev, advertiser_cpm_bid: cpm }));
+  };
+
+  const handleCpmInput = (val: string) => {
+    setForm(prev => ({ ...prev, advertiser_cpm_bid: val }));
+    const num = parseFloat(val);
+    if (!isNaN(num)) {
+      setCpmPercent(Math.min(100, Math.max(0, Math.round(((num - cpmMin) / (cpmMax - cpmMin)) * 100))));
     }
   };
 
-  useEffect(() => {
-    setTitle("Mini App Rewarded Ads");
-    fetchCampaigns();
-    apiFetch("/api/settings")
-      .then((res) => res.json())
-      .then((data) => {
-        if (data?.miniapp_internal_recommended_cpm) setRecommendedCpm(String(data.miniapp_internal_recommended_cpm));
-      })
-      .catch(() => {
-        // Recommended CPM is advisory; backend still validates.
-      });
-  }, [setTitle]);
+  const toggleCountry = (code: string) => {
+    setSelectedCountries(prev =>
+      prev.includes(code) ? prev.filter(c => c !== code) : [...prev, code]
+    );
+  };
 
-  useEffect(() => {
-    const query = new URLSearchParams({
-      type: "miniapp",
-      category: Array.isArray(form.categories) ? form.categories[0] || "" : "",
-      countries: form.countries,
-      languages: form.languages,
-      budget: form.budget,
+  const toggleLanguage = (code: string) => {
+    setSelectedLanguages(prev =>
+      prev.includes(code) ? prev.filter(l => l !== code) : [...prev, code]
+    );
+  };
+
+  const toggleCategory = (cat: string) => {
+    setForm(prev => {
+      const cats = Array.isArray(prev.categories) ? prev.categories : [];
+      return {
+        ...prev,
+        categories: cats.includes(cat) ? cats.filter(c => c !== cat) : [...cats, cat],
+      };
     });
-    apiFetch(`/api/advertiser/marketplace/recommended?${query.toString()}`)
-      .then((res) => res.json())
-      .then((data) => setRecommendedInventory(data.inventory || []))
-      .catch(() => setRecommendedInventory([]));
-  }, [form.categories, form.countries, form.languages, form.budget]);
+  };
+
+  const handleImageFile = async (file: File) => {
+    if (!file.type.startsWith("image/")) {
+      setImageError("This file is not an image. Please choose a JPG, PNG, or similar image file.");
+      return;
+    }
+
+    // Show preview immediately so the user sees we detected their file
+    const previewUrl = URL.createObjectURL(file);
+    setImagePreview(previewUrl);
+    setImageFile(file);
+    setImageError("");
+    setForm(p => ({ ...p, image_url: "" }));
+
+    // Size check
+    if (file.size > 1 * 1024 * 1024) {
+      setImageError("Image is too large. Maximum allowed size is 1 MB.");
+      return;
+    }
+
+    // Dimension + square check
+    const dimensionError = await new Promise<string>((resolve) => {
+      const img = new window.Image();
+      img.onload = () => {
+        const { naturalWidth: w, naturalHeight: h } = img;
+        if (w !== h) { resolve(`Image must be square (1:1). Yours is ${w}×${h}px.`); return; }
+        if (w < 240 || w > 1024) { resolve(`Dimensions must be 240–1024px. Yours is ${w}×${h}px.`); return; }
+        resolve("");
+      };
+      img.onerror = () => resolve("Could not read image dimensions.");
+      img.src = previewUrl;
+    });
+
+    if (dimensionError) {
+      setImageError(dimensionError);
+      return;
+    }
+
+    // All checks passed — upload
+    setImageUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("image", file);
+      const res = await apiFetch("/api/advertiser/upload-image", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Upload failed");
+      setForm(p => ({ ...p, image_url: data.url }));
+      setImageError("");
+    } catch (e: any) {
+      setImageError(e.message);
+      setForm(p => ({ ...p, image_url: "" }));
+    } finally {
+      setImageUploading(false);
+    }
+  };
+
+  const clearImage = () => {
+    setImageFile(null);
+    setImagePreview("");
+    setImageError("");
+    setForm(p => ({ ...p, image_url: "" }));
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const isValidLandingUrl = form.landing_url.trim().length > 0 && /^https?:\/\/.+\..+/.test(form.landing_url.trim());
+  const step1Valid = form.campaign_name.trim().length >= 3 && form.title.trim().length >= 3 && form.description.trim().length > 0 && isValidLandingUrl && !!form.image_url && !imageUploading && !imageError;
+  const step3Valid = Number(form.advertiser_cpm_bid) > 0 &&
+    (form.campaign_budget_mode === "unlimited" || Number(form.budget) > 0);
+
+  const recPct = Math.min(100, Math.max(0, ((recommendedCpm - cpmMin) / (cpmMax - cpmMin)) * 100));
 
   const submit = async () => {
     setSaving(true);
-    setMessage("");
+    setError("");
+    setSuccess("");
     try {
-      if (form.start_at && form.end_at && new Date(form.start_at).getTime() >= new Date(form.end_at).getTime()) {
+      if (!step3Valid) throw new Error("Please set a valid CPM bid and budget.");
+      if (form.start_at && form.end_at && new Date(form.start_at) >= new Date(form.end_at)) {
         throw new Error("Start date must be before end date.");
       }
-      if (!form.advertiser_cpm_bid || Number(form.advertiser_cpm_bid) <= 0) {
-        throw new Error("CPM Bid is required.");
-      }
-      if (form.campaign_budget_mode === "custom" && (!form.budget || Number(form.budget) <= 0)) {
-        throw new Error("Budget is required for custom budget campaigns.");
-      }
-      if (form.campaign_budget_mode === "custom" && form.daily_budget_limit && Number(form.daily_budget_limit) > Number(form.budget || 0)) {
-        throw new Error("Daily budget cannot exceed total campaign budget.");
-      }
-      if (form.frequency_cap_per_user && (!Number.isInteger(Number(form.frequency_cap_per_user)) || Number(form.frequency_cap_per_user) <= 0)) {
-        throw new Error("Frequency cap must be a positive whole number.");
-      }
-      if (!form.cta_text.trim()) {
-        throw new Error("CTA text is required.");
-      }
-      if (form.direct_placement_mode === "direct" && form.direct_inventory_scope === "inventory" && selectedInventoryIds.length === 0) {
-        throw new Error("Select at least one Mini App or choose a category, country, or language group.");
-      }
+      const payload = {
+        ...form,
+        countries: selectedCountries.join(","),
+        languages: selectedLanguages.join(","),
+      };
 
-      const res = await apiFetch("/api/advertiser/miniapp-rewarded-campaigns", {
-        method: "POST",
-        body: JSON.stringify({ ...form, direct_inventory_type: "miniapp", direct_inventory_ids: selectedInventoryIds }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to create campaign");
-      setForm(emptyForm);
-      setMessage("Campaign submitted for admin approval.");
-      await fetchCampaigns();
-    } catch (error: any) {
-      setMessage(error.message);
+      if (isEditMode) {
+        const res = await apiFetch(`/api/advertiser/miniapp-rewarded-campaigns/${editId}`, {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to update campaign");
+        router.push("/advertiser/campaigns");
+      } else {
+        const res = await apiFetch("/api/advertiser/miniapp-rewarded-campaigns", {
+          method: "POST",
+          body: JSON.stringify({
+            ...payload,
+            direct_placement_mode: "network",
+            direct_inventory_scope: "network",
+            direct_inventory_type: "miniapp",
+            direct_inventory_ids: [],
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to create campaign");
+        setForm(emptyForm);
+        setSelectedCountries([]);
+        setSelectedLanguages([]);
+        setCpmPercent(50);
+        setImageFile(null);
+        setImagePreview("");
+        setImageError("");
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        setStep(1);
+        router.push("/advertiser/campaigns");
+      }
+    } catch (e: any) {
+      setError(e.message);
     } finally {
       setSaving(false);
     }
   };
 
-  const toggleCategory = (category: string) => {
-    setForm((prev) => {
-      const selected = Array.isArray(prev.categories) ? prev.categories : [];
-      return {
-        ...prev,
-        categories: selected.includes(category)
-          ? selected.filter((item) => item !== category)
-          : [...selected, category],
-      };
-    });
-  };
-
-  const toggleInventory = (id: number) => {
-    setSelectedInventoryIds((prev) => prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]);
-    setForm((prev) => ({ ...prev, direct_placement_mode: "direct", direct_inventory_scope: "inventory" }));
-  };
-
   return (
     <DashboardLayout type="advertiser">
-      <div className="space-y-4">
-        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="mb-4 flex items-center gap-2 text-sm font-black text-slate-900"><Smartphone size={16} /> Mini App Rewarded Campaign</div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {[
-              ["campaign_name", "Campaign Name"],
-              ["title", "Rewarded Ad Title"],
-              ["image_url", "Thumbnail/Image URL"],
-              ["landing_url", "Landing URL"],
-              ["postback_url", "Postback URL, optional, include {click_id}"],
-              ["cta_text", "CTA Text, e.g. Learn More"],
-              ["advertiser_cpm_bid", `CPM Bid, recommended $${Number(recommendedCpm || 0).toFixed(2)}`],
-            ].map(([key, label]) => (
-              <input key={key} value={(form as any)[key]} onChange={(event) => setForm((prev) => ({ ...prev, [key]: event.target.value }))} placeholder={label} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
-            ))}
-            <textarea value={form.description} onChange={(event) => setForm((prev) => ({ ...prev, description: event.target.value }))} placeholder="Rewarded Ad Description" className="min-h-24 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500 sm:col-span-2" />
-          </div>
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            <label className="flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-              <span className="font-semibold text-slate-600">Title Color</span>
-              <input type="color" value={form.title_color || "#4f46e5"} onChange={(event) => setForm((prev) => ({ ...prev, title_color: event.target.value }))} className="h-8 w-12 rounded border border-slate-200 bg-white" />
-              <button type="button" onClick={() => setForm((prev) => ({ ...prev, title_color: "" }))} className="ml-auto text-xs font-bold text-slate-400">Default</button>
-            </label>
-            <label className="flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-              <span className="font-semibold text-slate-600">Body Color</span>
-              <input type="color" value={form.body_color || "#a7adbc"} onChange={(event) => setForm((prev) => ({ ...prev, body_color: event.target.value }))} className="h-8 w-12 rounded border border-slate-200 bg-white" />
-              <button type="button" onClick={() => setForm((prev) => ({ ...prev, body_color: "" }))} className="ml-auto text-xs font-bold text-slate-400">Default</button>
-            </label>
-          </div>
-          <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs font-semibold leading-relaxed text-blue-800">
-            Static image: Image must be square (1:1). Maximum file size: 1 MB. Supported dimensions: 240px-1024px.
-            <br />
-            GIF: GIF must be square (1:1). Maximum file size: 2 MB. Supported dimensions: 240px-600px.
-          </div>
-          <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
-            <div className="text-xs font-black uppercase tracking-widest text-slate-400">Categories</div>
-            <p className="mt-1 text-xs font-semibold text-slate-500">Default: All Categories — your ad can display across all eligible categories.</p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {MINIAPP_CREATIVE_CATEGORIES.map((category) => {
-                const active = Array.isArray(form.categories) && form.categories.includes(category);
-                return (
-                  <button
-                    key={category}
-                    type="button"
-                    onClick={() => toggleCategory(category)}
-                    className={`rounded-full border px-3 py-1.5 text-xs font-bold ${active ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 bg-slate-50 text-slate-600"}`}
-                  >
-                    {category}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          <div className="mt-4 grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:grid-cols-2">
-            <select value={form.campaign_budget_mode} onChange={(event) => setForm((prev) => ({ ...prev, campaign_budget_mode: event.target.value }))} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
-              <option value="custom">Custom campaign budget</option>
-              <option value="unlimited">Unlimited campaign budget</option>
-            </select>
-            <input value={form.budget} disabled={form.campaign_budget_mode === "unlimited"} onChange={(event) => setForm((prev) => ({ ...prev, budget: event.target.value }))} placeholder={form.campaign_budget_mode === "unlimited" ? "Runs until balance is exhausted" : "Budget"} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 disabled:bg-slate-100" />
-          </div>
-          <div className="mt-4 rounded-xl border border-slate-200 bg-white">
-            <button type="button" onClick={() => setTargetingOpen((prev) => !prev)} className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left">
-              <span>
-                <span className="block text-xs font-black uppercase tracking-widest text-slate-400">Targeting</span>
-                <span className="block text-sm font-bold text-slate-900">All Mini App users by default</span>
-              </span>
-              <ChevronDown size={18} className={`text-slate-400 transition-transform ${targetingOpen ? "rotate-180" : ""}`} />
-            </button>
-            {targetingOpen && (
-              <div className="grid gap-3 border-t border-slate-100 p-4 sm:grid-cols-2">
-                <input value={form.countries} onChange={(event) => setForm((prev) => ({ ...prev, countries: event.target.value }))} placeholder="Countries, optional (US, NG, GB)" className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
-                <input value={form.languages} onChange={(event) => setForm((prev) => ({ ...prev, languages: event.target.value }))} placeholder="Languages, optional (en, fr)" className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
-                <select value={form.vpn_policy} onChange={(event) => setForm((prev) => ({ ...prev, vpn_policy: event.target.value }))} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500">
-                  <option value="allow_all">Allow all traffic</option>
-                  <option value="prefer_non_vpn">Prefer non-VPN traffic</option>
-                  <option value="exclude_vpn">Exclude VPN/proxy traffic</option>
-                </select>
-                <select value={form.device_policy} onChange={(event) => setForm((prev) => ({ ...prev, device_policy: event.target.value }))} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500">
-                  <option value="all">All devices</option>
-                  <option value="mobile">Mobile only</option>
-                  <option value="desktop">Desktop only</option>
-                </select>
-                <select value={form.os_policy} onChange={(event) => setForm((prev) => ({ ...prev, os_policy: event.target.value }))} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500">
-                  <option value="all">All platforms</option>
-                  <option value="android">Android</option>
-                  <option value="ios">iOS</option>
-                  <option value="desktop_web">Desktop/Web</option>
-                </select>
-                <input type="number" min="1" step="1" value={form.frequency_cap_per_user} onChange={(event) => setForm((prev) => ({ ...prev, frequency_cap_per_user: event.target.value }))} placeholder="Max impressions per user per day" className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
-                <input type="datetime-local" value={form.start_at} onChange={(event) => setForm((prev) => ({ ...prev, start_at: event.target.value }))} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
-                <input type="datetime-local" value={form.end_at} onChange={(event) => setForm((prev) => ({ ...prev, end_at: event.target.value }))} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
-                <select value={form.daily_budget_mode} onChange={(event) => setForm((prev) => ({ ...prev, daily_budget_mode: event.target.value, daily_budget_limit: event.target.value === "unlimited" ? "" : prev.daily_budget_limit }))} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500">
-                  <option value="custom">Custom daily budget</option>
-                  <option value="unlimited">Unlimited daily budget</option>
-                </select>
-                <input type="number" min="0" step="0.01" disabled={form.daily_budget_mode === "unlimited"} value={form.daily_budget_limit} onChange={(event) => setForm((prev) => ({ ...prev, daily_budget_limit: event.target.value }))} placeholder="Daily budget limit, optional" className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500 disabled:bg-slate-100" />
-              </div>
-            )}
-          </div>
-          <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
-            <div className="mb-3 flex items-center gap-2 text-sm font-black text-slate-900">
-              <Store size={16} /> Placement Buying
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setForm((prev) => ({ ...prev, direct_placement_mode: "network", direct_inventory_scope: "network" }));
-                  setSelectedInventoryIds([]);
-                }}
-                className={`rounded-lg border p-3 text-left text-sm ${form.direct_placement_mode === "network" ? "border-blue-200 bg-blue-50" : "border-slate-200 bg-slate-50"}`}
-              >
-                <span className="font-black text-slate-900">Run Across Network</span>
-                <span className="mt-1 block text-xs font-semibold text-slate-500">Eligible Mini Apps can serve this campaign.</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setForm((prev) => ({ ...prev, direct_placement_mode: "direct", direct_inventory_scope: "inventory" }))}
-                className={`rounded-lg border p-3 text-left text-sm ${form.direct_placement_mode === "direct" ? "border-blue-200 bg-blue-50" : "border-slate-200 bg-slate-50"}`}
-              >
-                <span className="font-black text-slate-900">Select Specific Mini Apps</span>
-                <span className="mt-1 block text-xs font-semibold text-slate-500">Pick one, multiple, category, country, or language group.</span>
-              </button>
-            </div>
+      <style>{`
+        .shiny-btn { background: linear-gradient(135deg,#0c9de8 0%,#0b7ec9 100%); box-shadow: 0 4px 16px rgba(12,157,232,.32); transition: background .2s, box-shadow .2s, transform .15s; }
+        .shiny-btn:hover { background: linear-gradient(135deg,#3dbfff 0%,#0c9de8 100%); box-shadow: 0 6px 24px rgba(12,157,232,.52); transform: translateY(-1px); }
+        .shiny-btn:active { transform: translateY(0); }
+        .miniapp-cpm::-webkit-slider-thumb { -webkit-appearance:none; width:30px; height:30px; border-radius:50%; background:#0c9de8; border:4px solid white; box-shadow:0 2px 10px rgba(12,157,232,.45); cursor:grab; }
+        .miniapp-cpm:active::-webkit-slider-thumb { cursor:grabbing; box-shadow:0 4px 18px rgba(12,157,232,.65); }
+        .miniapp-cpm::-moz-range-thumb { width:30px; height:30px; border-radius:50%; background:#0c9de8; border:4px solid white; box-shadow:0 2px 10px rgba(12,157,232,.45); cursor:grab; }
+        .miniapp-cpm { -webkit-appearance:none; appearance:none; background:transparent; outline:none; }
+      `}</style>
 
-            {form.direct_placement_mode === "direct" && (
-              <div className="mt-4 space-y-3">
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <input value={form.direct_categories} onChange={(event) => setForm((prev) => ({ ...prev, direct_categories: event.target.value, direct_inventory_scope: "category" }))} placeholder="Categories" className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
-                  <input value={form.direct_countries} onChange={(event) => setForm((prev) => ({ ...prev, direct_countries: event.target.value, direct_inventory_scope: "country" }))} placeholder="Countries, US, NG" className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
-                  <input value={form.direct_languages} onChange={(event) => setForm((prev) => ({ ...prev, direct_languages: event.target.value, direct_inventory_scope: "language" }))} placeholder="Languages, en, fr" className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
+      <div className="space-y-6 pb-10">
+
+        {/* ── Wizard card ── */}
+        <div className="rounded-3xl border border-slate-100 bg-white shadow-sm p-5">
+
+          {/* Header */}
+          <div className="flex items-center gap-3 mb-5">
+            <div className="w-10 h-10 rounded-2xl bg-blue-50 flex items-center justify-center text-[#0c9de8]">
+              <Smartphone size={20} />
+            </div>
+            <div>
+              <p className="text-xs font-black uppercase tracking-widest text-slate-400">Mini App Campaign</p>
+              <p className="text-sm font-black text-slate-900">Step {step} of {STEPS.length} — {STEPS[step - 1]}</p>
+            </div>
+          </div>
+
+          <StepBar step={step} />
+
+          {/* ── STEP 1: Ad Creative ── */}
+          {step === 1 && (
+            <div className="space-y-5">
+              <div className="space-y-4">
+                {/* Campaign Name */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                      Campaign Name <span className="text-red-400">*</span>
+                    </label>
+                    <span className={cn(
+                      "text-[10px] font-bold",
+                      form.campaign_name.length > 0 && form.campaign_name.trim().length < 3 ? "text-red-400" : "text-slate-300"
+                    )}>
+                      {form.campaign_name.length}/50
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <Type size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" />
+                    <input
+                      type="text"
+                      value={form.campaign_name}
+                      onChange={e => setForm(p => ({ ...p, campaign_name: e.target.value }))}
+                      placeholder="e.g. Summer Crypto Promo"
+                      maxLength={50}
+                      className={cn(
+                        "w-full pl-10 pr-4 py-3 bg-slate-50 border rounded-2xl outline-none text-sm font-semibold text-slate-900 transition-all placeholder:font-normal placeholder:text-slate-400",
+                        form.campaign_name.length > 0 && form.campaign_name.trim().length < 3
+                          ? "border-red-300 focus:border-red-400"
+                          : "border-slate-200 focus:border-[#0c9de8] focus:bg-white"
+                      )}
+                    />
+                  </div>
+                  {form.campaign_name.length > 0 && form.campaign_name.trim().length < 3 && (
+                    <p className="text-[11px] font-bold text-red-500 flex items-center gap-1">
+                      <AlertCircle size={11} /> Minimum 3 characters required
+                    </p>
+                  )}
                 </div>
-                <div className="grid gap-2 sm:grid-cols-3">
-                  {recommendedInventory.length === 0 ? (
-                    <div className="rounded-lg bg-slate-50 p-3 text-xs font-semibold text-slate-400 sm:col-span-3">No Mini App recommendations yet.</div>
-                  ) : recommendedInventory.slice(0, 6).map((item) => {
-                    const selected = selectedInventoryIds.includes(item.id);
+
+                {/* Ad Title */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                      Ad Title <span className="text-red-400">*</span>
+                    </label>
+                    <span className={cn(
+                      "text-[10px] font-bold",
+                      form.title.length > 0 && form.title.trim().length < 3 ? "text-red-400" : "text-slate-300"
+                    )}>
+                      {form.title.length}/80
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <Type size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" />
+                    <input
+                      type="text"
+                      value={form.title}
+                      onChange={e => setForm(p => ({ ...p, title: e.target.value }))}
+                      placeholder="Short attention-grabbing headline"
+                      maxLength={80}
+                      className={cn(
+                        "w-full pl-10 pr-4 py-3 bg-slate-50 border rounded-2xl outline-none text-sm font-semibold text-slate-900 transition-all placeholder:font-normal placeholder:text-slate-400",
+                        form.title.length > 0 && form.title.trim().length < 3
+                          ? "border-red-300 focus:border-red-400"
+                          : "border-slate-200 focus:border-[#0c9de8] focus:bg-white"
+                      )}
+                    />
+                  </div>
+                  {form.title.length > 0 && form.title.trim().length < 3 && (
+                    <p className="text-[11px] font-bold text-red-500 flex items-center gap-1">
+                      <AlertCircle size={11} /> Minimum 3 characters required
+                    </p>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Description <span className="text-red-400">*</span></label>
+                  <textarea
+                    value={form.description}
+                    onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
+                    placeholder="Describe what this ad is about"
+                    rows={3}
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-semibold text-slate-900 outline-none focus:border-[#0c9de8] focus:bg-white transition-all placeholder:font-normal placeholder:text-slate-400 resize-none"
+                  />
+                </div>
+                {/* Image Upload */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                    Ad Image <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={e => { const f = e.target.files?.[0]; if (f) handleImageFile(f); }}
+                  />
+                  {imagePreview ? (
+                    <div className="space-y-2">
+                      <div className={cn(
+                        "relative rounded-2xl overflow-hidden border",
+                        imageError ? "border-red-300" : "border-slate-200"
+                      )}>
+                        <img src={imagePreview} alt="Ad preview" className="w-full h-44 object-cover" />
+                        {imageUploading && (
+                          <div className="absolute inset-0 bg-white/60 flex items-center justify-center gap-2">
+                            <Loader2 size={20} className="animate-spin text-[#0c9de8]" />
+                            <span className="text-xs font-black text-[#0c9de8]">Uploading…</span>
+                          </div>
+                        )}
+                        {imageError && (
+                          <div className="absolute inset-0 bg-red-900/40 flex items-end p-3">
+                            <div className="w-full flex items-start gap-2 rounded-xl bg-red-600 px-3 py-2.5">
+                              <AlertCircle size={14} className="text-white shrink-0 mt-0.5" />
+                              <p className="text-xs font-bold text-white leading-snug">{imageError}</p>
+                            </div>
+                          </div>
+                        )}
+                        {form.image_url && !imageUploading && !imageError && (
+                          <div className="absolute bottom-2 right-2 bg-emerald-500 text-white rounded-full p-1">
+                            <Check size={12} />
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={clearImage}
+                          className="absolute top-2 right-2 z-10 bg-white/90 backdrop-blur rounded-full p-1.5 text-slate-600 hover:text-red-500 transition-colors"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                      {imageError && (
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          className="w-full py-2 rounded-xl border border-red-200 bg-red-50 text-[11px] font-black text-red-600 hover:bg-red-100 transition-colors"
+                        >
+                          Choose a different image
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="w-full flex flex-col items-center gap-3 py-8 rounded-2xl border-2 border-dashed border-slate-200 hover:border-[#0c9de8] bg-slate-50 hover:bg-blue-50 transition-all"
+                    >
+                      <ImageIcon size={28} className="text-slate-300" />
+                      <div className="text-center">
+                        <p className="text-xs font-black text-slate-600">Tap to choose image</p>
+                        <p className="text-[10px] font-medium text-slate-400 mt-0.5">Any image format · max 1 MB</p>
+                      </div>
+                    </button>
+                  )}
+                  <div className="flex items-start gap-2 rounded-2xl border border-blue-100 bg-blue-50 px-3 py-2.5">
+                    <AlertCircle size={13} className="text-blue-500 shrink-0 mt-0.5" />
+                    <p className="text-[11px] font-semibold text-blue-700 leading-relaxed">
+                      Image must be <span className="font-black">square (1:1)</span>. Max file size: <span className="font-black">1 MB</span>. Supported dimensions: <span className="font-black">240px – 1024px</span>.
+                    </p>
+                  </div>
+                </div>
+                {/* Landing URL */}
+                {(() => {
+                  const isInvalidUrl = form.landing_url.trim().length > 0 && !isValidLandingUrl;
+                  return (
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                        Landing URL <span className="text-red-400">*</span>
+                      </label>
+                      <input
+                        type="url"
+                        value={form.landing_url}
+                        onChange={e => setForm(p => ({ ...p, landing_url: e.target.value }))}
+                        placeholder="https://t.me/YourBot/app"
+                        className={cn(
+                          "w-full px-4 py-3 bg-slate-50 border rounded-2xl outline-none text-sm font-semibold text-slate-900 transition-all placeholder:font-normal placeholder:text-slate-400",
+                          isInvalidUrl
+                            ? "border-red-300 focus:border-red-400"
+                            : "border-slate-200 focus:border-[#0c9de8] focus:bg-white"
+                        )}
+                      />
+                      {isInvalidUrl && (
+                        <p className="text-[11px] font-bold text-red-500 px-1">Enter a valid URL (https://…)</p>
+                      )}
+                    </div>
+                  );
+                })()}
+                <Field label="CTA Button Text" value={form.cta_text} onChange={v => setForm(p => ({ ...p, cta_text: v }))} placeholder="Learn More" />
+                <Field label="Postback URL (optional)" value={form.postback_url} onChange={v => setForm(p => ({ ...p, postback_url: v }))} placeholder="https://tracker.example.com/postback?click_id={click_id}" />
+              </div>
+
+              {/* Categories */}
+              <div className="space-y-3">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Ad Categories <span className="text-slate-300 font-normal">(optional)</span></label>
+                <div className="flex flex-wrap gap-2">
+                  {CATEGORIES.map(cat => {
+                    const active = Array.isArray(form.categories) && form.categories.includes(cat);
                     return (
-                      <button key={item.id} type="button" onClick={() => toggleInventory(item.id)} className={`rounded-lg border p-3 text-left ${selected ? "border-blue-200 bg-blue-50" : "border-slate-200 bg-slate-50"}`}>
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="truncate text-xs font-black text-slate-900">{item.name}</span>
-                          {selected && <Check size={14} className="text-blue-600" />}
-                        </div>
-                        <p className="mt-1 text-[10px] font-bold uppercase text-slate-400">@{item.username || "private"}</p>
-                        <p className="mt-2 text-[10px] font-semibold text-slate-500">{numberValue(item.monthly_impressions)} reach / {item.traffic_quality_rating}</p>
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => toggleCategory(cat)}
+                        className={cn(
+                          "px-3 py-2 rounded-xl text-[11px] font-black border transition-all",
+                          active ? "bg-[#0c9de8] border-[#0c9de8] text-white" : "bg-slate-50 border-slate-200 text-slate-500 hover:border-[#0c9de8]"
+                        )}
+                      >
+                        {cat}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] font-semibold text-slate-400">Leave empty to show across all categories.</p>
+              </div>
+            </div>
+          )}
+
+          {/* ── STEP 2: Targeting ── */}
+          {step === 2 && (
+            <div className="space-y-6">
+              <p className="text-xs font-semibold text-slate-400">All targeting fields are optional. Leave empty to reach all users.</p>
+
+              {/* Countries */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Countries</label>
+                  <button
+                    onClick={() => setSelectedCountries([])}
+                    className={cn(
+                      "px-3 py-1 rounded-full text-[10px] font-black border transition-all",
+                      selectedCountries.length === 0
+                        ? "bg-[#0c9de8] border-[#0c9de8] text-white"
+                        : "bg-slate-50 border-slate-200 text-slate-500 hover:border-[#0c9de8]"
+                    )}
+                  >
+                    🌍 Worldwide
+                  </button>
+                </div>
+
+                {selectedCountries.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {selectedCountries.map(code => {
+                      const c = COUNTRIES.find(x => x.code === code);
+                      return (
+                        <button
+                          key={code}
+                          onClick={() => toggleCountry(code)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black text-white"
+                          style={{ background: "#0c9de8" }}
+                        >
+                          {c?.flag} {c?.name}
+                          <span className="ml-0.5 opacity-70">×</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="relative">
+                  <Search size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    value={countrySearch}
+                    onChange={e => setCountrySearch(e.target.value)}
+                    placeholder="Search countries…"
+                    className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm outline-none focus:border-[#0c9de8] font-semibold"
+                  />
+                </div>
+
+                <div className="flex flex-col gap-1 max-h-60 overflow-y-auto pr-1">
+                  {filteredCountries.map(c => {
+                    const sel = selectedCountries.includes(c.code);
+                    return (
+                      <button
+                        key={c.code}
+                        onClick={() => toggleCountry(c.code)}
+                        className={cn(
+                          "flex items-center gap-2 px-3 py-2 rounded-xl border text-left transition-all",
+                          sel ? "border-[#0c9de8]/40 bg-blue-50" : "border-slate-100 bg-slate-50 hover:border-slate-300"
+                        )}
+                      >
+                        <span className="text-base">{c.flag}</span>
+                        <span className={cn("text-xs font-bold", sel ? "text-[#0c9de8]" : "text-slate-700")}>{c.name}</span>
+                        {sel && <Check size={12} className="ml-auto shrink-0 text-[#0c9de8]" />}
                       </button>
                     );
                   })}
                 </div>
               </div>
-            )}
-          </div>
-          <button onClick={submit} disabled={saving} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white disabled:bg-slate-300">
-            {saving ? <Loader2 className="animate-spin" size={16} /> : <Plus size={16} />}
-            Submit
-          </button>
-          {message && <div className="mt-3 text-xs font-semibold text-slate-500">{message}</div>}
-        </div>
 
-        <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
-          <div className="border-b border-slate-200 px-4 py-3 text-sm font-bold text-slate-900">Campaign Reporting</div>
-          {loading ? (
-            <div className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></div>
-          ) : campaigns.length === 0 ? (
-            <div className="p-8 text-center text-slate-500">No Mini App rewarded campaigns yet.</div>
-          ) : (
-            <div className="space-y-4 p-4">
-              <div className="grid gap-3 md:hidden">
-                {campaigns.map((campaign) => (
-                  <div key={campaign.id} className="rounded-xl border border-slate-100 bg-slate-50 p-4">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-black text-slate-900">{campaign.campaign_name}</p>
-                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Mini App Campaign</p>
-                      </div>
-                      <span className="rounded-full bg-white px-2 py-1 text-[10px] font-black uppercase text-slate-600">{campaign.status}</span>
-                    </div>
-                    <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
-                      <div><p className="font-black text-slate-900">{numberValue(campaign.impressions)}</p><p className="font-bold uppercase text-slate-400">Lifetime impressions</p></div>
-                      <div><p className="font-black text-slate-900">{numberValue(campaign.clicks)}</p><p className="font-bold uppercase text-slate-400">Clicks</p></div>
-                      <div><p className="font-black text-slate-900">{numberValue(campaign.conversions)}</p><p className="font-bold uppercase text-slate-400">Conversions</p></div>
-                      <div><p className="font-black text-slate-900">{numberValue(campaign.today_impressions)}</p><p className="font-bold uppercase text-slate-400">Today impressions</p></div>
-                      <div><p className="font-black text-slate-900">{numberValue(campaign.yesterday_impressions)}</p><p className="font-bold uppercase text-slate-400">Yesterday impressions</p></div>
-                      <div><p className="font-black text-slate-900">{money(campaign.spend)}</p><p className="font-bold uppercase text-slate-400">Lifetime spend</p></div>
-                      <div><p className="font-black text-slate-900">{money(campaign.today_spend)}</p><p className="font-bold uppercase text-slate-400">Today spend</p></div>
-                      <div><p className="font-black text-slate-900">{money(campaign.remaining_budget)}</p><p className="font-bold uppercase text-slate-400">Remaining</p></div>
-                      <div><p className="font-black text-slate-900">{money(campaign.advertiser_cpm_bid)}</p><p className="font-bold uppercase text-slate-400">CPM bid</p></div>
-                      <div><p className="font-black text-slate-900">{campaign.traffic_quality_rating || "Good"}</p><p className="font-bold uppercase text-slate-400">Traffic quality</p></div>
-                      <div><p className="font-black text-slate-900">{campaign.inventory_quality_rating || "Good"}</p><p className="font-bold uppercase text-slate-400">Inventory quality</p></div>
-                    </div>
-                    <div className="mt-3 border-t border-slate-200 pt-3">
-                      <p className="text-xs font-black text-slate-900">{formatDateTime(campaign.last_displayed_at)}</p>
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Last displayed</p>
-                    </div>
-                    <div className="mt-3 border-t border-slate-200 pt-3 text-xs">
-                      <p className="font-black text-slate-900">Countries: {parseList(campaign.countries || campaign.target_countries)}</p>
-                      <p className="font-bold text-slate-500">Languages: {parseList(campaign.languages)} / Device: {policyLabel(campaign.device_policy)} / OS: {policyLabel(campaign.os_policy)}</p>
+              {/* Languages */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Languages</label>
+                  {selectedLanguages.length > 0 && (
+                    <button onClick={() => setSelectedLanguages([])} className="text-[10px] font-black text-slate-400 hover:text-red-500">
+                      Clear
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {LANGUAGES.map(l => {
+                    const sel = selectedLanguages.includes(l.code);
+                    return (
+                      <button
+                        key={l.code}
+                        onClick={() => toggleLanguage(l.code)}
+                        className={cn(
+                          "px-3 py-2 rounded-xl text-[11px] font-black border transition-all",
+                          sel ? "bg-[#0c9de8] border-[#0c9de8] text-white" : "bg-slate-50 border-slate-200 text-slate-500 hover:border-[#0c9de8]"
+                        )}
+                      >
+                        {l.name}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] font-semibold text-slate-400">Empty = all languages.</p>
+              </div>
+
+              {/* VPN Policy */}
+              <div className="space-y-3">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">VPN Traffic</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {VPN_OPTIONS.map(opt => {
+                    const Icon = opt.icon;
+                    const sel = form.vpn_policy === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        onClick={() => setForm(p => ({ ...p, vpn_policy: opt.value }))}
+                        className={cn(
+                          "flex flex-col items-center gap-1.5 py-3 px-2 rounded-2xl border text-center transition-all",
+                          sel ? "border-[#0c9de8]/40 bg-blue-50" : "border-slate-100 bg-slate-50 hover:border-slate-300"
+                        )}
+                      >
+                        <Icon size={18} className={sel ? "text-[#0c9de8]" : "text-slate-400"} />
+                        <p className={cn("text-[10px] font-black", sel ? "text-[#0c9de8]" : "text-slate-700")}>{opt.label}</p>
+                        <p className="text-[9px] text-slate-400 font-medium leading-tight">{opt.sub}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Device */}
+              <div className="space-y-3">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Device Type</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {DEVICE_OPTIONS.map(opt => {
+                    const Icon = opt.icon;
+                    const sel = form.device_policy === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        onClick={() => setForm(p => ({ ...p, device_policy: opt.value }))}
+                        className={cn(
+                          "flex flex-col items-center gap-2 py-3 rounded-2xl border transition-all",
+                          sel ? "border-[#0c9de8]/40 bg-blue-50" : "border-slate-100 bg-slate-50 hover:border-slate-300"
+                        )}
+                      >
+                        <Icon size={18} className={sel ? "text-[#0c9de8]" : "text-slate-400"} />
+                        <p className={cn("text-[10px] font-black", sel ? "text-[#0c9de8]" : "text-slate-700")}>{opt.label}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* OS */}
+              <div className="space-y-3">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Operating System</label>
+                <div className="grid grid-cols-4 gap-2">
+                  {OS_OPTIONS.map(opt => {
+                    const sel = form.os_policy === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        onClick={() => setForm(p => ({ ...p, os_policy: opt.value }))}
+                        className={cn(
+                          "py-2.5 rounded-xl border text-[11px] font-black transition-all",
+                          sel ? "border-[#0c9de8]/40 bg-blue-50 text-[#0c9de8]" : "border-slate-100 bg-slate-50 text-slate-600 hover:border-slate-300"
+                        )}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Frequency Cap */}
+              <div className="space-y-3">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                  Frequency Cap <span className="text-slate-300 font-normal">(optional)</span>
+                </label>
+                <div className="relative">
+                  <Target size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={form.frequency_cap_per_user}
+                    onChange={e => setForm(p => ({ ...p, frequency_cap_per_user: e.target.value }))}
+                    placeholder="Max impressions per user per day"
+                    className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-semibold text-slate-900 outline-none focus:border-[#0c9de8] placeholder:font-normal placeholder:text-slate-400"
+                  />
+                </div>
+              </div>
+
+              {/* Date range */}
+              <div className="grid grid-cols-2 gap-3">
+                {[
+                  { label: "Start Date", key: "start_at" as const },
+                  { label: "End Date",   key: "end_at"   as const },
+                ].map(({ label, key }) => (
+                  <div key={key} className="space-y-1.5">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label} <span className="text-slate-300 font-normal">(optional)</span></label>
+                    <div className="relative">
+                      <Calendar size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="datetime-local"
+                        value={form[key]}
+                        onChange={e => setForm(p => ({ ...p, [key]: e.target.value }))}
+                        className="w-full pl-9 pr-3 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-semibold text-slate-900 outline-none focus:border-[#0c9de8]"
+                      />
                     </div>
                   </div>
                 ))}
               </div>
-
-              <div className="hidden overflow-x-auto md:block">
-                <table className="w-full min-w-[1120px] text-left text-sm">
-                  <thead className="bg-slate-50 text-xs text-slate-500">
-                    <tr>
-                      <th className="px-3 py-2">Campaign</th>
-                      <th className="px-3 py-2">Type</th>
-                      <th className="px-3 py-2">Status</th>
-                      <th className="px-3 py-2">Lifetime Impressions</th>
-                      <th className="px-3 py-2">Clicks</th>
-                      <th className="px-3 py-2">Conversions</th>
-                      <th className="px-3 py-2">Today Impressions</th>
-                      <th className="px-3 py-2">Yesterday Impressions</th>
-                      <th className="px-3 py-2">Lifetime Spend</th>
-                      <th className="px-3 py-2">Today Spend</th>
-                      <th className="px-3 py-2">Remaining Budget</th>
-                      <th className="px-3 py-2">CPM Bid</th>
-                      <th className="px-3 py-2">Traffic / Inventory</th>
-                      <th className="px-3 py-2">Targeting</th>
-                      <th className="px-3 py-2">Last Displayed</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {campaigns.map((campaign) => (
-                      <tr key={campaign.id}>
-                        <td className="px-3 py-2 font-semibold">{campaign.campaign_name}</td>
-                        <td className="px-3 py-2">Mini App Campaign</td>
-                        <td className="px-3 py-2 capitalize">{campaign.status}</td>
-                        <td className="px-3 py-2">{numberValue(campaign.impressions)}</td>
-                        <td className="px-3 py-2">{numberValue(campaign.clicks)}</td>
-                        <td className="px-3 py-2">{numberValue(campaign.conversions)}</td>
-                        <td className="px-3 py-2">{numberValue(campaign.today_impressions)}</td>
-                        <td className="px-3 py-2">{numberValue(campaign.yesterday_impressions)}</td>
-                        <td className="px-3 py-2">{money(campaign.spend)}</td>
-                        <td className="px-3 py-2">{money(campaign.today_spend)}</td>
-                        <td className="px-3 py-2">{money(campaign.remaining_budget)}</td>
-                        <td className="px-3 py-2">{money(campaign.advertiser_cpm_bid)}</td>
-                        <td className="px-3 py-2">{campaign.traffic_quality_rating || "Good"} / {campaign.inventory_quality_rating || "Good"}</td>
-                        <td className="px-3 py-2 text-xs">
-                          <div>Countries: {parseList(campaign.countries || campaign.target_countries)}</div>
-                          <div>Languages: {parseList(campaign.languages)}</div>
-                          <div>{policyLabel(campaign.vpn_policy)} / {policyLabel(campaign.device_policy)} / {policyLabel(campaign.os_policy)}</div>
-                        </td>
-                        <td className="px-3 py-2">{formatDateTime(campaign.last_displayed_at)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
             </div>
           )}
+
+          {/* ── STEP 3: Budget & Launch ── */}
+          {step === 3 && (
+            <div className="space-y-6">
+              {/* CPM Bid */}
+              <div className="space-y-4">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">CPM Bid <span className="text-red-400">*</span></label>
+
+                <div className="text-center">
+                  <div className="flex items-center justify-center gap-2 mb-2">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Bid per 1,000 impressions</p>
+                    {Number(form.advertiser_cpm_bid) >= recommendedCpm ? (
+                      <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-emerald-700 bg-emerald-50 border border-emerald-200">
+                        <Sparkles size={9} /> Recommended
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-amber-600 bg-amber-50 border border-amber-200">
+                        Below rec.
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-center gap-1 mt-1">
+                    <span className="text-2xl font-black text-slate-400">$</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min={cpmMin}
+                      max={cpmMax}
+                      value={form.advertiser_cpm_bid}
+                      onChange={e => handleCpmInput(e.target.value)}
+                      className="text-4xl font-black text-slate-800 w-28 text-center bg-transparent border-none outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-100 bg-white px-5 py-4 space-y-3 shadow-sm">
+                  <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-400">
+                    <span>Drag to adjust</span>
+                  </div>
+                  <div className="relative flex items-center" style={{ height: 44 }}>
+                    <div className="absolute inset-x-0 rounded-full" style={{ height: 8, background: "#e2e8f0" }} />
+                    <div className="absolute left-0 rounded-full pointer-events-none" style={{ height: 8, width: `${cpmPercent}%`, background: "linear-gradient(90deg,#0c9de8,#0b7ec9)" }} />
+                    {/* Recommended tick */}
+                    <div className="absolute pointer-events-none" style={{ left: `${recPct}%`, top: "50%", transform: "translate(-50%,-50%)", width: 3, height: 18, background: "#f59e0b", borderRadius: 2, opacity: 0.9 }} />
+                    <input
+                      type="range" min="0" max="100" step="0.5"
+                      value={cpmPercent}
+                      onChange={e => handleCpmSlider(Number(e.target.value))}
+                      className="miniapp-cpm absolute inset-x-0 w-full"
+                      style={{ height: 8 }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-[10px] font-bold text-slate-400">
+                    <span>${cpmMin}</span>
+                    <span className="text-amber-500 font-black">⭐ ${recommendedCpm.toFixed(2)} rec.</span>
+                    <span>${cpmMax}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Campaign Budget */}
+              <div className="space-y-3">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Campaign Budget <span className="text-red-400">*</span></label>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { value: "custom",    label: "Custom Budget" },
+                    { value: "unlimited", label: "Unlimited" },
+                  ].map(opt => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setForm(p => ({ ...p, campaign_budget_mode: opt.value }))}
+                      className={cn(
+                        "py-3 rounded-2xl border text-[11px] font-black transition-all",
+                        form.campaign_budget_mode === opt.value
+                          ? "border-[#0c9de8]/40 bg-blue-50 text-[#0c9de8]"
+                          : "border-slate-100 bg-slate-50 text-slate-600 hover:border-slate-300"
+                      )}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                {form.campaign_budget_mode === "custom" && (
+                  <div className="relative">
+                    <DollarSign size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="number" min="1" step="0.01"
+                      value={form.budget}
+                      onChange={e => setForm(p => ({ ...p, budget: e.target.value }))}
+                      placeholder="Total campaign budget"
+                      className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-semibold text-slate-900 outline-none focus:border-[#0c9de8] placeholder:font-normal placeholder:text-slate-400"
+                    />
+                  </div>
+                )}
+                {form.campaign_budget_mode === "unlimited" && (
+                  <p className="text-[11px] font-semibold text-slate-400 px-1">Runs until your ad balance is exhausted.</p>
+                )}
+              </div>
+
+              {/* Daily Budget */}
+              <div className="space-y-3">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Daily Budget Cap <span className="text-slate-300 font-normal">(optional)</span></label>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { value: "custom",    label: "Daily Limit" },
+                    { value: "unlimited", label: "No Limit" },
+                  ].map(opt => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setForm(p => ({ ...p, daily_budget_mode: opt.value, daily_budget_limit: opt.value === "unlimited" ? "" : p.daily_budget_limit }))}
+                      className={cn(
+                        "py-3 rounded-2xl border text-[11px] font-black transition-all",
+                        form.daily_budget_mode === opt.value
+                          ? "border-[#0c9de8]/40 bg-blue-50 text-[#0c9de8]"
+                          : "border-slate-100 bg-slate-50 text-slate-600 hover:border-slate-300"
+                      )}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                {form.daily_budget_mode === "custom" && (
+                  <div className="relative">
+                    <DollarSign size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="number" min="1" step="0.01"
+                      value={form.daily_budget_limit}
+                      onChange={e => setForm(p => ({ ...p, daily_budget_limit: e.target.value }))}
+                      placeholder="Max spend per day"
+                      className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-semibold text-slate-900 outline-none focus:border-[#0c9de8] placeholder:font-normal placeholder:text-slate-400"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Summary */}
+              <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Campaign Summary</p>
+                <div className="space-y-1.5 text-xs font-semibold text-slate-600">
+                  <div className="flex justify-between"><span>Campaign</span><span className="font-black text-slate-900 truncate max-w-[60%] text-right">{form.campaign_name || "—"}</span></div>
+                  <div className="flex justify-between"><span>Ad Title</span><span className="font-black text-slate-900 truncate max-w-[60%] text-right">{form.title || "—"}</span></div>
+                  <div className="flex justify-between"><span>CPM Bid</span><span className="font-black text-[#0c9de8]">${Number(form.advertiser_cpm_bid || 0).toFixed(2)}</span></div>
+                  <div className="flex justify-between"><span>Budget</span><span className="font-black text-slate-900">{form.campaign_budget_mode === "unlimited" ? "Unlimited" : form.budget ? `$${form.budget}` : "—"}</span></div>
+                  <div className="flex justify-between"><span>Countries</span><span className="font-black text-slate-900">{selectedCountries.length === 0 ? "Worldwide" : `${selectedCountries.length} selected`}</span></div>
+                  <div className="flex justify-between"><span>Languages</span><span className="font-black text-slate-900">{selectedLanguages.length === 0 ? "All" : selectedLanguages.join(", ")}</span></div>
+                  <div className="flex justify-between"><span>Device</span><span className="font-black text-slate-900">{DEVICE_OPTIONS.find(d => d.value === form.device_policy)?.label}</span></div>
+                  <div className="flex justify-between"><span>OS</span><span className="font-black text-slate-900">{OS_OPTIONS.find(o => o.value === form.os_policy)?.label}</span></div>
+                  <div className="flex justify-between"><span>VPN</span><span className="font-black text-slate-900">{VPN_OPTIONS.find(v => v.value === form.vpn_policy)?.label}</span></div>
+                </div>
+              </div>
+
+              {error && (
+                <div className="flex items-start gap-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3">
+                  <AlertCircle size={15} className="text-red-500 shrink-0 mt-0.5" />
+                  <p className="text-xs font-bold text-red-700">{error}</p>
+                </div>
+              )}
+              {success && (
+                <div className="flex items-start gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+                  <CheckCircle2 size={15} className="text-emerald-500 shrink-0 mt-0.5" />
+                  <p className="text-xs font-bold text-emerald-700">{success}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Navigation ── */}
+          <div className="flex gap-3 mt-6">
+            {step > 1 && (
+              <button
+                onClick={() => setStep(s => s - 1)}
+                className="flex items-center gap-2 px-5 py-3.5 rounded-2xl border border-slate-200 bg-slate-50 text-slate-600 text-xs font-black uppercase tracking-widest hover:bg-slate-100 transition-all"
+              >
+                <ChevronLeft size={15} /> Back
+              </button>
+            )}
+            {step < 3 ? (
+              <button
+                onClick={() => { setError(""); setStep(s => s + 1); }}
+                disabled={step === 1 && !step1Valid}
+                className={cn(
+                  "flex-1 py-3.5 text-xs font-black uppercase tracking-widest rounded-2xl flex items-center justify-center gap-2",
+                  (step === 1 && !step1Valid) ? "bg-slate-100 text-slate-400 cursor-not-allowed" : "shiny-btn text-white"
+                )}
+              >
+                Continue
+              </button>
+            ) : (
+              <button
+                onClick={submit}
+                disabled={saving || !step3Valid}
+                className={cn(
+                  "flex-1 py-3.5 text-xs font-black uppercase tracking-widest rounded-2xl flex items-center justify-center gap-2",
+                  saving || !step3Valid ? "bg-slate-100 text-slate-400 cursor-not-allowed" : "shiny-btn text-white"
+                )}
+              >
+                {saving ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} />}
+                {saving ? (isEditMode ? "Saving…" : "Submitting…") : (isEditMode ? "Save Changes" : "Launch Campaign")}
+              </button>
+            )}
+          </div>
         </div>
+
       </div>
     </DashboardLayout>
   );

@@ -80,6 +80,16 @@ export default function WithdrawalDetailSheet({ withdrawal, onClose }: Withdrawa
           <div className="text-center space-y-2">
             <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Withdrawal Amount</h3>
             <div className="text-4xl font-black text-slate-900">${parseFloat(withdrawal.amount).toFixed(2)}</div>
+            {parseFloat(withdrawal.fee || "0") > 0 && (
+              <div className="inline-flex flex-col items-center gap-0.5">
+                <span className="text-xs font-semibold text-amber-600">
+                  Network fee: -${parseFloat(withdrawal.fee).toFixed(2)}
+                </span>
+                <span className="text-sm font-black text-emerald-600">
+                  You receive: ${Math.max(0, parseFloat(withdrawal.net_amount || withdrawal.amount) ).toFixed(2)}
+                </span>
+              </div>
+            )}
             <div className={cn("inline-flex px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider", getStatusColor(withdrawal.status))}>
               {withdrawal.status}
             </div>

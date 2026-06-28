@@ -2,15 +2,12 @@
 
 import React, { useState, useEffect } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
-import { 
-  Plus, 
-  Tv, 
-  MoreVertical, 
-  ExternalLink, 
-  Trash2, 
-  Pause, 
-  Play, 
-  Search,
+import {
+  Plus,
+  Tv,
+  MoreVertical,
+  Pause,
+  Play,
   CheckCircle2,
   Clock,
   XCircle,
@@ -19,7 +16,15 @@ import {
   Target,
   BarChart3,
   DollarSign,
-  Loader2
+  Loader2,
+  Smartphone,
+  Bot,
+  ArrowRight,
+  X,
+  Eye,
+  MousePointer2,
+  Edit2,
+  TrendingUp,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
@@ -32,13 +37,41 @@ import Modal from "@/components/ui/Modal";
 import Toast from "@/components/ui/Toast";
 import Link from "next/link";
 
+const CREATE_OPTIONS = [
+  {
+    key: "channel",
+    href: "/advertiser/campaigns/new/channel",
+    icon: Tv,
+    title: "Channel Campaign",
+    tagline: "Post ads in active Telegram channels",
+    badge: "Most Popular",
+  },
+  {
+    key: "miniapp",
+    href: "/advertiser/miniapp-rewarded",
+    icon: Smartphone,
+    title: "Mini App Campaign",
+    tagline: "Rewarded ads inside Telegram Mini Apps",
+    badge: "High Engagement",
+  },
+  {
+    key: "bot",
+    href: "/advertiser/campaigns/new/bot",
+    icon: Bot,
+    title: "Bot Campaign",
+    tagline: "Direct inbox delivery via Telegram bots",
+    badge: "Direct Reach",
+  },
+];
+
 interface Campaign {
   id: number;
   name: string;
-  type: "views" | "clicks";
+  kind: "channel" | "bot" | "miniapp";
+  type: string;
   status: "pending" | "active" | "paused" | "completed" | "rejected" | "budget_exhausted";
-  budget: string;
-  cpm: string;
+  budget: string | number;
+  cpm: string | number;
   message_text: string;
   image_url: string | null;
   link: string;
@@ -46,6 +79,10 @@ interface Campaign {
   category: string;
   continents: string;
   created_at: string;
+  // miniapp stats
+  impressions?: number;
+  spend?: number;
+  clicks?: number;
 }
 
 export default function MyCampaignsPage() {
@@ -61,6 +98,9 @@ export default function MyCampaignsPage() {
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null);
   const [processingId, setProcessingId] = useState<number | null>(null);
   const [notification, setNotification] = useState<{ type: "success" | "error"; title: string; message: string } | null>(null);
+
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showTypeModal, setShowTypeModal] = useState(false);
 
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
@@ -81,10 +121,42 @@ export default function MyCampaignsPage() {
   const fetchCampaigns = async (silent = false) => {
     if (!silent) setIsLoading(true);
     try {
-      const res = await apiFetch("/api/advertiser/campaigns");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to fetch");
-      setCampaigns(data);
+      const [regularRes, miniappRes] = await Promise.all([
+        apiFetch("/api/advertiser/campaigns"),
+        apiFetch("/api/advertiser/miniapp-rewarded-campaigns"),
+      ]);
+      const regularData = regularRes.ok ? await regularRes.json() : [];
+      const miniappData = miniappRes.ok ? await miniappRes.json() : [];
+
+      const regular = (Array.isArray(regularData) ? regularData : []).map((c: any) => ({
+        ...c,
+        kind: c.type === "broadcast" ? "bot" : "channel",
+      }));
+
+      const miniapp = (Array.isArray(miniappData) ? miniappData : []).map((c: any) => ({
+        id: c.id,
+        name: c.campaign_name,
+        kind: "miniapp" as const,
+        type: "rewarded",
+        status: c.status,
+        budget: c.budget,
+        cpm: c.advertiser_cpm_bid,
+        message_text: c.description || "",
+        image_url: c.image_url || null,
+        link: c.landing_url || "",
+        button_text: c.cta_text || "",
+        category: "",
+        continents: "[]",
+        created_at: c.created_at,
+        impressions: Number(c.impressions || 0),
+        spend: Number(c.spend || 0),
+        clicks: Number(c.clicks || 0),
+      }));
+
+      const all = [...regular, ...miniapp].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
+      setCampaigns(all);
     } catch (error) {
       console.error("Error fetching campaigns:", error);
     } finally {
@@ -228,6 +300,11 @@ export default function MyCampaignsPage() {
     }
   };
 
+  const openEdit = (campaign: Campaign) => {
+    setMenuOpenId(null);
+    router.push(`/advertiser/miniapp-rewarded?edit=${campaign.id}`);
+  };
+
   const getStatusIcon = (status: string) => {
     switch (status) {
       case "active": return <CheckCircle2 className="text-emerald-500" size={14} />;
@@ -244,12 +321,12 @@ export default function MyCampaignsPage() {
         {/* Header */}
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-black text-slate-900 uppercase tracking-tight">Active Ads</h1>
-          <Link
-            href="/advertiser/campaigns/new"
+          <button
+            onClick={() => setShowCreateModal(true)}
             className="w-10 h-10 bg-[#0c9de8] text-white rounded-full flex items-center justify-center hover:bg-blue-600 transition-all active:scale-95 shadow-lg shadow-blue-500/20"
           >
             <Plus size={24} />
-          </Link>
+          </button>
         </div>
 
         <Modal 
@@ -278,115 +355,136 @@ export default function MyCampaignsPage() {
                 Create your first advertising campaign to reach thousands of Telegram users.
               </p>
             </div>
-            <Link
-              href="/advertiser/campaigns/new"
+            <button
+              onClick={() => setShowCreateModal(true)}
               className="text-[#0c9de8] font-black text-sm uppercase tracking-widest inline-block"
             >
               Launch First Campaign
-            </Link>
+            </button>
           </div>
         ) : (
           <div className="space-y-3">
             {campaigns.map((campaign) => (
               <div
-                key={campaign.id}
-                className="relative bg-white border border-slate-100 rounded-[2rem] p-5 flex items-center gap-4 group hover:border-slate-200 transition-all"
+                key={`${campaign.kind}-${campaign.id}`}
+                className="relative bg-white border border-slate-100 rounded-[2rem] p-5 group hover:border-slate-200 transition-all"
               >
-                <div className={cn(
-                  "w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 border-2",
-                  campaign.status === "active" ? "bg-emerald-50 border-emerald-100 text-emerald-500" : "bg-slate-50 border-slate-100 text-slate-400"
-                )}>
-                  {campaign.type === 'views' ? <BarChart3 size={28} /> : <Target size={28} />}
-                </div>
-
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <h3 className="font-black text-slate-900 truncate text-sm uppercase">{campaign.name}</h3>
-                    {getStatusIcon(campaign.status)}
+                <div className="flex items-center gap-4">
+                  <div className={cn(
+                    "w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 border-2",
+                    campaign.status === "active" ? "bg-emerald-50 border-emerald-100 text-emerald-500" : "bg-slate-50 border-slate-100 text-slate-400"
+                  )}>
+                    {campaign.kind === 'miniapp' ? <Smartphone size={28} /> :
+                     campaign.kind === 'bot' ? <Bot size={28} /> :
+                     campaign.type === 'views' ? <BarChart3 size={28} /> : <Target size={28} />}
                   </div>
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] font-bold uppercase tracking-tight text-slate-400">
-                    <span className="flex items-center gap-1 font-black text-slate-900"><DollarSign size={10} />{campaign.budget}</span>
-                    <span className="w-1 h-1 bg-slate-200 rounded-full" />
-                    <span>{campaign.type}</span>
-                    <span className="w-1 h-1 bg-slate-200 rounded-full" />
-                    <span className="text-[#0c9de8]">{campaign.status}</span>
+
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-black text-slate-900 truncate text-sm uppercase">{campaign.name}</h3>
+                      {getStatusIcon(campaign.status)}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] font-bold uppercase tracking-tight text-slate-400">
+                      <span className="flex items-center gap-1 font-black text-slate-900">
+                        <DollarSign size={10} />{parseFloat(String(campaign.budget)).toFixed(2)}
+                      </span>
+                      <span className="w-1 h-1 bg-slate-200 rounded-full" />
+                      <span>{campaign.kind === 'miniapp' ? 'mini app' : campaign.type}</span>
+                      <span className="w-1 h-1 bg-slate-200 rounded-full" />
+                      <span className="text-[#0c9de8]">{campaign.status}</span>
+                    </div>
                   </div>
-                </div>
 
-                <div className="relative">
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setMenuOpenId(menuOpenId === campaign.id ? null : campaign.id);
-                    }}
-                    className="w-10 h-10 flex items-center justify-center text-slate-400 hover:bg-slate-50 rounded-full transition-all"
-                  >
-                    <MoreVertical size={20} />
-                  </button>
+                  <div className="relative">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMenuOpenId(menuOpenId === campaign.id ? null : campaign.id);
+                      }}
+                      className="w-10 h-10 flex items-center justify-center text-slate-400 hover:bg-slate-50 rounded-full transition-all"
+                    >
+                      <MoreVertical size={20} />
+                    </button>
 
-                  <AnimatePresence>
-                    {menuOpenId === campaign.id && (
-                      <motion.div
-                        initial={{ opacity: 0, scale: 0.95, y: -10 }}
-                        animate={{ opacity: 1, scale: 1, y: 0 }}
-                        exit={{ opacity: 0, scale: 0.95, y: -10 }}
-                        className="absolute right-0 top-12 w-48 bg-white border border-slate-100 rounded-2xl p-2 z-[100] shadow-2xl"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <button
-                          onClick={() => {
-                            setViewingCampaign(campaign);
-                            setMenuOpenId(null);
-                          }}
-                          className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all"
+                    <AnimatePresence>
+                      {menuOpenId === campaign.id && (
+                        <motion.div
+                          initial={{ opacity: 0, scale: 0.95, y: -10 }}
+                          animate={{ opacity: 1, scale: 1, y: 0 }}
+                          exit={{ opacity: 0, scale: 0.95, y: -10 }}
+                          className="absolute right-0 bottom-full mb-1 w-48 bg-white border border-slate-100 rounded-2xl p-2 z-[100] shadow-2xl"
+                          onClick={(e) => e.stopPropagation()}
                         >
-                          <FileText size={16} /> View Details
-                        </button>
-                        <button
-                          onClick={() => {
-                            setFundingCampaign(campaign);
-                            setMenuOpenId(null);
-                          }}
-                          className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all mt-1"
-                        >
-                          <DollarSign size={16} /> Add Fund
-                        </button>
-                        <button
-                          disabled={campaign.status === "pending" || campaign.status === "rejected" || campaign.status === "completed" || campaign.status === "budget_exhausted" || processingId === campaign.id}
-                          onClick={() => {
-                            if (campaign.status === "active") {
-                              setConfirmModal({
-                                isOpen: true,
-                                id: campaign.id,
-                                title: "Pause Campaign",
-                                message: "Pausing this campaign will delete all active posts from channels. You cannot resume this campaign for 1 hour unless an admin resumes it manually. Do you want to continue?",
-                                confirmText: "Pause",
-                                action: "status"
-                              });
-                              setMenuOpenId(null);
-                              return;
-                            }
-                            handleToggleStatus(campaign.id);
-                          }}
-                          className={cn(
-                            "w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold rounded-xl transition-all mt-1",
-                            (campaign.status === "pending" || campaign.status === "rejected" || campaign.status === "completed" || campaign.status === "budget_exhausted" || processingId === campaign.id)
-                              ? "text-slate-200 cursor-not-allowed"
-                              : "text-slate-700 hover:bg-slate-50"
-                          )}
-                        >
-                          {processingId === campaign.id ? (
-                            <><Loader2 className="animate-spin" size={16} /> Processing...</>
-                          ) : campaign.status === "paused" ? (
-                            <><Play size={16} /> Resume Ad</>
+                          {campaign.kind === 'miniapp' ? (
+                            <button
+                              onClick={() => openEdit(campaign)}
+                              className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all"
+                            >
+                              <Edit2 size={16} /> Edit Campaign
+                            </button>
                           ) : (
-                            <><Pause size={16} /> Pause Ad</>
+                            <>
+                              <button
+                                onClick={() => { setViewingCampaign(campaign); setMenuOpenId(null); }}
+                                className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all"
+                              >
+                                <FileText size={16} /> View Details
+                              </button>
+                              <button
+                                onClick={() => { setFundingCampaign(campaign); setMenuOpenId(null); }}
+                                className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all mt-1"
+                              >
+                                <DollarSign size={16} /> Add Fund
+                              </button>
+                              <button
+                                disabled={campaign.status === "pending" || campaign.status === "rejected" || campaign.status === "completed" || campaign.status === "budget_exhausted" || processingId === campaign.id}
+                                onClick={() => {
+                                  if (campaign.status === "active") {
+                                    setConfirmModal({ isOpen: true, id: campaign.id, title: "Pause Campaign", message: "Pausing this campaign will delete all active posts from channels. You cannot resume this campaign for 1 hour unless an admin resumes it manually. Do you want to continue?", confirmText: "Pause", action: "status" });
+                                    setMenuOpenId(null);
+                                    return;
+                                  }
+                                  handleToggleStatus(campaign.id);
+                                }}
+                                className={cn(
+                                  "w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold rounded-xl transition-all mt-1",
+                                  (campaign.status === "pending" || campaign.status === "rejected" || campaign.status === "completed" || campaign.status === "budget_exhausted" || processingId === campaign.id)
+                                    ? "text-slate-200 cursor-not-allowed"
+                                    : "text-slate-700 hover:bg-slate-50"
+                                )}
+                              >
+                                {processingId === campaign.id ? <><Loader2 className="animate-spin" size={16} /> Processing...</> : campaign.status === "paused" ? <><Play size={16} /> Resume Ad</> : <><Pause size={16} /> Pause Ad</>}
+                              </button>
+                            </>
                           )}
-                        </button>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
                 </div>
+
+                {/* Stats row for miniapp campaigns */}
+                {campaign.kind === 'miniapp' && (campaign.impressions! > 0 || campaign.status === 'active') && (
+                  <div className="mt-3 pt-3 border-t border-slate-50 flex items-center gap-4">
+                    <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400">
+                      <Eye size={11} className="text-slate-300" />
+                      <span className="font-black text-slate-700">{(campaign.impressions || 0).toLocaleString()}</span>
+                      <span>IMPR</span>
+                    </div>
+                    <div className="w-px h-3 bg-slate-100" />
+                    <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400">
+                      <DollarSign size={11} className="text-slate-300" />
+                      <span className="font-black text-slate-700">${(campaign.spend || 0).toFixed(2)}</span>
+                      <span>SPEND</span>
+                    </div>
+                    <div className="w-px h-3 bg-slate-100" />
+                    <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400">
+                      <TrendingUp size={11} className="text-slate-300" />
+                      <span className="font-black text-slate-700">{(campaign.clicks || 0).toLocaleString()}</span>
+                      <span>CLICKS</span>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -486,6 +584,77 @@ export default function MyCampaignsPage() {
         )}
       </AnimatePresence>
 
+      {/* Views vs Click picker */}
+      <AnimatePresence>
+        {showTypeModal && (
+          <div className="fixed inset-0 z-[600] flex items-end justify-center sm:items-center p-0 sm:p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowTypeModal(false)}
+              className="absolute inset-0 bg-black/40 backdrop-blur-[2px]"
+            />
+            <motion.div
+              initial={{ y: "100%", opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: "100%", opacity: 0 }}
+              transition={{ type: "spring", damping: 28, stiffness: 220 }}
+              className="relative w-full max-w-md bg-white rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden"
+            >
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 w-10 h-1 bg-slate-200 rounded-full sm:hidden" />
+
+              <div className="flex items-center justify-between px-6 pt-7 pb-4 border-b border-slate-100">
+                <div>
+                  <h2 className="text-base font-black uppercase tracking-tight text-slate-900">Campaign Objective</h2>
+                  <p className="text-xs text-slate-400 font-medium mt-0.5">How do you want to pay for your ad?</p>
+                </div>
+                <button
+                  onClick={() => setShowTypeModal(false)}
+                  className="w-8 h-8 flex items-center justify-center rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="p-4 space-y-2">
+                <button
+                  onClick={() => { setShowTypeModal(false); router.push("/advertiser/campaigns/new/channel?type=views"); }}
+                  className="w-full flex items-center gap-4 px-4 py-5 rounded-2xl border border-slate-100 bg-white hover:border-[#0c9de8] hover:bg-blue-50/50 transition-all group text-left"
+                >
+                  <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center shrink-0 text-[#0c9de8] group-hover:bg-[#0c9de8] group-hover:text-white transition-colors">
+                    <Eye size={22} />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-black text-slate-900 uppercase tracking-tight">Views Campaign</p>
+                    <p className="text-xs text-slate-400 font-medium mt-0.5">Pay per 1,000 channel post views</p>
+                  </div>
+                  <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
+                </button>
+
+                <button
+                  onClick={() => { setShowTypeModal(false); router.push("/advertiser/campaigns/new/channel?type=clicks"); }}
+                  className="w-full flex items-center gap-4 px-4 py-5 rounded-2xl border border-slate-100 bg-white hover:border-[#0c9de8] hover:bg-blue-50/50 transition-all group text-left"
+                >
+                  <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center shrink-0 text-[#0c9de8] group-hover:bg-[#0c9de8] group-hover:text-white transition-colors">
+                    <MousePointer2 size={22} />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-black text-slate-900 uppercase tracking-tight">Click Campaign</p>
+                    <p className="text-xs text-slate-400 font-medium mt-0.5">Pay per button or link click</p>
+                  </div>
+                  <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
+                </button>
+              </div>
+
+              <div className="px-4 pb-6 pt-1">
+                <p className="text-center text-[11px] text-slate-400 font-medium">Views = broad reach · Clicks = direct conversions</p>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Success/Error Toast (Non-blocking) */}
       <Toast
         isOpen={!!notification}
@@ -494,6 +663,77 @@ export default function MyCampaignsPage() {
         title={notification?.title || ""}
         message={notification?.message || ""}
       />
+
+      {/* Create Campaign Modal */}
+      <AnimatePresence>
+        {showCreateModal && (
+          <div className="fixed inset-0 z-[600] flex items-end justify-center sm:items-center p-0 sm:p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowCreateModal(false)}
+              className="absolute inset-0 bg-black/40 backdrop-blur-[2px]"
+            />
+            <motion.div
+              initial={{ y: "100%", opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: "100%", opacity: 0 }}
+              transition={{ type: "spring", damping: 28, stiffness: 220 }}
+              className="relative w-full max-w-md bg-white rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden"
+            >
+              {/* Handle */}
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 w-10 h-1 bg-slate-200 rounded-full sm:hidden" />
+
+              {/* Header */}
+              <div className="flex items-center justify-between px-6 pt-7 pb-4 border-b border-slate-100">
+                <div>
+                  <h2 className="text-base font-black uppercase tracking-tight text-slate-900">Create Campaign</h2>
+                  <p className="text-xs text-slate-400 font-medium mt-0.5">Choose how you want to advertise</p>
+                </div>
+                <button
+                  onClick={() => setShowCreateModal(false)}
+                  className="w-8 h-8 flex items-center justify-center rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              {/* Options */}
+              <div className="p-4 space-y-2">
+                {CREATE_OPTIONS.map((opt) => {
+                  const isChannel = opt.key === "channel";
+                  const handleClick = () => {
+                    setShowCreateModal(false);
+                    if (isChannel) { setShowTypeModal(true); }
+                    else { router.push(opt.href); }
+                  };
+                  return (
+                    <button
+                      key={opt.key}
+                      onClick={handleClick}
+                      className="w-full flex items-center gap-4 px-4 py-4 rounded-2xl border border-slate-100 bg-white hover:border-[#0c9de8] hover:bg-blue-50/50 transition-all group text-left"
+                    >
+                      <div className="w-11 h-11 rounded-xl bg-blue-50 flex items-center justify-center shrink-0 text-[#0c9de8] group-hover:bg-[#0c9de8] group-hover:text-white transition-colors">
+                        <opt.icon size={20} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-black text-slate-900 uppercase tracking-tight">{opt.title}</p>
+                        <p className="text-xs text-slate-400 font-medium mt-0.5">{opt.tagline}</p>
+                      </div>
+                      <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="px-4 pb-6">
+                <p className="text-center text-[11px] text-slate-400 font-medium">Channel campaigns are the most common starting point</p>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </DashboardLayout>
   );
 }

@@ -125,7 +125,11 @@ CREATE TABLE IF NOT EXISTS miniapp_optimization_flags (
 -- 8. users — miniapp_beta_access (from 0011, no IF NOT EXISTS in original)
 -- ──────────────────────────────────────────────────────────────────────────────
 ALTER TABLE users
-  ADD COLUMN IF NOT EXISTS miniapp_beta_access TINYINT(1) NOT NULL DEFAULT 0;
+  ADD COLUMN IF NOT EXISTS miniapp_beta_access TINYINT(1) NOT NULL DEFAULT 1;
+
+UPDATE users
+SET miniapp_beta_access = 1
+WHERE miniapp_beta_access <> 1;
 
 -- ──────────────────────────────────────────────────────────────────────────────
 -- 9. campaign_delivery_events — reason column (from 0016)

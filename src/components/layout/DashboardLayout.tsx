@@ -8,6 +8,7 @@ import { apiFetch } from "@/lib/api";
 import BannedScreen from "@/components/auth/BannedScreen";
 import AppBootState from "@/components/shared/AppBootState";
 import SelfPromotionAd from "@/components/shared/SelfPromotionAd";
+import ReferralSprintPopup from "@/components/shared/ReferralSprintPopup";
 import { isTelegramMiniApp, safePrepareTelegramWebApp, waitForTelegramInitData } from "@/lib/telegramWebApp";
 
 interface DashboardLayoutProps {
@@ -51,6 +52,7 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
 
         setMiniappBetaAccess(Boolean(data.miniapp_beta_access));
         window.localStorage.setItem("last_dashboard", type);
+        window.localStorage.setItem("ag_miniapp_beta", data.miniapp_beta_access ? "1" : "0");
         setBootState("ready");
       } catch (error) {
         console.error("Dashboard boot failed:", error);
@@ -91,7 +93,7 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-slate-50 overflow-x-hidden">
       <SelfPromotionAd />
       <Header toggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)} />
       <Sidebar
@@ -101,19 +103,9 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
         miniappBetaAccess={miniappBetaAccess}
       />
 
+      {type === "publisher" && <ReferralSprintPopup />}
       <main className="min-h-screen pt-16 transition-all duration-300 lg:pl-64">
         <div className="mx-auto max-w-7xl p-4 lg:p-8">
-          <div className="mb-6 rounded-2xl border border-blue-100 bg-gradient-to-r from-blue-600 to-cyan-600 p-5 text-white shadow-lg shadow-blue-100">
-            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-              <div>
-                <h2 className="text-lg font-black uppercase tracking-tight">Invite Friends & Earn</h2>
-                <p className="text-sm font-semibold text-blue-50">Earn rewards for every verified referral. Join the Referral Sprint and compete for bonus rewards.</p>
-              </div>
-              <Link href="/publisher/referral" className="rounded-xl bg-white px-5 py-3 text-center text-xs font-black uppercase tracking-widest text-blue-600 shadow-sm transition-all active:scale-95">
-                Invite Friends
-              </Link>
-            </div>
-          </div>
           {children}
         </div>
       </main>

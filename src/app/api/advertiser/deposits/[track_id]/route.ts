@@ -1,9 +1,106 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { columnExists } from "@/lib/schemaGuards";
+import type { RowDataPacket } from "mysql2/promise";
 
 const OXAPAY_STATUS_URL = "https://api.oxapay.com/v1/payment/";
 const OXAPAY_KEY = process.env.OXAPAY_MERCHANT_API_KEY;
+
+type DepositRow = RowDataPacket & {
+  id: number;
+  track_id: string;
+  order_id: string;
+  amount: number;
+  pay_amount: number;
+  currency: string | null;
+  pay_currency: string | null;
+  network: string | null;
+  status: string;
+};
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Internal Server Error";
+}
+
+function toNumber(value: unknown) {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? amount : 0;
+}
+
+function getNestedNumber(source: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const amount = toNumber(source[key]);
+    if (amount > 0) return amount;
+  }
+  return 0;
+}
+
+function extractConvertedUsdtAmount(remote: Record<string, unknown>, fallbackAmount: number) {
+  const directAmount = getNestedNumber(remote, [
+    "received_usdt",
+    "received_amount_usdt",
+    "converted_amount",
+    "to_amount",
+    "credited_amount",
+  ]);
+  if (directAmount > 0 && String(remote.to_currency || remote.currency || "").toUpperCase() === "USDT") {
+    return directAmount;
+  }
+
+  const txs = Array.isArray(remote.txs) ? remote.txs : [];
+  const convertedFromTxs = txs.reduce((sum, tx) => {
+    if (!tx || typeof tx !== "object") return sum;
+    const txRecord = tx as Record<string, unknown>;
+    const conversion = txRecord.auto_convert;
+    if (conversion && typeof conversion === "object") {
+      const conversionRecord = conversion as Record<string, unknown>;
+      const conversionCurrency = String(conversionRecord.currency || conversionRecord.to_currency || "").toUpperCase();
+      const conversionAmount = getNestedNumber(conversionRecord, ["amount", "received_amount", "credited_amount"]);
+      if (conversionCurrency === "USDT" && conversionAmount > 0) {
+        return sum + conversionAmount;
+      }
+    }
+    return sum;
+  }, 0);
+
+  return convertedFromTxs > 0 ? convertedFromTxs : fallbackAmount;
+}
+
+async function ensureDepositStatusSchema() {
+  const columns: Array<[string, string]> = [
+    ["user_id", "INT NULL"],
+    ["track_id", "VARCHAR(255) NULL"],
+    ["order_id", "VARCHAR(255) NULL"],
+    ["amount", "DECIMAL(18,8) NOT NULL DEFAULT 0"],
+    ["pay_amount", "DECIMAL(18,8) NOT NULL DEFAULT 0"],
+    ["currency", "VARCHAR(20) NULL"],
+    ["pay_currency", "VARCHAR(20) NULL"],
+    ["network", "VARCHAR(50) NULL"],
+    ["address", "TEXT NULL"],
+    ["status", "VARCHAR(50) NOT NULL DEFAULT 'pending'"],
+    ["expired_at", "BIGINT NULL"],
+    ["txn_id", "TEXT NULL"],
+  ];
+
+  for (const [column, definition] of columns) {
+    if (!(await columnExists(pool, "deposits", column))) {
+      await pool.query(`ALTER TABLE deposits ADD COLUMN \`${column}\` ${definition}`);
+    }
+  }
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS advertiser_transactions (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id INT NOT NULL,
+      amount DECIMAL(18,8) NOT NULL DEFAULT 0,
+      type VARCHAR(30) NOT NULL,
+      description TEXT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_advertiser_transactions_user (user_id, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+  );
+}
 
 export async function GET(
   request: Request,
@@ -13,8 +110,9 @@ export async function GET(
     const { track_id } = await params;
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
+    await ensureDepositStatusSchema();
 
-    const [rows]: any = await pool.query(
+    const [rows] = await pool.query<DepositRow[]>(
       "SELECT * FROM deposits WHERE track_id = ? AND user_id = ?",
       [track_id, user.id]
     );
@@ -43,35 +141,38 @@ export async function GET(
       return NextResponse.json({ error: data.message || "OxaPay API Error" }, { status: 400 });
     }
 
-    const remote = data.data;
-    const newStatus = remote.status; // pending, paid, expired, etc.
-    const txn_id = remote.txs && remote.txs.length > 0 ? JSON.stringify(remote.txs) : null;
+    const remote = data.data as Record<string, unknown>;
+    const newStatus = String(remote.status || deposit.status); // pending, paid, expired, etc.
+    const txn_id = Array.isArray(remote.txs) && remote.txs.length > 0 ? JSON.stringify(remote.txs) : null;
 
     if (newStatus === "paid" && deposit.status !== "paid") {
+      const creditAmount = extractConvertedUsdtAmount(remote, toNumber(deposit.amount));
       const conn = await pool.getConnection();
       try {
         await conn.beginTransaction();
 
         // 1. Update deposit status
         await conn.query(
-          "UPDATE deposits SET status = ?, txn_id = ? WHERE id = ?",
-          ["paid", txn_id, deposit.id]
+          "UPDATE deposits SET status = ?, txn_id = ?, amount = ?, currency = 'USDT' WHERE id = ?",
+          ["paid", txn_id, creditAmount, deposit.id]
         );
 
         // 2. Add to user balance
         await conn.query(
           "UPDATE users SET ad_balance = ad_balance + ? WHERE id = ?",
-          [deposit.amount, user.id]
+          [creditAmount, user.id]
         );
 
         // 3. Log transaction
         await conn.query(
           "INSERT INTO advertiser_transactions (user_id, amount, type, description) VALUES (?, ?, 'credit', ?)",
-          [user.id, deposit.amount, `Deposit via OxaPay (Order: ${deposit.order_id})`]
+          [user.id, creditAmount, `Deposit via OxaPay converted to USDT (Order: ${deposit.order_id})`]
         );
 
         await conn.commit();
         deposit.status = "paid";
+        deposit.amount = creditAmount;
+        deposit.currency = "USDT";
       } catch (err) {
         await conn.rollback();
         throw err;
@@ -84,9 +185,9 @@ export async function GET(
     }
 
     return NextResponse.json(deposit);
-  } catch (error: any) {
+  } catch (error) {
     console.error("Deposit Status Check Error:", error);
-    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
+    return NextResponse.json({ error: errorMessage(error) }, { status: getAuthErrorStatus(error) });
   }
 }
 
@@ -98,6 +199,7 @@ export async function PATCH(
     const { track_id } = await params;
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
+    await ensureDepositStatusSchema();
     const { action } = await request.json();
 
     if (action === "cancel") {
@@ -109,7 +211,7 @@ export async function PATCH(
     }
 
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
+  } catch (error) {
+    return NextResponse.json({ error: errorMessage(error) }, { status: getAuthErrorStatus(error) });
   }
 }

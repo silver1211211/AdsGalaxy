@@ -265,7 +265,7 @@ export function serializeMarketplaceRow(row: Record<string, unknown>, favorite =
     type: row.inventory_type as MarketplaceInventoryType,
     type_label: TYPE_LABELS[row.inventory_type as MarketplaceInventoryType],
     name: String(row.name || "Untitled"),
-    username: String(row.username || "").replace(/^@/, ""),
+    username: row.inventory_type === "channel" ? "" : String(row.username || "").replace(/^@/, ""),
     category,
     country: String(row.marketplace_country || "Global").toUpperCase(),
     language: String(row.marketplace_language || "All"),

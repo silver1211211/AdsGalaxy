@@ -159,6 +159,7 @@ export default function AdminFAQsPage() {
                   className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                 >
                   <option value="publisher">Publishers</option>
+                  <option value="referral">Referrals</option>
                   <option value="advertiser">Advertisers</option>
                 </select>
               </div>
@@ -238,7 +239,13 @@ export default function AdminFAQsPage() {
                 faqs.map((faq: any) => (
                   <tr key={faq.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-4 py-3">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${faq.type === 'publisher' ? 'bg-purple-100 text-purple-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                        faq.type === 'publisher'
+                          ? 'bg-purple-100 text-purple-700'
+                          : faq.type === 'referral'
+                            ? 'bg-blue-100 text-blue-700'
+                            : 'bg-emerald-100 text-emerald-700'
+                      }`}>
                         {faq.type}
                       </span>
                     </td>

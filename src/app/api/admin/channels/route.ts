@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
 import { sendTelegramMessage } from "@/lib/telegram";
+import { ensureDefaultChannelDistribution } from "@/lib/channelLifecycle";
 
 export async function GET(request: Request) {
   if (!(await checkAdminAuth())) {
@@ -123,7 +124,20 @@ export async function PATCH(request: Request) {
     const status = statusMap[normalizedAction];
 
     if (normalizedAction === "activate") {
-      await pool.query("UPDATE channels SET status = ?, is_deleted = FALSE, paused_reason = NULL, suggested_fix = NULL, failure_reason = NULL WHERE id = ?", [status, id]);
+      await pool.query(
+        `UPDATE channels
+         SET status = ?,
+             is_deleted = FALSE,
+             paused_reason = NULL,
+             suggested_fix = NULL,
+             failure_reason = NULL,
+             health_status = 'active',
+             health_checked_at = NOW(),
+             reactivated_at = NOW()
+         WHERE id = ?`,
+        [status, id]
+      );
+      await ensureDefaultChannelDistribution();
     } else if (normalizedAction === "delete") {
       await pool.query("UPDATE channels SET status = ?, is_deleted = TRUE, paused_reason = 'Deleted by admin.', suggested_fix = NULL WHERE id = ?", [status, id]);
     } else {
@@ -137,8 +151,8 @@ export async function PATCH(request: Request) {
 
     // Send Telegram Notification
     const message = normalizedAction === "activate"
-      ? `✅ <b>Channel Approved!</b>\n\nYour channel <b>${channel.title}</b> (@${channel.username}) has been approved and is now active in the advertisements network.`
-      : `❌ <b>Channel Rejected</b>\n\nUnfortunately, your channel <b>${channel.title}</b> (@${channel.username}) was not approved for monetization at this time.`;
+      ? `✅ <b>Channel Approved!</b>\n\nYour channel <b>${channel.title}</b> (${channel.username ? `@${channel.username}` : "your private channel"}) has been approved and is now active in the advertisements network.`
+      : `❌ <b>Channel Rejected</b>\n\nUnfortunately, your channel <b>${channel.title}</b> (${channel.username ? `@${channel.username}` : "your private channel"}) was not approved for monetization at this time.`;
 
     if (normalizedAction === "activate" || normalizedAction === "reject") {
       await sendTelegramMessage(channel.telegram_id, message);

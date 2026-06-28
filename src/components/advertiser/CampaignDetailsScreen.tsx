@@ -8,10 +8,10 @@ import { cn } from "@/lib/utils";
 interface Campaign {
   id: number;
   name: string;
-  type: "views" | "clicks" | "broadcast";
+  type: string;
   status: string;
-  budget: string;
-  cpm: string;
+  budget: string | number;
+  cpm: string | number;
   message_text: string;
   image_url: string | null;
   link: string;
@@ -315,7 +315,7 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
                             {post.channel_title}
                           </p>
                           <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                            @{post.channel_username} • ID: #{post.id}
+                            Channel placement • ID: #{post.id}
                           </p>
                         </div>
                       </div>

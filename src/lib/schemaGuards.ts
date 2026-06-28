@@ -40,4 +40,6 @@ export async function ensureWithdrawalSubmissionColumns(db: Db = pool) {
   await addColumnIfMissing(db, "withdrawals", "network", "VARCHAR(20) NULL");
   await addColumnIfMissing(db, "withdrawals", "address", "VARCHAR(255) NULL");
   await addColumnIfMissing(db, "withdrawals", "created_at", "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP");
+  await addColumnIfMissing(db, "withdrawals", "fee", "DECIMAL(18,2) NOT NULL DEFAULT 0");
+  await addColumnIfMissing(db, "withdrawals", "net_amount", "DECIMAL(18,8) NOT NULL DEFAULT 0");
 }

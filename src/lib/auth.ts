@@ -1,6 +1,14 @@
 import crypto from "crypto";
 import pool from "./db";
 import { sendTelegramMessage } from "./telegram";
+import { getLocalMiniappDevAuthenticatedUser, parseLocalMiniappDevInitData } from "./localMiniappDev";
+import { processReferralJoinReward } from "./referralSprint";
+import {
+  blockReferralIfSelfDevice,
+  getReferralSecuritySignals,
+  markReferralJoinSignals,
+  updateUserReferralSecuritySignals,
+} from "./referralSecurity";
 
 export interface TelegramUser {
   id: number;
@@ -79,9 +87,17 @@ export function validateInitData(initData: string, botToken: string) {
  * Validates the request and returns the user object from the DB.
  * If user doesn't exist, it creates one.
  */
-export async function getAuthenticatedUser(initData: string | null, options: { allowBanned?: boolean } = {}) {
+export async function getAuthenticatedUser(initData: string | null, options: { allowBanned?: boolean; request?: Request } = {}) {
   if (!initData || initData === 'undefined' || initData === 'null') {
     throw new Error("Unauthorized: No initData provided");
+  }
+
+  if (parseLocalMiniappDevInitData(initData)) {
+    if (process.env.NODE_ENV === "production" || process.env.ENABLE_LOCAL_MINIAPP_DEV !== "true") {
+      throw new Error("Unauthorized: Local Mini App dev auth is disabled");
+    }
+
+    return getLocalMiniappDevAuthenticatedUser(initData, options);
   }
 
   const botToken = process.env.BOT_TOKEN;
@@ -91,6 +107,7 @@ export async function getAuthenticatedUser(initData: string | null, options: { a
 
   const tgUser = validateInitData(initData, botToken) as TelegramUser & { start_param?: string };
   const telegramId = String(tgUser.id);
+  const securitySignals = getReferralSecuritySignals(options.request);
 
   try {
     // Check if user exists
@@ -111,6 +128,7 @@ export async function getAuthenticatedUser(initData: string | null, options: { a
         "UPDATE users SET first_name = ?, last_name = ?, username = ?, photo_url = ? WHERE telegram_id = ?",
         [tgUser.first_name, tgUser.last_name || "", tgUser.username || "", tgUser.photo_url || "", telegramId]
       );
+      await updateUserReferralSecuritySignals(Number(rows[0].id), securitySignals);
       return rows[0];
     } else {
       // Create new user — ON DUPLICATE KEY UPDATE guards against concurrent first-login races.
@@ -150,20 +168,34 @@ export async function getAuthenticatedUser(initData: string | null, options: { a
           const referrerName = referrerRows[0].first_name;
 
           if (Number(invitedBy) !== Number(newUserId)) {
-            await pool.query(
+            const [referralResult]: any = await pool.query(
               "INSERT IGNORE INTO referrals (user_id, invited_by) VALUES (?, ?)",
               [newUserId, invitedBy]
             );
-          }
+            let referralBlocked = false;
+            if (referralResult.affectedRows > 0) {
+              await markReferralJoinSignals(Number(referralResult.insertId), securitySignals);
+              const selfDevice = await blockReferralIfSelfDevice(Number(referralResult.insertId));
+              referralBlocked = selfDevice.blocked;
+              if (!referralBlocked) {
+                await processReferralJoinReward(Number(referralResult.insertId));
+              }
+            }
 
-          await sendTelegramMessage(
-            referrerTgId,
-            `<b>New Referral Joined!</b>\n\nHi ${referrerName}, someone joined with your referral code. Reward is pending required channel verification.`
-          );
+            if (!referralBlocked) {
+              await sendTelegramMessage(
+                referrerTgId,
+                `<b>New Referral Joined!</b>\n\nHi ${referrerName}, someone joined with your referral code. You earned the instant join reward; the verification bonus unlocks after they join and verify the required channel.`
+              );
+            }
+          }
         }
       }
 
       const [newUser]: any = await pool.query("SELECT * FROM users WHERE id = ?", [newUserId]);
+      if (newUserId) {
+        await updateUserReferralSecuritySignals(Number(newUserId), securitySignals);
+      }
       return newUser[0];
     }
   } catch (error) {

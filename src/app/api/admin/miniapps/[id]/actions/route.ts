@@ -12,6 +12,10 @@ type MiniAppState = RowDataPacket & {
   status: string;
 };
 
+type ConfiguredNetworkCountRow = RowDataPacket & {
+  configured_networks: number;
+};
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -68,8 +72,8 @@ export async function POST(
 
     let newStatus = statusMap[action];
     if (action === "resume") {
-      const [[networkRow]]: any = await pool.query(
-        "SELECT COUNT(*) as configured_networks FROM miniapp_ad_networks WHERE miniapp_id = ? AND enabled = TRUE AND network_name IN ('AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub')",
+      const [[networkRow]] = await pool.query<ConfiguredNetworkCountRow[]>(
+        "SELECT COUNT(*) as configured_networks FROM miniapp_ad_networks WHERE miniapp_id = ? AND enabled = TRUE AND network_name IN ('AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')",
         [id]
       );
       newStatus = Number(networkRow?.configured_networks || 0) > 0 ? "approved" : "awaiting";

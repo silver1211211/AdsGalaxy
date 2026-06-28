@@ -77,8 +77,10 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
       const res = await apiFetch("/api/publisher/channels", {
         method: "POST",
         body: JSON.stringify({
-          telegram_id: channelInfo.id,
+          chat_id: channelInfo.id,
           username: channelInfo.username,
+          channel_type: "public",
+          subscriber_count: channelInfo.subscriber_count,
           title: editedTitle,
           posts_per_day: postsPerDay,
           audience_continents: selectedContinents,

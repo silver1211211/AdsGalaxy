@@ -43,7 +43,7 @@ export default function AdminLoginPage() {
           Admin Portal
         </h2>
         <p className="mt-2 text-center text-sm font-bold text-slate-500 uppercase tracking-widest">
-          Sign in to manage AdsFusion
+          Sign in to manage AdsGalaxy
         </p>
       </div>
 

@@ -11,6 +11,7 @@ type CampaignPostColumns = {
   hasDeletedAt: boolean;
   hasDeleteAttempts: boolean;
   hasDeleteFailedReason: boolean;
+  hasDeliveryConfirmedAt: boolean;
 };
 
 type ColumnRow = RowDataPacket & {
@@ -68,7 +69,7 @@ export async function getCampaignPostDeletionColumns(): Promise<CampaignPostColu
     FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA = DATABASE()
       AND TABLE_NAME = 'campaign_posts'
-      AND COLUMN_NAME IN ('deleted_at', 'delete_attempts', 'delete_failed_reason')
+      AND COLUMN_NAME IN ('deleted_at', 'delete_attempts', 'delete_failed_reason', 'delivery_confirmed_at')
   `);
 
   const columns = new Set(rows.map(row => row.COLUMN_NAME));
@@ -76,6 +77,7 @@ export async function getCampaignPostDeletionColumns(): Promise<CampaignPostColu
     hasDeletedAt: columns.has("deleted_at"),
     hasDeleteAttempts: columns.has("delete_attempts"),
     hasDeleteFailedReason: columns.has("delete_failed_reason"),
+    hasDeliveryConfirmedAt: columns.has("delivery_confirmed_at"),
   };
 }
 
@@ -83,13 +85,17 @@ async function fetchDeletionBatch(options: {
   campaignId?: number | string;
   olderThan24Hours?: boolean;
   hasDeletedAt: boolean;
+  hasDeliveryConfirmedAt: boolean;
   batchSize: number;
 }) {
-  const filters = ["cp.status = 'active'"];
+  const filters = ["cp.status IN ('active', 'posted', 'sent')"];
   const params: Array<number | string> = [];
 
   if (options.olderThan24Hours) {
-    filters.push("cp.created_at <= DATE_SUB(NOW(), INTERVAL 24 HOUR)");
+    const ageExpression = options.hasDeliveryConfirmedAt
+      ? "COALESCE(cp.delivery_confirmed_at, cp.created_at)"
+      : "cp.created_at";
+    filters.push(`${ageExpression} <= DATE_SUB(NOW(), INTERVAL 24 HOUR)`);
   }
 
   if (options.hasDeletedAt) {
@@ -258,6 +264,7 @@ export async function deleteCampaignPosts(options: {
       campaignId: options.campaignId,
       olderThan24Hours: options.olderThan24Hours,
       hasDeletedAt: columns.hasDeletedAt,
+      hasDeliveryConfirmedAt: columns.hasDeliveryConfirmedAt,
       batchSize,
     });
 

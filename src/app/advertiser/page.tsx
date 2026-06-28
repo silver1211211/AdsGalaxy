@@ -15,13 +15,40 @@ import {
   Lock,
   Tv,
   Smartphone,
-  Bot
+  Bot,
+  X,
 } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { useHeader } from "@/context/HeaderContext";
 import { apiFetch } from "@/lib/api";
 import AppBootState from "@/components/shared/AppBootState";
+import { AnimatePresence, motion } from "framer-motion";
+import { useRouter } from "next/navigation";
+
+const CREATE_OPTIONS = [
+  {
+    key: "channel",
+    href: "/advertiser/campaigns/new/channel",
+    icon: Tv,
+    title: "Channel Campaign",
+    tagline: "Post ads in active Telegram channels",
+  },
+  {
+    key: "miniapp",
+    href: "/advertiser/miniapp-rewarded",
+    icon: Smartphone,
+    title: "Mini App Campaign",
+    tagline: "Rewarded ads inside Telegram Mini Apps",
+  },
+  {
+    key: "bot",
+    href: "/advertiser/campaigns/new/bot",
+    icon: Bot,
+    title: "Bot Campaign",
+    tagline: "Direct inbox delivery via Telegram bots",
+  },
+];
 
 type AdvertiserCampaign = {
   id: number;
@@ -37,7 +64,6 @@ type AdvertiserCampaign = {
   today_spend?: string | number;
   conversions?: string | number;
   conversion_value?: string | number;
-  last_displayed_at?: string | null;
 };
 
 type AdvertiserStats = {
@@ -51,7 +77,7 @@ type AdvertiserStats = {
   conversion_rate?: number;
   cost_per_conversion?: number;
   conversion_value?: number;
-  roi?: number;
+  miniapp_impressions?: number;
   ad_balance: number;
   ad_balance_locked: number;
   advertiser_trust_level?: string;
@@ -80,10 +106,6 @@ function money(value: unknown) {
   return `$${Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
 }
 
-function displayDateTime(value?: string | null) {
-  if (!value) return "Not displayed";
-  return new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-}
 
 const defaultStats: AdvertiserStats = {
   active_ads: 0,
@@ -96,7 +118,7 @@ const defaultStats: AdvertiserStats = {
   conversion_rate: 0,
   cost_per_conversion: 0,
   conversion_value: 0,
-  roi: 0,
+  miniapp_impressions: 0,
   ad_balance: 0,
   ad_balance_locked: 0,
   advertiser_trust_level: "new",
@@ -106,9 +128,12 @@ const defaultStats: AdvertiserStats = {
 
 export default function AdvertiserDashboard() {
   const { setTitle } = useHeader();
+  const router = useRouter();
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [stats, setStats] = useState<AdvertiserStats>(defaultStats);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showTypeModal, setShowTypeModal] = useState(false);
 
   const fetchStats = useCallback(async () => {
     try {
@@ -164,18 +189,18 @@ export default function AdvertiserDashboard() {
       bg: "bg-indigo-50" 
     },
     {
+      label: "Impressions",
+      value: Number(stats.miniapp_impressions || 0).toLocaleString(),
+      icon: Smartphone,
+      color: "text-emerald-600",
+      bg: "bg-emerald-50"
+    },
+    {
       label: "Conversions",
       value: Number(stats.conversions || 0).toLocaleString(),
       icon: Zap,
       color: "text-purple-600",
       bg: "bg-purple-50"
-    },
-    {
-      label: "Conversion Rate",
-      value: `${(Number(stats.conversion_rate || 0) * 100).toFixed(2)}%`,
-      icon: TrendingUp,
-      color: "text-cyan-600",
-      bg: "bg-cyan-50"
     },
     {
       label: "CPA",
@@ -185,11 +210,11 @@ export default function AdvertiserDashboard() {
       bg: "bg-rose-50"
     },
     {
-      label: "ROI",
-      value: `${(Number(stats.roi || 0) * 100).toFixed(1)}%`,
-      icon: BarChart3,
-      color: "text-emerald-600",
-      bg: "bg-emerald-50"
+      label: "Conversion Rate",
+      value: `${(Number(stats.conversion_rate || 0) * 100).toFixed(2)}%`,
+      icon: TrendingUp,
+      color: "text-cyan-600",
+      bg: "bg-cyan-50"
     },
   ];
 
@@ -343,10 +368,6 @@ export default function AdvertiserDashboard() {
                         <p className="text-[10px] text-slate-400 uppercase font-black">Conversions</p>
                       </div>
                     </div>
-                    <div className="border-t border-slate-100 pt-3 text-left md:min-w-36 md:border-t-0 md:pt-0 md:text-right">
-                      <p className="text-xs font-bold text-slate-700">{displayDateTime(campaign.last_displayed_at)}</p>
-                      <p className="text-[10px] text-slate-400 uppercase font-black">Last displayed</p>
-                    </div>
                   </div>
                 );
               })
@@ -356,16 +377,16 @@ export default function AdvertiserDashboard() {
 
         {/* Quick Actions */}
         {!loadError && <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <Link 
-            href="/advertiser/campaigns/new"
-            className="group p-6 bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl text-white shadow-lg shadow-blue-200 flex items-center justify-between transition-transform active:scale-[0.98]"
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="group p-6 bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl text-white shadow-lg shadow-blue-200 flex items-center justify-between transition-transform active:scale-[0.98] text-left"
           >
             <div className="space-y-1">
               <h3 className="text-lg font-bold">Create Campaign</h3>
               <p className="text-blue-100 text-sm">Launch a new ad in minutes</p>
             </div>
             <PlusCircle size={32} className="text-white/40 group-hover:text-white transition-colors" />
-          </Link>
+          </button>
 
           <Link 
             href="/advertiser/deposit"
@@ -379,6 +400,130 @@ export default function AdvertiserDashboard() {
           </Link>
         </div>}
       </div>
+
+      {/* ── Create Campaign Modal ── */}
+      <AnimatePresence>
+        {showCreateModal && (
+          <div className="fixed inset-0 z-[600] flex items-end justify-center sm:items-center p-0 sm:p-4">
+            <motion.div
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              onClick={() => setShowCreateModal(false)}
+              className="absolute inset-0 bg-black/40 backdrop-blur-[2px]"
+            />
+            <motion.div
+              initial={{ y: "100%", opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: "100%", opacity: 0 }}
+              transition={{ type: "spring", damping: 28, stiffness: 220 }}
+              className="relative w-full max-w-md bg-white rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden"
+            >
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 w-10 h-1 bg-slate-200 rounded-full sm:hidden" />
+              <div className="flex items-center justify-between px-6 pt-7 pb-4 border-b border-slate-100">
+                <div>
+                  <h2 className="text-base font-black uppercase tracking-tight text-slate-900">Create Campaign</h2>
+                  <p className="text-xs text-slate-400 font-medium mt-0.5">Choose how you want to advertise</p>
+                </div>
+                <button
+                  onClick={() => setShowCreateModal(false)}
+                  className="w-8 h-8 flex items-center justify-center rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="p-4 space-y-2">
+                {CREATE_OPTIONS.map((opt) => {
+                  const isChannel = opt.key === "channel";
+                  return (
+                    <button
+                      key={opt.key}
+                      onClick={() => {
+                        setShowCreateModal(false);
+                        if (isChannel) { setShowTypeModal(true); }
+                        else { router.push(opt.href); }
+                      }}
+                      className="w-full flex items-center gap-4 px-4 py-4 rounded-2xl border border-slate-100 bg-white hover:border-[#0c9de8] hover:bg-blue-50/50 transition-all group text-left"
+                    >
+                      <div className="w-11 h-11 rounded-xl bg-blue-50 flex items-center justify-center shrink-0 text-[#0c9de8] group-hover:bg-[#0c9de8] group-hover:text-white transition-colors">
+                        <opt.icon size={20} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-black text-slate-900 uppercase tracking-tight">{opt.title}</p>
+                        <p className="text-xs text-slate-400 font-medium mt-0.5">{opt.tagline}</p>
+                      </div>
+                      <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="px-4 pb-6">
+                <p className="text-center text-[11px] text-slate-400 font-medium">Channel campaigns are the most common starting point</p>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Views vs Clicks Picker (Channel only) ── */}
+      <AnimatePresence>
+        {showTypeModal && (
+          <div className="fixed inset-0 z-[600] flex items-end justify-center sm:items-center p-0 sm:p-4">
+            <motion.div
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              onClick={() => setShowTypeModal(false)}
+              className="absolute inset-0 bg-black/40 backdrop-blur-[2px]"
+            />
+            <motion.div
+              initial={{ y: "100%", opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: "100%", opacity: 0 }}
+              transition={{ type: "spring", damping: 28, stiffness: 220 }}
+              className="relative w-full max-w-md bg-white rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden"
+            >
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 w-10 h-1 bg-slate-200 rounded-full sm:hidden" />
+              <div className="flex items-center justify-between px-6 pt-7 pb-4 border-b border-slate-100">
+                <div>
+                  <h2 className="text-base font-black uppercase tracking-tight text-slate-900">Campaign Objective</h2>
+                  <p className="text-xs text-slate-400 font-medium mt-0.5">How do you want to pay for your ad?</p>
+                </div>
+                <button
+                  onClick={() => setShowTypeModal(false)}
+                  className="w-8 h-8 flex items-center justify-center rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="p-4 space-y-2">
+                <button
+                  onClick={() => { setShowTypeModal(false); router.push("/advertiser/campaigns/new/channel?type=views"); }}
+                  className="w-full flex items-center gap-4 px-4 py-5 rounded-2xl border border-slate-100 bg-white hover:border-[#0c9de8] hover:bg-blue-50/50 transition-all group text-left"
+                >
+                  <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center shrink-0 text-[#0c9de8] group-hover:bg-[#0c9de8] group-hover:text-white transition-colors">
+                    <Eye size={22} />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-black text-slate-900 uppercase tracking-tight">Views Campaign</p>
+                    <p className="text-xs text-slate-400 font-medium mt-0.5">Pay per 1,000 channel post views</p>
+                  </div>
+                  <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
+                </button>
+                <button
+                  onClick={() => { setShowTypeModal(false); router.push("/advertiser/campaigns/new/channel?type=clicks"); }}
+                  className="w-full flex items-center gap-4 px-4 py-5 rounded-2xl border border-slate-100 bg-white hover:border-[#0c9de8] hover:bg-blue-50/50 transition-all group text-left"
+                >
+                  <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center shrink-0 text-[#0c9de8] group-hover:bg-[#0c9de8] group-hover:text-white transition-colors">
+                    <MousePointer2 size={22} />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-black text-slate-900 uppercase tracking-tight">Click Campaign</p>
+                    <p className="text-xs text-slate-400 font-medium mt-0.5">Pay per button or link click</p>
+                  </div>
+                  <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
+                </button>
+              </div>
+              <div className="px-4 pb-6 pt-1">
+                <p className="text-center text-[11px] text-slate-400 font-medium">Views = broad reach · Clicks = direct conversions</p>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
     </DashboardLayout>
   );
 }

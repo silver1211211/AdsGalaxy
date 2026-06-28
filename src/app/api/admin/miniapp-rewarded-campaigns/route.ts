@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { getAuthenticatedAdmin } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
@@ -37,6 +38,20 @@ function parseJsonArray(value: unknown) {
     return [];
   }
 }
+
+type MiniAppRewardedCampaignRow = RowDataPacket & {
+  id: number;
+  advertiser_id: number;
+  campaign_name: string;
+  advertiser_cpm_bid: string | number | null;
+  admin_cpm: string | number | null;
+  required_cpm: string | number | null;
+  categories: unknown;
+};
+
+type OwnerRow = RowDataPacket & {
+  telegram_id: string | number | null;
+};
 
 export async function GET(request: Request) {
   const admin = await getAuthenticatedAdmin();
@@ -118,29 +133,32 @@ export async function PATCH(request: Request) {
       return NextResponse.json({ error: "Valid campaign id is required" }, { status: 400 });
     }
 
-    const [beforeRows]: any = await pool.query("SELECT * FROM miniapp_rewarded_campaigns WHERE id = ?", [id]);
+    const [beforeRows] = await pool.query<MiniAppRewardedCampaignRow[]>("SELECT * FROM miniapp_rewarded_campaigns WHERE id = ?", [id]);
     if (beforeRows.length === 0) {
       return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
     }
 
     const selectedCategories = normalizeMiniAppCategories(parseJsonArray(beforeRows[0].categories));
-    const [[owner]]: any = await pool.query("SELECT telegram_id FROM users WHERE id = ?", [beforeRows[0].advertiser_id]);
+    const [[owner]] = await pool.query<OwnerRow[]>("SELECT telegram_id FROM users WHERE id = ?", [beforeRows[0].advertiser_id]);
 
     if (action === "approve") {
-      if (!Number.isFinite(adminCpm) || Number(adminCpm) <= 0) {
+      const approvalCpm = Number.isFinite(adminCpm)
+        ? Number(adminCpm)
+        : Number(beforeRows[0].admin_cpm || beforeRows[0].advertiser_cpm_bid || beforeRows[0].required_cpm || 0);
+      if (!Number.isFinite(approvalCpm) || approvalCpm <= 0) {
         return NextResponse.json({ error: "Admin CPM must be greater than 0 for approval" }, { status: 400 });
       }
       const cpmSettings = await getMiniAppPublisherCpmSettings();
-      validateAdvertiserCpmBid(Number(adminCpm), cpmSettings);
+      validateAdvertiserCpmBid(approvalCpm, cpmSettings);
       const categoryCpm = await requiredMiniAppCategoryCpm(selectedCategories);
-      if (Number(adminCpm) < categoryCpm.required_cpm) {
+      if (approvalCpm < categoryCpm.required_cpm) {
         return NextResponse.json({ error: `Admin CPM must be at least $${categoryCpm.required_cpm.toFixed(2)} for the selected categories` }, { status: 400 });
       }
       if (cpmMode === "fixed") {
         if (!Number.isFinite(fixedPublisherCpm) || Number(fixedPublisherCpm) <= 0) {
           return NextResponse.json({ error: "Fixed Publisher CPM must be greater than 0" }, { status: 400 });
         }
-        if (Number(fixedPublisherCpm) > maxPublisherCpm(Number(adminCpm), cpmSettings)) {
+        if (Number(fixedPublisherCpm) > maxPublisherCpm(approvalCpm, cpmSettings)) {
           return NextResponse.json({ error: "Fixed Publisher CPM exceeds the publisher share ceiling" }, { status: 400 });
         }
       }
@@ -155,8 +173,8 @@ export async function PATCH(request: Request) {
            creative_review_status = 'approved',
            creative_review_notes = ?,
            approved_at = COALESCE(approved_at, NOW())
-         WHERE id = ?`,
-        [adminCpm, adminCpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, categoryCpm.required_cpm, moderationNotes || null, id]
+          WHERE id = ?`,
+        [approvalCpm, approvalCpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, categoryCpm.required_cpm, moderationNotes || null, id]
       );
       await safeNotify(owner?.telegram_id, `✅ Your Mini App ad "${beforeRows[0].campaign_name}" was approved.`);
     } else if (action === "reject") {
@@ -166,9 +184,18 @@ export async function PATCH(request: Request) {
       await pool.query("UPDATE miniapp_rewarded_campaigns SET status = 'changes_required', creative_review_status = 'changes_required', creative_review_notes = ? WHERE id = ?", [moderationNotes || "Creative changes required", id]);
       await safeNotify(owner?.telegram_id, `⚠️ Your Mini App ad "${beforeRows[0].campaign_name}" requires changes.\n\n${moderationNotes || "Creative changes required"}`);
     } else if (action === "pause") {
-      await pool.query("UPDATE miniapp_rewarded_campaigns SET status = 'paused' WHERE id = ? AND status = 'approved'", [id]);
+      const [pauseResult] = await pool.query<any>("UPDATE miniapp_rewarded_campaigns SET status = 'paused' WHERE id = ? AND status = 'approved'", [id]);
+      if (pauseResult.affectedRows === 0) {
+        return NextResponse.json({ error: "Campaign must be in approved status to pause" }, { status: 400 });
+      }
     } else if (action === "resume") {
-      await pool.query("UPDATE miniapp_rewarded_campaigns SET status = 'approved' WHERE id = ? AND status = 'paused' AND remaining_budget > 0", [id]);
+      if (beforeRows[0].status !== "paused") {
+        return NextResponse.json({ error: "Campaign must be paused to resume" }, { status: 400 });
+      }
+      const [resumeResult] = await pool.query<any>("UPDATE miniapp_rewarded_campaigns SET status = 'approved' WHERE id = ? AND status = 'paused' AND remaining_budget > 0", [id]);
+      if (resumeResult.affectedRows === 0) {
+        return NextResponse.json({ error: "Campaign has no remaining budget — top up before resuming" }, { status: 400 });
+      }
     } else if (action === "update_cpm") {
       if (!Number.isFinite(adminCpm) || Number(adminCpm) <= 0) {
         return NextResponse.json({ error: "Admin CPM must be greater than 0" }, { status: 400 });
@@ -191,11 +218,42 @@ export async function PATCH(request: Request) {
         "UPDATE miniapp_rewarded_campaigns SET admin_cpm = ?, required_cpm = ?, cpm_mode = ?, fixed_publisher_cpm = ? WHERE id = ?",
         [adminCpm, categoryCpm.required_cpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, id]
       );
+    } else if (action === "edit") {
+      const campaign_name = cleanText(body.campaign_name) || beforeRows[0].campaign_name;
+      const title = cleanText(body.title);
+      const description = cleanText(body.description);
+      const image_url = cleanText(body.image_url) || null;
+      const landing_url = cleanText(body.landing_url) || null;
+      const cta_text = cleanText(body.cta_text) || null;
+      const title_color = cleanText(body.title_color) || null;
+      const body_color = cleanText(body.body_color) || null;
+      const categories = Array.isArray(body.categories) && body.categories.length > 0 ? JSON.stringify(body.categories) : beforeRows[0].categories;
+      const countries = Array.isArray(body.countries) && body.countries.length > 0 ? JSON.stringify(body.countries) : null;
+      const languages = Array.isArray(body.languages) && body.languages.length > 0 ? JSON.stringify(body.languages) : null;
+      const vpn_policy = cleanText(body.vpn_policy) || "allow_all";
+      const device_policy = cleanText(body.device_policy) || "all";
+      const os_policy = cleanText(body.os_policy) || "all";
+      const start_at = body.start_at || null;
+      const end_at = body.end_at || null;
+      const daily_budget_limit = body.daily_budget_limit ? Number(body.daily_budget_limit) : null;
+      const frequency_cap_per_user = body.frequency_cap_per_user ? Number(body.frequency_cap_per_user) : null;
+      await pool.query(
+        `UPDATE miniapp_rewarded_campaigns
+         SET campaign_name = ?, title = ?, description = ?, image_url = ?, landing_url = ?,
+             cta_text = ?, title_color = ?, body_color = ?, categories = ?, countries = ?,
+             languages = ?, vpn_policy = ?, device_policy = ?, os_policy = ?,
+             start_at = ?, end_at = ?, daily_budget_limit = ?, frequency_cap_per_user = ?
+         WHERE id = ?`,
+        [campaign_name, title, description, image_url, landing_url,
+         cta_text, title_color, body_color, categories, countries,
+         languages, vpn_policy, device_policy, os_policy,
+         start_at, end_at, daily_budget_limit, frequency_cap_per_user, id]
+      );
     } else {
       return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
 
-    const [afterRows]: any = await pool.query("SELECT * FROM miniapp_rewarded_campaigns WHERE id = ?", [id]);
+    const [afterRows] = await pool.query<MiniAppRewardedCampaignRow[]>("SELECT * FROM miniapp_rewarded_campaigns WHERE id = ?", [id]);
     await recordAdminActionAudit({
       adminId: admin.id,
       action: `miniapp_rewarded_${action}`,
@@ -220,7 +278,7 @@ export async function PATCH(request: Request) {
     });
 
     return NextResponse.json({ success: true, campaign: afterRows[0] });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Failed to update Mini App rewarded campaign" }, { status: 500 });
+  } catch (error: unknown) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Failed to update Mini App rewarded campaign" }, { status: 500 });
   }
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import {
   PlusCircle,
@@ -9,26 +9,24 @@ import {
   AlertCircle,
   Loader2,
   Globe,
-  Info,
   Type,
   Link as LinkIcon,
   DollarSign,
-  Send,
   Trash2,
   ChevronRight,
   ChevronLeft,
   ChevronDown,
   ArrowLeft,
   Bot,
+  ArrowUpRight,
   Eye,
+  Heart,
   MousePointer2,
-  Store,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
 import { useHeader } from "@/context/HeaderContext";
-import { useRouter, useParams } from "next/navigation";
-import Link from "next/link";
+import { useRouter, useParams, useSearchParams } from "next/navigation";
 import Modal from "@/components/ui/Modal";
 import { CAMPAIGN_CATEGORIES } from "@/lib/campaignCategories";
 
@@ -61,13 +59,14 @@ export default function NewCampaignWizardPage() {
   const { setTitle } = useHeader();
   const router = useRouter();
   const params = useParams<{ kind: string }>();
+  const searchParams = useSearchParams();
   const isBotCampaign = params.kind === "bot";
-  const defaultType = isBotCampaign ? "broadcast" : "views";
+  const presetType = searchParams.get("type");
+  const defaultType = isBotCampaign ? "broadcast" : (presetType === "clicks" ? "clicks" : "views");
 
   const [step, setStep] = useState(1);
   const [isLoading, setIsLoading] = useState(false);
-  const [isValidating, setIsValidating] = useState(false);
-  const [isVerified, setIsVerified] = useState(false);
+  const [showAdPreview, setShowAdPreview] = useState(false);
   const [error, setError] = useState("");
   const [limits, setLimits] = useState({
     min_cpm_views: 0.5,
@@ -76,7 +75,10 @@ export default function NewCampaignWizardPage() {
     max_cpm_clicks: 20.0,
     min_cpm_broadcast: 1.0,
     max_cpm_broadcast: 10.0,
-    min_budget: 10
+    min_budget: 10,
+    recommended_cpm_views: 1.5,
+    recommended_cpm_clicks: 5.0,
+    recommended_cpm_broadcast: 3.0,
   });
 
   // Form State
@@ -119,8 +121,42 @@ export default function NewCampaignWizardPage() {
 
   useEffect(() => {
     setTitle(isBotCampaign ? "Bot Campaign" : "Channel Campaign");
-    fetchSettings();
-  }, [setTitle]);
+    let cancelled = false;
+
+    apiFetch("/api/settings")
+      .then((res) => res.json().then((data) => ({ data, ok: res.ok })))
+      .then(({ data, ok }) => {
+        if (!ok || cancelled) return;
+        const recViews = parseFloat(data.recommended_cpm_views || "1.5");
+        const recClicks = parseFloat(data.recommended_cpm_clicks || "5.0");
+        const recBroadcast = parseFloat(data.recommended_cpm_broadcast || "3.0");
+        setLimits({
+          min_cpm_views: parseFloat(data.min_cpm_views || "0.5"),
+          max_cpm_views: parseFloat(data.max_cpm_views || "5.0"),
+          min_cpm_clicks: parseFloat(data.min_cpm_clicks || "2.0"),
+          max_cpm_clicks: parseFloat(data.max_cpm_clicks || "20.0"),
+          min_cpm_broadcast: parseFloat(data.min_cpm_broadcast || "1.0"),
+          max_cpm_broadcast: parseFloat(data.max_cpm_broadcast || "10.0"),
+          min_budget: parseFloat(data.min_campaign_budget || "10.0"),
+          recommended_cpm_views: recViews,
+          recommended_cpm_clicks: recClicks,
+          recommended_cpm_broadcast: recBroadcast,
+        });
+        const defaultCpm = isBotCampaign
+          ? recBroadcast.toString()
+          : presetType === "clicks" ? recClicks.toString() : recViews.toString();
+        setFormData(prev => ({
+          ...prev,
+          cpm: defaultCpm,
+          budget: data.min_campaign_budget || "10.0"
+        }));
+      })
+      .catch((err) => console.error("Failed to fetch settings:", err));
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isBotCampaign, setTitle]);
 
   useEffect(() => {
     if (!categoryDropdownOpen) return;
@@ -152,32 +188,6 @@ export default function NewCampaignWizardPage() {
       .catch(() => setRecommendedInventory([]));
   }, [step, isBotCampaign, formData.category, formData.countries, formData.languages, formData.budget]);
 
-  const fetchSettings = async () => {
-    try {
-      const res = await apiFetch("/api/settings");
-      const data = await res.json();
-      if (res.ok) {
-        setLimits({
-          min_cpm_views: parseFloat(data.min_cpm_views || "0.5"),
-          max_cpm_views: parseFloat(data.max_cpm_views || "5.0"),
-          min_cpm_clicks: parseFloat(data.min_cpm_clicks || "2.0"),
-          max_cpm_clicks: parseFloat(data.max_cpm_clicks || "20.0"),
-          min_cpm_broadcast: parseFloat(data.min_cpm_broadcast || "1.0"),
-          max_cpm_broadcast: parseFloat(data.max_cpm_broadcast || "10.0"),
-          min_budget: parseFloat(data.min_campaign_budget || "10.0")
-        });
-        // Set defaults
-        setFormData(prev => ({
-          ...prev,
-          cpm: isBotCampaign ? (data.min_cpm_broadcast || "1.0") : (data.min_cpm_views || "0.5"),
-          budget: data.min_campaign_budget || "10.0"
-        }));
-      }
-    } catch (err) {
-      console.error("Failed to fetch settings:", err);
-    }
-  };
-
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -193,38 +203,6 @@ export default function NewCampaignWizardPage() {
     }
   };
 
-  const validateMessage = async () => {
-    if (!formData.message_text) return;
-    setIsValidating(true);
-    setError("");
-    try {
-      const validateData = new FormData();
-      validateData.append("text", formData.message_text);
-      validateData.append("parse_mode", formData.parse_mode);
-      validateData.append("link", formData.link);
-      validateData.append("button_text", formData.button_text);
-      if (image) {
-        validateData.append("image", image);
-      }
-
-      const res = await apiFetch("/api/advertiser/campaigns/validate", {
-        method: "POST",
-        body: validateData,
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setIsVerified(true);
-      } else {
-        setError(data.error);
-        setIsVerified(false);
-      }
-    } catch (err) {
-      setError("Failed to connect to validation server");
-    } finally {
-      setIsValidating(false);
-    }
-  };
-
   const checkRestrictedContent = (text: string) => {
     if (formData.type !== "clicks") return false;
     const hasUsername = /@\w+/.test(text);
@@ -235,15 +213,6 @@ export default function NewCampaignWizardPage() {
   const hasValidCampaignObjective = () => {
     if (isBotCampaign) return formData.type === "broadcast";
     return formData.type === "views" || formData.type === "clicks";
-  };
-
-  const selectChannelObjective = (type: "views" | "clicks") => {
-    setFormData({
-      ...formData,
-      type,
-      cpm: type === "views" ? limits.min_cpm_views.toString() : limits.min_cpm_clicks.toString(),
-    });
-    setIsVerified(false);
   };
 
   const handleSubmit = async () => {
@@ -259,10 +228,6 @@ export default function NewCampaignWizardPage() {
 
     if (!hasValidCampaignObjective()) {
       setError(isBotCampaign ? "Bot campaign format is required" : "Please select View Campaign or Click Campaign");
-      return;
-    }
-    if (!isVerified) {
-      setError("Please validate your message formatting first");
       return;
     }
     if (!formData.category) {
@@ -290,11 +255,6 @@ export default function NewCampaignWizardPage() {
       setError("Frequency cap must be a positive whole number.");
       return;
     }
-    if (formData.direct_placement_mode === "direct" && formData.direct_inventory_scope === "inventory" && selectedInventoryIds.length === 0) {
-      setError("Select at least one inventory item or choose a category, country, or language group.");
-      return;
-    }
-
     setIsLoading(true);
     setError("");
 
@@ -310,8 +270,10 @@ export default function NewCampaignWizardPage() {
     if (image) {
       submitData.append("image", image);
     }
+    submitData.set("direct_placement_mode", "network");
+    submitData.set("direct_inventory_scope", "network");
     submitData.append("direct_inventory_type", isBotCampaign ? "bot" : "channel");
-    submitData.append("direct_inventory_ids", JSON.stringify(selectedInventoryIds));
+    submitData.append("direct_inventory_ids", JSON.stringify([]));
 
     try {
       const res = await apiFetch("/api/advertiser/campaigns", {
@@ -324,7 +286,7 @@ export default function NewCampaignWizardPage() {
       } else {
         setError(data.error);
       }
-    } catch (err) {
+    } catch {
       setError("Network error. Please try again.");
     } finally {
       setIsLoading(false);
@@ -373,29 +335,83 @@ export default function NewCampaignWizardPage() {
     setFormData((prev) => ({ ...prev, direct_placement_mode: "direct", direct_inventory_scope: "inventory" }));
   };
 
+  const advancedTextFields: Array<{ label: string; key: "countries" | "languages"; placeholder: string; hint: string }> = [
+    { label: "Countries", key: "countries", placeholder: "e.g. US, NG, GB", hint: "Comma-separated ISO codes" },
+    { label: "Languages", key: "languages", placeholder: "e.g. en, fr, es", hint: "Comma-separated language codes" },
+  ];
+
+  const policyFields: Array<{ label: string; key: "vpn_policy" | "device_policy" | "os_policy"; opts: Array<[string, string]> }> = [
+    { label: "VPN Traffic", key: "vpn_policy", opts: [["allow_all", "Allow all"], ["prefer_non_vpn", "Prefer non-VPN"], ["exclude_vpn", "Exclude VPN"]] },
+    { label: "Device Type", key: "device_policy", opts: [["all", "All devices"], ["mobile", "Mobile only"], ["desktop", "Desktop only"]] },
+    { label: "Platform / OS", key: "os_policy", opts: [["all", "All platforms"], ["android", "Android"], ["ios", "iOS"], ["desktop_web", "Desktop/Web"]] },
+  ];
+
   return (
     <DashboardLayout type="advertiser">
       <div className="max-w-3xl mx-auto space-y-8 pb-12">
-        <Link
-          href="/advertiser/campaigns/new"
+        <button
+          onClick={() => router.back()}
           className="inline-flex items-center gap-2 text-xs font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 transition-colors"
         >
           <ArrowLeft size={14} />
-          Back to campaign types
-        </Link>
+          Back
+        </button>
 
-        {/* Progress Bar */}
-        <div className="flex items-center gap-2">
-          {[1, 2, 3].map((s) => (
-            <div
-              key={s}
-              className={cn(
-                "h-1.5 flex-1 rounded-full transition-all duration-500",
-                step >= s ? "bg-blue-600" : "bg-slate-100"
-              )}
-            />
-          ))}
+        <div className="space-y-2">
+          <div className="inline-flex items-center gap-2 rounded-full bg-[#0c9de8] px-4 py-2 text-xs font-black uppercase tracking-widest text-white shadow-sm">
+            {isBotCampaign ? <Bot size={14} /> : <Globe size={14} />}
+            {isBotCampaign ? "Bot Campaign" : "Channel Campaign"}
+          </div>
+          <h1 className="text-3xl font-black uppercase tracking-tight text-slate-900">
+            {isBotCampaign ? "Create Bot Ad" : "Create Channel Ad"}
+          </h1>
+          <p className="text-sm font-semibold text-slate-500">
+            Build your campaign creative, targeting, and budget.
+          </p>
         </div>
+
+        {/* Step Bar */}
+        {(() => {
+          const labels = isBotCampaign
+            ? ["Campaign", "Ad Creative", "Budget"]
+            : ["Campaign", "Ad Creative", "Budget"];
+          return (
+            <div className="flex items-center gap-0">
+              {labels.map((label, i) => {
+                const idx = i + 1;
+                const done = step > idx;
+                const active = step === idx;
+                return (
+                  <Fragment key={label}>
+                    <div className="flex flex-col items-center gap-1.5">
+                      <div
+                        className={cn(
+                          "w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-black transition-all",
+                          done || active ? "text-white" : "bg-slate-100 text-slate-400"
+                        )}
+                        style={done || active ? { background: "linear-gradient(135deg,#0c9de8,#0b7ec9)" } : {}}
+                      >
+                        {done ? <Check size={14} /> : idx}
+                      </div>
+                      <span className={cn(
+                        "text-[9px] font-black uppercase tracking-wide whitespace-nowrap",
+                        active ? "text-[#0c9de8]" : done ? "text-slate-400" : "text-slate-300"
+                      )}>
+                        {label}
+                      </span>
+                    </div>
+                    {i < labels.length - 1 && (
+                      <div
+                        className="flex-1 h-0.5 mb-5 mx-1.5"
+                        style={{ background: step > idx ? "#0c9de8" : "#e2e8f0" }}
+                      />
+                    )}
+                  </Fragment>
+                );
+              })}
+            </div>
+          );
+        })()}
 
         <Modal
           isOpen={!!error}
@@ -406,148 +422,217 @@ export default function NewCampaignWizardPage() {
           {error}
         </Modal>
 
-        {/* Step 1: Basic Info */}
-        {step === 1 && (
-          <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4">
-            <div className="space-y-4">
-              <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tight">
-                {isBotCampaign ? "Bot Campaign Details" : "Channel Campaign Details"}
-              </h2>
-              <p className="text-slate-500 text-sm">Tell us about your campaign basics.</p>
-            </div>
+        {showAdPreview && (
+          <div className="fixed inset-0 z-[590] flex items-center justify-center p-4 sm:p-6">
+            <button
+              type="button"
+              aria-label="Close ad preview"
+              onClick={() => setShowAdPreview(false)}
+              className="absolute inset-0 bg-slate-950/60 backdrop-blur-sm"
+            />
+            <div className="relative w-full max-w-xl overflow-hidden rounded-[2rem] border border-slate-200 bg-white shadow-2xl">
+              <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Ad Preview</p>
+                  <p className="mt-1 text-sm font-black text-slate-900">{isBotCampaign ? "Bot sponsored message" : "Channel sponsored post"}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAdPreview(false)}
+                  className="rounded-xl border border-slate-200 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-500 hover:border-slate-300 hover:bg-slate-50"
+                >
+                  Close
+                </button>
+              </div>
+              <div
+                className="max-h-[78vh] overflow-y-auto bg-[#aad18a] p-4 sm:p-6"
+                style={{
+                  backgroundImage:
+                    "radial-gradient(circle at 12px 12px, rgba(255,255,255,.22) 0 1px, transparent 1.5px), radial-gradient(circle at 34px 30px, rgba(54,115,54,.18) 0 1px, transparent 1.5px)",
+                  backgroundSize: "46px 46px",
+                }}
+              >
+                <div className="mx-auto max-w-[430px]">
+                  <div className="overflow-hidden rounded-2xl rounded-bl-md bg-white shadow-lg">
+                    {imagePreview && (
+                      <img
+                        src={imagePreview}
+                        alt="Ad preview"
+                        className="aspect-video w-full object-cover"
+                      />
+                    )}
+                    <div className="space-y-3 p-4">
+                      <p className="whitespace-pre-wrap text-[15px] font-medium leading-relaxed text-slate-950 sm:text-base">
+                        {formData.message_text || "Your advertisement message will appear here."}
+                      </p>
 
-            <div className="space-y-6">
-              <div className="space-y-3">
-                <label className="text-xs font-black uppercase tracking-widest text-slate-400">Campaign Name</label>
-                <div className="relative">
-                  <Type size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
-                  <input
-                    type="text"
-                    value={formData.name}
-                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    placeholder="e.g. Summer Crypto Promotion"
-                    maxLength={50}
-                    className="w-full pl-12 pr-6 py-3 bg-white border border-slate-200 rounded-2xl focus:border-blue-500 outline-none font-bold text-slate-900 transition-all"
-                  />
+                      {/* Reactions row — channels only */}
+                      {!isBotCampaign && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {[
+                            { emoji: "👍", count: "2.1K" },
+                            { emoji: "❤️", count: "1.4K" },
+                            { emoji: "🔥", count: "891" },
+                            { emoji: "🎉", count: "543" },
+                            { emoji: "😍", count: "312" },
+                            { emoji: "😂", count: "178" },
+                          ].map(({ emoji, count }) => (
+                            <span
+                              key={emoji}
+                              className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-[12px] font-bold text-slate-700"
+                            >
+                              {emoji} {count}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Views + time */}
+                      <div className="flex items-center justify-end gap-2 text-[11px] font-medium text-slate-400">
+                        <Eye size={13} className="text-slate-400" />
+                        <span className="font-bold text-slate-500">22.5K</span>
+                        <span>1:59 PM</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="mt-2 grid gap-2">
+                    {[formData.button_text || "Sign Up", "Advertise with Ads galaxy"].map((label) => (
+                      <button
+                        key={label}
+                        type="button"
+                        className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#5f9f48]/70 px-4 py-3 text-center text-base font-bold text-white shadow-sm backdrop-blur transition-colors hover:bg-[#4d8d3a]/80"
+                      >
+                        <span className="min-w-0 truncate">{label}</span>
+                        <ArrowUpRight size={18} className="shrink-0" />
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
+            </div>
+          </div>
+        )}
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-3">
-                  <label className="text-xs font-black uppercase tracking-widest text-slate-400">Category</label>
-                  <div className="relative" ref={categoryDropdownRef}>
-                    <Globe size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 z-10 pointer-events-none" />
-                    <button
-                      type="button"
-                      onClick={() => setCategoryDropdownOpen((prev) => !prev)}
-                      className="w-full pl-12 pr-6 py-3 bg-white border border-slate-200 rounded-2xl focus:border-blue-500 outline-none font-bold text-slate-900 cursor-pointer flex items-center justify-between text-left"
-                    >
-                      <span className={cn(!formData.category && "text-slate-400")}>
-                        {formData.category || "Select category"}
-                      </span>
-                      <ChevronDown size={18} className={cn("text-slate-400 transition-transform shrink-0", categoryDropdownOpen && "rotate-180")} />
-                    </button>
+        {/* Step 1: Basic Info */}
+        {step === 1 && (
+          <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4">
 
-                    {categoryDropdownOpen && (
-                      <div className="absolute left-0 right-0 top-[calc(100%+8px)] z-30 max-h-64 overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-xl">
-                        {CAMPAIGN_CATEGORIES.map((cat) => (
-                          <button
-                            key={cat}
-                            type="button"
-                            onClick={() => {
-                              setFormData({ ...formData, category: cat });
-                              setCategoryDropdownOpen(false);
-                            }}
-                            className={cn(
-                              "w-full px-4 py-3 text-left text-sm font-bold transition-colors hover:bg-slate-50",
-                              formData.category === cat ? "bg-blue-50 text-blue-600" : "text-slate-700"
-                            )}
-                          >
-                            {cat}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
+            {/* Campaign type pill */}
+            <div className="inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-[11px] font-black uppercase tracking-widest text-white" style={{ background: "#0c9de8" }}>
+              {isBotCampaign ? <Bot size={13} /> : formData.type === "views" ? <Eye size={13} /> : <MousePointer2 size={13} />}
+              {isBotCampaign ? "Bot Campaign" : formData.type === "views" ? "Views Campaign" : "Click Campaign"}
+            </div>
 
-                {isBotCampaign ? (
-                  <div className="flex items-center gap-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3">
-                    <Bot size={20} className="text-emerald-600 shrink-0" />
-                    <p className="text-xs font-bold text-emerald-700 leading-relaxed">
-                      Broadcast format — your post will be sent directly to bot subscribers.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    <label className="text-xs font-black uppercase tracking-widest text-slate-400">Campaign Objective</label>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {/* Campaign Name card */}
+            <div className="rounded-2xl border border-slate-100 bg-white shadow-sm p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                  Campaign Name <span className="text-red-400">*</span>
+                </label>
+                <span className={cn(
+                  "text-[10px] font-bold",
+                  formData.name.length > 0 && formData.name.trim().length < 3 ? "text-red-400" : "text-slate-300"
+                )}>
+                  {formData.name.length}/50
+                </span>
+              </div>
+              <div className="relative">
+                <Type size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" />
+                <input
+                  type="text"
+                  value={formData.name}
+                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  placeholder="e.g. Summer Crypto Promotion"
+                  maxLength={50}
+                  className={cn(
+                    "w-full pl-10 pr-4 py-3 bg-slate-50 border rounded-xl outline-none text-sm font-semibold text-slate-900 transition-all placeholder:font-normal placeholder:text-slate-400",
+                    formData.name.length > 0 && formData.name.trim().length < 3
+                      ? "border-red-300 focus:border-red-400"
+                      : "border-slate-200 focus:border-[#0c9de8]"
+                  )}
+                />
+              </div>
+              {formData.name.length > 0 && formData.name.trim().length < 3 && (
+                <p className="text-[11px] font-bold text-red-500 flex items-center gap-1">
+                  <AlertCircle size={11} /> Minimum 3 characters required
+                </p>
+              )}
+            </div>
+
+            {/* Category card */}
+            <div className="rounded-2xl border border-slate-100 bg-white shadow-sm p-5 space-y-3">
+              <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                Category <span className="text-red-400">*</span>
+              </label>
+              <div className="relative" ref={categoryDropdownRef}>
+                <Globe size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 z-10 pointer-events-none" />
+                <button
+                  type="button"
+                  onClick={() => setCategoryDropdownOpen((prev) => !prev)}
+                  className={cn(
+                    "w-full pl-10 pr-4 py-3 bg-slate-50 border rounded-xl text-sm font-semibold cursor-pointer flex items-center justify-between text-left transition-colors",
+                    formData.category ? "text-slate-900 border-slate-200" : "text-slate-400 border-slate-200",
+                    !formData.category && formData.name.trim().length >= 3 ? "border-amber-300 bg-amber-50/40" : "",
+                    categoryDropdownOpen ? "border-[#0c9de8]" : ""
+                  )}
+                >
+                  {formData.category || "Select a category…"}
+                  <ChevronDown size={16} className={cn("text-slate-400 transition-transform shrink-0", categoryDropdownOpen && "rotate-180")} />
+                </button>
+                {categoryDropdownOpen && (
+                  <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-30 max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl">
+                    {CAMPAIGN_CATEGORIES.map((cat) => (
                       <button
+                        key={cat}
                         type="button"
-                        onClick={() => selectChannelObjective("views")}
+                        onClick={() => { setFormData({ ...formData, category: cat }); setCategoryDropdownOpen(false); }}
                         className={cn(
-                          "flex min-h-28 items-start gap-3 rounded-2xl border bg-white p-4 text-left transition-all",
-                          formData.type === "views" ? "border-blue-200 bg-blue-50 shadow-sm" : "border-slate-100 hover:border-slate-200"
+                          "w-full px-4 py-2.5 text-left text-sm font-semibold transition-colors",
+                          formData.category === cat ? "bg-blue-50 text-[#0c9de8] font-bold" : "text-slate-700 hover:bg-slate-50"
                         )}
                       >
-                        <span className={cn(
-                          "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl",
-                          formData.type === "views" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-400"
-                        )}>
-                          <Eye size={20} />
-                        </span>
-                        <span className="space-y-1">
-                          <span className="block text-sm font-black uppercase tracking-tight text-slate-900">View Campaign</span>
-                          <span className="block text-xs font-semibold leading-relaxed text-slate-500">Pay for channel post views.</span>
-                        </span>
+                        {cat}
                       </button>
-
-                      <button
-                        type="button"
-                        onClick={() => selectChannelObjective("clicks")}
-                        className={cn(
-                          "flex min-h-28 items-start gap-3 rounded-2xl border bg-white p-4 text-left transition-all",
-                          formData.type === "clicks" ? "border-blue-200 bg-blue-50 shadow-sm" : "border-slate-100 hover:border-slate-200"
-                        )}
-                      >
-                        <span className={cn(
-                          "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl",
-                          formData.type === "clicks" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-400"
-                        )}>
-                          <MousePointer2 size={20} />
-                        </span>
-                        <span className="space-y-1">
-                          <span className="block text-sm font-black uppercase tracking-tight text-slate-900">Click Campaign</span>
-                          <span className="block text-xs font-semibold leading-relaxed text-slate-500">Pay for button/link clicks.</span>
-                        </span>
-                      </button>
-                    </div>
+                    ))}
                   </div>
                 )}
               </div>
+              {!formData.category && formData.name.trim().length >= 3 && (
+                <p className="text-[11px] font-bold text-amber-500 flex items-center gap-1">
+                  <AlertCircle size={11} /> Select a category to continue
+                </p>
+              )}
+            </div>
 
-              <div className="p-4 bg-blue-50 border border-blue-100 rounded-2xl flex gap-3 text-blue-700">
-                <Info size={20} className="shrink-0" />
-                <p className="text-xs font-bold leading-relaxed">
-                  {formData.type === 'views'
-                    ? "Select VIEWS if you want broad reach and brand recognition across channels."
-                    : formData.type === 'clicks'
-                    ? "Select CLICKS if you want direct conversions and user engagement."
-                    : "Your post will be sent to bot users. Perfect if you are targeting bot users specifically."}
+            {/* Objective / format info card */}
+            <div className="rounded-2xl border bg-white shadow-sm p-5 flex items-center gap-4"
+              style={{ borderColor: "#e0f2fe" }}>
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl" style={{ background: "#e0f2fe" }}>
+                {isBotCampaign ? <Bot size={20} className="text-[#0c9de8]" /> : formData.type === "views" ? <Eye size={20} className="text-[#0c9de8]" /> : <MousePointer2 size={20} className="text-[#0c9de8]" />}
+              </div>
+              <div>
+                <p className="text-sm font-black text-slate-800">
+                  {isBotCampaign ? "Broadcast" : formData.type === "views" ? "Pay per View" : "Pay per Click"}
+                </p>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {isBotCampaign
+                    ? "Your post is sent directly to bot subscribers."
+                    : formData.type === "views"
+                    ? "You pay for every 1,000 channel post views — great for reach."
+                    : "You pay for each button or link click — great for conversions."}
                 </p>
               </div>
             </div>
 
             <button
-              onClick={() => {
-                if (!hasValidCampaignObjective()) {
-                  setError(isBotCampaign ? "Bot campaign format is required" : "Please select View Campaign or Click Campaign");
-                  return;
-                }
-                setStep(2);
-              }}
-              disabled={!formData.name || !hasValidCampaignObjective()}
-              className="w-full py-4 bg-blue-600 text-white rounded-2xl text-sm font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:bg-slate-100 disabled:text-slate-400 transition-all active:scale-[0.98]"
+              onClick={() => setStep(2)}
+              disabled={
+                formData.name.trim().length < 3 ||
+                !formData.category ||
+                !hasValidCampaignObjective()
+              }
+              className="w-full py-4 text-white rounded-2xl text-sm font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:bg-slate-100 disabled:text-slate-400 transition-all active:scale-[0.98]"
+              style={{ background: (formData.name.trim().length < 3 || !formData.category || !hasValidCampaignObjective()) ? undefined : "#0c9de8" }}
             >
               Next Step <ChevronRight size={18} />
             </button>
@@ -556,174 +641,175 @@ export default function NewCampaignWizardPage() {
 
         {/* Step 2: Content */}
         {step === 2 && (
-          <div className="space-y-8 animate-in fade-in slide-in-from-right-4">
-            <div className="space-y-4">
+          <div className="space-y-5 animate-in fade-in slide-in-from-right-4">
+            <div>
               <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tight">Ad Content</h2>
-              <p className="text-slate-500 text-sm">Design your message and upload an image.</p>
+              <p className="text-slate-400 text-sm mt-1">Write your message, upload an image, and set your link.</p>
             </div>
 
-            <div className="space-y-6">
-              <div className="space-y-3">
-                <div className="flex justify-between items-end">
-                  <label className="text-xs font-black uppercase tracking-widest text-slate-400">Message Text</label>
-                  <span className="text-[10px] font-bold text-slate-400">{formData.message_text.length}/1000</span>
-                </div>
-                <textarea
-                  value={formData.message_text}
-                  onChange={(e) => {
-                    setFormData({ ...formData, message_text: e.target.value.slice(0, 1000) });
-                    setIsVerified(false);
-                  }}
-                  rows={6}
-                  placeholder="Your advertisement message here..."
-                  className={cn(
-                    "w-full px-6 py-4 bg-white border rounded-2xl focus:border-blue-500 outline-none font-bold text-slate-900 transition-all resize-none",
-                    checkRestrictedContent(formData.message_text) ? "border-red-500 bg-red-50/10" : "border-slate-200"
-                  )}
-                />
-                {checkRestrictedContent(formData.message_text) && (
-                  <div className="flex items-center gap-1.5 text-red-500 mt-1 animate-pulse">
-                    <AlertCircle size={14} />
-                    <span className="text-[10px] font-black uppercase tracking-tight">Click campaigns cannot contain @usernames or links</span>
-                  </div>
+            {/* Click campaign rule banner */}
+            {formData.type === "clicks" && (
+              <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
+                <AlertCircle size={16} className="text-amber-500 shrink-0 mt-0.5" />
+                <p className="text-xs font-semibold text-amber-700 leading-relaxed">
+                  <span className="font-black">Click campaigns:</span> your message text must not contain any URLs or @usernames. Put your destination link in the Campaign Link field below — only one URL per ad is allowed.
+                </p>
+              </div>
+            )}
+
+            {/* ── Message ── */}
+            <div className="rounded-2xl border border-slate-100 bg-white p-5 space-y-4 shadow-sm">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Message Text <span className="text-red-400">*</span></p>
+                <span className="text-[10px] font-bold text-slate-300">{formData.message_text.length}/1000</span>
+              </div>
+
+              <textarea
+                value={formData.message_text}
+                onChange={(e) => setFormData({ ...formData, message_text: e.target.value.slice(0, 1000) })}
+                rows={6}
+                placeholder="Your advertisement message here…"
+                className={cn(
+                  "w-full px-4 py-3.5 bg-slate-50 border rounded-xl focus:border-[#0c9de8] outline-none text-sm font-medium text-slate-900 transition-all resize-none",
+                  checkRestrictedContent(formData.message_text) ? "border-red-400 bg-red-50/30" : "border-slate-200"
                 )}
-                <div className="space-y-2">
-                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Select parse mode</span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => { setFormData({ ...formData, parse_mode: 'markdown' }); setIsVerified(false); }}
-                      className={cn(
-                        "px-3 py-1.5 rounded-xl text-[10px] font-black uppercase border transition-none",
-                        formData.parse_mode === 'markdown' ? "bg-blue-50 border-blue-200 text-blue-600" : "bg-white border-slate-100 text-slate-400"
-                      )}
-                    >
-                      Markdown
-                    </button>
-                    <button
-                      onClick={() => { setFormData({ ...formData, parse_mode: 'html' }); setIsVerified(false); }}
-                      className={cn(
-                        "px-3 py-1.5 rounded-xl text-[10px] font-black uppercase border transition-none",
-                        formData.parse_mode === 'html' ? "bg-blue-50 border-blue-200 text-blue-600" : "bg-white border-slate-100 text-slate-400"
-                      )}
-                    >
-                      HTML
-                    </button>
-                    <button
-                      onClick={() => { setFormData({ ...formData, parse_mode: 'none' }); setIsVerified(false); }}
-                      className={cn(
-                        "px-3 py-1.5 rounded-xl text-[10px] font-black uppercase border transition-none",
-                        formData.parse_mode === 'none' ? "bg-blue-50 border-blue-200 text-blue-600" : "bg-white border-slate-100 text-slate-400"
-                      )}
-                    >
-                      None
-                    </button>
-                    <div className="flex-1" />
-                    <button
-                      onClick={validateMessage}
-                      disabled={!formData.message_text || isValidating || isVerified}
-                      className={cn(
-                        "flex items-center gap-2 px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-none",
-                        isVerified ? "bg-emerald-50 text-emerald-600" : "bg-blue-600 text-white disabled:bg-slate-100 disabled:text-slate-400"
-                      )}
-                    >
-                      {isValidating ? <Loader2 size={14} className="animate-spin" /> : (isVerified ? <Check size={14} /> : <Send size={14} />)}
-                      {isVerified ? "Validated" : "Validate"}
-                    </button>
-                  </div>
+              />
+
+              {checkRestrictedContent(formData.message_text) && (
+                <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2">
+                  <AlertCircle size={13} className="text-red-500 shrink-0" />
+                  <p className="text-[11px] font-bold text-red-600">Remove all URLs and @usernames from the message text — only the Campaign Link field may contain your URL.</p>
                 </div>
+              )}
+
+              {/* Parse mode */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-300 mr-1">Format:</p>
+                {(["markdown", "html", "none"] as const).map(mode => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setFormData({ ...formData, parse_mode: mode })}
+                    className={cn(
+                      "px-3 py-1.5 rounded-lg text-[10px] font-black uppercase border transition-colors",
+                      formData.parse_mode === mode ? "bg-[#0c9de8] border-[#0c9de8] text-white" : "bg-white border-slate-200 text-slate-400 hover:border-slate-300"
+                    )}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Image upload ── */}
+            <div className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm space-y-3">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Ad Image <span className="text-slate-300 font-medium normal-case">· optional · max 1 MB · PNG / JPG</span></p>
+              <div
+                onClick={() => fileInputRef.current?.click()}
+                className={cn(
+                  "relative border-2 border-dashed rounded-xl h-44 flex flex-col items-center justify-center gap-3 cursor-pointer group transition-all",
+                  imagePreview ? "border-[#0c9de8]/40 bg-blue-50/20" : "border-slate-200 hover:border-[#0c9de8]/50 hover:bg-slate-50"
+                )}
+              >
+                {imagePreview ? (
+                  <>
+                    <img src={imagePreview} alt="Preview" className="h-full w-full object-contain p-2 rounded-xl" />
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); setImage(null); setImagePreview(null); }}
+                      className="absolute top-3 right-3 p-1.5 bg-white shadow-md text-red-500 rounded-lg hover:bg-red-50 transition-colors"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-11 h-11 bg-slate-100 rounded-xl flex items-center justify-center text-slate-400 group-hover:text-[#0c9de8] group-hover:bg-blue-50 transition-colors">
+                      <Upload size={22} />
+                    </div>
+                    <p className="text-sm font-black text-slate-500 group-hover:text-slate-700 transition-colors">Click to upload image</p>
+                  </>
+                )}
+                <input ref={fileInputRef} type="file" className="hidden" accept="image/png,image/jpeg,image/jpg" onChange={handleImageChange} />
+              </div>
+            </div>
+
+            {/* ── Link + Postback + Button ── */}
+            <div className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm space-y-4">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Destination & Button</p>
+
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-500">Campaign Link <span className="text-red-400">*</span></label>
+                <div className="relative">
+                  <LinkIcon size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="url"
+                    value={formData.link}
+                    onChange={(e) => setFormData({ ...formData, link: e.target.value })}
+                    placeholder="https://t.me/yourchannel"
+                    className={cn(
+                      "w-full pl-10 pr-4 py-3 bg-slate-50 border rounded-xl focus:border-[#0c9de8] outline-none text-sm font-medium text-slate-900 transition-all",
+                      formData.link && !isValidUrl(formData.link) ? "border-red-300" : "border-slate-200"
+                    )}
+                  />
+                </div>
+                {formData.link && !isValidUrl(formData.link) && (
+                  <p className="text-[11px] font-bold text-red-500 px-1">Enter a valid URL (https://…)</p>
+                )}
               </div>
 
-              <div className="space-y-3">
-                <label className="text-xs font-black uppercase tracking-widest text-slate-400">Ad Image (Optional)</label>
-                <div
-                  onClick={() => fileInputRef.current?.click()}
-                  className={cn(
-                    "relative border-2 border-dashed rounded-2xl h-48 flex flex-col items-center justify-center gap-3 transition-all cursor-pointer group",
-                    imagePreview ? "border-blue-200 bg-blue-50/10" : "border-slate-100 hover:border-blue-200 hover:bg-slate-50"
-                  )}
-                >
-                  {imagePreview ? (
-                    <>
-                      <img src={imagePreview} alt="Preview" className="h-full w-full object-contain p-2 rounded-2xl" />
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setImage(null); setImagePreview(null); }}
-                        className="absolute top-4 right-4 p-2 bg-white/80 backdrop-blur-sm text-red-600 rounded-xl hover:bg-white transition-all shadow-sm"
-                      >
-                        <Trash2 size={18} />
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center text-slate-300 group-hover:text-blue-500 shadow-sm transition-colors">
-                        <Upload size={24} />
-                      </div>
-                      <div className="text-center">
-                        <p className="text-sm font-black text-slate-900 uppercase tracking-tight">Click to upload</p>
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Max 1MB • PNG/JPG</p>
-                      </div>
-                    </>
-                  )}
-                  <input ref={fileInputRef} type="file" className="hidden" accept="image/*" onChange={handleImageChange} />
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-500">Postback URL <span className="text-slate-300 font-normal">· optional</span></label>
+                <div className="relative">
+                  <LinkIcon size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="url"
+                    value={formData.postback_url}
+                    onChange={(e) => setFormData({ ...formData, postback_url: e.target.value })}
+                    placeholder="https://yourserver.com/postback?click_id={click_id}"
+                    className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-[#0c9de8] outline-none text-sm font-medium text-slate-900 transition-all"
+                  />
                 </div>
+                <p className="text-[10px] text-slate-400 px-1">Must be HTTPS and include <span className="font-mono font-bold">{"{click_id}"}</span> if used.</p>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-3">
-                  <label className="text-xs font-black uppercase tracking-widest text-slate-400">Campaign Link</label>
-                  <div className="relative">
-                    <LinkIcon size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
-                    <input
-                      type="url"
-                      value={formData.link}
-                      onChange={(e) => setFormData({ ...formData, link: e.target.value })}
-                      placeholder="https://t.me/yourchannel"
-                      className="w-full pl-12 pr-6 py-3 bg-white border border-slate-200 rounded-2xl focus:border-blue-500 outline-none font-bold text-slate-900 transition-all text-sm"
-                    />
-                  </div>
-                </div>
-                <div className="space-y-3">
-                  <label className="text-xs font-black uppercase tracking-widest text-slate-400">Postback URL</label>
-                  <div className="relative">
-                    <LinkIcon size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
-                    <input
-                      type="url"
-                      value={formData.postback_url}
-                      onChange={(e) => setFormData({ ...formData, postback_url: e.target.value })}
-                      placeholder="https://advertiser.com/postback?click_id={click_id}"
-                      className="w-full pl-12 pr-6 py-3 bg-white border border-slate-200 rounded-2xl focus:border-blue-500 outline-none font-bold text-slate-900 transition-all text-sm"
-                    />
-                  </div>
-                  <p className="text-[10px] font-bold text-slate-400">Optional. Must be HTTPS and include {"{click_id}"}.</p>
-                </div>
-                <div className="space-y-3">
-                  <label className="text-xs font-black uppercase tracking-widest text-slate-400">Button Text</label>
-                  <div className="relative">
-                    <Check size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 z-10 pointer-events-none" />
-                    <select
-                      value={formData.button_text}
-                      onChange={(e) => setFormData({ ...formData, button_text: e.target.value })}
-                      className="w-full pl-12 pr-6 py-3 bg-white border border-slate-200 rounded-2xl focus:border-blue-500 outline-none font-bold text-slate-900 appearance-none cursor-pointer"
-                    >
-                      <option value="" disabled>Select button text</option>
-                      {BUTTON_TEXTS.map(b => <option key={b} value={b}>{b}</option>)}
-                    </select>
-                  </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-500">Button Text <span className="text-red-400">*</span></label>
+                <div className="relative">
+                  <Check size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none z-10" />
+                  <select
+                    value={formData.button_text}
+                    onChange={(e) => setFormData({ ...formData, button_text: e.target.value })}
+                    className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-[#0c9de8] outline-none text-sm font-medium text-slate-900 appearance-none cursor-pointer"
+                  >
+                    <option value="" disabled>Select button label…</option>
+                    {BUTTON_TEXTS.map(b => <option key={b} value={b}>{b}</option>)}
+                  </select>
                 </div>
               </div>
             </div>
 
-            <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={() => setShowAdPreview(true)}
+              disabled={!formData.message_text}
+              className="flex w-full items-center justify-center gap-2 rounded-2xl border border-[#0c9de8]/30 bg-blue-50 py-3.5 text-xs font-black uppercase tracking-widest text-[#0c9de8] transition-colors hover:border-[#0c9de8]/50 hover:bg-blue-100 disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
+            >
+              <Eye size={16} /> Preview Ads
+            </button>
+
+            <div className="flex gap-3 pt-1">
               <button
                 onClick={() => setStep(1)}
-                className="flex-1 py-3 bg-slate-100 text-slate-900 rounded-2xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 transition-none border border-slate-200"
+                className="flex-1 py-3.5 bg-slate-100 text-slate-700 rounded-2xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 border border-slate-200"
               >
-                <ChevronLeft size={16} />
-                Back
+                <ChevronLeft size={16} /> Back
               </button>
               <button
                 onClick={() => setStep(3)}
-                disabled={!formData.message_text || !formData.link || !isValidUrl(formData.link) || !formData.button_text || !isVerified || checkRestrictedContent(formData.message_text)}
-                className="flex-1 py-3 bg-blue-600 text-white rounded-2xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:bg-slate-100 disabled:text-slate-400 transition-none"
+                disabled={!formData.message_text || !formData.link || !isValidUrl(formData.link) || !formData.button_text || checkRestrictedContent(formData.message_text)}
+                className="flex-1 py-3.5 text-white rounded-2xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:bg-slate-100 disabled:text-slate-400 transition-colors"
+                style={{ background: (!formData.message_text || !formData.link || !isValidUrl(formData.link) || !formData.button_text || checkRestrictedContent(formData.message_text)) ? undefined : "#0c9de8" }}
               >
                 Next <ChevronRight size={16} />
               </button>
@@ -732,373 +818,182 @@ export default function NewCampaignWizardPage() {
         )}
 
         {/* Step 3: Budget & Targeting */}
-        {step === 3 && (
-          <div className="space-y-8 animate-in fade-in slide-in-from-right-4">
-            <div className="space-y-4">
-              <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tight">Budget & Reach</h2>
-              <p className="text-slate-500 text-sm">Set your CPM and total campaign budget.</p>
-            </div>
+        {step === 3 && (() => {
+          const cpmMin = formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast;
+          const cpmMax = formData.type === 'views' ? limits.max_cpm_views : formData.type === 'clicks' ? limits.max_cpm_clicks : limits.max_cpm_broadcast;
+          const recCpm = formData.type === 'views' ? limits.recommended_cpm_views : formData.type === 'clicks' ? limits.recommended_cpm_clicks : limits.recommended_cpm_broadcast;
+          const cpmVal = parseFloat(formData.cpm || "0");
+          const cpmPct = Math.min(100, Math.max(0, ((cpmVal - cpmMin) / Math.max(0.01, cpmMax - cpmMin)) * 100));
+          const recPct = Math.min(100, Math.max(0, ((recCpm - cpmMin) / Math.max(0.01, cpmMax - cpmMin)) * 100));
+          const isAboveRec = cpmVal >= recCpm;
+          const estimatedReach = Math.floor(parseFloat(formData.budget || "0") / Math.max(0.001, cpmVal) * 1000);
+          return (
+          <div className="space-y-4 animate-in fade-in slide-in-from-right-4">
 
-            <div className="space-y-8">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div className="space-y-3">
-                  <label className="text-xs font-black uppercase tracking-widest text-slate-400">
-                    CPM ($ / 1000 {formData.type})
-                  </label>
-                  <div className="relative">
-                    <DollarSign size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-900 font-bold" />
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={formData.cpm}
-                      onChange={(e) => setFormData({ ...formData, cpm: e.target.value })}
-                      className="w-full pl-12 pr-6 py-3 bg-white border border-slate-200 rounded-2xl focus:border-blue-500 outline-none font-black text-slate-900 transition-all text-xl"
-                    />
-                  </div>
-                  <div className="pt-2 px-1">
-                    <input
-                      type="range"
-                      min={formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast}
-                      max={formData.type === 'views' ? limits.max_cpm_views : formData.type === 'clicks' ? limits.max_cpm_clicks : limits.max_cpm_broadcast}
-                      step="0.05"
-                      value={formData.cpm}
-                      onChange={(e) => setFormData({ ...formData, cpm: e.target.value })}
-                      className="w-full h-1.5 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-500"
-                      style={{
-                        background: `linear-gradient(to right, #10b981 0%, #10b981 ${((parseFloat(formData.cpm || "0") - (formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast)) / ((formData.type === 'views' ? limits.max_cpm_views : formData.type === 'clicks' ? limits.max_cpm_clicks : limits.max_cpm_broadcast) - (formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast))) * 100}%, #f1f5f9 ${((parseFloat(formData.cpm || "0") - (formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast)) / ((formData.type === 'views' ? limits.max_cpm_views : formData.type === 'clicks' ? limits.max_cpm_clicks : limits.max_cpm_broadcast) - (formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast))) * 100}%, #f1f5f9 100%)`
-                      }}
-                    />
-                    <div className="flex justify-between mt-1.5">
-                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                        Min: ${formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast}
-                      </p>
-                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                        Max: ${formData.type === 'views' ? limits.max_cpm_views : formData.type === 'clicks' ? limits.max_cpm_clicks : limits.max_cpm_broadcast}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-                <div className="space-y-3">
-                  <label className="text-xs font-black uppercase tracking-widest text-slate-400">Total Budget ($)</label>
-                  <div className="relative">
-                    <DollarSign size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-900 font-bold" />
-                    <input
-                      type="number"
-                      step="1"
-                      value={formData.budget}
-                      onChange={(e) => setFormData({ ...formData, budget: e.target.value })}
-                      className="w-full pl-12 pr-6 py-3 bg-white border border-slate-200 rounded-2xl focus:border-blue-500 outline-none font-black text-slate-900 transition-all text-xl"
-                    />
-                  </div>
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                    Min Budget: ${limits.min_budget}
-                  </p>
-                </div>
-              </div>
+            {/* ── CPM Slider card ── */}
+            <div className="rounded-2xl border border-slate-100 bg-white shadow-sm overflow-hidden">
+              <style>{`
+                .cpm-range { -webkit-appearance: none; appearance: none; background: transparent; outline: none; }
+                .cpm-range::-webkit-slider-thumb { -webkit-appearance: none; width: 34px; height: 34px; border-radius: 50%; background: #0c9de8; border: 4px solid white; box-shadow: 0 2px 12px rgba(12,157,232,0.5), 0 0 0 2px rgba(12,157,232,0.2); cursor: grab; transition: box-shadow 0.15s; }
+                .cpm-range:active::-webkit-slider-thumb { cursor: grabbing; box-shadow: 0 4px 20px rgba(12,157,232,0.7), 0 0 0 10px rgba(12,157,232,0.12); }
+                .cpm-range::-moz-range-thumb { width: 34px; height: 34px; border-radius: 50%; background: #0c9de8; border: 4px solid white; box-shadow: 0 2px 12px rgba(12,157,232,0.5); cursor: grab; }
+                .cpm-range:active::-moz-range-thumb { cursor: grabbing; }
+              `}</style>
 
-              <div className="space-y-4">
-                <label className="text-xs font-black uppercase tracking-widest text-slate-400">Targeting Continents</label>
-                <div className="grid grid-cols-2 gap-3">
-                  {CONTINENTS.map((con) => (
-                    <button
-                      key={con.id}
-                      onClick={() => toggleContinent(con.id)}
-                      className={cn(
-                        "p-4 rounded-2xl border transition-all text-left space-y-1",
-                        formData.continents.includes(con.id) ? "bg-blue-50 border-blue-200" : "bg-white border-slate-100",
-                        con.id === "global" && "col-span-2"
-                      )}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className={cn("text-xs font-black uppercase tracking-tight", formData.continents.includes(con.id) ? "text-blue-600" : "text-slate-900")}>
-                          {con.name}
-                        </span>
-                        {formData.continents.includes(con.id) && <Check size={14} className="text-blue-600" />}
-                      </div>
-                      <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">{con.countries}</p>
-                    </button>
-                  ))}
+              {/* CPM value + recommended badge */}
+              <div className="px-5 pt-5 pb-3 text-center">
+                <div className="flex items-center justify-center gap-2 mb-2">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Your Bid (CPM)</p>
+                  {isAboveRec ? (
+                    <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-emerald-700 bg-emerald-50 border border-emerald-200">
+                      ⭐ Recommended
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-amber-600 bg-amber-50 border border-amber-200">
+                      Below rec.
+                    </span>
+                  )}
                 </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-white">
-                <button
-                  type="button"
-                  onClick={() => setTargetingOpen((prev) => !prev)}
-                  className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
-                >
-                  <span>
-                    <span className="block text-xs font-black uppercase tracking-widest text-slate-400">Advanced Targeting</span>
-                    <span className="block text-sm font-bold text-slate-900">All audiences by default</span>
+                <div className="flex items-baseline justify-center gap-1">
+                  <span className="text-lg font-semibold text-slate-400">$</span>
+                  <span className="text-4xl font-bold text-slate-800 tabular-nums leading-none">
+                    {parseFloat(formData.cpm || "0").toFixed(2)}
                   </span>
-                  <ChevronDown size={18} className={cn("text-slate-400 transition-transform", targetingOpen && "rotate-180")} />
-                </button>
-
-                {targetingOpen && (
-                  <div className="grid gap-4 border-t border-slate-100 p-4 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Countries</label>
-                      <input
-                        type="text"
-                        value={formData.countries}
-                        onChange={(e) => setFormData({ ...formData, countries: e.target.value })}
-                        placeholder="All countries"
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-blue-500"
-                      />
-                      <p className="text-[10px] font-bold text-slate-400">Optional comma-separated ISO codes, e.g. US, NG, GB.</p>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Languages</label>
-                      <input
-                        type="text"
-                        value={formData.languages}
-                        onChange={(e) => setFormData({ ...formData, languages: e.target.value })}
-                        placeholder="All languages"
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-blue-500"
-                      />
-                      <p className="text-[10px] font-bold text-slate-400">Optional comma-separated language codes, e.g. en, fr, es.</p>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">VPN / Proxy Traffic</label>
-                      <select
-                        value={formData.vpn_policy}
-                        onChange={(e) => setFormData({ ...formData, vpn_policy: e.target.value })}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-blue-500"
-                      >
-                        <option value="allow_all">Allow all traffic</option>
-                        <option value="prefer_non_vpn">Prefer non-VPN traffic</option>
-                        <option value="exclude_vpn">Exclude VPN/proxy traffic</option>
-                      </select>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Device Type</label>
-                      <select
-                        value={formData.device_policy}
-                        onChange={(e) => setFormData({ ...formData, device_policy: e.target.value })}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-blue-500"
-                      >
-                        <option value="all">All devices</option>
-                        <option value="mobile">Mobile only</option>
-                        <option value="desktop">Desktop only</option>
-                      </select>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Platform / OS</label>
-                      <select
-                        value={formData.os_policy}
-                        onChange={(e) => setFormData({ ...formData, os_policy: e.target.value })}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-blue-500"
-                      >
-                        <option value="all">All platforms</option>
-                        <option value="android">Android</option>
-                        <option value="ios">iOS</option>
-                        <option value="desktop_web">Desktop/Web</option>
-                      </select>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Frequency Cap</label>
-                      <input
-                        type="number"
-                        min="1"
-                        step="1"
-                        value={formData.frequency_cap_per_user}
-                        onChange={(e) => setFormData({ ...formData, frequency_cap_per_user: e.target.value })}
-                        placeholder={formData.type === "clicks" ? "Max clicks per user per day" : "Max impressions per user per day"}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-blue-500"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Start Date</label>
-                      <input
-                        type="datetime-local"
-                        value={formData.start_at}
-                        onChange={(e) => setFormData({ ...formData, start_at: e.target.value })}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-blue-500"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">End Date</label>
-                      <input
-                        type="datetime-local"
-                        value={formData.end_at}
-                        onChange={(e) => setFormData({ ...formData, end_at: e.target.value })}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-blue-500"
-                      />
-                    </div>
-                    <div className="space-y-2 md:col-span-2">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Daily Budget Limit</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={formData.daily_budget_limit}
-                        onChange={(e) => setFormData({ ...formData, daily_budget_limit: e.target.value })}
-                        placeholder="No daily cap"
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-blue-500"
-                      />
-                    </div>
-                  </div>
-                )}
+                </div>
+                <p className="text-[11px] font-medium text-slate-400 mt-1.5">
+                  per 1,000 {formData.type === "clicks" ? "clicks" : "views"}
+                </p>
               </div>
 
-              <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <div className="mb-4 flex items-start gap-3">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
-                    <Store size={20} />
-                  </div>
+              {/* Drag hint */}
+              <div className="flex items-center justify-center gap-1.5 pb-2">
+                <ChevronLeft size={13} style={{ color: "#0c9de8" }} />
+                <span className="text-[10px] font-black uppercase tracking-widest" style={{ color: "#0c9de8" }}>
+                  Drag to adjust
+                </span>
+                <ChevronRight size={13} style={{ color: "#0c9de8" }} />
+              </div>
+
+              {/* Slider track */}
+              <div className="px-6 pb-4 pt-1">
+                <div className="relative flex items-center" style={{ height: 52 }}>
+                  {/* Track bg */}
+                  <div className="absolute inset-x-0 rounded-full" style={{ height: 10, background: "#e2e8f0" }} />
+                  {/* Fill */}
+                  <div
+                    className="absolute left-0 rounded-full pointer-events-none"
+                    style={{ height: 10, width: `${cpmPct}%`, background: "linear-gradient(90deg, #0c9de8 0%, #0b7ec9 100%)" }}
+                  />
+                  {/* Recommended tick mark */}
+                  <div
+                    className="absolute pointer-events-none"
+                    style={{ left: `${recPct}%`, top: '50%', transform: 'translate(-50%, -50%)', width: 3, height: 20, background: '#f59e0b', borderRadius: 2, opacity: 0.8 }}
+                  />
+                  {/* Range input overlaid */}
+                  <input
+                    type="range"
+                    min={cpmMin}
+                    max={cpmMax}
+                    step="0.05"
+                    value={formData.cpm}
+                    onChange={(e) => setFormData({ ...formData, cpm: e.target.value })}
+                    className="cpm-range absolute inset-x-0 w-full"
+                    style={{ height: 10 }}
+                  />
+                </div>
+                <div className="flex justify-between mt-1">
                   <div>
-                    <p className="text-xs font-black uppercase tracking-widest text-slate-400">Placement Buying</p>
-                    <h3 className="text-sm font-black text-slate-900">Run across network or select inventory</h3>
+                    <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Min</p>
+                    <p className="text-sm font-black text-slate-600">${cpmMin}</p>
                   </div>
-                </div>
-
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFormData((prev) => ({ ...prev, direct_placement_mode: "network", direct_inventory_scope: "network" }));
-                      setSelectedInventoryIds([]);
-                    }}
-                    className={cn(
-                      "rounded-xl border p-4 text-left transition-all",
-                      formData.direct_placement_mode === "network" ? "border-blue-200 bg-blue-50" : "border-slate-100 bg-slate-50"
-                    )}
-                  >
-                    <p className="text-sm font-black text-slate-900">Run Across Network</p>
-                    <p className="mt-1 text-xs font-semibold text-slate-500">Use all eligible inventory.</p>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setFormData((prev) => ({ ...prev, direct_placement_mode: "direct", direct_inventory_scope: "inventory" }))}
-                    className={cn(
-                      "rounded-xl border p-4 text-left transition-all",
-                      formData.direct_placement_mode === "direct" ? "border-blue-200 bg-blue-50" : "border-slate-100 bg-slate-50"
-                    )}
-                  >
-                    <p className="text-sm font-black text-slate-900">Select Specific Inventory</p>
-                    <p className="mt-1 text-xs font-semibold text-slate-500">Choose one, multiple, or group targets.</p>
-                  </button>
-                </div>
-
-                {formData.direct_placement_mode === "direct" && (
-                  <div className="mt-4 space-y-4">
-                    <div className="grid gap-3 sm:grid-cols-3">
-                      <button
-                        type="button"
-                        onClick={() => setFormData((prev) => ({ ...prev, direct_inventory_scope: "category" }))}
-                        className={cn("rounded-xl border px-3 py-2 text-xs font-black uppercase tracking-widest", formData.direct_inventory_scope === "category" ? "border-blue-200 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500")}
-                      >
-                        Entire Category
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setFormData((prev) => ({ ...prev, direct_inventory_scope: "country" }))}
-                        className={cn("rounded-xl border px-3 py-2 text-xs font-black uppercase tracking-widest", formData.direct_inventory_scope === "country" ? "border-blue-200 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500")}
-                      >
-                        Entire Country
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setFormData((prev) => ({ ...prev, direct_inventory_scope: "language" }))}
-                        className={cn("rounded-xl border px-3 py-2 text-xs font-black uppercase tracking-widest", formData.direct_inventory_scope === "language" ? "border-blue-200 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500")}
-                      >
-                        Language Group
-                      </button>
-                    </div>
-
-                    <div className="grid gap-3 sm:grid-cols-3">
-                      <input
-                        value={formData.direct_categories}
-                        onChange={(event) => setFormData((prev) => ({ ...prev, direct_categories: event.target.value, direct_inventory_scope: "category" }))}
-                        placeholder="Categories, comma-separated"
-                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold outline-none focus:border-blue-500"
-                      />
-                      <input
-                        value={formData.direct_countries}
-                        onChange={(event) => setFormData((prev) => ({ ...prev, direct_countries: event.target.value, direct_inventory_scope: "country" }))}
-                        placeholder="Countries, e.g. US, NG"
-                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold outline-none focus:border-blue-500"
-                      />
-                      <input
-                        value={formData.direct_languages}
-                        onChange={(event) => setFormData((prev) => ({ ...prev, direct_languages: event.target.value, direct_inventory_scope: "language" }))}
-                        placeholder="Languages, e.g. en, fr"
-                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold outline-none focus:border-blue-500"
-                      />
-                    </div>
-
-                    <div>
-                      <div className="mb-2 flex items-center justify-between">
-                        <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-                          Recommended {isBotCampaign ? "Bots" : "Channels"}
-                        </p>
-                        <Link href={`/advertiser/marketplace?type=${isBotCampaign ? "bot" : "channel"}`} className="text-[10px] font-black uppercase tracking-widest text-blue-600">
-                          Browse Marketplace
-                        </Link>
-                      </div>
-                      <div className="grid gap-2 sm:grid-cols-3">
-                        {recommendedInventory.length === 0 ? (
-                          <div className="rounded-xl bg-slate-50 p-4 text-xs font-semibold text-slate-400 sm:col-span-3">No recommendations yet. Try category, country, or language targeting.</div>
-                        ) : recommendedInventory.map((item) => {
-                          const selected = selectedInventoryIds.includes(item.id);
-                          return (
-                            <button
-                              type="button"
-                              key={`${item.type}-${item.id}`}
-                              onClick={() => toggleInventory(item.id)}
-                              className={cn("rounded-xl border p-3 text-left transition-all", selected ? "border-blue-200 bg-blue-50" : "border-slate-100 bg-slate-50")}
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <p className="truncate text-xs font-black text-slate-900">{item.name}</p>
-                                {selected && <Check size={14} className="text-blue-600" />}
-                              </div>
-                              <p className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">@{item.username || "private"}</p>
-                              <p className="mt-2 text-[10px] font-bold text-slate-500">
-                                {Number(item.monthly_impressions || 0).toLocaleString()} reach / {item.traffic_quality_rating}
-                              </p>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
+                  <div className="text-center">
+                    <p className="text-[9px] font-black uppercase tracking-widest text-amber-500">⭐ Rec.</p>
+                    <p className="text-sm font-black text-amber-600">${recCpm.toFixed(2)}</p>
                   </div>
-                )}
-              </div>
-
-              {/* Summary Box */}
-              <div className="p-6 bg-slate-900 rounded-3xl text-white space-y-4">
-                <div className="flex justify-between items-end border-b border-white/10 pb-4">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-white/40">Estimated Reach</p>
-                  <p className="text-xl font-black text-emerald-400">
-                    {(parseFloat(formData.budget || "0") / parseFloat(formData.cpm || "1") * 1000).toLocaleString(undefined, { maximumFractionDigits: 0 })} {formData.type}
-                  </p>
-                </div>
-                <div className="flex justify-between items-end pt-2">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-white/40">Total Locked Funds</p>
-                  <p className="text-xl font-black text-white">${parseFloat(formData.budget || "0").toFixed(2)}</p>
+                  <div className="text-right">
+                    <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Max</p>
+                    <p className="text-sm font-black text-slate-600">${cpmMax}</p>
+                  </div>
                 </div>
               </div>
             </div>
 
-            <div className="flex gap-3">
-              <button
-                onClick={() => setStep(2)}
-                className="flex-1 py-3 bg-slate-100 text-slate-900 rounded-2xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 transition-none border border-slate-200"
-              >
-                <ChevronLeft size={16} />
-                Back
+            {/* ── Budget card ── */}
+            <div className="rounded-2xl border border-slate-100 bg-white shadow-sm p-5 space-y-3">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Total Budget <span className="text-red-400">*</span></p>
+              <div className="relative">
+                <DollarSign size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="number"
+                  step="1"
+                  min={limits.min_budget}
+                  value={formData.budget}
+                  onChange={(e) => setFormData({ ...formData, budget: e.target.value })}
+                  placeholder="0.00"
+                  className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-[#0c9de8] outline-none text-xl font-black text-slate-900 transition-all"
+                />
+              </div>
+              <p className="text-[11px] text-slate-400">Minimum budget: <span className="font-black text-slate-600">${limits.min_budget}</span></p>
+            </div>
+
+            {/* ── Reach estimate ── */}
+            <div className="rounded-2xl p-5 flex items-center justify-between gap-4" style={{ background: "linear-gradient(135deg, #0c9de8 0%, #0b7ec9 100%)" }}>
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-widest text-white/60">Estimated Reach</p>
+                <p className="text-2xl font-black text-white mt-1">
+                  {estimatedReach > 0 ? estimatedReach.toLocaleString() : "—"}
+                  <span className="text-sm font-bold text-white/70 ml-1.5">{formData.type}</span>
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-[10px] font-black uppercase tracking-widest text-white/60">Locked Budget</p>
+                <p className="text-xl font-black text-white mt-1">${parseFloat(formData.budget || "0").toFixed(2)}</p>
+              </div>
+            </div>
+
+            {/* ── Continents ── */}
+            <div className="rounded-2xl border border-slate-100 bg-white shadow-sm p-5 space-y-3">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Targeting Regions</p>
+              <div className="grid grid-cols-2 gap-2">
+                {CONTINENTS.map((con) => (
+                  <button
+                    key={con.id}
+                    onClick={() => toggleContinent(con.id)}
+                    className={cn(
+                      "px-3 py-3 rounded-xl border text-left transition-all",
+                      formData.continents.includes(con.id) ? "border-[#0c9de8]/40 bg-blue-50" : "border-slate-100 bg-slate-50 hover:border-slate-200",
+                      con.id === "global" && "col-span-2"
+                    )}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className={cn("text-xs font-black uppercase tracking-tight", formData.continents.includes(con.id) ? "text-[#0c9de8]" : "text-slate-700")}>
+                        {con.name}
+                      </span>
+                      {formData.continents.includes(con.id) && <Check size={13} className="text-[#0c9de8]" />}
+                    </div>
+                    <p className="text-[9px] font-medium text-slate-400 mt-0.5">{con.countries}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex gap-3 pt-1">
+              <button onClick={() => setStep(2)} className="flex-1 py-3.5 bg-slate-100 text-slate-700 rounded-2xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 border border-slate-200">
+                <ChevronLeft size={16} /> Back
               </button>
               <button
                 onClick={handleSubmit}
                 disabled={isLoading || !formData.budget || !formData.cpm}
-                className="flex-1 py-3 bg-blue-600 text-white rounded-2xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:bg-slate-100 disabled:text-slate-400 transition-none"
+                className="flex-1 py-3.5 text-white rounded-2xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:bg-slate-100 disabled:text-slate-400 transition-colors"
+                style={{ background: (isLoading || !formData.budget || !formData.cpm) ? undefined : "#0c9de8" }}
               >
                 {isLoading ? <Loader2 size={16} className="animate-spin" /> : <PlusCircle size={16} />}
-                {isLoading ? "Creating..." : "Launch"}
+                {isLoading ? "Creating…" : "Launch Campaign"}
               </button>
             </div>
           </div>
-        )}
+          );
+        })()}
       </div>
     </DashboardLayout>
   );

@@ -3,24 +3,17 @@
 import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { 
-  LayoutDashboard, 
-  Tv, 
-  Wallet, 
-  ArrowUpRight, 
-  Users, 
-  HelpCircle, 
+import {
+  LayoutDashboard,
+  Tv,
+  Wallet,
+  ArrowUpRight,
+  Users,
+  HelpCircle,
   ArrowLeftRight,
-  Menu,
-  X,
-  PlusCircle,
-  Bot,
   Smartphone,
-  Store,
-  BarChart3,
-  Code2,
-  Lightbulb,
-  BriefcaseBusiness
+  BriefcaseBusiness,
+  DollarSign
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -36,11 +29,8 @@ export default function Sidebar({ type, isOpen, onClose, miniappBetaAccess = fal
 
   const publisherLinks = [
     { name: "Dashboard", href: "/publisher", icon: LayoutDashboard },
-    { name: "My Channels", href: "/publisher/channels", icon: Tv },
-    { name: "My Bots", href: "/publisher/bots", icon: Bot },
-    ...(miniappBetaAccess ? [{ name: "Mini Apps (Beta)", href: "/publisher/miniapps", icon: Smartphone }] : []),
-    { name: "Recommendations", href: "/publisher/recommendations", icon: Lightbulb },
-    { name: "Developer Center", href: "/publisher/developer", icon: Code2 },
+    { name: "Monetize", href: "/publisher/monetize", icon: DollarSign },
+    ...(miniappBetaAccess ? [{ name: "Mini Apps", href: "/publisher/miniapps", icon: Smartphone }] : []),
     { name: "Earnings", href: "/publisher/earnings", icon: Wallet },
     { name: "Withdraw", href: "/publisher/withdraw", icon: ArrowUpRight },
     { name: "Referral", href: "/publisher/referral", icon: Users },
@@ -49,12 +39,8 @@ export default function Sidebar({ type, isOpen, onClose, miniappBetaAccess = fal
 
   const advertiserLinks = [
     { name: "Dashboard", href: "/advertiser", icon: LayoutDashboard },
-    { name: "My Campaigns", href: "/advertiser/campaigns", icon: Tv },
-    { name: "Intelligence", href: "/advertiser/intelligence", icon: BarChart3 },
-    { name: "Recommendations", href: "/advertiser/recommendations", icon: Lightbulb },
-    { name: "Marketplace", href: "/advertiser/marketplace", icon: Store },
+    { name: "Campaigns", href: "/advertiser/campaigns", icon: Tv },
     { name: "Enterprise", href: "/advertiser/enterprise", icon: BriefcaseBusiness },
-    { name: "Create Campaign", href: "/advertiser/campaigns/new", icon: PlusCircle },
     { name: "Deposit Fund", href: "/advertiser/deposit", icon: Wallet },
     { name: "FAQs", href: "/advertiser/faqs", icon: HelpCircle },
   ];

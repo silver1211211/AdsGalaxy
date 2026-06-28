@@ -42,7 +42,12 @@ yarn-error.log*
 # Project specific
 *.log
 scripts/
+!scripts/
+scripts/*
+!scripts/generate-mt-session.js
+!scripts/test-private-views.js
 scratch/
+.telegram-mt-session*
 
 # AI-related
 .gemini/

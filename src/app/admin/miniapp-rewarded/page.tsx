@@ -142,6 +142,10 @@ export default function AdminMiniAppRewardedPage() {
   const [categoryAdjustments, setCategoryAdjustments] = useState<Record<string, number>>({});
   const [moderationNotes, setModerationNotes] = useState<Record<number, string>>({});
   const [message, setMessage] = useState("");
+  const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
+  const [editForm, setEditForm] = useState<Record<string, string>>({});
+  const [editCats, setEditCats] = useState<string[]>([]);
+  const [editLoading, setEditLoading] = useState(false);
 
   const fetchCampaigns = async () => {
     setLoading(true);
@@ -163,6 +167,7 @@ export default function AdminMiniAppRewardedPage() {
   }, []);
 
   const runAction = async (id: number, action: string) => {
+    setMessage("");
     try {
       const campaign = campaigns.find((item) => item.id === id);
       const res = await fetch("/api/admin/miniapp-rewarded-campaigns", {
@@ -202,6 +207,63 @@ export default function AdminMiniAppRewardedPage() {
       setMessage(error.message);
     }
   };
+
+  const openEdit = (campaign: Campaign) => {
+    setEditingCampaign(campaign);
+    setEditCats(parseList(campaign.categories));
+    setEditForm({
+      campaign_name: campaign.campaign_name || "",
+      title: campaign.title || "",
+      description: String(campaign.description || ""),
+      image_url: String(campaign.image_url || ""),
+      landing_url: String(campaign.landing_url || ""),
+      cta_text: String(campaign.cta_text || ""),
+      title_color: String(campaign.title_color || ""),
+      body_color: String(campaign.body_color || ""),
+      countries: parseList(campaign.countries || campaign.target_countries).join(", "),
+      languages: parseList(campaign.languages).join(", "),
+      vpn_policy: String(campaign.vpn_policy || "allow_all"),
+      device_policy: String(campaign.device_policy || "all"),
+      os_policy: String(campaign.os_policy || "all"),
+      start_at: campaign.start_at ? new Date(campaign.start_at).toISOString().slice(0, 10) : "",
+      end_at: campaign.end_at ? new Date(campaign.end_at).toISOString().slice(0, 10) : "",
+      daily_budget_limit: String(campaign.daily_budget_limit || ""),
+      frequency_cap_per_user: String(campaign.frequency_cap_per_user || ""),
+    });
+  };
+
+  const handleEditSubmit = async () => {
+    if (!editingCampaign) return;
+    setEditLoading(true);
+    setMessage("");
+    try {
+      const res = await fetch("/api/admin/miniapp-rewarded-campaigns", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: editingCampaign.id,
+          action: "edit",
+          ...editForm,
+          categories: editCats,
+          countries: editForm.countries ? editForm.countries.split(",").map((s) => s.trim()).filter(Boolean) : [],
+          languages: editForm.languages ? editForm.languages.split(",").map((s) => s.trim()).filter(Boolean) : [],
+          daily_budget_limit: editForm.daily_budget_limit || null,
+          frequency_cap_per_user: editForm.frequency_cap_per_user || null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Edit failed");
+      setMessage("Campaign updated.");
+      setEditingCampaign(null);
+      await fetchCampaigns();
+    } catch (error: any) {
+      setMessage(error.message);
+    } finally {
+      setEditLoading(false);
+    }
+  };
+
+  const ef = (field: string, value: string) => setEditForm((prev) => ({ ...prev, [field]: value }));
 
   return (
     <AdminLayout>
@@ -296,20 +358,133 @@ export default function AdminMiniAppRewardedPage() {
                       <div className="flex justify-end gap-1">
                         <button onClick={() => runAction(campaign.id, "approve")} className="rounded border border-emerald-200 p-1.5 text-emerald-600" title="Approve"><Check size={14} /></button>
                         <button onClick={() => runAction(campaign.id, "reject")} className="rounded border border-red-200 p-1.5 text-red-600" title="Reject"><X size={14} /></button>
-                        <button onClick={() => runAction(campaign.id, "pause")} className="rounded border border-amber-200 p-1.5 text-amber-600" title="Pause"><Pause size={14} /></button>
-                        <button onClick={() => runAction(campaign.id, "resume")} className="rounded border border-blue-200 p-1.5 text-blue-600" title="Resume"><Play size={14} /></button>
-                        <button onClick={() => runAction(campaign.id, "require_changes")} className="rounded border border-purple-200 p-1.5 text-purple-600" title="Require Changes"><Edit3 size={14} /></button>
+                        <button
+                          onClick={() => runAction(campaign.id, campaign.status === "paused" ? "resume" : "pause")}
+                          className={`rounded border p-1.5 ${campaign.status === "paused" ? "border-blue-200 text-blue-600" : "border-amber-200 text-amber-600"}`}
+                          title={campaign.status === "paused" ? "Resume" : "Pause"}
+                        >
+                          {campaign.status === "paused" ? <Play size={14} /> : <Pause size={14} />}
+                        </button>
+                        <button onClick={() => openEdit(campaign)} className="rounded border border-purple-200 p-1.5 text-purple-600" title="Edit Campaign"><Edit3 size={14} /></button>
                         <button onClick={() => runAction(campaign.id, "update_cpm")} className="rounded border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600">CPM</button>
                       </div>
                     </td>
                   </tr>
                 ))}
-                {campaigns.length === 0 && <tr><td colSpan={9} className="p-8 text-center text-slate-500">No internal rewarded campaigns.</td></tr>}
+                {campaigns.length === 0 && <tr><td colSpan={10} className="p-8 text-center text-slate-500">No internal rewarded campaigns.</td></tr>}
               </tbody>
             </table>
           </div>
         )}
       </div>
+      {editingCampaign && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4">
+          <div className="my-8 w-full max-w-2xl rounded-xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+              <h2 className="text-sm font-black text-slate-900">Edit Campaign — {editingCampaign.campaign_name}</h2>
+              <button onClick={() => setEditingCampaign(null)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            </div>
+            <div className="space-y-4 p-6">
+              <div className="grid grid-cols-2 gap-4">
+                <label className="col-span-2 block text-xs font-bold text-slate-500">Campaign Name
+                  <input value={editForm.campaign_name} onChange={(e) => ef("campaign_name", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" />
+                </label>
+                <label className="block text-xs font-bold text-slate-500">Title
+                  <input value={editForm.title} onChange={(e) => ef("title", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" />
+                </label>
+                <label className="block text-xs font-bold text-slate-500">CTA Text
+                  <input value={editForm.cta_text} onChange={(e) => ef("cta_text", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" />
+                </label>
+                <label className="col-span-2 block text-xs font-bold text-slate-500">Description
+                  <textarea value={editForm.description} onChange={(e) => ef("description", e.target.value)} rows={3} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" />
+                </label>
+                <label className="col-span-2 block text-xs font-bold text-slate-500">Image URL
+                  <input value={editForm.image_url} onChange={(e) => ef("image_url", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="https://..." />
+                </label>
+                <label className="col-span-2 block text-xs font-bold text-slate-500">Landing URL
+                  <input value={editForm.landing_url} onChange={(e) => ef("landing_url", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="https://..." />
+                </label>
+                <label className="block text-xs font-bold text-slate-500">Title Color
+                  <div className="mt-1 flex gap-2">
+                    <input type="color" value={editForm.title_color || "#000000"} onChange={(e) => ef("title_color", e.target.value)} className="h-9 w-12 cursor-pointer rounded border border-slate-200 p-0.5" />
+                    <input value={editForm.title_color} onChange={(e) => ef("title_color", e.target.value)} className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="#000000" />
+                  </div>
+                </label>
+                <label className="block text-xs font-bold text-slate-500">Body Color
+                  <div className="mt-1 flex gap-2">
+                    <input type="color" value={editForm.body_color || "#000000"} onChange={(e) => ef("body_color", e.target.value)} className="h-9 w-12 cursor-pointer rounded border border-slate-200 p-0.5" />
+                    <input value={editForm.body_color} onChange={(e) => ef("body_color", e.target.value)} className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="#000000" />
+                  </div>
+                </label>
+              </div>
+              <div>
+                <div className="mb-2 text-xs font-bold text-slate-500">Categories</div>
+                <div className="grid grid-cols-4 gap-2">
+                  {MINIAPP_CREATIVE_CATEGORIES.map((cat) => (
+                    <label key={cat} className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                      <input
+                        type="checkbox"
+                        checked={editCats.includes(cat)}
+                        onChange={() => setEditCats((prev) => prev.includes(cat) ? prev.filter((c) => c !== cat) : [...prev, cat])}
+                        className="accent-blue-600"
+                      />
+                      {cat}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <label className="block text-xs font-bold text-slate-500">Countries (comma-separated ISO codes)
+                  <input value={editForm.countries} onChange={(e) => ef("countries", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="US, GB, NG …" />
+                </label>
+                <label className="block text-xs font-bold text-slate-500">Languages (comma-separated)
+                  <input value={editForm.languages} onChange={(e) => ef("languages", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="en, fr …" />
+                </label>
+                <label className="block text-xs font-bold text-slate-500">VPN Policy
+                  <select value={editForm.vpn_policy} onChange={(e) => ef("vpn_policy", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300">
+                    <option value="allow_all">Allow all traffic</option>
+                    <option value="prefer_non_vpn">Prefer non-VPN</option>
+                    <option value="exclude_vpn">Exclude VPN/proxy</option>
+                  </select>
+                </label>
+                <label className="block text-xs font-bold text-slate-500">Device Policy
+                  <select value={editForm.device_policy} onChange={(e) => ef("device_policy", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300">
+                    <option value="all">All</option>
+                    <option value="mobile">Mobile only</option>
+                    <option value="desktop">Desktop only</option>
+                  </select>
+                </label>
+                <label className="block text-xs font-bold text-slate-500">OS Policy
+                  <select value={editForm.os_policy} onChange={(e) => ef("os_policy", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300">
+                    <option value="all">All</option>
+                    <option value="android">Android</option>
+                    <option value="ios">iOS</option>
+                    <option value="desktop_web">Desktop/Web</option>
+                  </select>
+                </label>
+                <label className="block text-xs font-bold text-slate-500">Start Date
+                  <input type="date" value={editForm.start_at} onChange={(e) => ef("start_at", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" />
+                </label>
+                <label className="block text-xs font-bold text-slate-500">End Date
+                  <input type="date" value={editForm.end_at} onChange={(e) => ef("end_at", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" />
+                </label>
+                <label className="block text-xs font-bold text-slate-500">Daily Budget Limit ($)
+                  <input type="number" min="0" step="0.01" value={editForm.daily_budget_limit} onChange={(e) => ef("daily_budget_limit", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="No limit" />
+                </label>
+                <label className="block text-xs font-bold text-slate-500">Frequency Cap (per user)
+                  <input type="number" min="0" step="1" value={editForm.frequency_cap_per_user} onChange={(e) => ef("frequency_cap_per_user", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="No cap" />
+                </label>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 border-t border-slate-200 px-6 py-4">
+              <button onClick={() => setEditingCampaign(null)} className="rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50">Cancel</button>
+              <button onClick={handleEditSubmit} disabled={editLoading} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-700 disabled:opacity-50">
+                {editLoading ? "Saving…" : "Save Changes"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </AdminLayout>
   );
 }

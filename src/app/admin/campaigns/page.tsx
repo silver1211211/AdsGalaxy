@@ -3,14 +3,15 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Trash2, Zap } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Zap } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Toast from "@/components/ui/Toast";
 
-type CampaignConfirmActionType = "approve" | "reject" | "pause" | "resume" | "delete";
+type CampaignConfirmActionType = "approve" | "reject" | "pause" | "resume";
 type ConfirmAction = {
   id: number;
+  kind: string;
   action: CampaignConfirmActionType;
   title: string;
   message: string;
@@ -21,6 +22,43 @@ type EmergencyAction = {
   id: number;
   mode: "fill_empty_slots" | "replace_everything";
 } | null;
+
+type AdminCampaignRow = {
+  id: number;
+  campaign_kind: "campaign" | "miniapp";
+  user_id: number;
+  name: string;
+  type: string;
+  status: string;
+  budget: string | number;
+  cpm: string | number;
+  link: string;
+  message_text?: string;
+  image_url?: string;
+  button_text?: string;
+  parse_mode?: string;
+  category?: string;
+  continents?: string;
+  countries?: string;
+  languages?: string;
+  vpn_policy?: string;
+  device_policy?: string;
+  os_policy?: string;
+  frequency_cap_per_user?: string | number;
+  start_at?: string | null;
+  end_at?: string | null;
+  daily_budget_limit?: string | number | null;
+  first_name?: string;
+  last_name?: string;
+  username?: string;
+  telegram_id?: string | number;
+  advertiser_trust_level?: string;
+  quality_score?: string | number;
+  quality_tier?: string;
+  advertiser_total_spend?: string | number;
+  advertiser_approved_campaigns?: string | number;
+  advertiser_rejected_campaigns?: string | number;
+};
 
 function renderTargetingList(value: unknown) {
   if (Array.isArray(value)) return value.length > 0 ? value.join(", ") : "All";
@@ -55,7 +93,7 @@ function renderDateRestriction(value: unknown) {
 }
 
 export default function AdminCampaignsPage() {
-  const [campaigns, setCampaigns] = useState([]);
+  const [campaigns, setCampaigns] = useState<AdminCampaignRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -70,7 +108,7 @@ export default function AdminCampaignsPage() {
   const [toast, setToast] = useState<{ type: "success" | "error"; title: string; message: string } | null>(null);
   
   const [viewModalOpen, setViewModalOpen] = useState(false);
-  const [selectedCampaign, setSelectedCampaign] = useState<any>(null);
+  const [selectedCampaign, setSelectedCampaign] = useState<AdminCampaignRow | null>(null);
 
   const fetchCampaigns = async (p: number, s: string, q: string, trust = trustFilter) => {
     setLoading(true);
@@ -93,36 +131,48 @@ export default function AdminCampaignsPage() {
     return () => clearTimeout(timer);
   }, [page, statusFilter, trustFilter, search]);
 
-  const handleAction = async (id: number, action: string) => {
+  const handleAction = async (id: number, action: string, kind = "campaign") => {
     setActionLoading(id);
     try {
-      const res = await fetch("/api/admin/campaigns", {
+      const endpoint = kind === "miniapp" ? "/api/admin/miniapp-rewarded-campaigns" : "/api/admin/campaigns";
+      const res = await fetch(endpoint, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, action })
       });
-      if (!res.ok) throw new Error("Action failed");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Action failed");
       await fetchCampaigns(page, statusFilter, search, trustFilter);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Action failed");
     } finally {
       setActionLoading(null);
     }
   };
 
-  const handleManagementAction = async (id: number, action: "pause" | "resume" | "delete") => {
+  const handleManagementAction = async (id: number, action: "pause" | "resume", kind = "campaign") => {
     setActionLoading(id);
     try {
-      const res = await fetch(`/api/admin/campaigns/${id}/actions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Action failed");
+      if (kind === "miniapp") {
+        const res = await fetch("/api/admin/miniapp-rewarded-campaigns", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, action })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "Action failed");
+      } else {
+        const res = await fetch(`/api/admin/campaigns/${id}/actions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "Action failed");
+      }
       await fetchCampaigns(page, statusFilter, search, trustFilter);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Action failed");
     } finally {
       setActionLoading(null);
     }
@@ -146,30 +196,30 @@ export default function AdminCampaignsPage() {
         message: `Posted: ${data.posted || 0}, Failed: ${data.failed || 0}, Skipped: ${data.skipped || 0}`,
       });
       await fetchCampaigns(page, statusFilter, search, trustFilter);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : `${label} failed`);
     } finally {
       setActionLoading(null);
     }
   };
   
-  const openViewModal = (campaign: any) => {
+  const openViewModal = (campaign: AdminCampaignRow) => {
     setSelectedCampaign(campaign);
     setViewModalOpen(true);
   };
 
-  const openConfirmAction = (id: number, action: CampaignConfirmActionType, title: string, message: string, danger = false) => {
-    setConfirmAction({ id, action, title, message, danger });
+  const openConfirmAction = (id: number, kind: string, action: CampaignConfirmActionType, title: string, message: string, danger = false) => {
+    setConfirmAction({ id, kind, action, title, message, danger });
   };
 
   const runConfirmedAction = async () => {
     if (!confirmAction) return;
-    const { id, action } = confirmAction;
+    const { id, kind, action } = confirmAction;
     setConfirmAction(null);
     if (action === "approve" || action === "reject") {
-      await handleAction(id, action);
+      await handleAction(id, action, kind);
     } else {
-      await handleManagementAction(id, action);
+      await handleManagementAction(id, action as "pause" | "resume", kind);
     }
   };
 
@@ -187,10 +237,11 @@ export default function AdminCampaignsPage() {
     await handleEmergencyPush(id, mode, confirmation);
   };
 
-  const renderContinents = (continentsStr: string) => {
+  const renderContinents = (continentsStr: unknown) => {
     if (!continentsStr) return <span className="font-medium text-slate-900">All</span>;
+    const continentsText = String(continentsStr);
     try {
-      const parsed = JSON.parse(continentsStr);
+      const parsed = JSON.parse(continentsText);
       if (Array.isArray(parsed) && parsed.length > 0) {
         return (
           <div className="flex flex-wrap gap-1 mt-1">
@@ -202,10 +253,10 @@ export default function AdminCampaignsPage() {
           </div>
         );
       }
-    } catch (e) {
+    } catch {
       // Fallback if not JSON
     }
-    return <span className="font-medium text-slate-900">{continentsStr}</span>;
+    return <span className="font-medium text-slate-900">{continentsText}</span>;
   };
 
   return (
@@ -392,11 +443,16 @@ export default function AdminCampaignsPage() {
               ) : campaigns.length === 0 ? (
                 <tr><td colSpan={5} className="p-8 text-center text-slate-500">No campaigns found.</td></tr>
               ) : (
-                campaigns.map((campaign: any) => (
-                  <tr key={campaign.id} className="hover:bg-slate-50 transition-colors">
+                campaigns.map((campaign) => (
+                  <tr key={`${campaign.campaign_kind}-${campaign.id}`} className="hover:bg-slate-50 transition-colors">
                     <td className="px-4 py-3">
-                      <div className="font-medium text-slate-900">{campaign.name}</div>
-                      <div className="text-xs text-slate-500">ID: #{campaign.id} - User: {campaign.user_id}</div>
+                      <div className="flex items-center gap-2">
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide ${campaign.campaign_kind === 'miniapp' ? 'bg-purple-50 text-purple-600 border border-purple-100' : 'bg-slate-100 text-slate-500 border border-slate-200'}`}>
+                          {campaign.campaign_kind === 'miniapp' ? 'Mini App' : 'Channel/Bot'}
+                        </span>
+                        <span className="font-medium text-slate-900">{campaign.name}</span>
+                      </div>
+                      <div className="text-xs text-slate-500 mt-0.5">ID: #{campaign.id} - User: {campaign.user_id}</div>
                       <div className="text-xs text-slate-500 capitalize">Trust: {campaign.advertiser_trust_level || "new"} - Quality: {campaign.quality_score || 50}</div>
                     </td>
                     <td className="px-4 py-3">
@@ -413,13 +469,15 @@ export default function AdminCampaignsPage() {
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
-                        <Link
-                          href={`/admin/campaigns/${campaign.id}`}
-                          className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors cursor-pointer"
-                          title="View Details"
-                        >
-                          <Eye size={16} />
-                        </Link>
+                        {campaign.campaign_kind === 'campaign' && (
+                          <Link
+                            href={`/admin/campaigns/${campaign.id}`}
+                            className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors cursor-pointer"
+                            title="View Details"
+                          >
+                            <Eye size={16} />
+                          </Link>
+                        )}
                         <button
                           onClick={() => openViewModal(campaign)}
                           className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors cursor-pointer"
@@ -429,16 +487,16 @@ export default function AdminCampaignsPage() {
                         </button>
                         {campaign.status === "pending" && (
                           <>
-                            <button 
-                              onClick={() => openConfirmAction(campaign.id, "approve", "Approve Campaign", "Approve this campaign?")}
+                            <button
+                              onClick={() => openConfirmAction(campaign.id, campaign.campaign_kind, "approve", "Approve Campaign", "Approve this campaign?")}
                               disabled={actionLoading === campaign.id}
                               className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Approve"
                             >
                               {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Check size={16} />}
                             </button>
-                            <button 
-                              onClick={() => openConfirmAction(campaign.id, "reject", "Reject Campaign", "Reject this campaign?", true)}
+                            <button
+                              onClick={() => openConfirmAction(campaign.id, campaign.campaign_kind, "reject", "Reject Campaign", "Reject this campaign?", true)}
                               disabled={actionLoading === campaign.id}
                               className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Reject"
@@ -449,24 +507,28 @@ export default function AdminCampaignsPage() {
                         )}
                         {campaign.status === "active" && (
                           <>
+                            {campaign.campaign_kind === 'campaign' && (
+                              <>
+                                <button
+                                  onClick={() => openEmergencyConfirm(campaign.id, "fill_empty_slots")}
+                                  disabled={actionLoading === campaign.id}
+                                  className="p-1.5 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-md transition-colors border border-blue-100 cursor-pointer disabled:cursor-not-allowed"
+                                  title="Emergency Push: Fill Empty Slots"
+                                >
+                                  {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Zap size={16} />}
+                                </button>
+                                <button
+                                  onClick={() => openEmergencyConfirm(campaign.id, "replace_everything")}
+                                  disabled={actionLoading === campaign.id}
+                                  className="px-2 py-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed text-[10px] font-bold"
+                                  title="Emergency Push: Replace Everything"
+                                >
+                                  Replace
+                                </button>
+                              </>
+                            )}
                             <button
-                              onClick={() => openEmergencyConfirm(campaign.id, "fill_empty_slots")}
-                              disabled={actionLoading === campaign.id}
-                              className="p-1.5 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-md transition-colors border border-blue-100 cursor-pointer disabled:cursor-not-allowed"
-                              title="Emergency Push: Fill Empty Slots"
-                            >
-                              {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Zap size={16} />}
-                            </button>
-                            <button
-                              onClick={() => openEmergencyConfirm(campaign.id, "replace_everything")}
-                              disabled={actionLoading === campaign.id}
-                              className="px-2 py-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed text-[10px] font-bold"
-                              title="Emergency Push: Replace Everything"
-                            >
-                              Replace
-                            </button>
-                            <button
-                              onClick={() => openConfirmAction(campaign.id, "pause", "Pause Campaign", "Pause this campaign?")}
+                              onClick={() => openConfirmAction(campaign.id, campaign.campaign_kind, "pause", "Pause Campaign", "Pause this campaign?")}
                               disabled={actionLoading === campaign.id}
                               className="p-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 rounded-md transition-colors border border-amber-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Pause"
@@ -477,22 +539,12 @@ export default function AdminCampaignsPage() {
                         )}
                         {campaign.status === "paused" && (
                           <button
-                            onClick={() => openConfirmAction(campaign.id, "resume", "Resume Campaign", "Resume this campaign?")}
+                            onClick={() => openConfirmAction(campaign.id, campaign.campaign_kind, "resume", "Resume Campaign", "Resume this campaign?")}
                             disabled={actionLoading === campaign.id}
                             className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-md transition-colors border border-emerald-100 cursor-pointer disabled:cursor-not-allowed"
                             title="Resume"
                           >
                             {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Play size={16} />}
-                          </button>
-                        )}
-                        {campaign.status !== "deleted" && (
-                          <button
-                            onClick={() => openConfirmAction(campaign.id, "delete", "Delete Campaign", "Delete this campaign? Active Telegram posts will be deleted and the campaign will be marked deleted.", true)}
-                            disabled={actionLoading === campaign.id}
-                            className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed"
-                            title="Delete"
-                          >
-                            {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Trash2 size={16} />}
                           </button>
                         )}
                       </div>

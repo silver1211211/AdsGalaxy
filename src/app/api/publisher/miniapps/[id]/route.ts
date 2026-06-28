@@ -15,6 +15,24 @@ export async function PATCH(
     const { id } = await params;
     const body = await request.json();
 
+    if (body?.action === "toggle_status") {
+      const [rows]: any = await pool.query(
+        "SELECT status FROM miniapps WHERE id = ? AND user_id = ? AND is_deleted = FALSE",
+        [id, user.id]
+      );
+      if (rows.length === 0) return NextResponse.json({ error: "Mini App not found" }, { status: 404 });
+      const currentStatus = rows[0].status;
+      if (currentStatus === "pending" || currentStatus === "awaiting") {
+        return NextResponse.json({ error: "Cannot pause a pending Mini App" }, { status: 400 });
+      }
+      const newStatus = currentStatus === "paused" ? "approved" : "paused";
+      await pool.query(
+        "UPDATE miniapps SET status = ? WHERE id = ? AND user_id = ? AND is_deleted = FALSE",
+        [newStatus, id, user.id]
+      );
+      return NextResponse.json({ success: true, status: newStatus });
+    }
+
     if (body?.action === "set_marketplace_visibility") {
       const visible = body.visible ? 1 : 0;
       const [result]: any = await pool.query(

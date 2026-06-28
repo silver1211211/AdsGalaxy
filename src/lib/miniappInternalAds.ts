@@ -1,5 +1,4 @@
-import type { PoolConnection, RowDataPacket } from "mysql2/promise";
-import pool from "@/lib/db";
+import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { getMiniAppOptimizationSettings } from "@/lib/miniappOptimization";
 import { parseTargetingList } from "@/lib/advertiserTargeting";
 import { calculateMiniAppPublisherPayout } from "@/lib/miniappPublisherCpmEngine";
@@ -40,6 +39,12 @@ type CampaignRow = RowDataPacket & {
   end_at: string | Date | null;
   daily_budget_limit: string | number | null;
   frequency_cap_per_user: string | number | null;
+};
+
+type MiniAppInventoryRow = RowDataPacket & {
+  inventory_score: string | number;
+  inventory_rank: string;
+  inventory_override: string;
 };
 
 function toNumber(value: unknown) {
@@ -110,7 +115,7 @@ export async function selectInternalRewardedCampaign(input: {
   const cap = await canServeInternalAd(input.miniappId, input.conn);
   if (!cap.allowed) return { campaign: null, skip_reason: cap.reason };
 
-  const [[inventoryRow]]: any = await input.conn.query(
+  const [[inventoryRow]] = await input.conn.query<MiniAppInventoryRow[]>(
     "SELECT COALESCE(inventory_score, 50) as inventory_score, COALESCE(inventory_rank, 'standard') as inventory_rank, COALESCE(inventory_override, 'none') as inventory_override FROM miniapps WHERE id = ?",
     [input.miniappId]
   );
@@ -223,14 +228,17 @@ export async function selectInternalRewardedCampaign(input: {
       }
     }
 
-    const [[miniappSpendRow]] = await input.conn.query<RowDataPacket[]>(
-      "SELECT COALESCE(SUM(cost), 0) as spend FROM miniapp_internal_ad_impressions WHERE campaign_id = ? AND miniapp_id = ?",
-      [row.id, input.miniappId]
-    );
-    const miniappShare = toNumber(miniappSpendRow?.spend) / Math.max(toNumber(row.budget), 0.000001) * 100;
-    if (miniappShare >= settings.internal_campaign_miniapp_max_share_percent) {
-      skipReason = "internal_campaign_miniapp_share_cap";
-      continue;
+    const budget = toNumber(row.budget);
+    if (budget > 0) {
+      const [[miniappSpendRow]] = await input.conn.query<RowDataPacket[]>(
+        "SELECT COALESCE(SUM(cost), 0) as spend FROM miniapp_internal_ad_impressions WHERE campaign_id = ? AND miniapp_id = ?",
+        [row.id, input.miniappId]
+      );
+      const miniappShare = toNumber(miniappSpendRow?.spend) / budget * 100;
+      if (miniappShare >= settings.internal_campaign_miniapp_max_share_percent) {
+        skipReason = "internal_campaign_miniapp_share_cap";
+        continue;
+      }
     }
 
     const [[pacingRow]] = await input.conn.query<RowDataPacket[]>(`
@@ -241,23 +249,24 @@ export async function selectInternalRewardedCampaign(input: {
       FROM miniapp_internal_ad_impressions
       WHERE campaign_id = ?
     `, [row.id]);
-    const budget = toNumber(row.budget);
     const dailyBudgetLimit = toNumber(row.daily_budget_limit);
     if (dailyBudgetLimit > 0 && toNumber(pacingRow?.daily_spend) + cost > dailyBudgetLimit) {
       skipReason = "daily_budget_limit";
       continue;
     }
-    if (toNumber(pacingRow?.daily_spend) >= budget * 0.3) {
-      skipReason = "daily_campaign_pacing";
-      continue;
-    }
-    if (toNumber(pacingRow?.hourly_spend) >= budget * 0.1) {
-      skipReason = "hourly_campaign_pacing";
-      continue;
-    }
-    if (toNumber(pacingRow?.rolling_spend) >= budget * 0.05) {
-      skipReason = "rolling_campaign_pacing";
-      continue;
+    if (budget > 0) {
+      if (toNumber(pacingRow?.daily_spend) >= budget * 0.3) {
+        skipReason = "daily_campaign_pacing";
+        continue;
+      }
+      if (toNumber(pacingRow?.hourly_spend) >= budget * 0.1) {
+        skipReason = "hourly_campaign_pacing";
+        continue;
+      }
+      if (toNumber(pacingRow?.rolling_spend) >= budget * 0.05) {
+        skipReason = "rolling_campaign_pacing";
+        continue;
+      }
     }
 
     campaign = row;
@@ -345,7 +354,7 @@ export async function recordInternalAdImpression(input: {
     completion_quality_score: completionQualityScore,
   };
 
-  const [insertResult]: any = await input.conn.query(
+  const [insertResult] = await input.conn.query<ResultSetHeader>(
     `INSERT IGNORE INTO miniapp_internal_ad_impressions
       (
         campaign_id, miniapp_id, request_id, telegram_user_id, country,
@@ -385,7 +394,7 @@ export async function recordInternalAdImpression(input: {
   }
 
   if (campaign.campaign_budget_mode === "unlimited") {
-    const [balanceResult]: any = await input.conn.query(
+    const [balanceResult] = await input.conn.query<ResultSetHeader>(
       "UPDATE users SET ad_balance = ad_balance - ? WHERE id = ? AND ad_balance >= ?",
       [cost, campaign.advertiser_id, cost]
     );

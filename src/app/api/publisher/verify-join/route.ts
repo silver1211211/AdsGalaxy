@@ -2,11 +2,12 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { processVerifiedReferralForUser } from "@/lib/referralSprint";
+import { blockReferralForUserIfSelfDevice, getReferralSecuritySignals } from "@/lib/referralSecurity";
 
 export async function POST(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await getAuthenticatedUser(initData, { request });
     if (!user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -44,6 +45,14 @@ export async function POST(request: Request) {
     
     if (!allowedStatuses.includes(status)) {
       return NextResponse.json({ error: "You have not joined the channel yet." }, { status: 400 });
+    }
+
+    const selfDevice = await blockReferralForUserIfSelfDevice(Number(user.id), getReferralSecuritySignals(request));
+    if (selfDevice.blocked) {
+      return NextResponse.json(
+        { error: "Referral reward blocked: same IP address or device as the referrer.", referral_reward: selfDevice },
+        { status: 400 }
+      );
     }
 
     // Success! Update user

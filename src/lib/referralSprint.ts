@@ -1,6 +1,7 @@
 import type { PoolConnection } from "mysql2/promise";
 import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
+import { blockReferralIfSelfDevice, ensureReferralSecuritySchema } from "@/lib/referralSecurity";
 
 type Db = typeof pool | PoolConnection;
 
@@ -42,8 +43,65 @@ function getSetting(settings: Map<string, string>, key: string, fallback: string
   return settings.get(key) || fallback;
 }
 
+async function columnExists(db: Db, table: string, column: string): Promise<boolean> {
+  const [[row]]: any = await db.query(
+    "SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+    [table, column]
+  );
+  return Number(row?.cnt || 0) > 0;
+}
+
+async function ensureReferralGrowthSchema(db: Db = pool) {
+  const cols: Array<{ name: string; def: string }> = [
+    { name: "status",              def: "VARCHAR(30) NOT NULL DEFAULT 'pending' AFTER invited_by" },
+    { name: "verification_status", def: "VARCHAR(30) NOT NULL DEFAULT 'pending' AFTER status" },
+    { name: "reward_status",       def: "VARCHAR(30) NOT NULL DEFAULT 'pending' AFTER verification_status" },
+    { name: "reward_amount",       def: "DECIMAL(18,8) NOT NULL DEFAULT 0 AFTER reward_status" },
+    { name: "required_channel",    def: "VARCHAR(255) NULL AFTER reward_amount" },
+    { name: "verified_at",         def: "DATETIME NULL AFTER required_channel" },
+    { name: "reward_paid_at",      def: "DATETIME NULL AFTER verified_at" },
+    { name: "rejection_reason",    def: "VARCHAR(255) NULL AFTER reward_paid_at" },
+    { name: "abuse_risk_level",    def: "VARCHAR(20) NOT NULL DEFAULT 'low' AFTER rejection_reason" },
+    { name: "abuse_flags",         def: "LONGTEXT NULL AFTER abuse_risk_level" },
+    { name: "sprint_id",           def: "BIGINT UNSIGNED NULL AFTER abuse_flags" },
+    { name: "created_at",          def: "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP" },
+    { name: "updated_at",          def: "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP" },
+  ];
+  for (const { name, def } of cols) {
+    if (!(await columnExists(db, "referrals", name))) {
+      await db.query(`ALTER TABLE referrals ADD COLUMN \`${name}\` ${def}`);
+    }
+  }
+}
+
+export async function ensureReferralGrowthSettingDefaults(db: Db = pool, repairSchema = true) {
+  if (repairSchema) await ensureReferralGrowthSchema(db);
+  await db.query(
+    `INSERT INTO referral_growth_settings (\`key\`, value, description) VALUES
+      ('referral_sprint_enabled', '1', 'Enable Referral Sprint, Team League, Team Rewards, popup, and growth UI'),
+      ('referral_join_reward_amount', '0.005', 'Reward paid when a referred user first joins AdsGalaxy'),
+      ('referral_verification_reward_amount', '0.010', 'Additional reward paid after the referred user verifies required channel membership'),
+      ('referral_sprint_popup_interval_seconds', '86400', 'Minimum seconds before the Referral Sprint popup is shown again after dismissal'),
+      ('referral_sprint_popup_interval_hours', '24', 'Minimum hours before the Referral Sprint popup is shown again after dismissal'),
+      ('referral_reward_amount', '0.015', 'Total displayed referral reward: join reward plus channel verification bonus')
+     ON DUPLICATE KEY UPDATE description = VALUES(description)`
+  );
+}
+
 function sprintEnabled(settings: Map<string, string>) {
   return getSetting(settings, "referral_sprint_enabled", "1") === "1";
+}
+
+export function getReferralJoinRewardAmount(settings: Map<string, string>) {
+  return toNumber(getSetting(settings, "referral_join_reward_amount", "0.005"));
+}
+
+export function getReferralVerificationRewardAmount(settings: Map<string, string>) {
+  return toNumber(getSetting(settings, "referral_verification_reward_amount", "0.010"));
+}
+
+export function getReferralTotalRewardAmount(settings: Map<string, string>) {
+  return Number((getReferralJoinRewardAmount(settings) + getReferralVerificationRewardAmount(settings)).toFixed(8));
 }
 
 async function isReferralSprintEnabled(db: Db = pool) {
@@ -374,6 +432,103 @@ async function awardFirstReferralBonus(conn: PoolConnection, userId: number, set
   return amount > 0;
 }
 
+export async function processReferralJoinReward(referralId: number) {
+  const conn = await pool.getConnection();
+  try {
+    await ensureReferralSecuritySchema(conn);
+    await conn.beginTransaction();
+    const [rows]: any = await conn.query(
+      `SELECT r.*, u.telegram_id as referrer_telegram_id
+       FROM referrals r
+       JOIN users u ON u.id = r.invited_by
+       WHERE r.id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [referralId]
+    );
+
+    if (rows.length === 0) {
+      await conn.commit();
+      return { paid: false, reason: "no_referral" };
+    }
+
+    const referral = rows[0];
+    if (Number(referral.self_referral_blocked || 0) === 1) {
+      await conn.commit();
+      return { paid: false, reason: "self_referral_blocked" };
+    }
+
+    const selfDevice = await blockReferralIfSelfDevice(Number(referral.id), conn, { ensureSchema: false });
+    if (selfDevice.blocked) {
+      await conn.commit();
+      return { paid: false, reason: "self_referral_blocked", referral_reward: selfDevice };
+    }
+
+    const settings = await getSettings(conn);
+    const joinRewardAmount = getReferralJoinRewardAmount(settings);
+    if (referral.reward_status === "paid" || toNumber(referral.reward_amount) >= joinRewardAmount) {
+      await conn.commit();
+      return { paid: false, reason: "already_paid" };
+    }
+
+    const growthEnabled = sprintEnabled(settings);
+    const activeSprint = growthEnabled ? await ensureActiveReferralSprint(conn) : null;
+    const configuredNewsChannel = process.env.TELEGRAM_NEWS_CHANNEL || process.env.NEXT_PUBLIC_CHANNEL || "AdsGalaxy_News";
+    const requiredChannel = getSetting(settings, "required_channel_url", `https://t.me/${configuredNewsChannel.replace(/^@/, "")}`);
+
+    const credited = await creditReferralReward(conn, {
+      userId: Number(referral.invited_by),
+      referralId: Number(referral.id),
+      sprintId: activeSprint ? Number(activeSprint.id) : null,
+      rewardType: "referral_join",
+      amount: joinRewardAmount,
+      reason: "referred_user_joined",
+      metadata: {
+        referred_user_id: referral.user_id,
+        next_step: "required_channel_verification",
+      },
+    });
+
+    if (credited) {
+      await conn.query(
+        `UPDATE referrals
+         SET status = 'joined',
+           reward_status = 'join_paid',
+           reward_amount = reward_amount + ?,
+           required_channel = ?,
+           sprint_id = COALESCE(sprint_id, ?)
+         WHERE id = ?`,
+        [joinRewardAmount, requiredChannel, activeSprint?.id || null, referral.id]
+      );
+
+      await createGrowthNotification(conn, {
+        userId: Number(referral.invited_by),
+        type: "referral_joined",
+        title: "Referral joined",
+        message: "Your referral joined AdsGalaxy. The instant join reward was added to your balance.",
+        metadata: { referral_id: referral.id, amount: joinRewardAmount },
+      });
+    }
+
+    await conn.commit();
+    return credited
+      ? { paid: true, amount: joinRewardAmount, referral_id: referral.id }
+      : { paid: false, reason: "already_paid" };
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function getAllUserMilestones(db: Db = pool) {
+  const [rows]: any = await db.query(
+    "SELECT * FROM referral_milestones WHERE scope = 'user' AND status = 'active' ORDER BY threshold_count ASC"
+  );
+  return rows as any[];
+}
+
 async function getNextUserMilestone(verifiedCount: number, db: Db = pool) {
   const [rows]: any = await db.query(
     "SELECT * FROM referral_milestones WHERE scope = 'user' AND status = 'active' AND threshold_count > ? ORDER BY threshold_count ASC LIMIT 1",
@@ -507,7 +662,9 @@ export async function getReferralGrowthSummary(userId: number) {
       sprint_enabled: false,
       referral_code: referralCode,
       referral_link: `https://t.me/${botUsername}?startapp=${referralCode}`,
-      reward_amount: toNumber(getSetting(settings, "referral_reward_amount", "0.015")),
+      reward_amount: getReferralTotalRewardAmount(settings),
+      referral_join_reward_amount: getReferralJoinRewardAmount(settings),
+      referral_verification_reward_amount: getReferralVerificationRewardAmount(settings),
       required_channel_url: getSetting(settings, "required_channel_url", defaultRequiredChannelUrl),
       total_earnings: toNumber(user.total_referral_earnings || stats?.referral_earnings),
       stats: {
@@ -523,6 +680,8 @@ export async function getReferralGrowthSummary(userId: number) {
   const leaderboard = await getReferralLeaderboard(Number(sprint.id), 50);
   const currentRank = leaderboard.find((row: any) => Number(row.user_id) === Number(userId))?.rank || null;
   const nextMilestone = await getNextUserMilestone(verifiedCount);
+  const allMilestones = await getAllUserMilestones();
+  const todayReferrals = toInt(stats?.today_referrals, 0);
   const teamLeague = await getTeamLeagueSummary(userId, Number(sprint.id), verifiedCount, settings);
   const boost = await getActiveBoostMultiplier(userId, teamLeague.current_team?.team_id || null);
   const nearWinnerGap = Math.max(1, toInt(getSetting(settings, "near_winner_gap_referrals", "2"), 2));
@@ -546,7 +705,9 @@ export async function getReferralGrowthSummary(userId: number) {
     sprint_enabled: true,
     referral_code: referralCode,
     referral_link: `https://t.me/${botUsername}?startapp=${referralCode}`,
-    reward_amount: toNumber(getSetting(settings, "referral_reward_amount", "0.015")),
+    reward_amount: getReferralTotalRewardAmount(settings),
+    referral_join_reward_amount: getReferralJoinRewardAmount(settings),
+    referral_verification_reward_amount: getReferralVerificationRewardAmount(settings),
     required_channel_url: getSetting(settings, "required_channel_url", defaultRequiredChannelUrl),
     total_earnings: toNumber(user.total_referral_earnings),
     stats,
@@ -556,6 +717,15 @@ export async function getReferralGrowthSummary(userId: number) {
       referrals_needed: nextMilestone ? Math.max(0, toInt(nextMilestone.threshold_count) - verifiedCount) : 0,
       reward_available: nextMilestone ? toNumber(nextMilestone.reward_amount) : 0,
     },
+    daily_milestones: allMilestones.map((m: any) => ({
+      id: m.id,
+      label: m.reward_label || `${m.threshold_count} referrals today`,
+      threshold: toInt(m.threshold_count),
+      reward: toNumber(m.reward_amount),
+      reward_type: m.reward_type,
+      today_progress: todayReferrals,
+      completed_today: todayReferrals >= toInt(m.threshold_count),
+    })),
     team_league: teamLeague,
     boost,
     alerts,
@@ -624,6 +794,7 @@ async function detectReferralAbuse(referral: any, conn: PoolConnection) {
 export async function processVerifiedReferralForUser(userId: number) {
   const conn = await pool.getConnection();
   try {
+    await ensureReferralSecuritySchema(conn);
     await conn.beginTransaction();
     const [rows]: any = await conn.query(
       `SELECT r.*, u.telegram_id as referrer_telegram_id
@@ -641,6 +812,17 @@ export async function processVerifiedReferralForUser(userId: number) {
     }
 
     const referral = rows[0];
+    if (Number(referral.self_referral_blocked || 0) === 1) {
+      await conn.commit();
+      return { paid: false, reason: "self_referral_blocked" };
+    }
+
+    const selfDevice = await blockReferralIfSelfDevice(Number(referral.id), conn, { ensureSchema: false });
+    if (selfDevice.blocked) {
+      await conn.commit();
+      return { paid: false, reason: "self_referral_blocked", referral_reward: selfDevice };
+    }
+
     if (referral.reward_status === "paid") {
       await conn.commit();
       return { paid: false, reason: "already_paid" };
@@ -657,10 +839,28 @@ export async function processVerifiedReferralForUser(userId: number) {
     const activeSprint = growthEnabled ? await ensureActiveReferralSprint(conn) : null;
     const configuredNewsChannel = process.env.TELEGRAM_NEWS_CHANNEL || process.env.NEXT_PUBLIC_CHANNEL || "AdsGalaxy_News";
     const requiredChannel = getSetting(settings, "required_channel_url", `https://t.me/${configuredNewsChannel.replace(/^@/, "")}`);
-    const [[teamRow]]: any = await conn.query("SELECT team_id FROM referral_team_memberships WHERE user_id = ? LIMIT 1", [referral.invited_by]);
-    const boost = growthEnabled ? await getActiveBoostMultiplier(Number(referral.invited_by), teamRow?.team_id || null, conn) : { multiplier: 1, events: [] };
-    const baseRewardAmount = toNumber(getSetting(settings, "referral_reward_amount", "0.015"));
-    const rewardAmount = Number((baseRewardAmount * boost.multiplier).toFixed(8));
+    const joinRewardAmount = getReferralJoinRewardAmount(settings);
+    let existingReferralRewardAmount = toNumber(referral.reward_amount);
+    if (existingReferralRewardAmount < joinRewardAmount) {
+      const joinCredited = await creditReferralReward(conn, {
+        userId: Number(referral.invited_by),
+        referralId: Number(referral.id),
+        sprintId: activeSprint ? Number(activeSprint.id) : null,
+        rewardType: "referral_join",
+        amount: joinRewardAmount,
+        reason: "referred_user_joined",
+        metadata: {
+          referred_user_id: userId,
+          credited_during: "channel_verification",
+        },
+      });
+      if (joinCredited) {
+        existingReferralRewardAmount = Number((existingReferralRewardAmount + joinRewardAmount).toFixed(8));
+      }
+    }
+    const verificationRewardAmount = getReferralVerificationRewardAmount(settings);
+    const rewardAmount = verificationRewardAmount;
+    const finalReferralRewardAmount = Number((existingReferralRewardAmount + rewardAmount).toFixed(8));
 
     await conn.query(
       `UPDATE referrals
@@ -673,7 +873,7 @@ export async function processVerifiedReferralForUser(userId: number) {
          reward_paid_at = NOW(),
          sprint_id = COALESCE(sprint_id, ?)
        WHERE id = ?`,
-      [rewardAmount, requiredChannel, activeSprint?.id || null, referral.id]
+      [finalReferralRewardAmount, requiredChannel, activeSprint?.id || null, referral.id]
     );
 
     await creditReferralReward(conn, {
@@ -686,9 +886,8 @@ export async function processVerifiedReferralForUser(userId: number) {
       metadata: {
         referred_user_id: userId,
         required_channel: requiredChannel,
-        base_amount: baseRewardAmount,
-        boost_multiplier: boost.multiplier,
-        boost_events: boost.events,
+        base_amount: verificationRewardAmount,
+        total_referral_reward_amount: finalReferralRewardAmount,
       },
     });
 
@@ -700,13 +899,13 @@ export async function processVerifiedReferralForUser(userId: number) {
     await createGrowthNotification(conn, {
       userId: Number(referral.invited_by),
       type: "referral_joined",
-      title: "Referral joined successfully",
-      message: "Your referral completed verification and your reward was added to withdrawable balance.",
-      metadata: { referral_id: referral.id, amount: rewardAmount },
+      title: "Referral verified",
+      message: "Your referral joined the required channel. The verification bonus was added to your balance.",
+      metadata: { referral_id: referral.id, amount: rewardAmount, total_amount: finalReferralRewardAmount },
     });
 
     await conn.commit();
-    await notifyUser(Number(referral.invited_by), `Referral verified\n\nYou earned $${rewardAmount.toFixed(3)} for a verified referral. It was added to your withdrawable balance.`);
+    await notifyUser(Number(referral.invited_by), `Referral verified\n\nYou earned an additional $${rewardAmount.toFixed(3)} after channel verification. Total for this referral: $${finalReferralRewardAmount.toFixed(3)}.`);
     if (firstBonusPaid) {
       await notifyUser(Number(referral.invited_by), "First referral bonus unlocked\n\nYour one-time first verified referral bonus was added to your withdrawable balance.");
     }
@@ -721,7 +920,7 @@ export async function processVerifiedReferralForUser(userId: number) {
       entityType: "referral",
       entityId: Number(referral.id),
       reason: "verified_required_channel",
-      metadata: { referrer_id: referral.invited_by, referred_user_id: userId, amount: rewardAmount, milestones: milestones.length, team_id: team?.team_id || team?.id || null },
+      metadata: { referrer_id: referral.invited_by, referred_user_id: userId, amount: rewardAmount, total_amount: finalReferralRewardAmount, milestones: milestones.length, team_id: team?.team_id || team?.id || null },
     });
     return { paid: true, amount: rewardAmount, referral_id: referral.id };
   } catch (error) {
@@ -957,13 +1156,14 @@ export async function notifyReferralSprintEndingSoon() {
 }
 
 export async function getAdminReferralGrowthData() {
+  await ensureReferralGrowthSettingDefaults();
   const settingsMap = await getSettings();
   const enabled = sprintEnabled(settingsMap);
   if (enabled) await ensureActiveReferralSprint();
   const [settings]: any = await pool.query("SELECT `key`, value, description FROM referral_growth_settings ORDER BY `key`");
   const [sprints]: any = await pool.query("SELECT * FROM referral_sprints ORDER BY starts_at DESC LIMIT 20");
-  const activeSprint = sprints.find((sprint: any) => sprint.status === "active") || sprints[0];
-  const leaderboard = activeSprint ? await getReferralLeaderboard(Number(activeSprint.id), 50) : [];
+  const activeSprint = enabled ? sprints.find((sprint: any) => sprint.status === "active") || null : null;
+  const leaderboard = enabled && activeSprint ? await getReferralLeaderboard(Number(activeSprint.id), 50) : [];
   const [history]: any = await pool.query(
     `SELECT w.*
      FROM referral_sprint_winners w

@@ -67,6 +67,7 @@ type BroadcastUserRow = RowDataPacket & {
 type EmergencySchema = {
   hasPostDeletedAtColumn: boolean;
   hasPostSlotColumns: boolean;
+  hasDeliveryConfirmedAtColumn: boolean;
   hasCampaignDeliveryEvents: boolean;
 };
 
@@ -144,7 +145,7 @@ async function getEmergencySchema(): Promise<EmergencySchema> {
     FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA = DATABASE()
       AND (
-        (TABLE_NAME = 'campaign_posts' AND COLUMN_NAME IN ('posting_slot_date', 'posting_slot_time', 'deleted_at'))
+        (TABLE_NAME = 'campaign_posts' AND COLUMN_NAME IN ('posting_slot_date', 'posting_slot_time', 'deleted_at', 'delivery_confirmed_at'))
         OR (TABLE_NAME = 'campaign_delivery_events')
       )
   `);
@@ -155,6 +156,7 @@ async function getEmergencySchema(): Promise<EmergencySchema> {
   return {
     hasPostDeletedAtColumn: columns.has("campaign_posts.deleted_at"),
     hasPostSlotColumns: columns.has("campaign_posts.posting_slot_date") && columns.has("campaign_posts.posting_slot_time"),
+    hasDeliveryConfirmedAtColumn: columns.has("campaign_posts.delivery_confirmed_at"),
     hasCampaignDeliveryEvents: tables.has("campaign_delivery_events"),
   };
 }
@@ -323,7 +325,12 @@ async function postCampaignToChannel(options: {
   }) as TelegramSendResponse | undefined;
 
   if (result?.ok && result.result?.message_id) {
-    await pool.query("UPDATE campaign_posts SET message_id = ? WHERE id = ?", [result.result.message_id, postId]);
+    await pool.query(
+      schema.hasDeliveryConfirmedAtColumn
+        ? "UPDATE campaign_posts SET message_id = ?, delivery_confirmed_at = NOW() WHERE id = ?"
+        : "UPDATE campaign_posts SET message_id = ? WHERE id = ?",
+      [result.result.message_id, postId]
+    );
     await recordDeliveryEvent(schema.hasCampaignDeliveryEvents, campaign.id, channel.id, postId, "emergency_posted", {
       mode: "emergency_push",
     });

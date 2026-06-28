@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
+import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
+import { getPrivatePostViews } from "@/lib/telegramMtproto";
 
 export const dynamic = 'force-dynamic';
 
@@ -30,9 +32,11 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    const privacySchema = await getChannelPrivacySchema();
+    const channelTypeSelect = privacySchema.hasChannelType ? "ch.channel_type" : "'public' as channel_type";
     const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
     const [posts]: any = await pool.query(`
-      SELECT cp.*, ch.chat_id, ch.username as channel_username, ch.user_id as owner_id, u.telegram_id as owner_telegram_id
+      SELECT cp.*, ch.chat_id, ch.username as channel_username, ${channelTypeSelect}, ch.user_id as owner_id, u.telegram_id as owner_telegram_id
       FROM campaign_posts cp
       JOIN channels ch ON cp.channel_id = ch.id
       JOIN users u ON ch.user_id = u.id
@@ -50,6 +54,39 @@ export async function GET(req: NextRequest) {
 
     for (const post of posts) {
       try {
+        if (String(post.channel_type || "public") === "private") {
+          const now = Date.now();
+          await pool.query("UPDATE campaign_posts SET last_views_update = ? WHERE id = ?", [now, post.id]);
+          const privateViews = await getPrivatePostViews(post.chat_id, post.message_id);
+
+          if (privateViews.ok) {
+            const lastViews = post.views || 0;
+            await pool.query("UPDATE campaign_posts SET views = ? WHERE id = ?", [privateViews.views, post.id]);
+            await pool.query(`
+              INSERT INTO campaign_views_audit (post_id, channel_id, total_views, last_views_count, status)
+              VALUES (?, ?, ?, ?, 'valid')
+            `, [post.id, post.channel_id, privateViews.views, lastViews]);
+            if (privacySchema.hasViewTrackingStatus) {
+              await pool.query("UPDATE channels SET view_tracking_status = 'available' WHERE id = ?", [post.channel_id]);
+            }
+            results.push({ post_id: post.id, views: privateViews.views, prev_views: lastViews });
+          } else {
+            if (privacySchema.hasViewTrackingStatus) {
+              await pool.query("UPDATE channels SET view_tracking_status = 'limited' WHERE id = ?", [post.channel_id]);
+            }
+            console.error(`Private views fetch failed for post ${post.id}: ${privateViews.code}`);
+            results.push({ post_id: post.id, status: "private_views_limited", reason: privateViews.code });
+          }
+          continue;
+        }
+
+        if (!post.channel_username) {
+          const now = Date.now();
+          await pool.query("UPDATE campaign_posts SET last_views_update = ? WHERE id = ?", [now, post.id]);
+          results.push({ post_id: post.id, status: "missing_public_username" });
+          continue;
+        }
+
         const viewsApiBaseUrl = process.env.PHP_VIEWS_API_URL || "https://php.adsgalaxy.online/views/api.php";
         const apiUrl = `${viewsApiBaseUrl}?channel=${encodeURIComponent(post.channel_username)}&post=${encodeURIComponent(String(post.message_id))}`;
         const res = await fetch(apiUrl);

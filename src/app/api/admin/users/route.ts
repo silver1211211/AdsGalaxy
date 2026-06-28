@@ -169,7 +169,8 @@ export async function PATCH(request: Request) {
     await ensureUserBanColumns(conn);
 
     if (!(await columnExists(conn, "users", "miniapp_beta_access"))) {
-      await conn.query("ALTER TABLE users ADD COLUMN miniapp_beta_access TINYINT(1) NOT NULL DEFAULT 0");
+      await conn.query("ALTER TABLE users ADD COLUMN miniapp_beta_access TINYINT(1) NOT NULL DEFAULT 1");
+      await conn.query("UPDATE users SET miniapp_beta_access = 1 WHERE miniapp_beta_access <> 1");
     }
 
     if (!(await columnExists(conn, "users", "advertiser_trust_level"))) {

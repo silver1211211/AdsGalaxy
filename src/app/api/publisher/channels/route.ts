@@ -1,11 +1,22 @@
 import { NextResponse } from "next/server";
+import type { ResultSetHeader, RowDataPacket } from "mysql2";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { normalizePostingTimes, normalizePostsPerDay } from "@/lib/postingTimes";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
+import {
+  inferChannelType,
+  getChannelPrivacySchema,
+  hashInviteLink,
+  isValidPrivateInviteLink,
+} from "@/lib/channelPrivacy";
+import { resolvePrivateInviteLink } from "@/lib/telegramMtproto";
+
+type SettingRow = RowDataPacket & { value?: string | number | null };
+type ExistingChannelRow = RowDataPacket & { id: number; user_id: number; is_deleted: boolean | number };
 
 async function hasPostingTimesColumn() {
-  const [rows]: any = await pool.query(`
+  const [rows] = await pool.query<RowDataPacket[]>(`
     SELECT 1
     FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA = DATABASE()
@@ -15,6 +26,37 @@ async function hasPostingTimesColumn() {
   `);
 
   return rows.length > 0;
+}
+
+async function telegram(token: string, method: string, body: Record<string, unknown>) {
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return response.json();
+  } catch (error) {
+    console.error(`Telegram ${method} request failed:`, error);
+    return { ok: false, description: "Unable to reach Telegram. Please try again." };
+  }
+}
+
+function privateInviteError(code: string) {
+  const messageByCode: Record<string, string> = {
+    missing_api_id: "Private channel verification is not configured.",
+    missing_api_hash: "Private channel verification is not configured.",
+    missing_account_sessions: "Private channel verification is not configured.",
+    invalid_invite_link: "Invalid private invite link.",
+    invite_hash_empty: "Invalid private invite link.",
+    invite_hash_expired: "This private invite link has expired.",
+    invite_hash_invalid: "Invalid private invite link.",
+    join_request_required: "This invite requires manual approval. Use an invite link that lets AdsGalaxy access the channel.",
+    channel_private: "Unable to access this private channel. Add AdsGalaxy Bot as administrator and use a valid invite link.",
+    all_accounts_failed: "Unable to access this private channel. Add AdsGalaxy Bot as administrator and use a valid invite link.",
+  };
+
+  return messageByCode[code] || "Unable to verify private channel.";
 }
 
 export async function GET(request: Request) {
@@ -27,9 +69,10 @@ export async function GET(request: Request) {
       [user.id]
     );
     return NextResponse.json(rows);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("API Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to fetch channels" }, { status: getAuthErrorStatus(error) });
+    const message = error instanceof Error ? error.message : "Failed to fetch channels";
+    return NextResponse.json({ error: message }, { status: getAuthErrorStatus(error) });
   }
 }
 
@@ -42,8 +85,36 @@ export async function POST(request: Request) {
     const user = await getAuthenticatedUser(initData);
 
     const body = await request.json();
-    const { chat_id, username, title, posts_per_day, audience_continents, categories, posting_times } = body;
+    const {
+      chat_id,
+      username,
+      title,
+      posts_per_day,
+      audience_continents,
+      categories,
+      posting_times,
+      channel_type,
+      invite_link,
+      subscriber_count,
+    } = body;
     const normalizedTitle = String(title ?? "").trim();
+    const normalizedChannelType = inferChannelType({ channelType: channel_type, inviteLink: invite_link, username });
+    if (!normalizedChannelType) {
+      return NextResponse.json({ error: "Channel type could not be determined. Use a public username or a private invite link." }, { status: 400 });
+    }
+
+    const normalizedInviteHash = normalizedChannelType === "private" ? hashInviteLink(invite_link) : null;
+    let normalizedUsername = String(username || "").replace(/^@/, "").trim() || null;
+    let resolvedChatId = String(chat_id || "").trim();
+    let privateSubscriberCount = Number.isFinite(Number(subscriber_count)) ? Number(subscriber_count) : null;
+
+    if (normalizedChannelType === "private" && !isValidPrivateInviteLink(invite_link)) {
+      return NextResponse.json({ error: "Invalid private invite link" }, { status: 400 });
+    }
+
+    if (normalizedChannelType === "public" && !normalizedUsername) {
+      return NextResponse.json({ error: "Public channel username is required" }, { status: 400 });
+    }
 
     if (normalizedTitle.length < 3) {
       return NextResponse.json({ error: "Channel name must be at least 3 characters." }, { status: 400 });
@@ -53,28 +124,63 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Channel name must be at most 50 characters." }, { status: 400 });
     }
 
+    const botToken = process.env.BOT_TOKEN;
+    if (!botToken) {
+      return NextResponse.json({ error: "Bot token not configured" }, { status: 500 });
+    }
+
+    if (normalizedChannelType === "private") {
+      const resolved = await resolvePrivateInviteLink(invite_link);
+      if (!resolved.ok) {
+        return NextResponse.json({ error: privateInviteError(resolved.code) }, { status: 400 });
+      }
+
+      resolvedChatId = resolved.chatId;
+      privateSubscriberCount = resolved.participantsCount;
+    }
+
     const normalizedPostsPerDay = normalizePostsPerDay(posts_per_day);
     const normalizedPostingTimes = normalizePostingTimes(posting_times, normalizedPostsPerDay);
     const canStorePostingTimes = await hasPostingTimesColumn();
+    const privacySchema = await getChannelPrivacySchema();
 
     if (!canStorePostingTimes) {
       console.warn("channels.posting_times column is missing; channel posting times will use runtime defaults");
     }
 
     // 1. Get minimum subscribers requirement from settings
-    const [settings]: any = await pool.query("SELECT value FROM settings WHERE `key` = 'min_subscribers'");
-    const minSubscribers = parseInt(settings[0]?.value || "0");
+    const [settings] = await pool.query<SettingRow[]>("SELECT value FROM settings WHERE `key` = 'min_subscribers'");
+    const minSubscribers = parseInt(String(settings[0]?.value || "0"));
 
-    // 2. Fetch current member count from Telegram
-    const botToken = process.env.BOT_TOKEN;
-    const tgRes = await fetch(`https://api.telegram.org/bot${botToken}/getChatMemberCount?chat_id=${chat_id}`);
-    const tgData = await tgRes.json();
+    // 2. Verify Telegram access and fetch current member count.
+    const chatData = await telegram(botToken, "getChat", { chat_id: resolvedChatId });
+    if (!chatData.ok) {
+      return NextResponse.json({ error: chatData.description || "Failed to verify channel access. Make sure the bot is an admin." }, { status: 400 });
+    }
 
-    if (!tgData.ok) {
+    if (chatData.result?.type !== "channel") {
+      return NextResponse.json({ error: "Only channels are allowed." }, { status: 400 });
+    }
+
+    const telegramUsername = String(chatData.result?.username || "").replace(/^@/, "").trim() || null;
+    if (normalizedChannelType === "public") {
+      normalizedUsername = telegramUsername || normalizedUsername;
+      if (!normalizedUsername) {
+        return NextResponse.json({ error: "Public channel username is required" }, { status: 400 });
+      }
+      resolvedChatId = String(chatData.result.id);
+    } else {
+      normalizedUsername = telegramUsername;
+      resolvedChatId = String(chatData.result.id || resolvedChatId);
+    }
+
+    const tgData = await telegram(botToken, "getChatMemberCount", { chat_id: resolvedChatId });
+
+    if (!tgData.ok && privateSubscriberCount === null) {
       return NextResponse.json({ error: "Failed to verify channel member count. Make sure the bot is an admin." }, { status: 400 });
     }
 
-    const subscriberCount = tgData.result;
+    const subscriberCount = tgData.ok ? Number(tgData.result || 0) : Number(privateSubscriberCount || 0);
 
     if (subscriberCount < minSubscribers) {
       return NextResponse.json({ 
@@ -83,9 +189,9 @@ export async function POST(request: Request) {
     }
 
     // 3. Check if channel already exists
-    const [existing]: any = await pool.query(
+    const [existing] = await pool.query<ExistingChannelRow[]>(
       "SELECT id, user_id, is_deleted FROM channels WHERE chat_id = ?",
-      [chat_id]
+      [resolvedChatId]
     );
 
     if (existing.length > 0) {
@@ -117,7 +223,7 @@ export async function POST(request: Request) {
         "auto_paused_at = NULL"
       ];
       const updateParams = [
-        username,
+        normalizedUsername,
         normalizedTitle,
         subscriberCount,
         normalizedPostsPerDay,
@@ -128,6 +234,21 @@ export async function POST(request: Request) {
       if (canStorePostingTimes) {
         updateColumns.splice(6, 0, "posting_times = ?");
         updateParams.push(JSON.stringify(normalizedPostingTimes));
+      }
+
+      if (privacySchema.hasChannelType) {
+        updateColumns.push("channel_type = ?");
+        updateParams.push(normalizedChannelType);
+      }
+
+      if (privacySchema.hasInviteLinkHash) {
+        updateColumns.push("invite_link_hash = ?");
+        updateParams.push(normalizedInviteHash);
+      }
+
+      if (privacySchema.hasViewTrackingStatus) {
+        updateColumns.push("view_tracking_status = ?");
+        updateParams.push(normalizedChannelType === "private" ? "limited" : "available");
       }
 
       updateParams.push(channel.id);
@@ -154,8 +275,8 @@ export async function POST(request: Request) {
     ];
     const insertParams = [
       user.id,
-      chat_id,
-      username,
+      resolvedChatId,
+      normalizedUsername,
       normalizedTitle,
       subscriberCount,
       normalizedPostsPerDay,
@@ -169,15 +290,31 @@ export async function POST(request: Request) {
       insertParams.splice(8, 0, JSON.stringify(normalizedPostingTimes));
     }
 
+    if (privacySchema.hasChannelType) {
+      insertColumns.push("channel_type");
+      insertParams.push(normalizedChannelType);
+    }
+
+    if (privacySchema.hasInviteLinkHash) {
+      insertColumns.push("invite_link_hash");
+      insertParams.push(normalizedInviteHash);
+    }
+
+    if (privacySchema.hasViewTrackingStatus) {
+      insertColumns.push("view_tracking_status");
+      insertParams.push(normalizedChannelType === "private" ? "limited" : "available");
+    }
+
     const placeholders = insertColumns.map(() => "?").join(", ");
     const [result] = await pool.query(
       `INSERT INTO channels (${insertColumns.join(", ")}) VALUES (${placeholders})`,
       insertParams
-    );
+    ) as [ResultSetHeader, unknown];
 
-    return NextResponse.json({ success: true, id: (result as any).insertId });
-  } catch (error: any) {
+    return NextResponse.json({ success: true, id: result.insertId });
+  } catch (error: unknown) {
     console.error("API Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to add channel" }, { status: getAuthErrorStatus(error) });
+    const message = error instanceof Error ? error.message : "Failed to add channel";
+    return NextResponse.json({ error: message }, { status: getAuthErrorStatus(error) });
   }
 }

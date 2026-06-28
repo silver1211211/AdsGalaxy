@@ -103,7 +103,7 @@ const sections: DocsSection[] = [
     title: "How Mini App monetization works",
     body: [
       "Mini App monetization lets approved Telegram Mini App publishers earn from ad activity inside their Mini Apps.",
-      "During beta, only selected publisher accounts can access Publisher > Mini Apps. If the menu is hidden, your account has not been enabled for beta testing yet.",
+      "Mini App monetization is live for all publisher accounts. Approved Mini Apps can serve ads after AdsGalaxy configures at least one delivery network.",
     ],
   },
   {
@@ -223,7 +223,7 @@ export default function PublisherMiniAppsDocsPage() {
     <DocsArticle
       eyebrow="Publisher Documentation"
       title="Mini App Monetization"
-      intro="Submit real Telegram Mini Apps for review, understand beta access, and learn how reporting and monetization fit together."
+      intro="Submit real Telegram Mini Apps for review, integrate the SDK, and learn how reporting and monetization fit together."
       sections={sections}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">

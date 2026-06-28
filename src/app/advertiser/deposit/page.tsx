@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useState, useEffect } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import {
   Wallet,
@@ -8,16 +8,13 @@ import {
   Clock,
   CheckCircle2,
   XCircle,
-  ExternalLink,
   Copy,
-  QrCode,
   DollarSign,
   ArrowRight,
   Info,
   Loader2,
   AlertCircle,
   Check,
-  Filter
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
@@ -25,6 +22,7 @@ import { useHeader } from "@/context/HeaderContext";
 import { AnimatePresence, motion } from "framer-motion";
 import Modal from "@/components/ui/Modal";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
+import { OXAPAY_DEPOSIT_NETWORKS } from "@/lib/oxapayNetworks";
 
 interface Deposit {
   id: number;
@@ -41,11 +39,39 @@ interface Deposit {
   created_at: string;
 }
 
-const NETWORKS = [
-  { id: "BEP20", name: "USDT (BEP20)", icon: "https://i.ibb.co/HpMws2FV/image.png" },
-  { id: "TRC20", name: "USDT (TRC20)", icon: "https://i.ibb.co/PvfwkJtq/image.png" },
-  { id: "ERC20", name: "USDT (ERC20)", icon: "https://i.ibb.co/cctw3bKj/image.png" }
-];
+type DepositNetwork = {
+  id: string;
+  oxapayNetwork: string;
+  name: string;
+  chain: string;
+  currency: string;
+  icon: string;
+  tone: string;
+};
+
+type TelegramWebApp = {
+  BackButton: {
+    show: () => void;
+    hide: () => void;
+    onClick: (callback: () => void) => void;
+    offClick: (callback: () => void) => void;
+  };
+  HapticFeedback?: {
+    impactOccurred: (style: "light" | "medium" | "heavy") => void;
+    notificationOccurred: (type: "success" | "error" | "warning") => void;
+    selectionChanged: () => void;
+  };
+};
+
+function getTelegramWebApp() {
+  return (window as unknown as Window & { Telegram?: { WebApp?: TelegramWebApp } }).Telegram?.WebApp;
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Something went wrong";
+}
+
+const DEFAULT_NETWORKS: DepositNetwork[] = OXAPAY_DEPOSIT_NETWORKS;
 
 export default function DepositPage() {
   const { setTitle } = useHeader();
@@ -53,7 +79,7 @@ export default function DepositPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
   const [amount, setAmount] = useState("");
-  const [network, setNetwork] = useState("BEP20");
+  const [network, setNetwork] = useState("USDT_BSC");
   const [viewingDeposit, setViewingDeposit] = useState<Deposit | null>(null);
   const [isPaying, setIsPaying] = useState(false);
   const [minDeposit, setMinDeposit] = useState<number>(5.0);
@@ -66,6 +92,7 @@ export default function DepositPage() {
   const [statusMessage, setStatusMessage] = useState("");
   const [activeFilter, setActiveFilter] = useState("all");
   const [limit, setLimit] = useState(10);
+  const [depositNetworks, setDepositNetworks] = useState<DepositNetwork[]>(DEFAULT_NETWORKS);
 
   const pendingDeposit = deposits.find(d => ["pending", "waiting", "paying"].includes(d.status));
 
@@ -106,7 +133,7 @@ export default function DepositPage() {
     return () => clearInterval(interval);
   }, [viewingDeposit]);
 
-  const fetchDeposits = async (silent = false) => {
+  const fetchDeposits = useCallback(async (silent = false) => {
     if (!silent) setIsLoading(true);
     try {
       const res = await apiFetch("/api/advertiser/deposits");
@@ -114,21 +141,27 @@ export default function DepositPage() {
       if (!res.ok) throw new Error(data.error || "Failed to fetch deposits");
       setDeposits(data.deposits);
       setMinDeposit(data.minDeposit);
-    } catch (err: any) {
+      if (Array.isArray(data.networks) && data.networks.length > 0) {
+        setDepositNetworks(data.networks);
+        if (!data.networks.some((item: DepositNetwork) => item.id === network)) {
+          setNetwork(data.networks[0].id);
+        }
+      }
+    } catch (err) {
       console.error(err);
-      setError(err.message);
+      setError(errorMessage(err));
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [network]);
 
   useEffect(() => {
     setTitle("Deposit");
-    fetchDeposits();
-  }, [setTitle]);
+    void Promise.resolve().then(() => fetchDeposits());
+  }, [fetchDeposits, setTitle]);
 
   useEffect(() => {
-    const webapp = (window as any).Telegram?.WebApp;
+    const webapp = getTelegramWebApp();
     if (webapp) {
       const handleBack = () => {
         if (isPaying) setIsPaying(false);
@@ -146,8 +179,8 @@ export default function DepositPage() {
   }, [viewingDeposit, isPaying]);
 
   const handleCreate = async () => {
-    const webapp = (window as any).Telegram?.WebApp;
-    if (webapp) webapp.HapticFeedback.impactOccurred('medium');
+    const webapp = getTelegramWebApp();
+    if (webapp) webapp.HapticFeedback?.impactOccurred('medium');
 
     if (!amount || parseFloat(amount) < minDeposit || isCreating) return;
     setIsCreating(true);
@@ -163,18 +196,18 @@ export default function DepositPage() {
       setIsPaying(true);
       setAmount("");
       fetchDeposits(true);
-      if (webapp) webapp.HapticFeedback.notificationOccurred('success');
-    } catch (err: any) {
-      setError(err.message);
-      if (webapp) webapp.HapticFeedback.notificationOccurred('error');
+      if (webapp) webapp.HapticFeedback?.notificationOccurred('success');
+    } catch (err) {
+      setError(errorMessage(err));
+      if (webapp) webapp.HapticFeedback?.notificationOccurred('error');
     } finally {
       setIsCreating(false);
     }
   };
 
   const handleCancel = async (track_id: string) => {
-    const webapp = (window as any).Telegram?.WebApp;
-    if (webapp) webapp.HapticFeedback.impactOccurred('medium');
+    const webapp = getTelegramWebApp();
+    if (webapp) webapp.HapticFeedback?.impactOccurred('medium');
 
     if (isCanceling) return;
     setIsCanceling(true);
@@ -191,18 +224,18 @@ export default function DepositPage() {
       // Optimistic update
       setDeposits(prev => prev.map(d => d.track_id === track_id ? { ...d, status: 'canceled' } : d));
       fetchDeposits(true);
-      if (webapp) webapp.HapticFeedback.notificationOccurred('success');
-    } catch (err: any) {
-      setError(err.message);
-      if (webapp) webapp.HapticFeedback.notificationOccurred('error');
+      if (webapp) webapp.HapticFeedback?.notificationOccurred('success');
+    } catch (err) {
+      setError(errorMessage(err));
+      if (webapp) webapp.HapticFeedback?.notificationOccurred('error');
     } finally {
       setIsCanceling(false);
     }
   };
 
   const handleCheckStatus = async (track_id: string) => {
-    const webapp = (window as any).Telegram?.WebApp;
-    if (webapp) webapp.HapticFeedback.impactOccurred('medium');
+    const webapp = getTelegramWebApp();
+    if (webapp) webapp.HapticFeedback?.impactOccurred('medium');
 
     if (isChecking) return;
     setIsChecking(true);
@@ -216,7 +249,7 @@ export default function DepositPage() {
         setViewingDeposit(data);
         if (data.status === "paid") {
           setStatusMessage("Payment received! Your balance has been updated.");
-          if (webapp) webapp.HapticFeedback.notificationOccurred('success');
+          if (webapp) webapp.HapticFeedback?.notificationOccurred('success');
           setTimeout(() => {
             setIsPaying(false);
             setViewingDeposit(null);
@@ -228,17 +261,17 @@ export default function DepositPage() {
         }
       }
       fetchDeposits(true);
-    } catch (err: any) {
-      setError(err.message);
-      if (webapp) webapp.HapticFeedback.notificationOccurred('error');
+    } catch (err) {
+      setError(errorMessage(err));
+      if (webapp) webapp.HapticFeedback?.notificationOccurred('error');
     } finally {
       setIsChecking(false);
     }
   };
 
   const copyToClipboard = (text: string) => {
-    const webapp = (window as any).Telegram?.WebApp;
-    if (webapp) webapp.HapticFeedback.impactOccurred('light');
+    const webapp = getTelegramWebApp();
+    if (webapp) webapp.HapticFeedback?.impactOccurred('light');
 
     navigator.clipboard.writeText(text);
     setCopied(true);
@@ -296,27 +329,34 @@ export default function DepositPage() {
 
             <div className="space-y-2">
               <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 px-1">Select Network</label>
-              <div className="grid grid-cols-3 gap-3">
-                {NETWORKS.map((net) => (
+              <div className="max-h-[228px] overflow-y-auto pr-1">
+                <div className="grid grid-cols-3 gap-3">
+                {depositNetworks.map((net) => (
                   <button
                     key={net.id}
                     onClick={() => {
-                      const webapp = (window as any).Telegram?.WebApp;
-                      if (webapp) webapp.HapticFeedback.selectionChanged();
+                      const webapp = getTelegramWebApp();
+                      if (webapp) webapp.HapticFeedback?.selectionChanged();
                       setNetwork(net.id);
                     }}
                     disabled={!!pendingDeposit || isCreating}
+                    title={`${net.name} on ${net.chain}`}
                     className={cn(
-                      "flex items-center justify-center gap-2 py-3 px-1 rounded-xl border-2 transition-all shadow-sm",
+                      "flex h-16 min-w-0 items-center justify-center gap-2 rounded-2xl border-2 px-2 text-left shadow-md transition-all",
                       network === net.id
-                        ? "bg-blue-50 border-[#0c9de8] text-[#0c9de8] shadow-[#0c9de8]/20"
-                        : "bg-slate-50 border-slate-200 text-slate-500 hover:border-slate-300 hover:bg-slate-100"
+                        ? "border-[#0c9de8] bg-blue-50 text-[#0c9de8] shadow-[#0c9de8]/20"
+                        : "border-slate-200 bg-slate-50 text-slate-500 shadow-slate-200/80 hover:border-slate-300 hover:bg-slate-100"
                     )}
                   >
-                    <img src={net.icon} alt={net.name} className="w-4 h-4 shrink-0" />
-                    <span className="text-[9px] font-black uppercase tracking-tight">{net.id}</span>
+                    <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border text-[8px] font-black", net.tone)}>
+                      {net.icon}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-[10px] font-black uppercase tracking-tight">{net.chain}</span>
+                    </span>
                   </button>
                 ))}
+                </div>
               </div>
             </div>
 
@@ -330,8 +370,8 @@ export default function DepositPage() {
                   </p>
                   <button
                     onClick={() => {
-                      const webapp = (window as any).Telegram?.WebApp;
-                      if (webapp) webapp.HapticFeedback.impactOccurred('light');
+                      const webapp = getTelegramWebApp();
+                      if (webapp) webapp.HapticFeedback?.impactOccurred('light');
                       setViewingDeposit(pendingDeposit);
                       setIsPaying(false);
                     }}
@@ -364,8 +404,8 @@ export default function DepositPage() {
                   <button
                     key={f}
                     onClick={() => {
-                      const webapp = (window as any).Telegram?.WebApp;
-                      if (webapp) webapp.HapticFeedback.selectionChanged();
+                      const webapp = getTelegramWebApp();
+                      if (webapp) webapp.HapticFeedback?.selectionChanged();
                       setActiveFilter(f);
                     }}
                     className={cn(
@@ -400,8 +440,8 @@ export default function DepositPage() {
                   <button
                     key={deposit.id}
                     onClick={() => {
-                      const webapp = (window as any).Telegram?.WebApp;
-                      if (webapp) webapp.HapticFeedback.impactOccurred('light');
+                      const webapp = getTelegramWebApp();
+                      if (webapp) webapp.HapticFeedback?.impactOccurred('light');
                       setViewingDeposit(deposit);
                       setIsPaying(false);
                     }}
@@ -435,8 +475,8 @@ export default function DepositPage() {
               {hasMore && (
                 <button
                   onClick={() => {
-                    const webapp = (window as any).Telegram?.WebApp;
-                    if (webapp) webapp.HapticFeedback.impactOccurred('light');
+                    const webapp = getTelegramWebApp();
+                    if (webapp) webapp.HapticFeedback?.impactOccurred('light');
                     setLimit(prev => prev + 10);
                   }}
                   className="w-full py-4 bg-slate-50 text-slate-400 rounded-2xl font-black uppercase tracking-widest text-[10px] active:scale-95 transition-all"
@@ -522,8 +562,8 @@ export default function DepositPage() {
                   )}
                   <button
                     onClick={() => {
-                      const webapp = (window as any).Telegram?.WebApp;
-                      if (webapp) webapp.HapticFeedback.impactOccurred('light');
+                      const webapp = getTelegramWebApp();
+                      if (webapp) webapp.HapticFeedback?.impactOccurred('light');
                       setViewingDeposit(null);
                     }}
                     className="w-full py-4 bg-slate-50 text-slate-900 rounded-2xl font-black uppercase tracking-widest transition-all"
@@ -633,8 +673,8 @@ export default function DepositPage() {
               <div className="text-center pt-2">
                 <button
                   onClick={() => {
-                    const webapp = (window as any).Telegram?.WebApp;
-                    if (webapp) webapp.HapticFeedback.impactOccurred('light');
+                    const webapp = getTelegramWebApp();
+                    if (webapp) webapp.HapticFeedback?.impactOccurred('light');
                     setIsPaying(false);
                   }}
                   className="text-[10px] font-black text-slate-400 uppercase tracking-widest transition-colors"

@@ -11,6 +11,8 @@ type WithdrawalRow = {
   id: number;
   user_id: number;
   amount: string | number;
+  fee?: string | number;
+  net_amount?: string | number;
   status: string;
   refunded?: boolean | number;
   paid_out?: boolean | number;
@@ -288,6 +290,28 @@ export default function AdminWithdrawalsPage() {
                   <PayoutState withdrawal={selectedWithdrawal} />
                 </div>
               </div>
+              {/* Fee breakdown */}
+              {(() => {
+                const fee = Number(selectedWithdrawal.fee || 0);
+                const net = fee > 0 ? Number(selectedWithdrawal.net_amount || 0) : Number(selectedWithdrawal.amount || 0);
+                return (
+                  <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 space-y-1">
+                    <div className="text-xs font-bold uppercase tracking-wide text-emerald-700 mb-2">Payment to Send</div>
+                    <div className="flex justify-between text-xs font-semibold text-slate-600">
+                      <span>Requested</span><span>{money(selectedWithdrawal.amount)}</span>
+                    </div>
+                    {fee > 0 && (
+                      <div className="flex justify-between text-xs font-semibold text-amber-600">
+                        <span>Network fee ({selectedWithdrawal.network})</span><span>-{money(fee)}</span>
+                      </div>
+                    )}
+                    <div className="border-t border-emerald-200 pt-1 flex justify-between text-sm font-black text-emerald-700">
+                      <span>Send to user</span><span>{money(net)}</span>
+                    </div>
+                  </div>
+                );
+              })()}
+
               <div className="rounded-md border border-slate-200 p-3">
                 <div className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">Full address</div>
                 <div className="flex items-center gap-2">
@@ -344,8 +368,22 @@ export default function AdminWithdrawalsPage() {
                     {Boolean(withdrawal.is_banned) && <div className="mt-1 text-xs font-semibold text-red-600">User banned</div>}
                   </td>
                   <td className="px-4 py-3">
-                    <div className="font-semibold text-slate-900">{money(withdrawal.amount)}</div>
-                    <div className="text-xs text-slate-500">{withdrawal.network || "Network N/A"}</div>
+                    {(() => {
+                      const fee = Number(withdrawal.fee || 0);
+                      const net = fee > 0 ? Number(withdrawal.net_amount || 0) : Number(withdrawal.amount || 0);
+                      return (
+                        <>
+                          <div className="font-bold text-emerald-700 text-base">{money(net)}</div>
+                          <div className="text-[10px] font-bold text-slate-400 uppercase">To process</div>
+                          {fee > 0 && (
+                            <div className="text-[10px] text-slate-400 mt-0.5">
+                              Requested {money(withdrawal.amount)} · fee -{money(fee)}
+                            </div>
+                          )}
+                          <div className="text-xs text-slate-500 mt-0.5">{withdrawal.network || "Network N/A"}</div>
+                        </>
+                      );
+                    })()}
                   </td>
                   <td className="px-4 py-3"><AddressCell withdrawal={withdrawal} /></td>
                   <td className="px-4 py-3"><FraudMetrics withdrawal={withdrawal} /></td>
@@ -377,7 +415,15 @@ export default function AdminWithdrawalsPage() {
               </div>
               <PayoutState withdrawal={withdrawal} />
               <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
-                <div><div className="text-[10px] font-bold uppercase text-slate-400">Amount</div><div className="font-semibold">{money(withdrawal.amount)}</div></div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase text-slate-400">To Process</div>
+                  <div className="font-bold text-emerald-700">
+                    {money(Number(withdrawal.fee || 0) > 0 ? withdrawal.net_amount : withdrawal.amount)}
+                  </div>
+                  {Number(withdrawal.fee || 0) > 0 && (
+                    <div className="text-[10px] text-slate-400">Req. {money(withdrawal.amount)} · fee -{money(withdrawal.fee)}</div>
+                  )}
+                </div>
                 <div><div className="text-[10px] font-bold uppercase text-slate-400">Network</div><div className="font-semibold">{withdrawal.network || "N/A"}</div></div>
               </div>
               <div className="mt-3"><AddressCell withdrawal={withdrawal} /></div>

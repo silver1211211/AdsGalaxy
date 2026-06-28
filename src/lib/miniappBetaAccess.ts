@@ -11,20 +11,21 @@ export class MiniAppBetaAccessError extends Error {
   statusCode = 403;
 
   constructor() {
-    super("Mini Apps are not available for this account yet.");
+    super("Mini Apps are available for all accounts.");
     this.name = "MiniAppBetaAccessError";
   }
 }
 
-export function hasMiniAppBetaAccess(user: { miniapp_beta_access?: unknown }) {
-  return user.miniapp_beta_access === true || Number(user.miniapp_beta_access || 0) === 1;
+export function hasMiniAppBetaAccess(user?: { miniapp_beta_access?: unknown }) {
+  void user;
+  return true;
 }
 
 export function getMiniAppBetaAccessStatus(error: unknown) {
   return error instanceof MiniAppBetaAccessError ? error.statusCode : 500;
 }
 
-export async function assertMiniAppBetaAccess(user: { miniapp_beta_access?: unknown }) {
+export async function assertMiniAppBetaAccess(user?: { miniapp_beta_access?: unknown }) {
   if (!hasMiniAppBetaAccess(user)) {
     throw new MiniAppBetaAccessError();
   }

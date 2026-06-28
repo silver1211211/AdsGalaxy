@@ -13,6 +13,18 @@ type NetworkRow = RowDataPacket & {
   priority_order: number | null;
 };
 
+type MiniAppRow = RowDataPacket & {
+  id: number;
+  status: string;
+};
+
+type SubmittedNetwork = {
+  network_name?: unknown;
+  network_placement_id?: unknown;
+  enabled?: unknown;
+  priority_order?: unknown;
+};
+
 async function getNetworkState(miniappId: string) {
   const [rows] = await pool.query<NetworkRow[]>(
     `SELECT network_name, network_placement_id, enabled, priority_order
@@ -46,7 +58,7 @@ export async function GET(
 
   try {
     const { id } = await params;
-    const [miniapps]: any = await pool.query(
+    const [miniapps] = await pool.query<MiniAppRow[]>(
       "SELECT id FROM miniapps WHERE id = ? AND is_deleted = FALSE",
       [id]
     );
@@ -73,10 +85,10 @@ export async function PUT(
 
   try {
     const { id } = await params;
-    const body = await request.json();
-    const submittedNetworks = Array.isArray(body.networks) ? body.networks : [];
+    const body = await request.json() as { networks?: unknown };
+    const submittedNetworks: SubmittedNetwork[] = Array.isArray(body.networks) ? body.networks : [];
 
-    const [miniapps]: any = await pool.query(
+    const [miniapps] = await pool.query<MiniAppRow[]>(
       "SELECT id, status FROM miniapps WHERE id = ? AND is_deleted = FALSE",
       [id]
     );
@@ -88,7 +100,7 @@ export async function PUT(
     const previousState = await getNetworkState(id);
 
     for (const networkName of NETWORKS) {
-      const submitted = submittedNetworks.find((item: any) => item?.network_name === networkName) || {};
+      const submitted = submittedNetworks.find((item) => item?.network_name === networkName) || {};
       const placementId = String(submitted.network_placement_id || "").trim();
       const enabled = Boolean(submitted.enabled);
       const submittedPriority = Number(submitted.priority_order);
@@ -108,7 +120,7 @@ export async function PUT(
     }
 
     const newState = await getNetworkState(id);
-    const configuredNetworkCount = newState.filter((network) => network.enabled && network.network_name !== "AdsGalaxyInternal").length;
+    const configuredNetworkCount = newState.filter((network) => network.enabled).length;
     const enabledNetworkCount = newState.filter((network) => network.enabled).length;
     const currentStatus = String(miniapps[0].status || "");
     const newStatus = currentStatus === "paused" || currentStatus === "rejected"

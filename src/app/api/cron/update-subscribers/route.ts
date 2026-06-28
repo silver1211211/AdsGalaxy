@@ -97,7 +97,8 @@ export async function GET(_req: NextRequest) {
             await pool.query("UPDATE channels SET last_subscriber_update_at = NOW() WHERE id = ?", [channel.id]);
           }
 
-          const notification = `<b>Channel Health Alert</b>\n\nYour channel <b>${channel.title}</b> (@${channel.username}) is not currently counted as active.\n\nReason: <i>${health.reason || "Unable to verify channel access"}</i>\n\n${health.suggestedFix || "Please verify channel access and try again."}`;
+          const channelLabel = channel.username ? `@${channel.username}` : `ID ${channel.chat_id}`;
+          const notification = `<b>Channel Health Alert</b>\n\nYour channel <b>${channel.title}</b> (${channelLabel}) is not currently counted as active.\n\nReason: <i>${health.reason || "Unable to verify channel access"}</i>\n\n${health.suggestedFix || "Please verify channel access and try again."}`;
 
           try {
             await sendTelegramMessage(channel.owner_telegram_id, notification);

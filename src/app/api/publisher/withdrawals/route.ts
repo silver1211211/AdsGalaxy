@@ -31,6 +31,12 @@ export async function GET(request: Request) {
   }
 }
 
+const NETWORK_FEES: Record<string, number> = {
+  "TRC-20": 2,
+  "ERC-20": 1,
+  "BEP-20": 0,
+};
+
 export async function POST(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
@@ -44,6 +50,8 @@ export async function POST(request: Request) {
     }
 
     const withdrawAmount = parseFloat(amount);
+    const fee = NETWORK_FEES[network] ?? 0;
+    const netAmount = Math.max(0, withdrawAmount - fee);
 
     // Fetch limits
     const [settingsRows]: any = await pool.query("SELECT \`key\`, value FROM settings WHERE \`key\` IN ('min_withdraw', 'max_withdraw')");
@@ -88,15 +96,15 @@ export async function POST(request: Request) {
       }
 
       await connection.query(
-        "INSERT INTO withdrawals (user_id, amount, network, address, status) VALUES (?, ?, ?, ?, 'pending')",
-        [user.id, withdrawAmount, network, address]
+        "INSERT INTO withdrawals (user_id, amount, fee, net_amount, network, address, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+        [user.id, withdrawAmount, fee, netAmount, network, address]
       );
 
       await connection.commit();
 
-      // Send Telegram Notification
+      const feeNote = fee > 0 ? `\nNetwork Fee: <b>-$${fee.toFixed(2)}</b>\nYou receive: <b>$${netAmount.toFixed(2)}</b>` : "";
       const message = `🚀 <b>Withdrawal Placed!</b>\n\n` +
-        `Amount: <b>$${withdrawAmount.toFixed(2)}</b>\n` +
+        `Amount: <b>$${withdrawAmount.toFixed(2)}</b>${feeNote}\n` +
         `Network: <b>${network}</b>\n` +
         `Address: <code>${address}</code>\n\n` +
         `Your withdrawal has been placed successfully and will be processed shortly.`;

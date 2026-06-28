@@ -230,6 +230,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
         body: JSON.stringify({
           chat_id: isEdit ? channel.chat_id : channelInfo.id,
           username: isEdit ? channel.username : channelInfo.username,
+          channel_type: "public",
           title: trimmedTitle,
           posts_per_day: postsPerDay,
           posting_times: postingTimes,
