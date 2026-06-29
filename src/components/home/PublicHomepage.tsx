@@ -210,14 +210,6 @@ export default function PublicHomepage() {
               href={BOT_LINK}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-sm font-bold text-slate-600 transition-colors duration-200 hover:text-[#0c9de8]"
-            >
-              Login
-            </a>
-            <a
-              href={BOT_LINK}
-              target="_blank"
-              rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-[#13aef5] to-[#0b86d6] px-4 py-2.5 text-sm font-black text-white shadow-md shadow-[#0c9de8]/25 transition-all duration-200 hover:-translate-y-px hover:shadow-lg hover:shadow-[#0c9de8]/35 active:scale-[0.97]"
             >
               Open App

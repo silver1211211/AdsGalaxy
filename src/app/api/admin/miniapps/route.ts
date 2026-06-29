@@ -122,20 +122,21 @@ export async function GET(request: Request) {
     const [[countRow]]: any = await pool.query(countQuery, queryParams);
 
     const miniapps = await Promise.all(rows.map(async (row: any) => {
-      const [health, [flagRows], [lockRows]] = await Promise.all([
-        getMiniAppNetworkHealthScores(row.id),
-        pool.query(
+      const [health, flagResult, lockResult] = await Promise.all([
+        getMiniAppNetworkHealthScores(row.id).catch(() => []),
+        (pool.query(
           "SELECT COUNT(*) as suspicious_flags FROM miniapp_optimization_flags WHERE miniapp_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)",
           [row.id]
-        ) as any,
-        pool.query(
+        ) as any).catch(() => [[{ suspicious_flags: 0 }]]),
+        (pool.query(
           "SELECT COUNT(*) as monetag_lock_count FROM miniapp_network_frequency_state WHERE miniapp_id = ? AND network_name = 'Monetag' AND locked_until IS NOT NULL",
           [row.id]
-        ) as any,
+        ) as any).catch(() => [[{ monetag_lock_count: 0 }]]),
       ]);
+      const [flagRows] = flagResult;
+      const [lockRows] = lockResult;
       const requestCount = Number(row.mediation_request_count || 0);
-      const noFillCount = Number(row.no_fill_count || 0);
-      const impressions = health.reduce((sum, item) => sum + Number(item.impressions || 0), 0);
+      const impressions = (health as any[]).reduce((sum, item) => sum + Number(item.impressions || 0), 0);
       return {
         ...row,
         network_health: health,
@@ -146,7 +147,7 @@ export async function GET(request: Request) {
       };
     }));
 
-    const revenueSummary = await getMiniAppGlobalRevenueSummary();
+    const revenueSummary = await getMiniAppGlobalRevenueSummary().catch(() => null);
 
     return NextResponse.json({
       miniapps,

@@ -130,7 +130,7 @@ function policyValue(value: unknown) {
 function scheduleValue(start?: string | null, end?: string | null) {
   const startText = start ? new Date(start).toLocaleDateString() : "Any start";
   const endText = end ? new Date(end).toLocaleDateString() : "No end";
-  return `${startText} - ${endText}`;
+  return `${startText} – ${endText}`;
 }
 
 export default function AdminMiniAppRewardedPage() {
@@ -265,163 +265,323 @@ export default function AdminMiniAppRewardedPage() {
 
   const ef = (field: string, value: string) => setEditForm((prev) => ({ ...prev, [field]: value }));
 
+  const inputCls = "mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300";
+
   return (
     <AdminLayout>
-      <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-          <h2 className="text-sm font-semibold text-slate-900">Mini App Rewarded Campaigns</h2>
-          {message && <span className="text-xs font-semibold text-slate-500">{message}</span>}
+      {/* Page Header */}
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-slate-900">Rewarded Ad Campaigns</h1>
+          <p className="mt-0.5 text-sm text-slate-500">Review and manage mini app rewarded ad campaigns</p>
         </div>
-        <div className="border-b border-slate-200 bg-slate-50 p-4">
-          <div className="mb-2 text-xs font-black uppercase tracking-widest text-slate-500">Category CPM Adjustments</div>
-          <div className="grid gap-2 md:grid-cols-4">
+        {message && (
+          <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${message.includes("failed") || message.includes("Failed") ? "border-red-200 bg-red-50 text-red-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
+            {message}
+          </span>
+        )}
+      </div>
+
+      {/* Category CPM Adjustments */}
+      <div className="mb-6 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-200 px-5 py-4">
+          <h2 className="text-sm font-semibold text-slate-900">Category CPM Adjustments</h2>
+          <p className="mt-0.5 text-xs text-slate-500">Override CPM multipliers per creative category</p>
+        </div>
+        <div className="p-5">
+          <div className="grid gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
             {MINIAPP_CREATIVE_CATEGORIES.map((category) => (
-              <label key={category} className="rounded border border-slate-200 bg-white p-2 text-xs font-semibold text-slate-600">
-                <span>{category}</span>
+              <div key={category} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <div className="mb-1.5 text-xs font-semibold text-slate-700">{category}</div>
                 <input
                   defaultValue={Number(categoryAdjustments[category] || 0).toFixed(2)}
-                  onBlur={(event) => updateCategoryAdjustment(category, event.target.value)}
-                  className="mt-1 w-full rounded border border-slate-200 px-2 py-1 font-mono text-xs"
+                  onBlur={(e) => updateCategoryAdjustment(category, e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
                 />
-              </label>
+              </div>
             ))}
           </div>
         </div>
+      </div>
+
+      {/* Campaigns Table */}
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-200 px-5 py-4">
+          <h2 className="text-sm font-semibold text-slate-900">All Campaigns</h2>
+        </div>
         {loading ? (
-          <div className="p-10 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={24} /></div>
+          <div className="p-16 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={28} /></div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[1320px] text-left text-sm">
-              <thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="px-3 py-2">Creative</th><th className="px-3 py-2">Advertiser</th><th className="px-3 py-2">Status</th><th className="px-3 py-2">Budget</th><th className="px-3 py-2">Impressions</th><th className="px-3 py-2">Revenue</th><th className="px-3 py-2">Targeting</th><th className="px-3 py-2">Review</th><th className="px-3 py-2">CPM Controls</th><th className="px-3 py-2 text-right">Actions</th></tr></thead>
+              <thead className="border-b border-slate-200 bg-slate-50">
+                <tr>
+                  <th className="px-4 py-3 text-xs font-semibold text-slate-500">Creative</th>
+                  <th className="px-4 py-3 text-xs font-semibold text-slate-500">Advertiser</th>
+                  <th className="px-4 py-3 text-xs font-semibold text-slate-500">Status</th>
+                  <th className="px-4 py-3 text-xs font-semibold text-slate-500">Budget</th>
+                  <th className="px-4 py-3 text-xs font-semibold text-slate-500">Impressions</th>
+                  <th className="px-4 py-3 text-xs font-semibold text-slate-500">Revenue</th>
+                  <th className="px-4 py-3 text-xs font-semibold text-slate-500">Targeting</th>
+                  <th className="px-4 py-3 text-xs font-semibold text-slate-500">Review</th>
+                  <th className="px-4 py-3 text-xs font-semibold text-slate-500">CPM Controls</th>
+                  <th className="px-4 py-3 text-right text-xs font-semibold text-slate-500">Actions</th>
+                </tr>
+              </thead>
               <tbody className="divide-y divide-slate-100">
                 {campaigns.map((campaign) => (
-                  <tr key={campaign.id}>
-                    <td className="px-3 py-2">
+                  <tr key={campaign.id} className="transition-colors hover:bg-slate-50/80">
+                    {/* Creative */}
+                    <td className="px-4 py-4">
                       <div className="flex gap-3">
-                        {campaign.image_url ? <img src={campaign.image_url} alt={campaign.title} className="h-20 w-20 rounded border border-slate-200 object-cover" /> : <div className="h-20 w-20 rounded border border-slate-200 bg-slate-50" />}
-                        <div className="min-w-0 max-w-[260px]">
+                        {campaign.image_url
+                          ? <img src={campaign.image_url} alt={campaign.title} className="h-20 w-20 flex-shrink-0 rounded-lg border border-slate-200 object-cover" />
+                          : <div className="h-20 w-20 flex-shrink-0 rounded-lg border border-slate-200 bg-slate-50" />
+                        }
+                        <div className="min-w-0 max-w-[240px]">
                           <div className="font-semibold text-slate-900">{campaign.campaign_name}</div>
-                          <div className="text-xs font-bold" style={{ color: campaign.title_color || undefined }}>{campaign.title}</div>
-                          <div className="line-clamp-2 text-xs text-slate-500" style={{ color: campaign.body_color || undefined }}>{campaign.description}</div>
-                          <a href={campaign.landing_url || "#"} target="_blank" rel="noreferrer" className="block truncate text-xs font-semibold text-blue-700">{campaign.landing_url}</a>
-                          <div className="text-xs text-slate-500">CTA: <span className="font-bold text-slate-800">{campaign.cta_text || "Learn More"}</span></div>
+                          <div className="mt-0.5 text-xs font-bold" style={{ color: campaign.title_color || undefined }}>{campaign.title}</div>
+                          <div className="mt-0.5 line-clamp-2 text-xs text-slate-500" style={{ color: campaign.body_color || undefined }}>{campaign.description}</div>
+                          <a href={campaign.landing_url || "#"} target="_blank" rel="noreferrer" className="mt-0.5 block truncate text-xs font-semibold text-blue-700 hover:text-blue-900">{campaign.landing_url}</a>
+                          <div className="mt-0.5 text-xs text-slate-500">CTA: <span className="font-bold text-slate-800">{campaign.cta_text || "Learn More"}</span></div>
                         </div>
                       </div>
                     </td>
-                    <td className="px-3 py-2">
-                      <div>{campaign.username ? `@${campaign.username}` : campaign.first_name || `User #${campaign.advertiser_id}`}</div>
-                      <div className="text-xs text-slate-500 capitalize">Trust: {campaign.advertiser_trust_level || "new"}</div>
-                      <div className="text-xs text-slate-500">Spend {money(campaign.advertiser_total_spend)} / Approved {campaign.advertiser_approved_campaigns || 0} / Rejected {campaign.advertiser_rejected_campaigns || 0}</div>
-                    </td>
-                    <td className="px-3 py-2 capitalize"><div>{campaign.status}</div><div className="text-xs text-slate-500">Review: {campaign.creative_review_status || "pending"}</div></td>
-                    <td className="px-3 py-2"><div>{campaign.campaign_budget_mode === "unlimited" ? "Unlimited" : money(campaign.budget)}</div><div className="text-xs text-slate-500">Left {campaign.campaign_budget_mode === "unlimited" ? "Balance funded" : money(campaign.remaining_budget)}</div><div className="text-xs text-slate-500">Bid {money(campaign.advertiser_cpm_bid)}</div></td>
-                    <td className="px-3 py-2">{numberValue(campaign.impressions)}</td>
-                    <td className="px-3 py-2 text-xs">
-                      <div>Advertiser: {money(campaign.spend)}</div>
-                      <div>Publisher: {money(campaign.publisher_revenue)}</div>
-                      <div>AdsGalaxy: {money(campaign.ads_galaxy_revenue)}</div>
-                      <div>Reserve: {money(campaign.reserve_revenue)}</div>
-                      <div>Avg Q: {Number(campaign.avg_quality_factor || 0).toFixed(4)}</div>
-                      <div>Campaign Quality: {campaign.quality_score || 50} / {campaign.quality_tier || "average"}</div>
-                    </td>
-                    <td className="px-3 py-2 text-xs">
-                      <div>Countries: {listValue(campaign.countries || campaign.target_countries)}</div>
-                      <div>Categories: {listValue(campaign.categories)}</div>
-                      <div>Languages: {listValue(campaign.languages)}</div>
-                      <div>{policyValue(campaign.vpn_policy)} / {policyValue(campaign.device_policy)} / {policyValue(campaign.os_policy)}</div>
-                      <div>{scheduleValue(campaign.start_at, campaign.end_at)}</div>
-                      <div>Daily: {campaign.daily_budget_limit ? money(campaign.daily_budget_limit) : "No cap"} / Freq: {campaign.frequency_cap_per_user || "No cap"}</div>
-                    </td>
-                    <td className="px-3 py-2 text-xs">
-                      <div>Quality: <span className="font-black">{campaign.quality_score || 50}</span> / {campaign.quality_tier || "average"}</div>
-                      <div>Required CPM: {money(campaign.required_cpm)}</div>
-                      <div>Image: {imageMetaText(campaign.image_review_metadata)}</div>
-                      <div className="mt-1 space-y-1">
-                        {parseList(campaign.landing_review_flags).length > 0 ? parseList(campaign.landing_review_flags).map((flag) => (
-                          <div key={flag} className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 font-bold text-amber-700"><AlertTriangle size={11} /> {flag}</div>
-                        )) : <span className="text-slate-500">No landing flags</span>}
-                      </div>
-                      {campaign.creative_review_notes && <div className="mt-1 rounded bg-slate-50 p-1 text-slate-600">{campaign.creative_review_notes}</div>}
-                    </td>
-                    <td className="px-3 py-2">
-                      <div className="space-y-1">
-                        <input value={cpms[campaign.id] ?? String(campaign.admin_cpm || campaign.advertiser_cpm_bid || "")} onChange={(event) => setCpms((prev) => ({ ...prev, [campaign.id]: event.target.value }))} className="w-28 rounded border border-slate-200 px-2 py-1 text-xs" placeholder="Advertiser CPM" />
-                        <select value={cpmModes[campaign.id] ?? String(campaign.cpm_mode || "live")} onChange={(event) => setCpmModes((prev) => ({ ...prev, [campaign.id]: event.target.value }))} className="w-28 rounded border border-slate-200 px-2 py-1 text-xs">
-                          <option value="live">Live CPM</option>
-                          <option value="fixed">Fixed CPM</option>
-                        </select>
-                        <input value={fixedCpms[campaign.id] ?? String(campaign.fixed_publisher_cpm || "")} onChange={(event) => setFixedCpms((prev) => ({ ...prev, [campaign.id]: event.target.value }))} className="w-28 rounded border border-slate-200 px-2 py-1 text-xs" placeholder="Fixed pub CPM" />
-                        <input value={moderationNotes[campaign.id] || ""} onChange={(event) => setModerationNotes((prev) => ({ ...prev, [campaign.id]: event.target.value }))} className="w-28 rounded border border-slate-200 px-2 py-1 text-xs" placeholder="Review note" />
+
+                    {/* Advertiser */}
+                    <td className="px-4 py-4">
+                      <div className="font-semibold text-slate-900">{campaign.username ? `@${campaign.username}` : campaign.first_name || `User #${campaign.advertiser_id}`}</div>
+                      <div className="mt-0.5 text-xs capitalize text-slate-500">Trust: {campaign.advertiser_trust_level || "new"}</div>
+                      <div className="mt-1 space-y-0.5 text-xs text-slate-500">
+                        <div>Spend {money(campaign.advertiser_total_spend)}</div>
+                        <div>Approved {campaign.advertiser_approved_campaigns || 0} / Rejected {campaign.advertiser_rejected_campaigns || 0}</div>
                       </div>
                     </td>
-                    <td className="px-3 py-2">
-                      <div className="flex justify-end gap-1">
-                        <button onClick={() => runAction(campaign.id, "approve")} className="rounded border border-emerald-200 p-1.5 text-emerald-600" title="Approve"><Check size={14} /></button>
-                        <button onClick={() => runAction(campaign.id, "reject")} className="rounded border border-red-200 p-1.5 text-red-600" title="Reject"><X size={14} /></button>
+
+                    {/* Status */}
+                    <td className="px-4 py-4">
+                      <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold capitalize ${
+                        campaign.status === "active" ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        : campaign.status === "paused" ? "border-amber-200 bg-amber-50 text-amber-700"
+                        : campaign.status === "rejected" ? "border-red-200 bg-red-50 text-red-700"
+                        : "border-slate-200 bg-slate-100 text-slate-600"
+                      }`}>{campaign.status}</span>
+                      <div className="mt-1.5 text-xs text-slate-500">Review: {campaign.creative_review_status || "pending"}</div>
+                    </td>
+
+                    {/* Budget */}
+                    <td className="px-4 py-4">
+                      <div className="font-semibold text-slate-900">{campaign.campaign_budget_mode === "unlimited" ? "Unlimited" : money(campaign.budget)}</div>
+                      <div className="mt-0.5 text-xs text-slate-500">Left {campaign.campaign_budget_mode === "unlimited" ? "Balance funded" : money(campaign.remaining_budget)}</div>
+                      <div className="text-xs text-slate-500">Bid {money(campaign.advertiser_cpm_bid)}</div>
+                    </td>
+
+                    {/* Impressions */}
+                    <td className="px-4 py-4">
+                      <div className="font-semibold text-slate-900">{numberValue(campaign.impressions)}</div>
+                    </td>
+
+                    {/* Revenue */}
+                    <td className="px-4 py-4">
+                      <div className="space-y-0.5 text-xs">
+                        <div className="flex justify-between gap-3"><span className="text-slate-500">Advertiser</span><span className="font-medium text-slate-900">{money(campaign.spend)}</span></div>
+                        <div className="flex justify-between gap-3"><span className="text-slate-500">Publisher</span><span className="font-medium text-slate-900">{money(campaign.publisher_revenue)}</span></div>
+                        <div className="flex justify-between gap-3"><span className="text-slate-500">AdsGalaxy</span><span className="font-medium text-slate-900">{money(campaign.ads_galaxy_revenue)}</span></div>
+                        <div className="flex justify-between gap-3"><span className="text-slate-500">Reserve</span><span className="font-medium text-slate-900">{money(campaign.reserve_revenue)}</span></div>
+                        <div className="mt-1 border-t border-slate-100 pt-1 text-[10px] text-slate-400">
+                          Avg Q: {Number(campaign.avg_quality_factor || 0).toFixed(4)} · Score: {campaign.quality_score || 50} / {campaign.quality_tier || "avg"}
+                        </div>
+                      </div>
+                    </td>
+
+                    {/* Targeting */}
+                    <td className="px-4 py-4">
+                      <div className="space-y-0.5 text-xs">
+                        <div><span className="text-slate-500">Countries: </span><span className="text-slate-700">{listValue(campaign.countries || campaign.target_countries)}</span></div>
+                        <div><span className="text-slate-500">Categories: </span><span className="text-slate-700">{listValue(campaign.categories)}</span></div>
+                        <div><span className="text-slate-500">Languages: </span><span className="text-slate-700">{listValue(campaign.languages)}</span></div>
+                        <div className="text-slate-500">{policyValue(campaign.vpn_policy)} · {policyValue(campaign.device_policy)} · {policyValue(campaign.os_policy)}</div>
+                        <div className="text-slate-500">{scheduleValue(campaign.start_at, campaign.end_at)}</div>
+                        <div className="text-slate-500">Daily: {campaign.daily_budget_limit ? money(campaign.daily_budget_limit) : "No cap"} · Freq: {campaign.frequency_cap_per_user || "No cap"}</div>
+                      </div>
+                    </td>
+
+                    {/* Review */}
+                    <td className="px-4 py-4">
+                      <div className="space-y-0.5 text-xs">
+                        <div><span className="text-slate-500">Quality: </span><span className="font-black text-slate-900">{campaign.quality_score || 50}</span><span className="text-slate-500"> / {campaign.quality_tier || "average"}</span></div>
+                        <div><span className="text-slate-500">Required CPM: </span><span className="font-medium text-slate-900">{money(campaign.required_cpm)}</span></div>
+                        <div className="text-slate-500">Image: {imageMetaText(campaign.image_review_metadata)}</div>
+                        <div className="mt-1.5 flex flex-wrap gap-1">
+                          {parseList(campaign.landing_review_flags).length > 0
+                            ? parseList(campaign.landing_review_flags).map((flag) => (
+                              <span key={flag} className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">
+                                <AlertTriangle size={10} /> {flag}
+                              </span>
+                            ))
+                            : <span className="text-slate-400">No landing flags</span>
+                          }
+                        </div>
+                        {campaign.creative_review_notes && (
+                          <div className="mt-1 rounded-lg bg-slate-50 p-1.5 text-slate-600">{campaign.creative_review_notes}</div>
+                        )}
+                      </div>
+                    </td>
+
+                    {/* CPM Controls */}
+                    <td className="px-4 py-4">
+                      <div className="space-y-2">
+                        <div>
+                          <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Advertiser CPM</label>
+                          <input
+                            value={cpms[campaign.id] ?? String(campaign.admin_cpm || campaign.advertiser_cpm_bid || "")}
+                            onChange={(e) => setCpms((prev) => ({ ...prev, [campaign.id]: e.target.value }))}
+                            className="w-32 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-blue-500"
+                            placeholder="CPM"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">CPM Mode</label>
+                          <select
+                            value={cpmModes[campaign.id] ?? String(campaign.cpm_mode || "live")}
+                            onChange={(e) => setCpmModes((prev) => ({ ...prev, [campaign.id]: e.target.value }))}
+                            className="w-32 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-blue-500"
+                          >
+                            <option value="live">Live CPM</option>
+                            <option value="fixed">Fixed CPM</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Fixed Pub CPM</label>
+                          <input
+                            value={fixedCpms[campaign.id] ?? String(campaign.fixed_publisher_cpm || "")}
+                            onChange={(e) => setFixedCpms((prev) => ({ ...prev, [campaign.id]: e.target.value }))}
+                            className="w-32 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-blue-500"
+                            placeholder="Fixed CPM"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Review Note</label>
+                          <input
+                            value={moderationNotes[campaign.id] || ""}
+                            onChange={(e) => setModerationNotes((prev) => ({ ...prev, [campaign.id]: e.target.value }))}
+                            className="w-32 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-blue-500"
+                            placeholder="Note"
+                          />
+                        </div>
+                      </div>
+                    </td>
+
+                    {/* Actions */}
+                    <td className="px-4 py-4">
+                      <div className="flex flex-col items-end gap-1.5">
+                        <div className="flex gap-1.5">
+                          <button
+                            onClick={() => runAction(campaign.id, "approve")}
+                            className="rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-emerald-600 transition-colors hover:bg-emerald-100"
+                            title="Approve"
+                          >
+                            <Check size={14} />
+                          </button>
+                          <button
+                            onClick={() => runAction(campaign.id, "reject")}
+                            className="rounded-lg border border-red-200 bg-red-50 p-2 text-red-600 transition-colors hover:bg-red-100"
+                            title="Reject"
+                          >
+                            <X size={14} />
+                          </button>
+                          <button
+                            onClick={() => runAction(campaign.id, campaign.status === "paused" ? "resume" : "pause")}
+                            className={`rounded-lg border p-2 transition-colors ${campaign.status === "paused" ? "border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100" : "border-amber-200 bg-amber-50 text-amber-600 hover:bg-amber-100"}`}
+                            title={campaign.status === "paused" ? "Resume" : "Pause"}
+                          >
+                            {campaign.status === "paused" ? <Play size={14} /> : <Pause size={14} />}
+                          </button>
+                          <button
+                            onClick={() => openEdit(campaign)}
+                            className="rounded-lg border border-purple-200 bg-purple-50 p-2 text-purple-600 transition-colors hover:bg-purple-100"
+                            title="Edit Campaign"
+                          >
+                            <Edit3 size={14} />
+                          </button>
+                        </div>
                         <button
-                          onClick={() => runAction(campaign.id, campaign.status === "paused" ? "resume" : "pause")}
-                          className={`rounded border p-1.5 ${campaign.status === "paused" ? "border-blue-200 text-blue-600" : "border-amber-200 text-amber-600"}`}
-                          title={campaign.status === "paused" ? "Resume" : "Pause"}
+                          onClick={() => runAction(campaign.id, "update_cpm")}
+                          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50"
                         >
-                          {campaign.status === "paused" ? <Play size={14} /> : <Pause size={14} />}
+                          Save CPM
                         </button>
-                        <button onClick={() => openEdit(campaign)} className="rounded border border-purple-200 p-1.5 text-purple-600" title="Edit Campaign"><Edit3 size={14} /></button>
-                        <button onClick={() => runAction(campaign.id, "update_cpm")} className="rounded border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600">CPM</button>
                       </div>
                     </td>
                   </tr>
                 ))}
-                {campaigns.length === 0 && <tr><td colSpan={10} className="p-8 text-center text-slate-500">No internal rewarded campaigns.</td></tr>}
+                {campaigns.length === 0 && (
+                  <tr><td colSpan={10} className="p-10 text-center text-slate-500">No internal rewarded campaigns.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
         )}
       </div>
+
+      {/* Edit Campaign Modal */}
       {editingCampaign && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4">
-          <div className="my-8 w-full max-w-2xl rounded-xl bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
-              <h2 className="text-sm font-black text-slate-900">Edit Campaign — {editingCampaign.campaign_name}</h2>
-              <button onClick={() => setEditingCampaign(null)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
-            </div>
-            <div className="space-y-4 p-6">
-              <div className="grid grid-cols-2 gap-4">
-                <label className="col-span-2 block text-xs font-bold text-slate-500">Campaign Name
-                  <input value={editForm.campaign_name} onChange={(e) => ef("campaign_name", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" />
-                </label>
-                <label className="block text-xs font-bold text-slate-500">Title
-                  <input value={editForm.title} onChange={(e) => ef("title", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" />
-                </label>
-                <label className="block text-xs font-bold text-slate-500">CTA Text
-                  <input value={editForm.cta_text} onChange={(e) => ef("cta_text", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" />
-                </label>
-                <label className="col-span-2 block text-xs font-bold text-slate-500">Description
-                  <textarea value={editForm.description} onChange={(e) => ef("description", e.target.value)} rows={3} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" />
-                </label>
-                <label className="col-span-2 block text-xs font-bold text-slate-500">Image URL
-                  <input value={editForm.image_url} onChange={(e) => ef("image_url", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="https://..." />
-                </label>
-                <label className="col-span-2 block text-xs font-bold text-slate-500">Landing URL
-                  <input value={editForm.landing_url} onChange={(e) => ef("landing_url", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="https://..." />
-                </label>
-                <label className="block text-xs font-bold text-slate-500">Title Color
-                  <div className="mt-1 flex gap-2">
-                    <input type="color" value={editForm.title_color || "#000000"} onChange={(e) => ef("title_color", e.target.value)} className="h-9 w-12 cursor-pointer rounded border border-slate-200 p-0.5" />
-                    <input value={editForm.title_color} onChange={(e) => ef("title_color", e.target.value)} className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="#000000" />
-                  </div>
-                </label>
-                <label className="block text-xs font-bold text-slate-500">Body Color
-                  <div className="mt-1 flex gap-2">
-                    <input type="color" value={editForm.body_color || "#000000"} onChange={(e) => ef("body_color", e.target.value)} className="h-9 w-12 cursor-pointer rounded border border-slate-200 p-0.5" />
-                    <input value={editForm.body_color} onChange={(e) => ef("body_color", e.target.value)} className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="#000000" />
-                  </div>
-                </label>
-              </div>
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/60 p-4">
+          <div className="my-8 w-full max-w-2xl overflow-hidden rounded-xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
               <div>
-                <div className="mb-2 text-xs font-bold text-slate-500">Categories</div>
-                <div className="grid grid-cols-4 gap-2">
+                <h2 className="text-base font-bold text-slate-900">Edit Campaign</h2>
+                <p className="mt-0.5 text-sm text-slate-500">{editingCampaign.campaign_name}</p>
+              </div>
+              <button onClick={() => setEditingCampaign(null)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="space-y-5 p-6">
+              {/* Basic Info */}
+              <div>
+                <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-400">Basic Information</h3>
+                <div className="grid grid-cols-2 gap-4">
+                  <label className="col-span-2 block text-xs font-semibold text-slate-600">Campaign Name
+                    <input value={editForm.campaign_name} onChange={(e) => ef("campaign_name", e.target.value)} className={inputCls} />
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600">Title
+                    <input value={editForm.title} onChange={(e) => ef("title", e.target.value)} className={inputCls} />
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600">CTA Text
+                    <input value={editForm.cta_text} onChange={(e) => ef("cta_text", e.target.value)} className={inputCls} />
+                  </label>
+                  <label className="col-span-2 block text-xs font-semibold text-slate-600">Description
+                    <textarea value={editForm.description} onChange={(e) => ef("description", e.target.value)} rows={3} className={inputCls} />
+                  </label>
+                  <label className="col-span-2 block text-xs font-semibold text-slate-600">Image URL
+                    <input value={editForm.image_url} onChange={(e) => ef("image_url", e.target.value)} className={inputCls} placeholder="https://..." />
+                  </label>
+                  <label className="col-span-2 block text-xs font-semibold text-slate-600">Landing URL
+                    <input value={editForm.landing_url} onChange={(e) => ef("landing_url", e.target.value)} className={inputCls} placeholder="https://..." />
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600">Title Color
+                    <div className="mt-1 flex gap-2">
+                      <input type="color" value={editForm.title_color || "#000000"} onChange={(e) => ef("title_color", e.target.value)} className="h-9 w-12 cursor-pointer rounded-lg border border-slate-200 p-0.5" />
+                      <input value={editForm.title_color} onChange={(e) => ef("title_color", e.target.value)} className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="#000000" />
+                    </div>
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600">Body Color
+                    <div className="mt-1 flex gap-2">
+                      <input type="color" value={editForm.body_color || "#000000"} onChange={(e) => ef("body_color", e.target.value)} className="h-9 w-12 cursor-pointer rounded-lg border border-slate-200 p-0.5" />
+                      <input value={editForm.body_color} onChange={(e) => ef("body_color", e.target.value)} className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="#000000" />
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              {/* Categories */}
+              <div>
+                <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-400">Categories</h3>
+                <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
                   {MINIAPP_CREATIVE_CATEGORIES.map((cat) => (
-                    <label key={cat} className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                    <label key={cat} className="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
                       <input
                         type="checkbox"
                         checked={editCats.includes(cat)}
@@ -433,52 +593,61 @@ export default function AdminMiniAppRewardedPage() {
                   ))}
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <label className="block text-xs font-bold text-slate-500">Countries (comma-separated ISO codes)
-                  <input value={editForm.countries} onChange={(e) => ef("countries", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="US, GB, NG …" />
-                </label>
-                <label className="block text-xs font-bold text-slate-500">Languages (comma-separated)
-                  <input value={editForm.languages} onChange={(e) => ef("languages", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="en, fr …" />
-                </label>
-                <label className="block text-xs font-bold text-slate-500">VPN Policy
-                  <select value={editForm.vpn_policy} onChange={(e) => ef("vpn_policy", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300">
-                    <option value="allow_all">Allow all traffic</option>
-                    <option value="prefer_non_vpn">Prefer non-VPN</option>
-                    <option value="exclude_vpn">Exclude VPN/proxy</option>
-                  </select>
-                </label>
-                <label className="block text-xs font-bold text-slate-500">Device Policy
-                  <select value={editForm.device_policy} onChange={(e) => ef("device_policy", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300">
-                    <option value="all">All</option>
-                    <option value="mobile">Mobile only</option>
-                    <option value="desktop">Desktop only</option>
-                  </select>
-                </label>
-                <label className="block text-xs font-bold text-slate-500">OS Policy
-                  <select value={editForm.os_policy} onChange={(e) => ef("os_policy", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300">
-                    <option value="all">All</option>
-                    <option value="android">Android</option>
-                    <option value="ios">iOS</option>
-                    <option value="desktop_web">Desktop/Web</option>
-                  </select>
-                </label>
-                <label className="block text-xs font-bold text-slate-500">Start Date
-                  <input type="date" value={editForm.start_at} onChange={(e) => ef("start_at", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" />
-                </label>
-                <label className="block text-xs font-bold text-slate-500">End Date
-                  <input type="date" value={editForm.end_at} onChange={(e) => ef("end_at", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" />
-                </label>
-                <label className="block text-xs font-bold text-slate-500">Daily Budget Limit ($)
-                  <input type="number" min="0" step="0.01" value={editForm.daily_budget_limit} onChange={(e) => ef("daily_budget_limit", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="No limit" />
-                </label>
-                <label className="block text-xs font-bold text-slate-500">Frequency Cap (per user)
-                  <input type="number" min="0" step="1" value={editForm.frequency_cap_per_user} onChange={(e) => ef("frequency_cap_per_user", e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:ring-2 focus:ring-blue-300" placeholder="No cap" />
-                </label>
+
+              {/* Targeting */}
+              <div>
+                <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-400">Targeting & Schedule</h3>
+                <div className="grid grid-cols-2 gap-4">
+                  <label className="block text-xs font-semibold text-slate-600">Countries (comma-separated ISO codes)
+                    <input value={editForm.countries} onChange={(e) => ef("countries", e.target.value)} className={inputCls} placeholder="US, GB, NG …" />
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600">Languages (comma-separated)
+                    <input value={editForm.languages} onChange={(e) => ef("languages", e.target.value)} className={inputCls} placeholder="en, fr …" />
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600">VPN Policy
+                    <select value={editForm.vpn_policy} onChange={(e) => ef("vpn_policy", e.target.value)} className={inputCls}>
+                      <option value="allow_all">Allow all traffic</option>
+                      <option value="prefer_non_vpn">Prefer non-VPN</option>
+                      <option value="exclude_vpn">Exclude VPN/proxy</option>
+                    </select>
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600">Device Policy
+                    <select value={editForm.device_policy} onChange={(e) => ef("device_policy", e.target.value)} className={inputCls}>
+                      <option value="all">All</option>
+                      <option value="mobile">Mobile only</option>
+                      <option value="desktop">Desktop only</option>
+                    </select>
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600">OS Policy
+                    <select value={editForm.os_policy} onChange={(e) => ef("os_policy", e.target.value)} className={inputCls}>
+                      <option value="all">All</option>
+                      <option value="android">Android</option>
+                      <option value="ios">iOS</option>
+                      <option value="desktop_web">Desktop/Web</option>
+                    </select>
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600">Start Date
+                    <input type="date" value={editForm.start_at} onChange={(e) => ef("start_at", e.target.value)} className={inputCls} />
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600">End Date
+                    <input type="date" value={editForm.end_at} onChange={(e) => ef("end_at", e.target.value)} className={inputCls} />
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600">Daily Budget Limit ($)
+                    <input type="number" min="0" step="0.01" value={editForm.daily_budget_limit} onChange={(e) => ef("daily_budget_limit", e.target.value)} className={inputCls} placeholder="No limit" />
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600">Frequency Cap (per user)
+                    <input type="number" min="0" step="1" value={editForm.frequency_cap_per_user} onChange={(e) => ef("frequency_cap_per_user", e.target.value)} className={inputCls} placeholder="No cap" />
+                  </label>
+                </div>
               </div>
             </div>
-            <div className="flex justify-end gap-3 border-t border-slate-200 px-6 py-4">
-              <button onClick={() => setEditingCampaign(null)} className="rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50">Cancel</button>
-              <button onClick={handleEditSubmit} disabled={editLoading} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-700 disabled:opacity-50">
+
+            <div className="flex gap-3 border-t border-slate-200 px-6 py-4">
+              <button onClick={() => setEditingCampaign(null)} className="flex-1 rounded-xl border border-slate-200 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50">
+                Cancel
+              </button>
+              <button onClick={handleEditSubmit} disabled={editLoading} className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-blue-600 py-2.5 text-sm font-bold text-white hover:bg-blue-700 disabled:opacity-50">
+                {editLoading && <Loader2 className="animate-spin" size={16} />}
                 {editLoading ? "Saving…" : "Save Changes"}
               </button>
             </div>

@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
+import type { RowDataPacket } from "mysql2/promise";
+
+type BotRow = RowDataPacket & { id: number };
 
 function clean(value: unknown) {
   return String(value || "").trim();
@@ -26,7 +29,7 @@ export async function POST(request: Request) {
 
   try {
     // 1. Find bot by token
-    const [bots]: any = await pool.query(
+    const [bots] = await pool.query<BotRow[]>(
       "SELECT id FROM bots WHERE bot_token = ? AND is_deleted = FALSE AND status = 'active' AND COALESCE(health_status, 'active') = 'active'",
       [botToken]
     );
@@ -48,15 +51,15 @@ export async function POST(request: Request) {
 
     // 3. Add to bot_users (reactivate if already exists)
     await pool.query(
-      `INSERT INTO bot_users (bot_id, chat_id, is_active, status)
-       VALUES (?, ?, TRUE, 'active')
-       ON DUPLICATE KEY UPDATE is_active = TRUE, status = 'active', inactive_reason = NULL`,
-      [botId, chatId]
+      `INSERT INTO bot_users (bot_id, user_id, chat_id, is_active, status)
+       VALUES (?, ?, ?, TRUE, 'active')
+       ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), is_active = TRUE, status = 'active', inactive_reason = NULL`,
+      [botId, chatId, chatId]
     );
 
     return NextResponse.json({ success: true });
-  } catch (error: any) {
-    console.error("Public Bot Add User API Error:", error?.message || "unknown");
+  } catch (error: unknown) {
+    console.error("Public Bot Add User API Error:", error instanceof Error ? error.message : "unknown");
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
 }

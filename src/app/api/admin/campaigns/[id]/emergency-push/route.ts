@@ -67,6 +67,7 @@ type BroadcastUserRow = RowDataPacket & {
 type EmergencySchema = {
   hasPostDeletedAtColumn: boolean;
   hasPostSlotColumns: boolean;
+  hasPostPostingModeColumn: boolean;
   hasDeliveryConfirmedAtColumn: boolean;
   hasCampaignDeliveryEvents: boolean;
 };
@@ -145,7 +146,7 @@ async function getEmergencySchema(): Promise<EmergencySchema> {
     FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA = DATABASE()
       AND (
-        (TABLE_NAME = 'campaign_posts' AND COLUMN_NAME IN ('posting_slot_date', 'posting_slot_time', 'deleted_at', 'delivery_confirmed_at'))
+        (TABLE_NAME = 'campaign_posts' AND COLUMN_NAME IN ('posting_slot_date', 'posting_slot_time', 'deleted_at', 'posting_mode', 'delivery_confirmed_at'))
         OR (TABLE_NAME = 'campaign_delivery_events')
       )
   `);
@@ -156,6 +157,7 @@ async function getEmergencySchema(): Promise<EmergencySchema> {
   return {
     hasPostDeletedAtColumn: columns.has("campaign_posts.deleted_at"),
     hasPostSlotColumns: columns.has("campaign_posts.posting_slot_date") && columns.has("campaign_posts.posting_slot_time"),
+    hasPostPostingModeColumn: columns.has("campaign_posts.posting_mode"),
     hasDeliveryConfirmedAtColumn: columns.has("campaign_posts.delivery_confirmed_at"),
     hasCampaignDeliveryEvents: tables.has("campaign_delivery_events"),
   };
@@ -235,14 +237,12 @@ async function getEligibleChannels(campaign: CampaignRow, schema: EmergencySchem
           AND ${activeCondition}
       )`
     : "";
-  const duplicateCondition = mode === "fill_empty_slots"
-    ? `AND NOT EXISTS (
+  const duplicateCondition = `AND NOT EXISTS (
         SELECT 1 FROM campaign_posts cp
         WHERE cp.campaign_id = ?
           AND cp.channel_id = c.id
           AND cp.created_at > NOW() - INTERVAL 24 HOUR
-      )`
-    : "";
+      )`;
 
   const [channels] = await pool.query<ChannelRow[]>(`
     SELECT c.*
@@ -257,7 +257,7 @@ async function getEligibleChannels(campaign: CampaignRow, schema: EmergencySchem
     LIMIT ?
   `, mode === "fill_empty_slots"
     ? [ACTIVE_POST_STATUSES, campaign.id, MAX_EMERGENCY_CHANNELS + 1]
-    : [MAX_EMERGENCY_CHANNELS + 1]
+    : [campaign.id, MAX_EMERGENCY_CHANNELS + 1]
   );
 
   const filtered = channels.filter((channel) => {
@@ -289,6 +289,11 @@ async function postCampaignToChannel(options: {
   const slot = getEmergencySlot();
   const insertColumns = ["campaign_id", "channel_id", "channel_username", "status"];
   const insertParams: Array<number | string | null> = [campaign.id, channel.id, channel.username, "active"];
+
+  if (schema.hasPostPostingModeColumn) {
+    insertColumns.push("posting_mode");
+    insertParams.push("emergency");
+  }
 
   if (schema.hasPostSlotColumns) {
     insertColumns.push("posting_slot_date", "posting_slot_time");

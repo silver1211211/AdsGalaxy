@@ -3,12 +3,16 @@
 import React, { useEffect, useState } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import {
-  Bell, Check, Clock, Copy, Gift, Medal, Share2, Sparkles, Target, Trophy,
-  UserPlus, Users, X, ArrowRight, CheckCircle2, Zap, ChevronDown, ChevronUp, Star,
+  AlertTriangle, ArrowRight, Check, CheckCircle2,
+  ChevronDown, ChevronUp, Clock, Copy, Gift, Lock,
+  Medal, Share2, Shield, Sparkles, Star,
+  Trophy, Users, UserPlus, X, Zap, Calendar,
+  Crown, Flame, Gauge, Rocket, Target, Bell,
 } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { useHeader } from "@/context/HeaderContext";
 import { cn } from "@/lib/utils";
+import { usePopupQueue } from "@/context/PopupQueueContext";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -26,13 +30,7 @@ function rewardBreakdown(data: any) {
   };
 }
 
-function rankMedalClass(rank: number) {
-  if (rank === 1) return "text-amber-400";
-  if (rank === 2) return "text-slate-400";
-  return "text-orange-400";
-}
-
-// ── Countdown ─────────────────────────────────────────────────────────────────
+// ── Countdown (sprint end) ────────────────────────────────────────────────────
 
 function Countdown({ endsAt, dark = false }: { endsAt?: string; dark?: boolean }) {
   const [r, setR] = useState({ d: 0, h: 0, m: 0, s: 0 });
@@ -67,74 +65,52 @@ function Countdown({ endsAt, dark = false }: { endsAt?: string; dark?: boolean }
   );
 }
 
-// ── Midnight countdown (daily reset) ─────────────────────────────────────────
+// ── Midnight countdown ────────────────────────────────────────────────────────
 
-function MidnightCountdown() {
-  const [timeLeft, setTimeLeft] = useState({ h: 0, m: 0, s: 0 });
+function MidnightCountdown({ inline = false }: { inline?: boolean }) {
+  const [t, setT] = useState({ h: 0, m: 0, s: 0 });
   useEffect(() => {
     const tick = () => {
       const now = new Date();
-      const midnight = new Date(now);
-      midnight.setHours(24, 0, 0, 0);
-      const diff = midnight.getTime() - now.getTime();
-      setTimeLeft({
-        h: Math.floor(diff / 3600000),
-        m: Math.floor((diff % 3600000) / 60000),
-        s: Math.floor((diff % 60000) / 1000),
-      });
+      const mid = new Date(now); mid.setHours(24, 0, 0, 0);
+      const diff = mid.getTime() - now.getTime();
+      setT({ h: Math.floor(diff / 3600000), m: Math.floor((diff % 3600000) / 60000), s: Math.floor((diff % 60000) / 1000) });
     };
     tick();
-    const t = setInterval(tick, 1000);
-    return () => clearInterval(t);
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
   }, []);
+  const str = `${String(t.h).padStart(2,"0")}:${String(t.m).padStart(2,"0")}:${String(t.s).padStart(2,"0")}`;
+  if (inline) return <span className="tabular-nums font-black text-[#0c9de8]">{str}</span>;
   return (
-    <span className="tabular-nums font-black text-[#0c9de8]">
-      {String(timeLeft.h).padStart(2, "0")}:{String(timeLeft.m).padStart(2, "0")}:{String(timeLeft.s).padStart(2, "0")}
-    </span>
+    <div className="rounded-xl bg-white/10 px-4 py-3 text-center">
+      <p className="text-[9px] font-black uppercase tracking-widest text-white/60">Daily Reset</p>
+      <p className="mt-1 tabular-nums text-xl font-black text-white">{str}</p>
+    </div>
   );
 }
 
 // ── Referral status badge ─────────────────────────────────────────────────────
 
 function ReferralBadge({ status, verificationStatus }: { status?: string; verificationStatus?: string }) {
-  if (status === "rejected" || verificationStatus === "rejected") {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2.5 py-0.5 text-[10px] font-bold text-red-600">
-        Rejected
-      </span>
-    );
-  }
-  if (verificationStatus === "verified") {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold text-emerald-700">
-        <Check size={9} />Verified
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-0.5 text-[10px] font-bold text-amber-700">
-      <Clock size={9} />Pending
-    </span>
-  );
+  if (status === "rejected" || verificationStatus === "rejected")
+    return <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2.5 py-0.5 text-[10px] font-bold text-red-600">Rejected</span>;
+  if (verificationStatus === "verified")
+    return <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold text-emerald-700"><Check size={9} />Verified</span>;
+  return <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-0.5 text-[10px] font-bold text-amber-700"><Clock size={9} />Pending</span>;
 }
 
-// ── Rewards Modal ─────────────────────────────────────────────────────────────
+// ── Reward Details Modal ──────────────────────────────────────────────────────
 
-function RewardsModal({ data, onClose }: { data: any; onClose: () => void }) {
+function RewardDetailsModal({ data, onClose }: { data: any; onClose: () => void }) {
+  const isQueueActive = usePopupQueue(true, "referral-reward-details");
   const { joinReward, verificationReward, totalReward } = rewardBreakdown(data);
-  const isSprint = data?.mode === "sprint";
   const fallback = `https://t.me/${process.env.NEXT_PUBLIC_CHANNEL || "AdsGalaxy_News"}`;
+  if (!isQueueActive) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-[200] flex flex-col justify-end sm:items-center sm:justify-center sm:p-4 bg-black/50 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="w-full sm:max-w-lg max-h-[92vh] bg-white rounded-t-3xl sm:rounded-3xl flex flex-col shadow-2xl overflow-hidden"
-        onClick={e => e.stopPropagation()}
-      >
-        {/* Header */}
+    <div className="fixed inset-0 z-[200] flex flex-col sm:items-center sm:justify-center sm:p-4 bg-black/40 sm:bg-black/50 backdrop-blur-sm" onClick={onClose}>
+      <div className="w-full sm:max-w-lg flex-1 sm:flex-none sm:max-h-[90vh] bg-white sm:rounded-3xl flex flex-col shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
         <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-6 pt-6 pb-4">
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-50">
@@ -142,23 +118,18 @@ function RewardsModal({ data, onClose }: { data: any; onClose: () => void }) {
             </div>
             <h2 className="text-base font-black text-slate-900">Reward Details</h2>
           </div>
-          <button
-            onClick={onClose}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors"
-          >
+          <button onClick={onClose} className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors">
             <X size={16} />
           </button>
         </div>
-
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Reward tiers */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-6">
           <div>
             <p className="mb-3 text-[10px] font-black uppercase tracking-widest text-slate-400">How You Earn</p>
             <div className="space-y-2.5">
               <div className="flex items-center justify-between rounded-xl bg-blue-50 px-5 py-4">
                 <div>
                   <p className="text-sm font-black text-slate-900">Friend Joins</p>
-                  <p className="mt-0.5 text-xs font-medium text-slate-500">Instant when they start the bot</p>
+                  <p className="mt-0.5 text-xs font-medium text-slate-500">Pending when they start the bot</p>
                 </div>
                 <span className="text-lg font-black text-[#0c9de8]">{money(joinReward)}</span>
               </div>
@@ -178,16 +149,10 @@ function RewardsModal({ data, onClose }: { data: any; onClose: () => void }) {
               </div>
             </div>
           </div>
-
-          {/* Channel requirement */}
           <div>
             <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-slate-400">Verification Requirement</p>
-            <a
-              href={data?.required_channel_url || fallback}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 transition-colors hover:bg-slate-100"
-            >
+            <a href={data?.required_channel_url || fallback} target="_blank" rel="noopener noreferrer"
+              className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 transition-colors hover:bg-slate-100">
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-bold text-slate-800">Join Required Channel</p>
                 <p className="truncate text-xs text-slate-400">{data?.required_channel_url || fallback}</p>
@@ -199,8 +164,6 @@ function RewardsModal({ data, onClose }: { data: any; onClose: () => void }) {
               <span className="font-bold text-emerald-600">{money(verificationReward)}</span> bonus.
             </p>
           </div>
-
-          {/* Earnings summary */}
           <div>
             <p className="mb-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Your Earnings</p>
             <div className="grid grid-cols-2 gap-3">
@@ -218,7 +181,89 @@ function RewardsModal({ data, onClose }: { data: any; onClose: () => void }) {
               </div>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
+// ── Success Popup ─────────────────────────────────────────────────────────────
+
+function SuccessPopup({ amount, settlementDate, onClose }: { amount: string; settlementDate: string; onClose: () => void }) {
+  const isQueueActive = usePopupQueue(true, `referral-success:${amount}:${settlementDate}`);
+  if (!isQueueActive) return null;
+
+  return (
+    <div className="fixed inset-0 z-[210] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
+      <div className="w-full max-w-sm bg-white rounded-3xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="p-8 text-center">
+          <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-50">
+            <CheckCircle2 size={32} className="text-emerald-500" />
+          </div>
+          <h2 className="text-xl font-black text-slate-900">Congratulations</h2>
+          <p className="mt-2 text-sm font-medium text-slate-500">Your sprint reward has been confirmed</p>
+          <div className="my-6 rounded-2xl bg-slate-50 px-6 py-5">
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Amount Credited</p>
+            <p className="mt-2 text-3xl font-black text-emerald-600">{amount}</p>
+            <p className="mt-0.5 text-xs font-medium text-slate-400">USDT</p>
+          </div>
+          <div className="mb-6 flex items-center justify-between rounded-xl border border-slate-100 px-4 py-3">
+            <div className="flex items-center gap-2 text-slate-500">
+              <Calendar size={14} />
+              <span className="text-xs font-medium">Settlement Date</span>
+            </div>
+            <span className="text-xs font-black text-slate-900">{settlementDate}</span>
+          </div>
+          <button onClick={onClose} className="w-full rounded-2xl bg-slate-900 py-3.5 text-sm font-black text-white transition-all hover:bg-slate-800 active:scale-95">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Fraud Popup ──────────────────────────────────────────────────────────────
+
+function FraudPopup({ reward, reason, reviewDate, onClose }: {
+  reward: string; reason: string; reviewDate: string; onClose: () => void;
+}) {
+  const isQueueActive = usePopupQueue(true, `referral-fraud:${reward}:${reason}:${reviewDate}`);
+  if (!isQueueActive) return null;
+
+  return (
+    <div className="fixed inset-0 z-[210] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
+      <div className="w-full max-w-sm bg-white rounded-3xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="border-b border-red-50 bg-red-50 px-6 py-5 text-center">
+          <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-white shadow-sm">
+            <Shield size={26} className="text-red-500" />
+          </div>
+          <h2 className="text-base font-black text-slate-900">Sprint Review Failed</h2>
+          <p className="mt-1 text-xs font-medium text-slate-500">Daily sprint reward was not approved</p>
+        </div>
+        <div className="p-6 space-y-3">
+          <div className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3">
+            <span className="text-xs font-medium text-slate-500">Reward</span>
+            <span className="text-xs font-black text-slate-900">{reward}</span>
+          </div>
+          <div className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3">
+            <span className="text-xs font-medium text-slate-500">Status</span>
+            <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2.5 py-0.5 text-[10px] font-bold text-red-600">Fraud Detected</span>
+          </div>
+          <div className="rounded-xl bg-slate-50 px-4 py-3">
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Reason</p>
+            <p className="text-xs font-medium text-slate-700">{reason}</p>
+          </div>
+          <div className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3">
+            <span className="text-xs font-medium text-slate-500">Review Date</span>
+            <span className="text-xs font-black text-slate-900">{reviewDate}</span>
+          </div>
+          <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3">
+            <p className="text-xs font-medium text-blue-700">Your regular referral commissions are not affected by this review.</p>
+          </div>
+          <button onClick={onClose} className="w-full rounded-2xl bg-slate-900 py-3 text-xs font-black text-white transition-all hover:bg-slate-800 active:scale-95">
+            Close
+          </button>
         </div>
       </div>
     </div>
@@ -235,6 +280,9 @@ export default function ReferralPage() {
   const [showRewards, setShowRewards] = useState(false);
   const [showAllLeaders, setShowAllLeaders] = useState(false);
   const [showAllTeams, setShowAllTeams]     = useState(false);
+  const [showAllHistory, setShowAllHistory] = useState(false);
+  const [successPopup, setSuccessPopup] = useState<{ amount: string; settlementDate: string } | null>(null);
+  const [fraudPopup, setFraudPopup]   = useState<{ reward: string; reason: string; reviewDate: string } | null>(null);
 
   useEffect(() => {
     setTitle("Referral");
@@ -244,6 +292,39 @@ export default function ReferralPage() {
       .catch(console.error)
       .finally(() => setIsLoading(false));
   }, [setTitle]);
+
+  useEffect(() => {
+    const notification = (data?.notifications || []).find((item: any) =>
+      item?.status === "unread"
+      && ["referral_settlement_paid", "referral_settlement_fraud"].includes(item?.notification_type)
+    );
+    if (!notification) return;
+
+    const meta = notification.metadata || {};
+    const settlementDate = meta.settlement_date
+      ? new Date(meta.settlement_date).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })
+      : new Date(notification.created_at).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+
+    const popupTimer = window.setTimeout(() => {
+      if (notification.notification_type === "referral_settlement_paid") {
+        setSuccessPopup({ amount: money(meta.amount || 0), settlementDate });
+      } else {
+        setFraudPopup({
+          reward: money(meta.amount || 0),
+          reason: meta.reason || notification.message || "Less than 3% publisher conversion.",
+          reviewDate: settlementDate,
+        });
+      }
+    }, 0);
+
+    apiFetch("/api/publisher/referrals", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notification_id: notification.id }),
+    }).catch(console.error);
+
+    return () => window.clearTimeout(popupTimer);
+  }, [data]);
 
   const copyToClipboard = () => {
     if (!data?.referral_link) return;
@@ -265,17 +346,16 @@ export default function ReferralPage() {
     else window.open(shareUrl, "_blank", "noopener,noreferrer");
   };
 
-  // ── Loading skeleton ──────────────────────────────────────────────────────
   if (isLoading) {
     return (
       <DashboardLayout type="publisher">
         <div className="animate-pulse space-y-4">
-          <div className="h-64 rounded-3xl bg-slate-100" />
-          <div className="grid grid-cols-3 gap-3">
-            {[0, 1, 2].map(i => <div key={i} className="h-20 rounded-2xl bg-slate-100" />)}
+          <div className="h-52 rounded-3xl bg-slate-100" />
+          <div className="grid grid-cols-2 gap-3">
+            {[0, 1, 2, 3].map(i => <div key={i} className="h-24 rounded-2xl bg-slate-100" />)}
           </div>
-          <div className="h-48 rounded-3xl bg-slate-100" />
           <div className="h-36 rounded-2xl bg-slate-100" />
+          <div className="h-48 rounded-3xl bg-slate-100" />
           <div className="h-48 rounded-2xl bg-slate-100" />
         </div>
       </DashboardLayout>
@@ -286,61 +366,153 @@ export default function ReferralPage() {
   const isSprint          = data?.mode === "sprint";
   const totalReferrals    = data?.stats?.total_referrals    || 0;
   const verifiedReferrals = data?.stats?.verified_referrals || 0;
-  const pendingCount      = Math.max(0, totalReferrals - verifiedReferrals);
-  const hasBoost          = isSprint && Number(data?.boost?.multiplier || 1) > 1;
+  const todayRefs         = data?.stats?.today_referrals    || 0;
   const teamUnlocked      = isSprint && data?.team_league?.unlocked && data?.team_league?.current_team;
-  const teamLocked        = isSprint && data?.team_league && !data.team_league.unlocked;
   const leaderboard       = (data?.leaderboard || []) as any[];
   const visibleLeaders    = showAllLeaders ? leaderboard : leaderboard.slice(0, 5);
-  const notifications     = (data?.notifications || []) as any[];
+  const referrals         = (data?.referrals || []) as any[];
+  const visibleRefs       = showAllHistory ? referrals : referrals.slice(0, 5);
+  const pendingTotal      = Number(data?.pending_rewards_total || 0);
+  const todayPending      = Number(data?.today_pending_amount  || 0);
+  const nextSettlement    = data?.next_settlement_date
+    ? new Date(data.next_settlement_date).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })
+    : "Rolling weekly";
+  const dailyMilestones   = ((data?.daily_milestones || []) as any[]);
+  const nextMilestone     = dailyMilestones.find((ms: any) => !ms.completed_today) || dailyMilestones[dailyMilestones.length - 1];
+  const dailyTarget       = Number(nextMilestone?.threshold || Math.max(todayRefs, 1));
+  const dailyProgress     = Math.min(100, Math.round((todayRefs / Math.max(1, dailyTarget)) * 100));
+  const currentRank       = Number(data?.current_rank || 0);
+  const settlementHistory = ((data?.settlement_history || []) as any[]);
+  const lastSettlement    = settlementHistory[0];
+  const hasBoost          = isSprint && Number(data?.boost?.multiplier || 1) > 1;
+  const boostEvents       = ((data?.boost?.events || []) as any[]);
+  const team              = teamUnlocked ? (data.team_league.current_team as any) : null;
+  const teamLeaderboard   = ((data?.team_league?.leaderboard || []) as any[]);
+  const teamProgressNow   = teamUnlocked
+    ? Number(team?.sprint_referrals || 0)
+    : Math.max(0, Number(data?.team_league?.unlock_at || 0) - Number(data?.team_league?.referrals_needed || 0));
+  const teamProgressGoal  = teamUnlocked ? Math.max(1, Number(team?.sprint_referrals || 1)) : Math.max(1, Number(data?.team_league?.unlock_at || 1));
+  const teamProgressPct   = teamUnlocked ? 100 : Math.min(100, Math.round((teamProgressNow / teamProgressGoal) * 100));
+  const qualitySignals = [
+    verifiedReferrals > 0 ? "Verified referrals are counted for sprint rewards." : "Get your first verified referral to activate reward momentum.",
+    pendingTotal > 0 ? "Rewards are queued safely until settlement." : "No pending settlement yet today.",
+    teamUnlocked ? "Team league is unlocked — your referrals now push team rank." : "Team league unlocks with more verified referrals.",
+  ];
 
   return (
     <DashboardLayout type="publisher">
-      {showRewards && <RewardsModal data={data} onClose={() => setShowRewards(false)} />}
+      {showRewards  && <RewardDetailsModal data={data} onClose={() => setShowRewards(false)} />}
+      {successPopup && <SuccessPopup amount={successPopup.amount} settlementDate={successPopup.settlementDate} onClose={() => setSuccessPopup(null)} />}
+      {fraudPopup   && <FraudPopup reward={fraudPopup.reward} reason={fraudPopup.reason} reviewDate={fraudPopup.reviewDate} onClose={() => setFraudPopup(null)} />}
 
-      <div className="space-y-5">
+      <div className="space-y-4">
 
-        {/* ── HERO ── */}
-        <section className="rounded-3xl bg-gradient-to-br from-[#0c9de8] to-blue-700 p-7 text-white shadow-lg shadow-blue-100">
-          {isSprint && (
-            <div className="mb-4 inline-flex items-center gap-1.5 rounded-full bg-white/20 px-3 py-1 text-[10px] font-black uppercase tracking-widest">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
-              Sprint Live
+        <section className="relative overflow-hidden rounded-[2rem] bg-slate-950 text-white shadow-2xl shadow-blue-950/20">
+          <div className="absolute -right-20 -top-24 h-56 w-56 rounded-full bg-[#0c9de8]/40 blur-3xl" />
+          <div className="absolute -bottom-24 left-8 h-48 w-48 rounded-full bg-violet-500/30 blur-3xl" />
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_25%_20%,rgba(255,255,255,0.16),transparent_28%),linear-gradient(135deg,rgba(12,157,232,0.95),rgba(15,23,42,0.92)_55%,rgba(88,28,135,0.88))]" />
+
+          <div className="relative px-5 py-5">
+            <div className="mb-5 flex items-center justify-between gap-3">
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.22em] text-white/80 backdrop-blur">
+                <span className={cn("h-2 w-2 rounded-full", isSprint ? "animate-pulse bg-emerald-300" : "bg-slate-400")} />
+                {isSprint ? "Sprint Live" : "Referral Engine"}
+              </div>
+              <div className="inline-flex items-center gap-1.5 rounded-full border border-amber-300/30 bg-amber-300/15 px-3 py-1.5 text-[10px] font-black text-amber-100">
+                <Crown size={12} />
+                {currentRank ? `Rank #${currentRank}` : "No rank yet"}
+              </div>
             </div>
-          )}
 
-          <div className="mb-6 flex items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/20">
-              <Gift size={26} />
-            </div>
-            <div>
-              <h1 className="text-xl font-black uppercase tracking-tight">Invite Friends & Earn</h1>
-              <p className="text-xs font-medium text-blue-100">
-                Up to{" "}
-                <span className="font-black text-white">{money(totalReward)} USDT</span>{" "}
-                per verified referral
+            <div className="space-y-2">
+              <p className="text-[11px] font-black uppercase tracking-[0.28em] text-cyan-100/70">Referral Command Center</p>
+              <h1 className="text-3xl font-black leading-tight tracking-tight">
+                Turn quality invites into settled rewards.
+              </h1>
+              <p className="max-w-xl text-sm font-medium leading-6 text-white/70">
+                Share once, track every verified referral, climb the daily sprint, and push your team toward the pool.
               </p>
             </div>
-          </div>
 
-          <div className="mb-4 space-y-1.5">
-            <p className="text-[10px] font-black uppercase tracking-widest text-blue-200">Your Referral Link</p>
-            <div className="truncate rounded-xl border border-white/20 bg-white/10 px-4 py-2.5 font-mono text-sm text-blue-50">
-              {data?.referral_link || "-"}
+            <div className="mt-5 rounded-3xl border border-white/15 bg-white/10 p-3 shadow-inner shadow-white/5 backdrop-blur">
+              <p className="mb-2 px-1 text-[9px] font-black uppercase tracking-widest text-white/50">Your referral link</p>
+              <div className="flex items-center gap-2 rounded-2xl bg-slate-950/45 px-3 py-3">
+                <span className="min-w-0 flex-1 truncate font-mono text-xs text-cyan-50">{data?.referral_link || "—"}</span>
+                <button onClick={copyToClipboard} className="rounded-xl bg-white px-3 py-2 text-[10px] font-black uppercase text-slate-950 active:scale-95">
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <button
+                  onClick={handleShare}
+                  className="flex items-center justify-center gap-2 rounded-2xl bg-white py-3 text-xs font-black uppercase tracking-wide text-slate-950 shadow-lg shadow-white/10 active:scale-95"
+                >
+                  <Rocket size={15} />
+                  Launch Invite
+                </button>
+                <button
+                  onClick={() => setShowRewards(true)}
+                  className="flex items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/10 py-3 text-xs font-black uppercase tracking-wide text-white active:scale-95"
+                >
+                  <Gift size={15} />
+                  Rewards
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-3 gap-2">
+              {[
+                { label: "Today", value: todayRefs, sub: "verified path", Icon: Flame },
+                { label: "Pending", value: money(pendingTotal), sub: "settlement", Icon: Clock },
+                { label: "Reset", value: <MidnightCountdown inline />, sub: "daily sprint", Icon: Calendar },
+              ].map((item) => (
+                <div key={item.label} className="rounded-2xl border border-white/10 bg-white/10 p-3 backdrop-blur">
+                  <item.Icon size={14} className="mb-2 text-cyan-100" />
+                  <p className="text-[9px] font-black uppercase tracking-widest text-white/45">{item.label}</p>
+                  <p className="mt-1 truncate text-sm font-black text-white">{item.value}</p>
+                  <p className="mt-0.5 truncate text-[9px] font-semibold text-white/45">{item.sub}</p>
+                </div>
+              ))}
             </div>
           </div>
+        </section>
 
-          <div className="grid grid-cols-2 gap-3">
+        {/* ── 1. REFERRAL LINK HERO ── */}
+        <section
+          className="hidden rounded-3xl overflow-hidden shadow-lg shadow-blue-100"
+          style={{ background: "linear-gradient(135deg, #0c9de8 0%, #0b80cb 100%)" }}
+        >
+          {isSprint && (
+            <div className="flex items-center justify-between px-6 pt-5">
+              <div className="inline-flex items-center gap-1.5 rounded-full bg-white/20 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-white">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+                Sprint Active
+              </div>
+              {data?.current_rank && (
+                <div className="flex items-center gap-1.5 rounded-full bg-white/20 px-3 py-1 text-[10px] font-black text-white">
+                  <Trophy size={11} className="text-amber-300" />
+                  Rank #{data.current_rank}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="px-6 pt-5 pb-2">
+            <p className="text-[10px] font-black uppercase tracking-widest text-white/60 mb-2">Your Referral Link</p>
+            <div className="flex items-center rounded-2xl border border-white/20 bg-white/10 px-4 py-3 min-w-0">
+              <span className="flex-1 truncate font-mono text-sm text-white/90">{data?.referral_link || "—"}</span>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 px-6 pb-6 pt-3">
             <button
               onClick={copyToClipboard}
-              className="flex items-center justify-center gap-2 rounded-xl bg-white py-3.5 text-sm font-black uppercase tracking-wide text-[#0c9de8] shadow-sm transition-all active:scale-95"
+              className="flex items-center justify-center gap-2 rounded-2xl bg-white py-3.5 text-sm font-black uppercase tracking-wide text-[#0c9de8] shadow-sm transition-all active:scale-95"
             >
               {copied ? <Check size={17} /> : <Copy size={17} />}
-              {copied ? "Copied!" : "Copy Link"}
+              {copied ? "Copied" : "Copy Link"}
             </button>
             <button
               onClick={handleShare}
-              className="flex items-center justify-center gap-2 rounded-xl bg-white/20 py-3.5 text-sm font-black uppercase tracking-wide text-white transition-all hover:bg-white/30 active:scale-95"
+              className="flex items-center justify-center gap-2 rounded-2xl bg-white/20 py-3.5 text-sm font-black uppercase tracking-wide text-white transition-all hover:bg-white/30 active:scale-95"
             >
               <Share2 size={17} />
               Share
@@ -348,201 +520,277 @@ export default function ReferralPage() {
           </div>
         </section>
 
-        {/* ── ALERTS ── (sprint only) */}
-        {isSprint && (data?.alerts || []).length > 0 && (
-          <div className="space-y-2">
-            {data.alerts.map((alert: string) => (
-              <div key={alert} className="flex items-start gap-2 rounded-2xl border border-blue-100 bg-blue-50 px-4 py-3 text-xs font-medium text-blue-700">
-                <Zap size={13} className="mt-0.5 shrink-0 text-blue-500" />
-                {alert}
+        {/* ── 2. REFERRAL SUMMARY ── */}
+        <section>
+          <p className="mb-2.5 text-[10px] font-black uppercase tracking-widest text-slate-400">Referral Summary</p>
+          <div className="grid grid-cols-2 gap-2.5">
+            {[
+              { label: "Total Referrals", value: String(totalReferrals),    sub: "all time",  Icon: Users,        iconBg: "bg-blue-50",   iconCls: "text-[#0c9de8]",   valCls: "text-slate-900" },
+              { label: "Verified",        value: String(verifiedReferrals), sub: "referrals", Icon: CheckCircle2, iconBg: "bg-emerald-50", iconCls: "text-emerald-500", valCls: "text-emerald-600" },
+              { label: "Total Earned",    value: money(data?.total_earnings || data?.stats?.referral_earnings || 0), sub: "USDT", Icon: Sparkles, iconBg: "bg-amber-50", iconCls: "text-amber-500", valCls: "text-amber-600" },
+              { label: "Today",           value: String(todayRefs),         sub: "referrals", Icon: Zap,          iconBg: "bg-violet-50", iconCls: "text-violet-500",  valCls: todayRefs > 0 ? "text-violet-700" : "text-slate-900" },
+            ].map(item => (
+              <div key={item.label} className="flex items-center gap-3 rounded-2xl border border-slate-100 bg-white px-4 py-4 shadow-sm">
+                <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-xl", item.iconBg)}>
+                  <item.Icon size={16} className={item.iconCls} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 leading-tight">{item.label}</p>
+                  <p className={cn("mt-0.5 text-lg font-black leading-none", item.valCls)}>{item.value}</p>
+                  <p className="text-[9px] font-medium text-slate-300">{item.sub}</p>
+                </div>
               </div>
             ))}
           </div>
-        )}
-
-        {/* ── EARNINGS STATS ── */}
-        {isSprint && (
-          <section className="rounded-2xl border border-blue-100 bg-white p-5 shadow-sm">
-            <div className="mb-4 flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-50 text-[#0c9de8]">
-                <Target size={18} />
-              </div>
-              <div>
-                <p className="text-sm font-black text-slate-900">Referral Sprint Features</p>
-                <p className="text-xs font-semibold text-slate-500">All active sprint tools are shown here in the Mini App.</p>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              {[
-                { label: "Leaderboard", value: data?.current_rank ? `Rank #${data.current_rank}` : "Open", icon: Trophy },
-                { label: "Milestones", value: data?.progress?.next_milestone ? `${data.progress.referrals_needed} to next` : "Complete", icon: Medal },
-                { label: "Team League", value: teamUnlocked ? data.team_league.current_team.name : `${data?.team_league?.referrals_needed || 0} left`, icon: Users },
-                { label: "Boosts", value: hasBoost ? `${data.boost.multiplier}x active` : "Standard", icon: Zap },
-              ].map((item) => (
-                <div key={item.label} className="rounded-xl bg-slate-50 p-3">
-                  <item.icon size={16} className="mb-2 text-[#0c9de8]" />
-                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{item.label}</p>
-                  <p className="mt-1 truncate text-sm font-black text-slate-900">{item.value}</p>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-
-        <section className="grid grid-cols-3 gap-3">
-          {[
-            { label: "Total Earned", value: money(data?.total_earnings || data?.stats?.referral_earnings || 0), sub: "USDT",       cls: "text-emerald-600" },
-            { label: "Verified",     value: String(verifiedReferrals),                                          sub: "referrals",  cls: "text-slate-900" },
-            { label: "Pending",      value: String(pendingCount),                                               sub: "unverified", cls: pendingCount > 0 ? "text-amber-600" : "text-slate-900" },
-          ].map(item => (
-            <div key={item.label} className="rounded-2xl border border-slate-100 bg-white px-3 py-4 text-center shadow-sm">
-              <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{item.label}</p>
-              <p className={cn("mt-1.5 text-lg font-black leading-none", item.cls)}>{item.value}</p>
-              <p className="mt-1 text-[9px] font-medium text-slate-300">{item.sub}</p>
-            </div>
-          ))}
         </section>
 
-        {/* ── SPRINT CONTEST ── (sprint only, fully inline) */}
-        {isSprint && data?.sprint && (
-          <section className="rounded-3xl overflow-hidden shadow-lg shadow-blue-100" style={{ background: "linear-gradient(135deg, #0c9de8 0%, #0b7ec9 100%)" }}>
-            {/* Sprint header */}
-            <div className="px-6 pt-6 pb-4">
+        {/* ── 3. PENDING REFERRAL REWARDS ── */}
+        <section className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="relative overflow-hidden rounded-3xl border border-cyan-100 bg-white p-5 shadow-sm">
+            <div className="absolute -right-8 -top-8 h-24 w-24 rounded-full bg-cyan-100 blur-2xl" />
+            <div className="relative">
               <div className="mb-4 flex items-center justify-between">
-                <div className="flex items-center gap-2 text-white">
-                  <Trophy size={20} />
-                  <p className="text-sm font-black uppercase tracking-wide">Sprint Contest</p>
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-cyan-500">Daily Sprint Mission</p>
+                  <p className="mt-1 text-xl font-black text-slate-950">{todayRefs}/{dailyTarget} verified</p>
                 </div>
-                {data?.current_rank ? (
-                  <div className="flex items-center gap-1.5 rounded-full bg-white/20 px-3 py-1 text-xs font-black text-white">
-                    <Medal size={12} className="text-yellow-300" />
-                    Rank #{data.current_rank}
-                  </div>
-                ) : (
-                  <div className="rounded-full bg-white/10 px-3 py-1 text-[10px] font-bold text-white/70">
-                    Not ranked yet
-                  </div>
-                )}
-              </div>
-
-              {/* Countdown */}
-              {data?.sprint?.ends_at && (
-                <div className="mb-4">
-                  <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-white/60">Ends In</p>
-                  <Countdown endsAt={data.sprint.ends_at} dark />
+                <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-50 text-cyan-600">
+                  <Target size={20} />
                 </div>
-              )}
-
-              {/* Sprint activity stats */}
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  { label: "Sprint Refs", value: data?.stats?.sprint_referrals || 0 },
-                  { label: "Today",       value: data?.stats?.today_referrals   || 0 },
-                  { label: "This Week",   value: data?.stats?.weekly_referrals  || 0 },
-                ].map(item => (
-                  <div key={item.label} className="rounded-xl bg-white/15 p-3 text-center">
-                    <p className="text-lg font-black text-white">{item.value}</p>
-                    <p className="text-[9px] font-bold uppercase tracking-widest text-white/60">{item.label}</p>
-                  </div>
-                ))}
               </div>
+              <div className="h-3 overflow-hidden rounded-full bg-slate-100">
+                <div className="h-3 rounded-full bg-gradient-to-r from-cyan-400 to-blue-600 transition-all" style={{ width: `${dailyProgress}%` }} />
+              </div>
+              <div className="mt-3 flex items-center justify-between text-[10px] font-bold text-slate-400">
+                <span>{dailyProgress}% complete</span>
+                <span>Resets <MidnightCountdown inline /></span>
+              </div>
+              <p className="mt-4 rounded-2xl bg-slate-50 px-4 py-3 text-xs font-semibold leading-5 text-slate-500">
+                {nextMilestone
+                  ? `Next milestone: ${nextMilestone.label || `${nextMilestone.threshold} referrals`} for ${money(nextMilestone.reward)}.`
+                  : "All daily milestones are cleared. Keep stacking verified referrals before settlement."}
+              </p>
             </div>
+          </div>
 
-            {/* Prize positions */}
-            {(data?.top_winners || []).length > 0 && (
-              <div className="mx-4 mb-4 rounded-2xl bg-white/10 p-4">
-                <p className="mb-3 text-[10px] font-black uppercase tracking-widest text-white/60">Prize Positions</p>
-                <div className="space-y-2">
-                  {data.top_winners.map((w: any) => (
-                    <div key={w.rank} className="flex items-center justify-between rounded-xl bg-white/10 px-3 py-2.5">
-                      <div className="flex items-center gap-2">
-                        <Medal
-                          size={15}
-                          className={w.rank === 1 ? "text-yellow-300" : w.rank === 2 ? "text-white/60" : "text-blue-200"}
-                        />
-                        <div>
-                          <p className="text-sm font-black text-white">{w.display_name || "Open spot"}</p>
-                          <p className="text-[10px] text-white/50">{w.referral_count || 0} verified referrals</p>
-                        </div>
-                      </div>
-                      <span className="text-sm font-black text-white">{money(w.reward_amount)}</span>
-                    </div>
-                  ))}
+          <div className="relative overflow-hidden rounded-3xl border border-violet-100 bg-slate-950 p-5 text-white shadow-sm">
+            <div className="absolute -left-10 -top-10 h-28 w-28 rounded-full bg-violet-500/40 blur-2xl" />
+            <div className="absolute -bottom-10 right-0 h-24 w-24 rounded-full bg-[#0c9de8]/30 blur-2xl" />
+            <div className="relative">
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-violet-200/70">Team League</p>
+                  <p className="mt-1 text-xl font-black">{teamUnlocked ? team?.name : "Locked"}</p>
+                </div>
+                <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/10 text-violet-100">
+                  {teamUnlocked ? <Crown size={20} /> : <Lock size={20} />}
                 </div>
               </div>
-            )}
-
-          </section>
-        )}
-
-        {/* ── DAILY MILESTONES ── (sprint only) */}
-        {isSprint && (data?.daily_milestones || []).length > 0 && (
-          <section className="rounded-2xl border border-slate-100 bg-white shadow-sm overflow-hidden">
-            {/* Header */}
-            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <Star size={14} className="text-amber-500" />
-                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Daily Milestones</p>
+              <div className="h-3 overflow-hidden rounded-full bg-white/10">
+                <div className="h-3 rounded-full bg-gradient-to-r from-violet-300 to-cyan-300 transition-all" style={{ width: `${teamProgressPct}%` }} />
               </div>
-              <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400">
-                <Clock size={11} className="text-slate-300" />
-                Resets in <MidnightCountdown />
+              <div className="mt-3 flex items-center justify-between text-[10px] font-bold text-white/45">
+                <span>{teamUnlocked ? `${team?.sprint_referrals || 0} team refs` : `${teamProgressNow}/${teamProgressGoal} unlock`}</span>
+                <span>{teamUnlocked && team?.rank ? `Rank #${team.rank}` : "Quality referrals only"}</span>
               </div>
+              <p className="mt-4 rounded-2xl border border-white/10 bg-white/10 px-4 py-3 text-xs font-semibold leading-5 text-white/65">
+                {teamUnlocked
+                  ? `Your contribution is ${team?.contribution_percent || 0}%. Push together to capture the team pool.`
+                  : `${data?.team_league?.referrals_needed || 0} more verified referrals to enter team rewards.`}
+              </p>
             </div>
+          </div>
+        </section>
 
-            {/* Today's progress summary */}
-            <div className="flex items-center gap-3 px-5 py-3 bg-blue-50/50 border-b border-slate-100">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#0c9de8]/10">
-                <Target size={14} className="text-[#0c9de8]" />
+        <section className="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
+                <Gauge size={16} />
               </div>
               <div>
-                <p className="text-xs font-black text-slate-800">
-                  <span className="text-[#0c9de8]">{data?.stats?.today_referrals || 0}</span> referrals today
+                <p className="text-sm font-black text-slate-950">Quality & Settlement Radar</p>
+                <p className="text-[10px] font-semibold text-slate-400">Built to reward real publishers, not empty traffic.</p>
+              </div>
+            </div>
+            {hasBoost && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2.5 py-1 text-[10px] font-black text-orange-600">
+                <Flame size={11} />
+                {data.boost.multiplier}x
+              </span>
+            )}
+          </div>
+          <div className="grid gap-2">
+            {qualitySignals.map((signal) => (
+              <div key={signal} className="flex items-start gap-2 rounded-2xl bg-slate-50 px-3 py-2.5">
+                <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-500" />
+                <p className="text-xs font-semibold leading-5 text-slate-600">{signal}</p>
+              </div>
+            ))}
+            {lastSettlement && (
+              <div className="flex items-start gap-2 rounded-2xl bg-blue-50 px-3 py-2.5">
+                <Bell size={14} className="mt-0.5 shrink-0 text-[#0c9de8]" />
+                <p className="text-xs font-semibold leading-5 text-slate-600">
+                  Last settlement: <span className="font-black">{lastSettlement.status}</span> · {money(lastSettlement.amount)}.
                 </p>
-                <p className="text-[10px] font-medium text-slate-400">Progress resets at midnight 00:00</p>
+              </div>
+            )}
+            {hasBoost && boostEvents.length > 0 && (
+              <div className="rounded-2xl bg-orange-50 px-3 py-2.5">
+                <p className="text-[10px] font-black uppercase tracking-widest text-orange-400">Active boosts</p>
+                <p className="mt-1 text-xs font-semibold text-orange-700">{boostEvents.map((event: any) => event.name).join(", ")}</p>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-amber-100 bg-white shadow-sm overflow-hidden">
+          <div className="flex items-center justify-between px-5 py-3.5 bg-amber-50 border-b border-amber-100">
+            <div className="flex items-center gap-2.5">
+              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-white shadow-sm">
+                <Clock size={14} className="text-amber-500" />
+              </div>
+              <p className="text-sm font-black text-slate-900">Pending Rewards</p>
+            </div>
+            <button onClick={() => setShowRewards(true)} className="text-[10px] font-black text-[#0c9de8]">
+              View Details
+            </button>
+          </div>
+          <div className="grid grid-cols-2 divide-x divide-slate-100">
+            <div className="px-5 py-4 text-center">
+              <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Pending Balance</p>
+              <p className="mt-1.5 text-xl font-black text-amber-600">{money(pendingTotal)}</p>
+              <p className="text-[9px] font-medium text-slate-300">USDT</p>
+            </div>
+            <div className="px-5 py-4 text-center">
+              <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Today&apos;s Pending</p>
+              <p className="mt-1.5 text-xl font-black text-slate-900">{money(todayPending)}</p>
+              <p className="text-[9px] font-medium text-slate-300">USDT</p>
+            </div>
+          </div>
+          <div className="flex items-center justify-between border-t border-slate-50 px-5 py-3">
+            <div className="flex items-center gap-1.5 text-xs text-slate-400">
+              <Calendar size={12} />
+              <span>Next Settlement</span>
+            </div>
+            <span className="text-xs font-black text-slate-700">{nextSettlement}</span>
+          </div>
+        </section>
+
+        {/* ── 4. DAILY REFERRAL SPRINT ── */}
+        {isSprint && (data?.daily_milestones || []).length > 0 && (
+          <section className="rounded-2xl border border-slate-100 bg-white shadow-sm overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-50">
+                  <Star size={15} className="text-amber-500" />
+                </div>
+                <div>
+                  <p className="text-sm font-black text-slate-900">Daily Referral Sprint</p>
+                  <p className="text-[10px] font-medium text-slate-400">
+                    Resets in <MidnightCountdown inline />
+                  </p>
+                </div>
+              </div>
+              <div className="rounded-full bg-blue-50 px-3 py-1">
+                <span className="text-[10px] font-black text-[#0c9de8]">{todayRefs} today</span>
               </div>
             </div>
 
-            {/* Milestones list */}
             <div className="divide-y divide-slate-50">
-              {(data.daily_milestones as any[]).map((ms: any) => {
-                const pct = Math.min(100, ((data?.stats?.today_referrals || 0) / Math.max(1, ms.threshold)) * 100);
-                const done = ms.completed_today;
+              {(data.daily_milestones as any[]).map((ms: any, idx: number) => {
+                const prevThreshold = idx === 0 ? 0 : (data.daily_milestones as any[])[idx - 1].threshold;
+                const pct           = Math.min(100, (todayRefs / Math.max(1, ms.threshold)) * 100);
+                const done          = ms.completed_today;
+                const isActive      = !done && todayRefs >= prevThreshold && todayRefs < ms.threshold;
+                const isLocked      = !done && !isActive;
+                const payoutStatus  = ms.payout_status || ms.status;
+                const isPaid        = payoutStatus === "paid";
+                const isFraudMs     = payoutStatus === "fraud";
+
                 return (
-                  <div key={ms.id} className={cn("px-5 py-4", done && "bg-emerald-50/40")}>
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        {done ? (
-                          <div className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-100">
-                            <Check size={12} className="text-emerald-600" />
-                          </div>
-                        ) : (
-                          <div className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-100">
-                            <Star size={12} className="text-slate-400" />
-                          </div>
-                        )}
-                        <p className={cn("text-sm font-black", done ? "text-emerald-700" : "text-slate-800")}>
-                          {ms.label}
-                        </p>
+                  <div
+                    key={ms.id ?? idx}
+                    className={cn(
+                      "px-5 py-4 transition-colors",
+                      isPaid    && "bg-emerald-50/30",
+                      isFraudMs && "bg-red-50/20",
+                      done && !isPaid && !isFraudMs && "bg-amber-50/20",
+                      isActive  && "bg-blue-50/20",
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-2 mb-2.5">
+                      <div className="flex items-center gap-2.5">
+                        <div className={cn(
+                          "flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-black",
+                          isPaid     ? "bg-emerald-100 text-emerald-700"
+                          : isFraudMs ? "bg-red-100 text-red-600"
+                          : done     ? "bg-amber-100 text-amber-700"
+                          : isActive  ? "bg-blue-100 text-[#0c9de8]"
+                          : "bg-slate-100 text-slate-400"
+                        )}>
+                          {isPaid ? <Check size={13} />
+                            : isFraudMs ? <AlertTriangle size={11} />
+                            : done ? <Check size={13} />
+                            : ms.threshold}
+                        </div>
+                        <div>
+                          <p className={cn(
+                            "text-sm font-black",
+                            isPaid     ? "text-emerald-700"
+                            : isFraudMs ? "text-red-600"
+                            : done     ? "text-amber-700"
+                            : isActive  ? "text-slate-900"
+                            : "text-slate-400"
+                          )}>
+                            {ms.label || `${ms.threshold} Referrals`}
+                          </p>
+                          <p className="text-[10px] font-medium text-slate-400">{ms.threshold} refs required</p>
+                        </div>
                       </div>
-                      <span className={cn("text-sm font-black", done ? "text-emerald-600" : "text-amber-600")}>
-                        +{money(ms.reward)}
-                      </span>
+                      <div className="flex flex-col items-end gap-1 shrink-0">
+                        <span className={cn(
+                          "text-sm font-black",
+                          isPaid     ? "text-emerald-600"
+                          : isFraudMs ? "text-red-300 line-through"
+                          : done     ? "text-amber-600"
+                          : isActive  ? "text-[#0c9de8]"
+                          : "text-slate-300"
+                        )}>
+                          +{money(ms.reward)}
+                        </span>
+                        {isPaid && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[9px] font-black text-emerald-700">Paid</span>}
+                        {isFraudMs && (
+                          <button
+                            onClick={() => setFraudPopup({
+                              reward: money(ms.reward),
+                              reason: ms.fraud_reason || "Suspicious activity detected",
+                              reviewDate: ms.review_date || nextSettlement,
+                            })}
+                            className="rounded-full bg-red-50 px-2 py-0.5 text-[9px] font-black text-red-600 hover:bg-red-100 transition-colors"
+                          >
+                            Fraud
+                          </button>
+                        )}
+                        {done && !isPaid && !isFraudMs && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[9px] font-black text-amber-700">Pending</span>}
+                        {isActive && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[9px] font-black text-[#0c9de8]">In Progress</span>}
+                        {isLocked && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-black text-slate-400">Locked</span>}
+                      </div>
                     </div>
-                    <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden">
-                      <div
-                        className={cn("h-1.5 rounded-full transition-all", done ? "bg-emerald-400" : "bg-[#0c9de8]")}
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                    <div className="flex justify-between mt-1">
-                      <p className="text-[10px] font-medium text-slate-400">
-                        {data?.stats?.today_referrals || 0} / {ms.threshold} refs today
-                      </p>
-                      {done && (
-                        <p className="text-[10px] font-black text-emerald-600">Completed ✓</p>
-                      )}
-                    </div>
+                    {!isPaid && !isFraudMs && (
+                      <>
+                        <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                          <div
+                            className={cn("h-1.5 rounded-full transition-all duration-500",
+                              done ? "bg-amber-400" : isActive ? "bg-[#0c9de8]" : "bg-slate-200")}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        <p className="mt-1 text-[9px] font-medium text-slate-400">
+                          {Math.min(todayRefs, ms.threshold)} / {ms.threshold}
+                        </p>
+                      </>
+                    )}
                   </div>
                 );
               })}
@@ -550,55 +798,179 @@ export default function ReferralPage() {
           </section>
         )}
 
-        {isSprint && notifications.length > 0 && (
-          <section className="rounded-2xl border border-slate-100 bg-white shadow-sm">
-            <div className="flex items-center justify-between border-b border-slate-50 px-5 py-4">
-              <p className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400">
-                <Bell size={13} className="text-[#0c9de8]" />
-                Sprint Updates
-              </p>
-              <span className="rounded-full bg-blue-50 px-2.5 py-0.5 text-[10px] font-bold text-[#0c9de8]">{notifications.length}</span>
+        {/* ── 5. TEAM SPRINT — always visible in sprint mode ── */}
+        {isSprint && data?.team_league && (
+          <section className="rounded-2xl border border-slate-100 bg-white shadow-sm overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-50">
+                  <Users size={15} className="text-violet-600" />
+                </div>
+                <p className="text-sm font-black text-slate-900">Team Sprint</p>
+              </div>
+              {teamUnlocked && (data.team_league.current_team as any)?.rank && (
+                <span className="rounded-full bg-violet-50 px-3 py-1 text-[10px] font-black text-violet-600">
+                  Rank #{(data.team_league.current_team as any).rank}
+                </span>
+              )}
             </div>
-            <div className="divide-y divide-slate-50">
-              {notifications.slice(0, 4).map((item) => (
-                <div key={item.id} className="px-5 py-3">
-                  <p className="text-sm font-black text-slate-900">{item.title}</p>
-                  <p className="mt-1 text-xs font-medium leading-5 text-slate-500">{item.message}</p>
-                  <p className="mt-1 text-[10px] font-semibold text-slate-300">{new Date(item.created_at).toLocaleString()}</p>
+
+            {teamUnlocked ? (
+              <div className="p-5 space-y-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-violet-100 text-xl font-black text-violet-700">
+                    {String((data.team_league.current_team as any).name || "T").charAt(0)}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-black text-slate-900">{(data.team_league.current_team as any).name}</p>
+                    <p className="text-xs text-slate-500">
+                      Your contribution:{" "}
+                      <span className="font-black text-violet-600">{(data.team_league.current_team as any).contribution_percent || 0}%</span>
+                      {Number((data.team_league.current_team as any).sprint_referrals || 0) > 0
+                        && ` · ${(data.team_league.current_team as any).sprint_referrals} refs`}
+                    </p>
+                    {(data.team_league.current_team as any).mvp && (
+                      <p className="mt-0.5 text-[10px] font-bold text-violet-500">
+                        MVP: {(data.team_league.current_team as any).mvp.display_name}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {teamLeaderboard.length > 0 && (
+                  <>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Team Standings</p>
+                    <div className="space-y-1.5">
+                      {(showAllTeams ? teamLeaderboard : teamLeaderboard.slice(0, 3)).map((team: any) => (
+                        <div key={team.team_id} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2.5">
+                          <div className="flex items-center gap-2">
+                            <span className={cn(
+                              "flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-black",
+                              team.rank === 1 ? "bg-amber-100 text-amber-700"
+                              : team.rank === 2 ? "bg-slate-200 text-slate-600"
+                              : team.rank === 3 ? "bg-orange-100 text-orange-600"
+                              : "bg-slate-100 text-slate-400"
+                            )}>
+                              {team.rank}
+                            </span>
+                            <span className="text-sm font-bold text-slate-800">{team.name}</span>
+                          </div>
+                          <span className="text-xs font-black text-emerald-600">{team.sprint_referrals} refs</span>
+                        </div>
+                      ))}
+                    </div>
+                    {teamLeaderboard.length > 3 && (
+                      <button onClick={() => setShowAllTeams(v => !v)} className="flex w-full items-center justify-center gap-1 text-[10px] font-black text-[#0c9de8]">
+                        {showAllTeams
+                          ? <><ChevronUp size={12} /> Show less</>
+                          : <><ChevronDown size={12} /> Show all {teamLeaderboard.length} teams</>}
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="p-5">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100">
+                    <Lock size={16} className="text-slate-400" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-slate-700">Unlock Team League</p>
+                    <p className="text-xs text-slate-400">
+                      {data.team_league.referrals_needed || 0} more verified referrals to qualify
+                    </p>
+                  </div>
+                </div>
+                <div>
+                  <div className="flex justify-between mb-1.5">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Qualification Progress</p>
+                    <p className="text-[10px] font-black text-slate-500">
+                      {Math.max(0, (data.team_league.unlock_at || 20) - (data.team_league.referrals_needed || 0))}
+                      /{data.team_league.unlock_at || 20}
+                    </p>
+                  </div>
+                  <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                    <div
+                      className="h-2 rounded-full bg-violet-400 transition-all"
+                      style={{
+                        width: `${Math.min(100,
+                          ((Math.max(0, (data.team_league.unlock_at || 20) - (data.team_league.referrals_needed || 0)))
+                            / Math.max(1, data.team_league.unlock_at || 20)) * 100
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                  <p className="mt-2 text-xs text-slate-400">
+                    Unlock at{" "}
+                    <span className="font-black text-violet-600">{data.team_league.unlock_at || 20}</span>{" "}
+                    verified referrals — keep inviting quality friends.
+                  </p>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ── 6. COUNTDOWN AREA ── */}
+        {isSprint && data?.sprint?.ends_at && (
+          <section
+            className="rounded-3xl overflow-hidden shadow-lg shadow-blue-50"
+            style={{ background: "linear-gradient(135deg, #0c9de8 0%, #0b7ec9 100%)" }}
+          >
+            <div className="px-6 py-5">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2 text-white">
+                  <Trophy size={18} />
+                  <p className="text-sm font-black uppercase tracking-wide">Sprint Countdown</p>
+                </div>
+                {data?.sprint?.name && (
+                  <span className="rounded-full bg-white/20 px-3 py-1 text-[10px] font-bold text-white">
+                    {data.sprint.name}
+                  </span>
+                )}
+              </div>
+              <p className="mb-3 text-[10px] font-black uppercase tracking-widest text-white/60">Sprint Ends In</p>
+              <Countdown endsAt={data.sprint.ends_at} dark />
+              <div className="mt-4 flex items-center justify-between rounded-xl bg-white/10 px-4 py-3">
+                <div className="flex items-center gap-2 text-white text-xs font-black">
+                  <Clock size={13} />
+                  Daily Reset
+                </div>
+                <MidnightCountdown inline />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-px bg-white/10">
+              {[
+                { label: "Sprint Total", value: data?.stats?.sprint_referrals || 0 },
+                { label: "This Week",   value: data?.stats?.weekly_referrals  || 0 },
+                { label: "Today",       value: todayRefs },
+              ].map(item => (
+                <div key={item.label} className="bg-black/20 px-3 py-3 text-center">
+                  <p className="text-lg font-black text-white">{item.value}</p>
+                  <p className="text-[9px] font-bold uppercase tracking-widest text-white/50">{item.label}</p>
                 </div>
               ))}
             </div>
           </section>
         )}
 
-        {/* ── HOW IT WORKS ── */}
-        <section className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm">
-          <p className="mb-4 text-[10px] font-black uppercase tracking-widest text-slate-400">How It Works</p>
-          <div className="space-y-4">
+        {/* ── 7. HOW YOU EARN ── */}
+        <section className="rounded-2xl border border-slate-100 bg-white shadow-sm overflow-hidden">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">How You Earn</p>
+            <button onClick={() => setShowRewards(true)} className="flex items-center gap-1 text-[10px] font-black text-[#0c9de8]">
+              <Gift size={11} />
+              Full Details
+            </button>
+          </div>
+          <div className="divide-y divide-slate-50">
             {[
-              {
-                Icon: UserPlus,
-                label: "Friend Joins",
-                amount: money(joinReward),
-                desc: "Instant reward when they start the bot",
-                iconBg: "bg-blue-50",   iconCls: "text-[#0c9de8]", amtCls: "text-[#0c9de8]",
-              },
-              {
-                Icon: CheckCircle2,
-                label: "Friend Verifies",
-                amount: money(verificationReward),
-                desc: "Bonus after they join the required channel",
-                iconBg: "bg-emerald-50", iconCls: "text-emerald-600", amtCls: "text-emerald-600",
-              },
-              {
-                Icon: Sparkles,
-                label: "Total Per Referral",
-                amount: money(totalReward),
-                desc: "Maximum combined reward",
-                iconBg: "bg-violet-50", iconCls: "text-violet-600", amtCls: "text-violet-600",
-              },
+              { Icon: UserPlus,     label: "Friend Joins",       amount: money(joinReward),         desc: "Pending until settlement",              iconBg: "bg-blue-50",   iconCls: "text-[#0c9de8]",   amtCls: "text-[#0c9de8]" },
+              { Icon: CheckCircle2, label: "Friend Verifies",    amount: money(verificationReward), desc: "After joining the required channel",     iconBg: "bg-emerald-50",iconCls: "text-emerald-500", amtCls: "text-emerald-600" },
+              { Icon: Sparkles,     label: "Total Per Referral", amount: money(totalReward),        desc: "Maximum combined reward per person",     iconBg: "bg-slate-900", iconCls: "text-white",        amtCls: "text-slate-900" },
             ].map(row => (
-              <div key={row.label} className="flex items-center gap-3">
+              <div key={row.label} className="flex items-center gap-3 px-5 py-4">
                 <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-xl", row.iconBg)}>
                   <row.Icon size={16} className={row.iconCls} />
                 </div>
@@ -607,47 +979,21 @@ export default function ReferralPage() {
                   <p className="text-[10px] text-slate-400">{row.desc}</p>
                 </div>
                 <span className={cn("shrink-0 text-sm font-black", row.amtCls)}>
-                  {row.amount}{" "}
-                  <span className="text-[10px] font-medium opacity-60">USDT</span>
+                  {row.amount} <span className="text-[10px] font-medium opacity-50">USDT</span>
                 </span>
               </div>
             ))}
           </div>
         </section>
 
-        {/* ── BOOST BANNER ── (sprint + active boost only) */}
-        {hasBoost && (
-          <section className="rounded-2xl p-4" style={{ background: "linear-gradient(135deg, #0c9de8 0%, #0b7ec9 100%)" }}>
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/20">
-                <Zap size={18} className="text-white" />
-              </div>
-              <div className="flex-1">
-                <p className="text-sm font-black text-white">
-                  {data.boost.multiplier}x Boost Active
-                </p>
-                {(data?.boost?.events || []).map((ev: any) => (
-                  <p key={ev.name} className="text-[10px] font-medium text-white/80">{ev.name}</p>
-                ))}
-              </div>
-            </div>
-          </section>
-        )}
-
-        {/* ── REWARDS BUTTON ── */}
-        <button
-          onClick={() => setShowRewards(true)}
-          className="flex w-full items-center justify-center gap-2.5 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3.5 text-sm font-black text-emerald-700 transition-all hover:bg-emerald-100 active:scale-95"
-        >
-          <Gift size={17} className="text-emerald-500" />
-          View Reward Details
-        </button>
-
-        {/* ── TOP REFERRERS LEADERBOARD ── (sprint only) */}
+        {/* ── SPRINT LEADERBOARD ── */}
         {isSprint && leaderboard.length > 0 && (
           <section className="rounded-2xl border border-slate-100 bg-white shadow-sm overflow-hidden">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-50">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Sprint Leaderboard</p>
+              <div className="flex items-center gap-2">
+                <Trophy size={14} className="text-amber-500" />
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Sprint Leaderboard</p>
+              </div>
               <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[10px] font-bold text-slate-500">
                 {leaderboard.length}
               </span>
@@ -655,24 +1001,26 @@ export default function ReferralPage() {
             <div className="divide-y divide-slate-50">
               {visibleLeaders.map((row: any) => (
                 <div key={row.user_id} className="flex items-center gap-3 px-5 py-3">
-                  <div
-                    className={cn(
-                      "flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-black",
-                      row.rank === 1 ? "bg-amber-100 text-amber-700"
-                        : row.rank === 2 ? "bg-slate-100 text-slate-600"
-                        : row.rank === 3 ? "bg-orange-100 text-orange-600"
-                        : "bg-slate-50 text-slate-400",
-                    )}
-                  >
+                  <div className={cn(
+                    "flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-black",
+                    row.rank === 1 ? "bg-amber-100 text-amber-700"
+                    : row.rank === 2 ? "bg-slate-100 text-slate-600"
+                    : row.rank === 3 ? "bg-orange-100 text-orange-600"
+                    : "bg-slate-50 text-slate-400"
+                  )}>
                     {row.rank}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <span className="text-sm font-bold text-slate-800 truncate">
+                    <span className="text-sm font-bold text-slate-800 truncate block">
                       {row.display_name || `User #${row.user_id}`}
                     </span>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
-                    {row.rank <= 3 && <Medal size={12} className={rankMedalClass(row.rank)} />}
+                    {row.rank <= 3 && (
+                      <Medal size={12} className={
+                        row.rank === 1 ? "text-amber-400" : row.rank === 2 ? "text-slate-400" : "text-orange-400"
+                      } />
+                    )}
                     <span className="text-xs font-black text-emerald-600">{row.referral_count} refs</span>
                   </div>
                 </div>
@@ -685,101 +1033,13 @@ export default function ReferralPage() {
               >
                 {showAllLeaders
                   ? <><ChevronUp size={13} /> Show less</>
-                  : <><ChevronDown size={13} /> Show all {leaderboard.length} referrers</>}
+                  : <><ChevronDown size={13} /> Show all {leaderboard.length}</>}
               </button>
             )}
           </section>
         )}
 
-        {/* ── TEAM LEAGUE: unlocked ── (sprint only) */}
-        {teamUnlocked && (
-          <section className="rounded-2xl border border-indigo-100 bg-indigo-50 overflow-hidden shadow-sm">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-indigo-100/50">
-              <p className="text-[10px] font-black uppercase tracking-widest text-indigo-400">Your Team</p>
-              {data.team_league.current_team.rank && (
-                <span className="text-[10px] font-black text-indigo-600">
-                  Rank #{data.team_league.current_team.rank}
-                </span>
-              )}
-            </div>
-            <div className="p-5">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-indigo-200 text-xl font-black text-indigo-700">
-                  {String(data.team_league.current_team.name || "T").charAt(0)}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="font-black text-slate-900">{data.team_league.current_team.name}</p>
-                  <p className="text-xs text-slate-500">
-                    Your contribution: {data.team_league.current_team.contribution_percent || 0}%
-                    {Number(data.team_league.current_team.sprint_referrals || 0) > 0
-                      ? ` - ${data.team_league.current_team.sprint_referrals} team refs` : ""}
-                  </p>
-                  {data.team_league.current_team.mvp && (
-                    <p className="mt-0.5 text-[10px] font-bold text-indigo-500">
-                      MVP: {data.team_league.current_team.mvp.display_name}
-                    </p>
-                  )}
-                </div>
-              </div>
-
-              {/* Team standings */}
-              {(data?.team_league?.leaderboard || []).length > 0 && (
-                <>
-                  <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-indigo-400">Team Standings</p>
-                  <div className="space-y-1.5">
-                    {(showAllTeams
-                      ? data.team_league.leaderboard
-                      : data.team_league.leaderboard.slice(0, 3)
-                    ).map((team: any) => (
-                      <div key={team.team_id} className="flex items-center justify-between rounded-xl bg-white/60 px-3 py-2.5">
-                        <div className="flex items-center gap-2">
-                          <span className="w-7 text-[11px] font-black text-indigo-400">#{team.rank}</span>
-                          <span className="text-sm font-bold text-slate-800">{team.name}</span>
-                        </div>
-                        <span className="text-xs font-black text-emerald-600">{team.sprint_referrals} refs</span>
-                      </div>
-                    ))}
-                  </div>
-                  {data.team_league.leaderboard.length > 3 && (
-                    <button
-                      onClick={() => setShowAllTeams(v => !v)}
-                      className="mt-2 flex w-full items-center justify-center gap-1 text-[10px] font-black text-indigo-500"
-                    >
-                      {showAllTeams
-                        ? <><ChevronUp size={12} /> Show less</>
-                        : <><ChevronDown size={12} /> Show all {data.team_league.leaderboard.length} teams</>}
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          </section>
-        )}
-
-        {/* ── TEAM LEAGUE: locked ── (sprint only) */}
-        {teamLocked && (
-          <section className="rounded-2xl border border-dashed border-indigo-200 bg-indigo-50/40 p-5 text-center">
-            <p className="text-sm font-black text-slate-700">Team League</p>
-            <p className="mt-1 text-xs text-slate-400">
-              Unlock after{" "}
-              <span className="font-bold text-indigo-600">{data.team_league.unlock_at || 10}</span>{" "}
-              verified referrals - {data.team_league.referrals_needed || 0} more to go
-            </p>
-            <div className="mx-auto mt-3 max-w-[200px] h-1.5 rounded-full bg-indigo-100 overflow-hidden">
-              <div
-                className="h-1.5 rounded-full bg-indigo-400 transition-all"
-                style={{
-                  width: `${Math.min(100,
-                    ((Math.max(0, (data.team_league.unlock_at || 10) - (data.team_league.referrals_needed || 0))) /
-                      Math.max(1, data.team_league.unlock_at || 10)) * 100
-                  )}%`,
-                }}
-              />
-            </div>
-          </section>
-        )}
-
-        {/* ── REFERRAL HISTORY ── */}
+        {/* ── 8. REFERRAL HISTORY ── */}
         <section>
           <div className="mb-3 flex items-center justify-between">
             <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Referral History</p>
@@ -790,20 +1050,43 @@ export default function ReferralPage() {
             )}
           </div>
 
-          {(!data?.referrals || data.referrals.length === 0) ? (
+          {referrals.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-slate-200 bg-white py-14 text-center">
-              <Users size={30} className="mx-auto text-slate-200" />
-              <p className="mt-4 text-sm font-bold text-slate-500">No referrals yet</p>
-              <p className="mt-1 text-xs text-slate-400">Share your link above to start earning rewards.</p>
+              <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-50">
+                <Users size={24} className="text-slate-300" />
+              </div>
+              <p className="text-sm font-bold text-slate-500">No referrals yet</p>
+              <p className="mt-1 text-xs text-slate-400">Share your link to start earning rewards.</p>
+              <button
+                onClick={handleShare}
+                className="mt-5 inline-flex items-center gap-2 rounded-full bg-[#0c9de8] px-5 py-2.5 text-xs font-black text-white shadow-md shadow-blue-100 active:scale-95 transition-all"
+              >
+                <Share2 size={13} />
+                Share Referral Link
+              </button>
             </div>
           ) : (
             <div className="space-y-2">
-              {data.referrals.map((ref: any) => {
-                const initials = String(ref.display_name || "?").replace(/[^A-Za-z0-9#]/g, "").slice(0, 2).toUpperCase() || "?";
-                const earned   = Number(ref.reward_amount || 0);
+              {visibleRefs.map((ref: any) => {
+                const initials   = String(ref.display_name || "?").replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "?";
+                const earned     = Number(ref.reward_amount || 0);
+                const isFraudRef = ref.status === "fraud" || ref.verification_status === "fraud";
+                const isVerified = ref.verification_status === "verified";
+
                 return (
-                  <div key={ref.id} className="flex items-center gap-3 rounded-2xl border border-slate-100 bg-white px-4 py-3.5 shadow-sm">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-blue-50 text-xs font-black text-[#0c9de8]">
+                  <div
+                    key={ref.id}
+                    className={cn(
+                      "flex items-center gap-3 rounded-2xl border bg-white px-4 py-3.5 shadow-sm",
+                      isFraudRef ? "border-red-100" : "border-slate-100"
+                    )}
+                  >
+                    <div className={cn(
+                      "flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-xs font-black",
+                      isFraudRef ? "bg-red-50 text-red-400"
+                      : isVerified ? "bg-emerald-50 text-emerald-600"
+                      : "bg-blue-50 text-[#0c9de8]"
+                    )}>
                       {initials}
                     </div>
                     <div className="min-w-0 flex-1">
@@ -814,13 +1097,35 @@ export default function ReferralPage() {
                     </div>
                     <div className="flex shrink-0 flex-col items-end gap-1.5">
                       <ReferralBadge status={ref.status} verificationStatus={ref.verification_status} />
-                      {earned > 0 && (
+                      {earned > 0 && !isFraudRef && (
                         <span className="text-[11px] font-black text-emerald-600">{money(earned)}</span>
+                      )}
+                      {isFraudRef && (
+                        <button
+                          onClick={() => setFraudPopup({
+                            reward: money(earned),
+                            reason: ref.fraud_reason || "Suspicious activity detected",
+                            reviewDate: ref.review_date || nextSettlement,
+                          })}
+                          className="text-[10px] font-black text-red-500 hover:text-red-700 transition-colors"
+                        >
+                          Details
+                        </button>
                       )}
                     </div>
                   </div>
                 );
               })}
+              {referrals.length > 5 && (
+                <button
+                  onClick={() => setShowAllHistory(v => !v)}
+                  className="flex w-full items-center justify-center gap-1 rounded-2xl border border-slate-100 bg-white py-3 text-[11px] font-black text-[#0c9de8] shadow-sm"
+                >
+                  {showAllHistory
+                    ? <><ChevronUp size={13} /> Show less</>
+                    : <><ChevronDown size={13} /> Show all {referrals.length} referrals</>}
+                </button>
+              )}
             </div>
           )}
         </section>

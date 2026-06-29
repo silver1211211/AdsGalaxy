@@ -8,9 +8,17 @@ import {
   inferChannelType,
   getChannelPrivacySchema,
   hashInviteLink,
-  isValidPrivateInviteLink,
+  normalizePrivateInviteLink,
+  normalizePublicChannelUsername,
 } from "@/lib/channelPrivacy";
 import { resolvePrivateInviteLink } from "@/lib/telegramMtproto";
+import { getTrackingAccountUsernames } from "@/lib/privateChannelTrackingOnboarding";
+import { encryptPrivateInviteLink } from "@/lib/privateInviteLinkVault";
+import {
+  inspectPrivateChannelVerificationToken,
+  type PrivateChannelTokenInspection,
+} from "@/lib/privateChannelVerificationToken";
+import { logPrivateChannelDiagnostic } from "@/lib/privateChannelDiagnostics";
 
 type SettingRow = RowDataPacket & { value?: string | number | null };
 type ExistingChannelRow = RowDataPacket & { id: number; user_id: number; is_deleted: boolean | number };
@@ -24,6 +32,19 @@ async function hasPostingTimesColumn() {
       AND COLUMN_NAME = 'posting_times'
     LIMIT 1
   `);
+
+  return rows.length > 0;
+}
+
+async function tableExists(tableName: string) {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT 1
+     FROM INFORMATION_SCHEMA.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+     LIMIT 1`,
+    [tableName]
+  );
 
   return rows.length > 0;
 }
@@ -59,16 +80,99 @@ function privateInviteError(code: string) {
   return messageByCode[code] || "Unable to verify private channel.";
 }
 
+function withManualTrackingUsernames(rows: any[]) {
+  const manualUsernames = getTrackingAccountUsernames();
+  return rows.map((row) => {
+    const { private_invite_link_encrypted, ...safeRow } = row;
+    if (row.channel_type === "private" && row.tracking_account_status === "pending_manual") {
+      return { ...safeRow, tracking_manual_usernames: manualUsernames };
+    }
+    return safeRow;
+  });
+}
+
+function addTrackingColumns(
+  columns: string[],
+  params: unknown[],
+  channelType: "public" | "private",
+  schema: Awaited<ReturnType<typeof getChannelPrivacySchema>>
+) {
+  if (schema.hasTrackingAccountStatus) {
+    columns.push("tracking_account_status = ?");
+    params.push(channelType === "private" ? "pending_manual" : "not_required");
+  }
+  if (schema.hasTrackingAccount) {
+    columns.push("tracking_account = NULL");
+  }
+  if (schema.hasTrackingAccountMemberStatus) {
+    columns.push("tracking_account_member_status = NULL");
+  }
+  if (schema.hasTrackingAccountAssignedAt) {
+    columns.push("tracking_account_assigned_at = NULL");
+  }
+  if (schema.hasTrackingAccountLastSuccessAt) {
+    columns.push("tracking_account_last_success_at = NULL");
+  }
+  if (schema.hasTrackingAccountLastFailureAt) {
+    columns.push("tracking_account_last_failure_at = NULL");
+  }
+  if (schema.hasTrackingAccountFailureReason) {
+    columns.push("tracking_account_failure_reason = NULL");
+  }
+}
+
+function addTrackingInsertColumns(
+  columns: string[],
+  params: unknown[],
+  channelType: "public" | "private",
+  schema: Awaited<ReturnType<typeof getChannelPrivacySchema>>
+) {
+  if (schema.hasTrackingAccountStatus) {
+    columns.push("tracking_account_status");
+    params.push(channelType === "private" ? "pending_manual" : "not_required");
+  }
+}
+
 export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
+    const [hasCampaignClicks, hasAdSettlements, hasAdSettlementsViews, hasCampaignPosts] = await Promise.all([
+      tableExists("campaign_clicks"),
+      tableExists("ad_settlements"),
+      tableExists("ad_settlements_views"),
+      tableExists("campaign_posts"),
+    ]);
+    const totalImpressionsExpr = hasCampaignPosts
+      ? "COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.channel_id = c.id), 0)"
+      : "0";
+    const totalClicksExpr = hasCampaignClicks && hasCampaignPosts
+      ? `COALESCE((
+          SELECT COUNT(*)
+          FROM campaign_clicks cc
+          JOIN campaign_posts cp ON cp.id = cc.post_id
+          WHERE cp.channel_id = c.id
+        ), 0)`
+      : "0";
+    const clickRevenueExpr = hasAdSettlements
+      ? "COALESCE((SELECT SUM(s.publisher_reward) FROM ad_settlements s WHERE s.channel_id = c.id), 0)"
+      : "0";
+    const viewRevenueExpr = hasAdSettlementsViews
+      ? "COALESCE((SELECT SUM(sv.publisher_reward) FROM ad_settlements_views sv WHERE sv.channel_id = c.id), 0)"
+      : "0";
 
-    const [rows] = await pool.query(
-      "SELECT * FROM channels WHERE user_id = ? AND is_deleted = FALSE ORDER BY created_at DESC", 
+    const [rows]: any = await pool.query(
+      `SELECT
+        c.*,
+        ${totalImpressionsExpr} as total_impressions,
+        ${totalClicksExpr} as total_clicks,
+        (${clickRevenueExpr} + ${viewRevenueExpr}) as total_revenue
+       FROM channels c
+       WHERE c.user_id = ? AND c.is_deleted = FALSE
+       ORDER BY c.created_at DESC`,
       [user.id]
     );
-    return NextResponse.json(rows);
+    return NextResponse.json(withManualTrackingUsernames(rows));
   } catch (error: unknown) {
     console.error("API Error:", error);
     const message = error instanceof Error ? error.message : "Failed to fetch channels";
@@ -95,6 +199,7 @@ export async function POST(request: Request) {
       posting_times,
       channel_type,
       invite_link,
+      verification_token,
       subscriber_count,
     } = body;
     const normalizedTitle = String(title ?? "").trim();
@@ -103,12 +208,24 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Channel type could not be determined. Use a public username or a private invite link." }, { status: 400 });
     }
 
-    const normalizedInviteHash = normalizedChannelType === "private" ? hashInviteLink(invite_link) : null;
-    let normalizedUsername = String(username || "").replace(/^@/, "").trim() || null;
+    const normalizedPrivateInviteLink = normalizedChannelType === "private" ? normalizePrivateInviteLink(invite_link) : null;
+    const normalizedInviteHash = normalizedChannelType === "private" ? hashInviteLink(normalizedPrivateInviteLink) : null;
+    let normalizedUsername = normalizedChannelType === "public" ? normalizePublicChannelUsername(username) : null;
     let resolvedChatId = String(chat_id || "").trim();
     let privateSubscriberCount = Number.isFinite(Number(subscriber_count)) ? Number(subscriber_count) : null;
+    let tokenInspection: PrivateChannelTokenInspection | null = null;
 
-    if (normalizedChannelType === "private" && !isValidPrivateInviteLink(invite_link)) {
+    if (normalizedChannelType === "private" && !normalizedPrivateInviteLink) {
+      logPrivateChannelDiagnostic("channel_submit_rejected", {
+        token_received: Boolean(verification_token),
+        token_valid: false,
+        token_error_code: "normalized_invite_invalid",
+        token_has_chat_id: false,
+        digest_match: false,
+        submit_channel_type: "private",
+        normalized_input_type: "invalid_private_invite",
+        final_reject_reason: "invalid_private_invite",
+      });
       return NextResponse.json({ error: "Invalid private invite link" }, { status: 400 });
     }
 
@@ -130,19 +247,72 @@ export async function POST(request: Request) {
     }
 
     if (normalizedChannelType === "private") {
-      const resolved = await resolvePrivateInviteLink(invite_link);
-      if (!resolved.ok) {
-        return NextResponse.json({ error: privateInviteError(resolved.code) }, { status: 400 });
-      }
+      tokenInspection = inspectPrivateChannelVerificationToken(
+        verification_token,
+        normalizedPrivateInviteLink,
+        resolvedChatId
+      );
+      logPrivateChannelDiagnostic("channel_submit_token_checked", {
+        token_received: tokenInspection.tokenReceived,
+        token_valid: tokenInspection.valid,
+        token_error_code: tokenInspection.errorCode,
+        token_has_chat_id: tokenInspection.tokenHasChatId,
+        digest_match: tokenInspection.digestMatch,
+        submit_channel_type: "private",
+        normalized_input_type: "private_invite",
+        final_reject_reason: tokenInspection.valid ? "none" : "token_fallback_required",
+      });
 
-      resolvedChatId = resolved.chatId;
-      privateSubscriberCount = resolved.participantsCount;
+      if (tokenInspection.valid && tokenInspection.chatId) {
+        resolvedChatId = tokenInspection.chatId;
+      } else {
+        const resolved = await resolvePrivateInviteLink(normalizedPrivateInviteLink!);
+        if (!resolved.ok) {
+          logPrivateChannelDiagnostic("channel_submit_rejected", {
+            token_received: tokenInspection.tokenReceived,
+            token_valid: tokenInspection.valid,
+            token_error_code: tokenInspection.errorCode,
+            token_has_chat_id: tokenInspection.tokenHasChatId,
+            digest_match: tokenInspection.digestMatch,
+            submit_channel_type: "private",
+            normalized_input_type: "private_invite",
+            final_reject_reason: `invite_resolution_${resolved.code}`,
+          });
+          return NextResponse.json({ error: privateInviteError(resolved.code) }, { status: 400 });
+        }
+
+        resolvedChatId = resolved.chatId;
+        privateSubscriberCount = resolved.participantsCount;
+      }
     }
 
     const normalizedPostsPerDay = normalizePostsPerDay(posts_per_day);
     const normalizedPostingTimes = normalizePostingTimes(posting_times, normalizedPostsPerDay);
     const canStorePostingTimes = await hasPostingTimesColumn();
     const privacySchema = await getChannelPrivacySchema();
+    const encryptedPrivateInviteLink = normalizedChannelType === "private"
+      ? encryptPrivateInviteLink(normalizedPrivateInviteLink)
+      : null;
+
+    if (normalizedChannelType === "private" && (!privacySchema.hasPrivateInviteLinkEncrypted || !encryptedPrivateInviteLink)) {
+      logPrivateChannelDiagnostic("channel_submit_rejected", {
+        token_received: tokenInspection?.tokenReceived ?? Boolean(verification_token),
+        token_valid: tokenInspection?.valid ?? false,
+        token_error_code: tokenInspection?.errorCode ?? "not_checked",
+        token_has_chat_id: tokenInspection?.tokenHasChatId ?? false,
+        digest_match: tokenInspection?.digestMatch ?? false,
+        submit_channel_type: "private",
+        normalized_input_type: "private_invite",
+        final_reject_reason: "private_invite_storage_unavailable",
+      });
+      return NextResponse.json(
+        {
+          error: "Private channel storage is not configured. Please contact support.",
+          code: "PRIVATE_INVITE_STORAGE_UNAVAILABLE",
+        },
+        { status: 503 }
+      );
+    }
 
     if (!canStorePostingTimes) {
       console.warn("channels.posting_times column is missing; channel posting times will use runtime defaults");
@@ -246,10 +416,17 @@ export async function POST(request: Request) {
         updateParams.push(normalizedInviteHash);
       }
 
+      if (privacySchema.hasPrivateInviteLinkEncrypted) {
+        updateColumns.push("private_invite_link_encrypted = ?");
+        updateParams.push(encryptedPrivateInviteLink);
+      }
+
       if (privacySchema.hasViewTrackingStatus) {
         updateColumns.push("view_tracking_status = ?");
         updateParams.push(normalizedChannelType === "private" ? "limited" : "available");
       }
+
+      addTrackingColumns(updateColumns, updateParams, normalizedChannelType, privacySchema);
 
       updateParams.push(channel.id);
 
@@ -258,7 +435,24 @@ export async function POST(request: Request) {
         updateParams
       );
 
-      return NextResponse.json({ success: true, id: channel.id, message: "Channel reactivated and updated" });
+      if (normalizedChannelType === "private") {
+        logPrivateChannelDiagnostic("channel_submit_persisted", {
+          token_received: tokenInspection?.tokenReceived ?? Boolean(verification_token),
+          token_valid: tokenInspection?.valid ?? false,
+          token_error_code: tokenInspection?.errorCode ?? "not_checked",
+          token_has_chat_id: tokenInspection?.tokenHasChatId ?? false,
+          digest_match: tokenInspection?.digestMatch ?? false,
+          submit_channel_type: "private",
+          normalized_input_type: "private_invite",
+          final_reject_reason: "none",
+        });
+      }
+
+      return NextResponse.json({
+        success: true,
+        id: channel.id,
+        message: "Channel reactivated and updated",
+      });
     }
 
     // 4. Insert new channel
@@ -300,16 +494,36 @@ export async function POST(request: Request) {
       insertParams.push(normalizedInviteHash);
     }
 
+    if (privacySchema.hasPrivateInviteLinkEncrypted) {
+      insertColumns.push("private_invite_link_encrypted");
+      insertParams.push(encryptedPrivateInviteLink);
+    }
+
     if (privacySchema.hasViewTrackingStatus) {
       insertColumns.push("view_tracking_status");
       insertParams.push(normalizedChannelType === "private" ? "limited" : "available");
     }
+
+    addTrackingInsertColumns(insertColumns, insertParams, normalizedChannelType, privacySchema);
 
     const placeholders = insertColumns.map(() => "?").join(", ");
     const [result] = await pool.query(
       `INSERT INTO channels (${insertColumns.join(", ")}) VALUES (${placeholders})`,
       insertParams
     ) as [ResultSetHeader, unknown];
+
+    if (normalizedChannelType === "private") {
+      logPrivateChannelDiagnostic("channel_submit_persisted", {
+        token_received: tokenInspection?.tokenReceived ?? Boolean(verification_token),
+        token_valid: tokenInspection?.valid ?? false,
+        token_error_code: tokenInspection?.errorCode ?? "not_checked",
+        token_has_chat_id: tokenInspection?.tokenHasChatId ?? false,
+        digest_match: tokenInspection?.digestMatch ?? false,
+        submit_channel_type: "private",
+        normalized_input_type: "private_invite",
+        final_reject_reason: "none",
+      });
+    }
 
     return NextResponse.json({ success: true, id: result.insertId });
   } catch (error: unknown) {

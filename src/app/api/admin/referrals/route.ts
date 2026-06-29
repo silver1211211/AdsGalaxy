@@ -7,6 +7,7 @@ import {
   getAdminReferralGrowthData,
   notifyReferralAudience,
   recordReferralSprintAudit,
+  settlePendingReferralRewards,
 } from "@/lib/referralSprint";
 
 function clean(value: unknown) {
@@ -219,8 +220,14 @@ export async function PATCH(request: Request) {
     }
 
     if (action === "finalize_sprints") {
+      const settlement = await settlePendingReferralRewards({ actorId: admin.id });
       const result = await finalizeExpiredReferralSprints(admin.id);
       await ensureActiveReferralSprint();
+      return NextResponse.json({ success: true, settlement, result });
+    }
+
+    if (action === "settle_referrals") {
+      const result = await settlePendingReferralRewards({ settlementDate: clean(body.settlement_date) || undefined, actorId: admin.id });
       return NextResponse.json({ success: true, result });
     }
 

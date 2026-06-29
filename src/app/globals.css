@@ -25,6 +25,55 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+/* User-facing Mini App premium shell. Scoped away from admin. */
+.ag-miniapp-shell {
+  color: #0f172a;
+}
+
+.ag-miniapp-shell .bg-white {
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.055);
+}
+
+.ag-miniapp-shell .border-slate-100,
+.ag-miniapp-shell .border-slate-200 {
+  border-color: rgba(226, 232, 240, 0.86);
+}
+
+.ag-miniapp-shell button,
+.ag-miniapp-shell a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.ag-miniapp-shell button:not(:disabled),
+.ag-miniapp-shell a {
+  transition-property: transform, box-shadow, background-color, border-color, color, opacity;
+  transition-duration: 180ms;
+}
+
+.ag-miniapp-shell button:not(:disabled):active,
+.ag-miniapp-shell a:active {
+  transform: scale(0.985);
+}
+
+.ag-miniapp-shell input,
+.ag-miniapp-shell textarea,
+.ag-miniapp-shell select {
+  border-radius: 16px;
+  background-color: rgba(248, 250, 252, 0.92);
+}
+
+.ag-miniapp-shell input:focus,
+.ag-miniapp-shell textarea:focus,
+.ag-miniapp-shell select:focus {
+  border-color: #0c9de8;
+  box-shadow: 0 0 0 4px rgba(12, 157, 232, 0.10);
+  outline: none;
+}
+
+.ag-miniapp-shell .fixed.inset-0 .bg-white {
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.22);
+}
+
 /* Admin Panel Theme Engine */
 .admin-panel {
   /* Default: Snow Frost (Light) */

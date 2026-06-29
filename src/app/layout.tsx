@@ -12,6 +12,7 @@ const geistMono = Geist_Mono({
 });
 
 import { HeaderProvider } from "@/context/HeaderContext";
+import { PopupQueueProvider } from "@/context/PopupQueueContext";
 
 import TelegramScript from "@/components/shared/TelegramScript";
 
@@ -34,9 +35,11 @@ export default function RootLayout({
       </head>
       <body className="min-h-full flex flex-col" suppressHydrationWarning>
         <TelegramScript />
-        <HeaderProvider>
-          {children}
-        </HeaderProvider>
+        <PopupQueueProvider>
+          <HeaderProvider>
+            {children}
+          </HeaderProvider>
+        </PopupQueueProvider>
       </body>
     </html>
   );

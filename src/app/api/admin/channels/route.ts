@@ -3,6 +3,25 @@ import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { ensureDefaultChannelDistribution } from "@/lib/channelLifecycle";
+import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
+import {
+  clearPrivateTrackingAssignment,
+  onboardPrivateChannelTracking,
+} from "@/lib/privateChannelTrackingOnboarding";
+import { decryptPrivateInviteLink } from "@/lib/privateInviteLinkVault";
+
+function withPrivateModerationLinks(rows: any[]) {
+  return rows.map((row) => {
+    const privateUrl = row.channel_type === "private"
+      ? decryptPrivateInviteLink(row.private_invite_link_encrypted)
+      : null;
+    const { private_invite_link_encrypted, ...safeRow } = row;
+    return {
+      ...safeRow,
+      private_invite_link_url: privateUrl,
+    };
+  });
+}
 
 export async function GET(request: Request) {
   if (!(await checkAdminAuth())) {
@@ -75,7 +94,7 @@ export async function GET(request: Request) {
     `);
 
     return NextResponse.json({
-      channels: rows,
+      channels: withPrivateModerationLinks(rows),
       total: countRow.total,
       page,
       totalPages: Math.ceil(countRow.total / limit),
@@ -98,7 +117,7 @@ export async function PATCH(request: Request) {
 
     // Fetch channel and owner details
     const [rows]: any = await pool.query(
-      `SELECT c.title, c.username, u.telegram_id 
+      `SELECT c.title, c.username, c.chat_id, c.channel_type, u.telegram_id
        FROM channels c 
        JOIN users u ON c.user_id = u.id 
        WHERE c.id = ?`,
@@ -138,8 +157,19 @@ export async function PATCH(request: Request) {
         [status, id]
       );
       await ensureDefaultChannelDistribution();
+      const privacySchema = await getChannelPrivacySchema();
+      await onboardPrivateChannelTracking({
+        channelId: id,
+        chatId: channel.chat_id,
+        channelType: channel.channel_type === "private" ? "private" : "public",
+        schema: privacySchema,
+      }).catch((trackingError: unknown) => {
+        const message = trackingError instanceof Error ? trackingError.message : "tracking_onboarding_error";
+        console.warn("Private tracking onboarding after admin approval failed", { channel_id: id, error: message });
+      });
     } else if (normalizedAction === "delete") {
       await pool.query("UPDATE channels SET status = ?, is_deleted = TRUE, paused_reason = 'Deleted by admin.', suggested_fix = NULL WHERE id = ?", [status, id]);
+      await clearPrivateTrackingAssignment(id, await getChannelPrivacySchema());
     } else {
       await pool.query("UPDATE channels SET status = ?, paused_reason = ?, suggested_fix = ? WHERE id = ?", [
         status,

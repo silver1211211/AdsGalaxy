@@ -3,7 +3,7 @@ import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
-import { getPrivatePostViews } from "@/lib/telegramMtproto";
+import { getPrivatePostViews, mtprotoAccountNumber } from "@/lib/telegramMtproto";
 
 export const dynamic = 'force-dynamic';
 
@@ -69,10 +69,50 @@ export async function GET(req: NextRequest) {
             if (privacySchema.hasViewTrackingStatus) {
               await pool.query("UPDATE channels SET view_tracking_status = 'available' WHERE id = ?", [post.channel_id]);
             }
+            if (
+              privacySchema.hasTrackingAccountStatus
+              && privacySchema.hasTrackingAccount
+              && privacySchema.hasTrackingAccountMemberStatus
+              && privacySchema.hasTrackingAccountLastSuccessAt
+              && privacySchema.hasTrackingAccountLastFailureAt
+              && privacySchema.hasTrackingAccountFailureReason
+            ) {
+              await pool.query(
+                `UPDATE channels
+                 SET tracking_account_status = 'active',
+                     tracking_account = COALESCE(tracking_account, ?),
+                     tracking_account_member_status = 'member',
+                     tracking_account_last_success_at = NOW(),
+                     tracking_account_last_failure_at = NULL,
+                     tracking_account_failure_reason = NULL
+                 WHERE id = ?`,
+                [mtprotoAccountNumber(privateViews.account), post.channel_id]
+              );
+            }
             results.push({ post_id: post.id, views: privateViews.views, prev_views: lastViews });
           } else {
             if (privacySchema.hasViewTrackingStatus) {
-              await pool.query("UPDATE channels SET view_tracking_status = 'limited' WHERE id = ?", [post.channel_id]);
+              const nextStatus = privateViews.code === "all_accounts_failed"
+                || privateViews.code === "missing_api_id"
+                || privateViews.code === "missing_api_hash"
+                || privateViews.code === "missing_account_sessions"
+                ? "unavailable"
+                : "limited";
+              await pool.query("UPDATE channels SET view_tracking_status = ? WHERE id = ?", [nextStatus, post.channel_id]);
+            }
+            if (
+              privacySchema.hasTrackingAccountStatus
+              && privacySchema.hasTrackingAccountLastFailureAt
+              && privacySchema.hasTrackingAccountFailureReason
+            ) {
+              await pool.query(
+                `UPDATE channels
+                 SET tracking_account_status = CASE WHEN tracking_account_status = 'active' THEN tracking_account_status ELSE 'pending_manual' END,
+                     tracking_account_last_failure_at = NOW(),
+                     tracking_account_failure_reason = ?
+                 WHERE id = ?`,
+                [String(privateViews.code || "private_views_failed").slice(0, 255), post.channel_id]
+              );
             }
             console.error(`Private views fetch failed for post ${post.id}: ${privateViews.code}`);
             results.push({ post_id: post.id, status: "private_views_limited", reason: privateViews.code });

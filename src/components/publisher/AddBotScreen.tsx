@@ -179,7 +179,7 @@ export default function AddBotScreen({ onClose, onSuccess, bot }: AddBotScreenPr
                 className="space-y-8"
               >
                 <div className="space-y-4">
-                  <div className="w-14 h-14 bg-indigo-50 rounded-2xl flex items-center justify-center text-indigo-600">
+                  <div className="w-14 h-14 bg-blue-50 rounded-2xl flex items-center justify-center text-[#0c9de8]">
                     <Bot size={28} />
                   </div>
                   <div>
@@ -194,10 +194,10 @@ export default function AddBotScreen({ onClose, onSuccess, bot }: AddBotScreenPr
                       value={token}
                       onChange={(e) => setToken(e.target.value)}
                       placeholder="123456789:ABCDefGhIjKlMnOpQrStUvWxYz"
-                      className="w-full px-4 py-3 bg-slate-50 border-none rounded-2xl focus:bg-white focus:ring-2 focus:ring-indigo-500/20 transition-all outline-none font-mono text-sm text-slate-900"
+                      className="w-full px-4 py-3 bg-slate-50 border-none rounded-2xl focus:bg-white focus:ring-2 focus:ring-blue-500/20 transition-all outline-none font-mono text-sm text-slate-900"
                     />
                     <p className="text-[10px] text-slate-400 font-medium">
-                      You can get this token from <a href="https://t.me/BotFather" target="_blank" className="text-indigo-600 underline">@BotFather</a>.
+                      You can get this token from <a href="https://t.me/BotFather" target="_blank" className="text-[#0c9de8] underline">@BotFather</a>.
                     </p>
                   </div>
                 </div>
@@ -253,7 +253,7 @@ export default function AddBotScreen({ onClose, onSuccess, bot }: AddBotScreenPr
                             onClick={() => setPostsPerDay(num)}
                             className={cn(
                               "relative z-10 flex-1 h-full flex items-center justify-center font-black text-xs transition-colors duration-300",
-                              postsPerDay === num ? "text-indigo-600" : "text-slate-400"
+                              postsPerDay === num ? "text-[#0c9de8]" : "text-slate-400"
                             )}
                           >
                             {num} {num === 1 ? 'post' : 'posts'}
@@ -272,8 +272,8 @@ export default function AddBotScreen({ onClose, onSuccess, bot }: AddBotScreenPr
                             className={cn(
                               "px-3 py-2 rounded-xl text-[10px] font-black uppercase transition-all border",
                               selectedCategories.includes(cat)
-                                ? "bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-100"
-                                : "bg-white border-slate-200 text-slate-400 hover:border-indigo-200"
+                                ? "bg-blue-600 border-blue-600 text-white shadow-md shadow-blue-100"
+                                : "bg-white border-slate-200 text-slate-400 hover:border-blue-200"
                             )}
                           >
                             {cat}
@@ -292,7 +292,7 @@ export default function AddBotScreen({ onClose, onSuccess, bot }: AddBotScreenPr
                             className={cn(
                               "px-5 py-3 text-sm font-bold rounded-2xl transition-all flex flex-col items-start gap-1 text-left border-2",
                               selectedContinents.includes(cont.name)
-                                ? "bg-indigo-50 border-indigo-500/30 text-indigo-700"
+                                ? "bg-blue-50 border-blue-500/30 text-blue-700"
                                 : "bg-slate-50 border-transparent text-slate-500 hover:bg-slate-100"
                             )}
                           >
@@ -302,7 +302,7 @@ export default function AddBotScreen({ onClose, onSuccess, bot }: AddBotScreenPr
                             </div>
                             <span className={cn(
                               "text-[10px] font-bold uppercase tracking-wider",
-                              selectedContinents.includes(cont.name) ? "text-indigo-400" : "text-slate-400"
+                              selectedContinents.includes(cont.name) ? "text-blue-400" : "text-slate-400"
                             )}>
                               {cont.countries}
                             </span>
@@ -325,7 +325,7 @@ export default function AddBotScreen({ onClose, onSuccess, bot }: AddBotScreenPr
                   <button
                     onClick={handleSubmit}
                     disabled={isLoading || selectedContinents.length === 0 || selectedCategories.length === 0}
-                    className="flex-1 py-3.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 text-white font-black rounded-2xl transition-all flex items-center justify-center gap-2 text-sm"
+                    className="flex-1 py-3.5 bg-[#0c9de8] hover:bg-blue-600 disabled:bg-slate-200 text-white font-black rounded-2xl transition-all flex items-center justify-center gap-2 text-sm"
                   >
                     {isLoading && <Loader2 className="animate-spin" size={20} />}
                     Complete

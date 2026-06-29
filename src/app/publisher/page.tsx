@@ -16,6 +16,8 @@ import {
   Loader2,
   Bot,
   Smartphone,
+  Sparkles,
+  TrendingUp,
 } from "lucide-react";
 import Link from "next/link";
 import { apiFetch } from "@/lib/api";
@@ -26,6 +28,9 @@ import AppBootState from "@/components/shared/AppBootState";
 import { getTelegramWebApp, waitForTelegramInitData } from "@/lib/telegramWebApp";
 import ChannelDetailsScreen from "@/components/publisher/ChannelDetailsScreen";
 import AddChannelScreen from "@/components/publisher/AddChannelScreen";
+import BotDetailsScreen from "@/components/publisher/BotDetailsScreen";
+import AddBotScreen from "@/components/publisher/AddBotScreen";
+import MiniAppDetailsScreen from "@/components/publisher/MiniAppDetailsScreen";
 import Toast from "@/components/ui/Toast";
 
 type PublisherStats = {
@@ -70,10 +75,13 @@ export default function PublisherDashboard() {
   const [verifyError, setVerifyError] = React.useState("");
 
   // three-dots menu state
-  const [openMenu,       setOpenMenu]       = React.useState<number | null>(null);
+  const [openMenu,       setOpenMenu]       = React.useState<string | null>(null);
   const [viewingChannel, setViewingChannel] = React.useState<any | null>(null);
   const [editingChannel, setEditingChannel] = React.useState<any | null>(null);
-  const [processingId,   setProcessingId]   = React.useState<number | null>(null);
+  const [viewingBot,     setViewingBot]     = React.useState<any | null>(null);
+  const [editingBot,     setEditingBot]     = React.useState<any | null>(null);
+  const [viewingMiniApp, setViewingMiniApp] = React.useState<any | null>(null);
+  const [processingId,   setProcessingId]   = React.useState<string | null>(null);
   const [toast, setToast] = React.useState<{ type: "success" | "error"; title: string; message: string } | null>(null);
 
   const channelName   = process.env.NEXT_PUBLIC_CHANNEL || "AdsGalaxy_News";
@@ -131,18 +139,26 @@ export default function PublisherDashboard() {
     }
   };
 
-  async function handleToggleStatus(channel: any) {
-    setProcessingId(channel.id);
+  async function handleToggleStatus(item: NonNullable<PublisherStats["recent_monetized"]>[number]) {
+    const key = `${item.type}-${item.id}`;
+    const endpoint = item.type === "channel"
+      ? `/api/publisher/channels/${item.id}`
+      : item.type === "bot"
+      ? `/api/publisher/bots/${item.id}`
+      : `/api/publisher/miniapps/${item.id}`;
+    const label = item.type === "miniapp" ? "Mini App" : item.type.charAt(0).toUpperCase() + item.type.slice(1);
+
+    setProcessingId(key);
     setOpenMenu(null);
     try {
-      const res  = await apiFetch(`/api/publisher/channels/${channel.id}`, {
+      const res  = await apiFetch(endpoint, {
         method: "PATCH",
         body: JSON.stringify({ action: "toggle_status" }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to update status");
       fetchStats();
-      setToast({ type: "success", title: "Status Updated", message: "Channel status updated successfully." });
+      setToast({ type: "success", title: "Status Updated", message: `${label} status updated successfully.` });
     } catch (err: any) {
       setToast({ type: "error", title: "Update Failed", message: err.message });
     } finally {
@@ -180,6 +196,42 @@ export default function PublisherDashboard() {
         )}
       </AnimatePresence>
 
+      <AnimatePresence>
+        {viewingBot && (
+          <BotDetailsScreen
+            bot={viewingBot}
+            onClose={() => setViewingBot(null)}
+            onEdit={() => { setViewingBot(null); setEditingBot(viewingBot); }}
+            onToggleStatus={() => { handleToggleStatus({ type: "bot", id: Number(viewingBot.id), name: viewingBot.bot_name, username: viewingBot.bot_username ?? undefined, status: viewingBot.status }); setViewingBot(null); }}
+            canToggleStatus={!["pending", "deleted"].includes(viewingBot.status)}
+            isResuming={canReactivate(viewingBot.status)}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {editingBot && (
+          <AddBotScreen
+            bot={editingBot}
+            onClose={() => setEditingBot(null)}
+            onSuccess={() => { setEditingBot(null); fetchStats(); }}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {viewingMiniApp && (
+          <MiniAppDetailsScreen
+            miniapp={viewingMiniApp}
+            onClose={() => setViewingMiniApp(null)}
+            onEdit={() => { window.location.href = "/publisher/monetize"; }}
+            onToggleStatus={() => { handleToggleStatus({ type: "miniapp", id: Number(viewingMiniApp.id), name: viewingMiniApp.miniapp_name, username: viewingMiniApp.miniapp_username ?? undefined, status: viewingMiniApp.status }); setViewingMiniApp(null); }}
+            canToggleStatus={!["pending", "deleted"].includes(viewingMiniApp.status)}
+            isResuming={viewingMiniApp.status === "paused"}
+          />
+        )}
+      </AnimatePresence>
+
       <Toast
         isOpen={!!toast}
         onClose={() => setToast(null)}
@@ -189,10 +241,28 @@ export default function PublisherDashboard() {
       />
 
       <div className="space-y-8">
-        {/* Header */}
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-bold text-slate-900">Publisher Dashboard</h1>
-          <p className="text-slate-500">Welcome back! Here&apos;s an overview of your channel performance.</p>
+        {/* Premium Header */}
+        <div className="relative overflow-hidden rounded-[2rem] bg-slate-950 p-6 text-white shadow-2xl shadow-blue-950/10">
+          <div className="absolute -right-16 -top-20 h-52 w-52 rounded-full bg-[#0c9de8]/40 blur-3xl" />
+          <div className="absolute -bottom-20 left-8 h-40 w-40 rounded-full bg-blue-500/20 blur-3xl" />
+          <div className="relative">
+            <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.22em] text-blue-100">
+              <Sparkles size={12} />
+              Publisher Command Center
+            </div>
+            <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <h1 className="text-3xl font-black tracking-tight">Grow, monetize, withdraw.</h1>
+                <p className="mt-2 max-w-xl text-sm font-medium leading-6 text-white/65">
+                  Your Telegram inventory, earnings, and monetized assets in one polished control room.
+                </p>
+              </div>
+              <Link href="/publisher/monetize" className="inline-flex items-center justify-center gap-2 rounded-2xl bg-white px-5 py-3 text-xs font-black uppercase tracking-wide text-[#0c9de8] shadow-lg shadow-white/10">
+                <TrendingUp size={15} />
+                Monetize More
+              </Link>
+            </div>
+          </div>
         </div>
 
         {loadError && (
@@ -244,9 +314,9 @@ export default function PublisherDashboard() {
             ))
           ) : (
             statCards.map((stat) => (
-              <div key={stat.label} className="bg-white p-4 md:p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+              <div key={stat.label} className="group rounded-3xl border border-slate-100 bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-xl md:p-6">
                 <div className="flex items-center justify-between mb-4">
-                  <div className={`p-2 md:p-3 rounded-xl ${stat.bg}`}>
+                  <div className={`rounded-2xl p-2 ring-1 ring-white md:p-3 ${stat.bg}`}>
                     <stat.icon className={stat.color} size={20} />
                   </div>
                 </div>
@@ -280,12 +350,61 @@ export default function PublisherDashboard() {
                   </div>
                 ) : (
                   stats.recent_monetized.map((item) => {
-                    const isChannel = item.type === "channel";
+                    const menuKey = `${item.type}-${item.id}`;
                     const iconConfig = item.type === "channel"
                       ? { icon: <Tv size={20} />, bg: "bg-blue-100", color: "text-blue-600", label: "Channel" }
                       : item.type === "bot"
                       ? { icon: <Bot size={20} />, bg: "bg-violet-100", color: "text-violet-600", label: "Bot" }
                       : { icon: <Smartphone size={20} />, bg: "bg-emerald-100", color: "text-emerald-600", label: "Mini App" };
+                    const isProcessing = processingId === menuKey;
+                    const canToggle = item.status !== "pending" && item.status !== "deleted";
+                    const shouldResume = item.type === "miniapp"
+                      ? item.status === "paused"
+                      : canReactivate(item.status ?? "");
+
+                    const viewItem = () => {
+                      setOpenMenu(null);
+                      if (item.type === "channel") {
+                        setViewingChannel({ id: item.id, title: item.name, username: item.username, status: item.status });
+                        return;
+                      }
+                      if (item.type === "bot") {
+                        setViewingBot({
+                          id: item.id,
+                          bot_name: item.name,
+                          bot_username: item.username,
+                          status: item.status || "pending",
+                          created_at: new Date().toISOString(),
+                        });
+                        return;
+                      }
+                      setViewingMiniApp({
+                        id: item.id,
+                        miniapp_name: item.name,
+                        miniapp_username: item.username,
+                        status: item.status || "pending",
+                        created_at: new Date().toISOString(),
+                      });
+                    };
+
+                    const editItem = () => {
+                      setOpenMenu(null);
+                      if (item.type === "channel") {
+                        setEditingChannel({ id: item.id, title: item.name, username: item.username, status: item.status });
+                        return;
+                      }
+                      if (item.type === "bot") {
+                        setEditingBot({
+                          id: item.id,
+                          bot_name: item.name,
+                          bot_username: item.username,
+                          status: item.status || "pending",
+                          created_at: new Date().toISOString(),
+                        });
+                        return;
+                      }
+                      window.location.href = "/publisher/monetize";
+                    };
 
                     return (
                       <div key={`${item.type}-${item.id}`} className="flex items-center justify-between p-4 rounded-xl border border-slate-50 bg-slate-50/50">
@@ -305,59 +424,54 @@ export default function PublisherDashboard() {
                         </div>
 
                         {/* Three-dots menu — channels only */}
-                        {isChannel ? (
-                          <div className="relative shrink-0">
-                            <button
-                              onClick={e => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); setOpenMenu(openMenu === item.id ? null : item.id); }}
-                              className="p-2 hover:bg-white rounded-lg transition-colors text-slate-400"
-                            >
-                              <MoreVertical size={16} />
-                            </button>
+                        <div className="relative shrink-0">
+                          <button
+                            onClick={e => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); setOpenMenu(openMenu === menuKey ? null : menuKey); }}
+                            className="p-2 hover:bg-white rounded-lg transition-colors text-slate-400"
+                            aria-label={`${iconConfig.label} actions`}
+                          >
+                            <MoreVertical size={16} />
+                          </button>
 
-                            {openMenu === item.id && (
-                              <div className="absolute right-0 bottom-full mb-1 z-20 w-52 rounded-2xl bg-white shadow-xl border border-slate-100 overflow-hidden">
-                                <button
-                                  onClick={() => { setOpenMenu(null); setViewingChannel({ id: item.id, title: item.name, username: item.username, status: item.status }); }}
-                                  className="flex items-center gap-3 w-full px-4 py-3 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors"
-                                >
-                                  <FileText size={15} className="text-slate-400 shrink-0" />
-                                  View Details
-                                </button>
-                                <div className="border-t border-slate-100" />
-                                <button
-                                  onClick={() => { setOpenMenu(null); setEditingChannel({ id: item.id, title: item.name, username: item.username, status: item.status }); }}
-                                  className="flex items-center gap-3 w-full px-4 py-3 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors"
-                                >
-                                  <Edit3 size={15} className="text-slate-400 shrink-0" />
-                                  Edit Channel
-                                </button>
-                                <div className="border-t border-slate-100" />
-                                <button
-                                  disabled={item.status === "pending" || item.status === "deleted" || processingId === item.id}
-                                  onClick={() => handleToggleStatus({ id: item.id, status: item.status })}
-                                  className={cn(
-                                    "flex items-center gap-3 w-full px-4 py-3 text-xs font-bold transition-colors",
-                                    item.status === "pending" || item.status === "deleted" || processingId === item.id
-                                      ? "text-slate-300 cursor-not-allowed"
-                                      : "text-slate-700 hover:bg-slate-50"
-                                  )}
-                                >
-                                  {processingId === item.id ? (
-                                    <><Loader2 size={15} className="animate-spin shrink-0" />Processing...</>
-                                  ) : canReactivate(item.status ?? "") ? (
-                                    <><Play size={15} className="text-emerald-500 shrink-0" />Resume Channel</>
-                                  ) : (
-                                    <><Pause size={15} className="text-slate-400 shrink-0" />Pause Channel</>
-                                  )}
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <Link href="/publisher/monetize" className="p-2 text-slate-300 hover:text-slate-500 transition-colors">
-                            <ArrowRight size={16} />
-                          </Link>
-                        )}
+                          {openMenu === menuKey && (
+                            <div className="absolute right-0 bottom-full mb-1 z-20 w-52 rounded-2xl bg-white shadow-xl border border-slate-100 overflow-hidden">
+                              <button
+                                onClick={viewItem}
+                                className="flex items-center gap-3 w-full px-4 py-3 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors"
+                              >
+                                <FileText size={15} className="text-slate-400 shrink-0" />
+                                View Details
+                              </button>
+                              <div className="border-t border-slate-100" />
+                              <button
+                                onClick={editItem}
+                                className="flex items-center gap-3 w-full px-4 py-3 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors"
+                              >
+                                <Edit3 size={15} className="text-slate-400 shrink-0" />
+                                Edit {iconConfig.label}
+                              </button>
+                              <div className="border-t border-slate-100" />
+                              <button
+                                disabled={!canToggle || isProcessing}
+                                onClick={() => handleToggleStatus(item)}
+                                className={cn(
+                                  "flex items-center gap-3 w-full px-4 py-3 text-xs font-bold transition-colors",
+                                  !canToggle || isProcessing
+                                    ? "text-slate-300 cursor-not-allowed"
+                                    : "text-slate-700 hover:bg-slate-50"
+                                )}
+                              >
+                                {isProcessing ? (
+                                  <><Loader2 size={15} className="animate-spin shrink-0" />Processing...</>
+                                ) : shouldResume ? (
+                                  <><Play size={15} className="text-emerald-500 shrink-0" />Resume {iconConfig.label}</>
+                                ) : (
+                                  <><Pause size={15} className="text-slate-400 shrink-0" />Pause {iconConfig.label}</>
+                                )}
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     );
                   })

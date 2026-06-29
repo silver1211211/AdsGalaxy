@@ -445,16 +445,20 @@ export default function AdvertiserMiniAppRewardedPage() {
       <div className="space-y-6 pb-10">
 
         {/* ── Wizard card ── */}
-        <div className="rounded-3xl border border-slate-100 bg-white shadow-sm p-5">
+        <div className="rounded-[2rem] border border-blue-100 bg-white shadow-xl shadow-blue-100/50 p-5">
 
           {/* Header */}
-          <div className="flex items-center gap-3 mb-5">
-            <div className="w-10 h-10 rounded-2xl bg-blue-50 flex items-center justify-center text-[#0c9de8]">
+          <div className="relative mb-5 overflow-hidden rounded-[1.7rem] bg-slate-950 p-5 text-white">
+            <div className="absolute -right-10 -top-10 h-28 w-28 rounded-full bg-[#0c9de8]/30 blur-3xl" />
+            <div className="relative flex items-center gap-3">
+            <div className="w-11 h-11 rounded-2xl bg-white/10 ring-1 ring-white/10 flex items-center justify-center text-blue-100">
               <Smartphone size={20} />
             </div>
             <div>
-              <p className="text-xs font-black uppercase tracking-widest text-slate-400">Mini App Campaign</p>
-              <p className="text-sm font-black text-slate-900">Step {step} of {STEPS.length} — {STEPS[step - 1]}</p>
+              <p className="text-xs font-black uppercase tracking-widest text-blue-100/70">Mini App Campaign</p>
+              <p className="text-base font-black text-white">Step {step} of {STEPS.length} — {STEPS[step - 1]}</p>
+              <p className="mt-1 text-[11px] font-semibold text-blue-100/70">Rewarded ad setup with the same campaign logic.</p>
+            </div>
             </div>
           </div>
 

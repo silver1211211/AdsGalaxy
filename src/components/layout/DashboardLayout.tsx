@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import Link from "next/link";
+import { usePathname } from "next/navigation";
 import Header from "./Header";
 import Sidebar from "./Sidebar";
 import { apiFetch } from "@/lib/api";
@@ -19,9 +19,19 @@ interface DashboardLayoutProps {
 type BootState = "checking" | "ready" | "banned" | "error";
 
 export default function DashboardLayout({ children, type }: DashboardLayoutProps) {
+  const pathname = usePathname();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [bootState, setBootState] = useState<BootState>("checking");
-  const [miniappBetaAccess, setMiniappBetaAccess] = useState(false);
+  const isPublisherDashboard = type === "publisher" && pathname === "/publisher";
+  const [referralPopupBlockingPromo, setReferralPopupBlockingPromo] = useState(isPublisherDashboard);
+
+  const handleReferralBlockingChange = React.useCallback((isBlocking: boolean) => {
+    setReferralPopupBlockingPromo(isBlocking);
+  }, []);
+
+  useEffect(() => {
+    setReferralPopupBlockingPromo(isPublisherDashboard);
+  }, [isPublisherDashboard]);
 
   useEffect(() => {
     let cancelled = false;
@@ -50,7 +60,6 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
           throw new Error(data.error || "Unable to verify account status");
         }
 
-        setMiniappBetaAccess(Boolean(data.miniapp_beta_access));
         window.localStorage.setItem("last_dashboard", type);
         window.localStorage.setItem("ag_miniapp_beta", data.miniapp_beta_access ? "1" : "0");
         setBootState("ready");
@@ -93,19 +102,21 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 overflow-x-hidden">
-      <SelfPromotionAd />
+    <div className="ag-miniapp-shell relative min-h-screen overflow-x-hidden bg-[radial-gradient(circle_at_top_left,rgba(12,157,232,0.12),transparent_32%),linear-gradient(180deg,#f8fbff_0%,#f1f7fc_42%,#ffffff_100%)]">
+      <div className="pointer-events-none fixed inset-x-0 top-0 z-0 h-64 bg-gradient-to-b from-[#0c9de8]/10 to-transparent" />
+      <SelfPromotionAd enabled={isPublisherDashboard && !referralPopupBlockingPromo} delayMs={2500} />
       <Header toggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)} />
       <Sidebar
         type={type}
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
-        miniappBetaAccess={miniappBetaAccess}
       />
 
-      {type === "publisher" && <ReferralSprintPopup />}
-      <main className="min-h-screen pt-16 transition-all duration-300 lg:pl-64">
-        <div className="mx-auto max-w-7xl p-4 lg:p-8">
+      {type === "publisher" && (
+        <ReferralSprintPopup onBlockingChange={handleReferralBlockingChange} />
+      )}
+      <main className="relative z-10 min-h-screen pt-16 transition-all duration-300 lg:pl-64">
+        <div className="mx-auto max-w-7xl p-4 pb-8 lg:p-8">
           {children}
         </div>
       </main>

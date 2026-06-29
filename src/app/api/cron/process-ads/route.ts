@@ -27,8 +27,6 @@ import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronS
 
 export const dynamic = 'force-dynamic';
 
-const ACTIVE_POST_STATUSES = new Set(["active", "posted", "sent"]);
-
 interface CampaignRow {
   id: number;
   user_id: number;
@@ -82,7 +80,7 @@ async function getPostingSchedulerSchema() {
     WHERE TABLE_SCHEMA = DATABASE()
       AND (
         (TABLE_NAME = 'channels' AND COLUMN_NAME IN ('posting_times', 'scheduler_slot', 'last_successful_post_at', 'last_failure_at', 'failure_reason', 'paused_reason', 'suggested_fix'))
-        OR (TABLE_NAME = 'campaign_posts' AND COLUMN_NAME IN ('posting_slot_date', 'posting_slot_time', 'deleted_at'))
+        OR (TABLE_NAME = 'campaign_posts' AND COLUMN_NAME IN ('posting_slot_date', 'posting_slot_time', 'deleted_at', 'posting_mode'))
         OR (TABLE_NAME = 'campaign_delivery_events')
       )
   `);
@@ -96,6 +94,7 @@ async function getPostingSchedulerSchema() {
     hasChannelLifecycleColumns: columns.has("channels.last_successful_post_at") && columns.has("channels.last_failure_at") && columns.has("channels.failure_reason"),
     hasPostSlotColumns: columns.has("campaign_posts.posting_slot_date") && columns.has("campaign_posts.posting_slot_time"),
     hasPostDeletedAtColumn: columns.has("campaign_posts.deleted_at"),
+    hasPostPostingModeColumn: columns.has("campaign_posts.posting_mode"),
     hasCampaignDeliveryEvents: tables.has("campaign_delivery_events")
   };
 }
@@ -157,7 +156,6 @@ function campaignMatchesChannel(campaign: CampaignRow, channel: ChannelRow) {
 
 function buildPostMaps(posts: RecentPostRow[], hasDeletedAtColumn: boolean) {
   const recent24h = new Set<string>();
-  const activeUndeleted = new Set<string>();
   const cutoff = Date.now() - (24 * 60 * 60 * 1000);
 
   for (const post of posts) {
@@ -167,16 +165,9 @@ function buildPostMaps(posts: RecentPostRow[], hasDeletedAtColumn: boolean) {
     if (createdAt > cutoff) {
       recent24h.add(key);
     }
-
-    const isActiveStatus = ACTIVE_POST_STATUSES.has(post.status);
-    const isUndeleted = hasDeletedAtColumn ? !post.deleted_at : true;
-
-    if (isActiveStatus && isUndeleted) {
-      activeUndeleted.add(key);
-    }
   }
 
-  return { recent24h, activeUndeleted };
+  return { recent24h };
 }
 
 async function recordDeliveryEvent(
@@ -291,6 +282,7 @@ export async function GET(req: NextRequest) {
       AND NOT EXISTS (
         SELECT 1 FROM campaign_posts cp
         WHERE cp.channel_id = c.id
+        ${schedulerSchema.hasPostPostingModeColumn ? "AND cp.posting_mode = 'scheduled'" : ""}
         ${schedulerSchema.hasPostSlotColumns
           ? "AND cp.posting_slot_date = ? AND cp.posting_slot_time = ?"
           : "AND cp.created_at >= ? AND cp.created_at < DATE_ADD(?, INTERVAL 30 MINUTE)"
@@ -312,6 +304,7 @@ export async function GET(req: NextRequest) {
       AND NOT EXISTS (
         SELECT 1 FROM campaign_posts cp
         WHERE cp.channel_id = c.id
+        ${schedulerSchema.hasPostPostingModeColumn ? "AND cp.posting_mode = 'scheduled'" : ""}
         ${schedulerSchema.hasPostSlotColumns
           ? "AND cp.posting_slot_date = ? AND cp.posting_slot_time = ?"
           : "AND cp.created_at >= ? AND cp.created_at < DATE_ADD(?, INTERVAL 30 MINUTE)"
@@ -350,6 +343,7 @@ export async function GET(req: NextRequest) {
       AND (
         SELECT COUNT(*) FROM campaign_posts cp
         WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 1 DAY
+        ${schedulerSchema.hasPostPostingModeColumn ? "AND cp.posting_mode = 'scheduled'" : ""}
       ) < c.posts_per_day
       ${timingConditions}
       ORDER BY c.id ASC
@@ -414,18 +408,11 @@ export async function GET(req: NextRequest) {
       dailyRows.map((row: any) => [Number(row.campaign_id), Number(row.count)])
     );
 
-    const activePostCondition = schedulerSchema.hasPostDeletedAtColumn
-      ? "(status IN ('active', 'posted', 'sent') AND deleted_at IS NULL)"
-      : "status IN ('active', 'posted', 'sent')";
-
     const [recentPosts]: any = await pool.query(`
       SELECT campaign_id, channel_id, created_at, status${schedulerSchema.hasPostDeletedAtColumn ? ", deleted_at" : ""}
       FROM campaign_posts
       WHERE campaign_id IN (?) AND channel_id IN (?)
-      AND (
-        created_at > NOW() - INTERVAL 24 HOUR
-        OR ${activePostCondition}
-      )
+      AND created_at > NOW() - INTERVAL 24 HOUR
     `, [campaignIds, channelIds]);
 
     const postMaps = buildPostMaps(recentPosts, schedulerSchema.hasPostDeletedAtColumn);
@@ -486,11 +473,6 @@ export async function GET(req: NextRequest) {
           return false;
         }
 
-        if (postMaps.activeUndeleted.has(key)) {
-          incrementSkip("active_old_post_exists");
-          return false;
-        }
-
         return true;
       });
 
@@ -536,6 +518,11 @@ export async function GET(req: NextRequest) {
 
       const insertColumns = ["campaign_id", "channel_id", "channel_username", "status", "delivery_attempted_at"];
       const insertParams = [campaign.id, channel.id, channel.username, "pending_delivery", new Date()];
+
+      if (schedulerSchema.hasPostPostingModeColumn) {
+        insertColumns.push("posting_mode");
+        insertParams.push("scheduled");
+      }
 
       if (schedulerSchema.hasPostSlotColumns) {
         insertColumns.push("posting_slot_date", "posting_slot_time");

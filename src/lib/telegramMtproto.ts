@@ -1,7 +1,9 @@
 import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions";
+import { normalizePrivateInviteLink } from "@/lib/telegramChannelInput";
 
-type MtprotoAccountKey = "account_1" | "account_2";
+export type MtprotoAccountKey = "account_1" | "account_2";
+export type MtprotoAccountNumber = 1 | 2;
 
 type PrivatePostViewResult =
   | { ok: true; views: number; account: MtprotoAccountKey }
@@ -9,6 +11,10 @@ type PrivatePostViewResult =
 
 type PrivateInviteResolveResult =
   | { ok: true; chatId: string; title: string; participantsCount: number | null; account: MtprotoAccountKey }
+  | { ok: false; code: string };
+
+type PrivateInviteJoinResult =
+  | { ok: true; account: MtprotoAccountKey; accountNumber: MtprotoAccountNumber; memberStatus: "member" | "already_member" }
   | { ok: false; code: string };
 
 type MtprotoAccountConfig = {
@@ -30,6 +36,8 @@ const SESSION_ENV_BY_ACCOUNT: Record<MtprotoAccountKey, string> = {
   account_1: "TELEGRAM_MT_ACCOUNT_1_SESSION",
   account_2: "TELEGRAM_MT_ACCOUNT_2_SESSION",
 };
+
+export const MTPROTO_ACCOUNT_KEYS: MtprotoAccountKey[] = ["account_1", "account_2"];
 
 const clientPromises: Partial<Record<MtprotoAccountKey, Promise<TelegramClient>>> = {};
 
@@ -66,7 +74,11 @@ async function getMtprotoClient(account: MtprotoAccountConfig, apiId: number, ap
   if (!clientPromises[account.key]) {
     clientPromises[account.key] = (async () => {
       const client = new TelegramClient(new StringSession(account.session), apiId, apiHash, {
-        connectionRetries: 3,
+        connectionRetries: 1,
+        reconnectRetries: 1,
+        requestRetries: 1,
+        retryDelay: 500,
+        floodSleepThreshold: 0,
       });
       await client.connect();
 
@@ -90,6 +102,7 @@ function safeMtprotoErrorCode(error: unknown) {
 
   if (message === "missing_api_id" || message === "missing_api_hash" || message === "missing_account_sessions") return message;
   if (message === "session_unauthorized") return message;
+  if (message === "verification_timeout") return message;
   if (upper.includes("CHANNEL_PRIVATE")) return "channel_private";
   if (upper.includes("INVITE_HASH_EMPTY")) return "invite_hash_empty";
   if (upper.includes("INVITE_HASH_EXPIRED")) return "invite_hash_expired";
@@ -105,10 +118,31 @@ function safeMtprotoErrorCode(error: unknown) {
   return "mtproto_error";
 }
 
+export function mtprotoAccountNumber(account: MtprotoAccountKey): MtprotoAccountNumber {
+  return account === "account_2" ? 2 : 1;
+}
+
+function mtprotoAccountKey(accountNumber: number): MtprotoAccountKey | null {
+  return accountNumber === 1 ? "account_1" : accountNumber === 2 ? "account_2" : null;
+}
+
 function privateInviteHash(inviteLink: string) {
-  const trimmed = inviteLink.trim();
-  const match = trimmed.match(/^https:\/\/t\.me\/(?:\+|joinchat\/)([A-Za-z0-9_-]+)$/);
+  const normalized = normalizePrivateInviteLink(inviteLink);
+  const match = normalized?.match(/^https:\/\/t\.me\/(?:\+|joinchat\/)([A-Za-z0-9_-]+)$/);
   return match?.[1] || "";
+}
+
+export function getConfiguredMtprotoAccountNumbers(): MtprotoAccountNumber[] {
+  return MTPROTO_ACCOUNT_KEYS
+    .filter((key) => Boolean(process.env[SESSION_ENV_BY_ACCOUNT[key]]))
+    .map(mtprotoAccountNumber);
+}
+
+export function getTrackingAccountUsernames() {
+  return [
+    { account: 1 as const, username: String(process.env.TELEGRAM_MT_ACCOUNT_1_USERNAME || "EarningPandaAdmin").replace(/^@/, "").trim() },
+    { account: 2 as const, username: String(process.env.TELEGRAM_MT_ACCOUNT_2_USERNAME || "qthfdssv").replace(/^@/, "").trim() },
+  ].filter((item) => item.username);
 }
 
 function telegramChannelChatId(chat: unknown) {
@@ -201,7 +235,12 @@ export async function resolvePrivateInviteLink(inviteLink: string): Promise<Priv
 
   for (const account of pool.accounts) {
     try {
-      return await resolveInviteWithAccount(account, pool.apiId, pool.apiHash, inviteLink);
+      return await Promise.race([
+        resolveInviteWithAccount(account, pool.apiId, pool.apiHash, inviteLink),
+        new Promise<PrivateInviteResolveResult>((_, reject) => {
+          setTimeout(() => reject(new Error("verification_timeout")), 12_000);
+        }),
+      ]);
     } catch (error) {
       const code = safeMtprotoErrorCode(error);
       if (code === "already_participant") {
@@ -227,6 +266,36 @@ export async function resolvePrivateInviteLink(inviteLink: string): Promise<Priv
   }
 
   return { ok: false, code: "all_accounts_failed" };
+}
+
+export async function joinPrivateInviteWithAccount(
+  accountNumber: MtprotoAccountNumber,
+  inviteLink: string
+): Promise<PrivateInviteJoinResult> {
+  const accountKey = mtprotoAccountKey(accountNumber);
+  if (!accountKey) return { ok: false, code: "invalid_account" };
+
+  const pool = getMtprotoAccountPool();
+  if (!pool.ok) return { ok: false, code: pool.code };
+
+  const account = pool.accounts.find((candidate) => candidate.key === accountKey);
+  if (!account) return { ok: false, code: "missing_account_session" };
+
+  const hash = privateInviteHash(inviteLink);
+  if (!hash) return { ok: false, code: "invalid_invite_link" };
+
+  try {
+    const client = await getMtprotoClient(account, pool.apiId, pool.apiHash);
+    await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+    return { ok: true, account: account.key, accountNumber, memberStatus: "member" };
+  } catch (error) {
+    const code = safeMtprotoErrorCode(error);
+    if (code === "already_participant") {
+      return { ok: true, account: account.key, accountNumber, memberStatus: "already_member" };
+    }
+    console.error(`Private tracking join MTProto ${account.key} failed: ${code}`);
+    return { ok: false, code };
+  }
 }
 
 export async function getPrivatePostViews(chatId: string | number, messageId: string | number): Promise<PrivatePostViewResult> {

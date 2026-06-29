@@ -5,7 +5,7 @@ import DashboardLayout from "@/components/layout/DashboardLayout";
 import {
   Plus, Tv, Bot, Smartphone, CheckCircle2, Clock, XCircle, PauseCircle,
   Loader2, Users, X, ChevronLeft, Search, ExternalLink, TrendingUp, MoreVertical,
-  Eye, Pause, Play, FileText, Edit3,
+  Eye, Pause, Play, FileText, Edit3, Sparkles, ShieldCheck,
 } from "lucide-react";
 import ChannelDetailsScreen from "@/components/publisher/ChannelDetailsScreen";
 import AddChannelScreen from "@/components/publisher/AddChannelScreen";
@@ -27,6 +27,11 @@ import {
   validateMiniAppSubmission,
   MiniAppSubmissionValidationError,
 } from "@/lib/miniappSubmissionValidation";
+import {
+  normalizePrivateInviteLink,
+  normalizePublicChannelUsername,
+} from "@/lib/telegramChannelInput";
+import { logPrivateChannelDiagnostic } from "@/lib/privateChannelDiagnostics";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -55,39 +60,46 @@ type FlowStep  = "select" | "channel-privacy" | "channel-1" | "channel-verifying
 const ADD_OPTIONS: {
   label: string; desc: string;
   icon: React.ElementType; iconCls: string; iconBg: string;
+  hoverCls: string;
   action: AddType;
 }[] = [
   {
     label: "Channel", desc: "Earn from ads shown to your Telegram channel subscribers.",
-    icon: Tv, iconCls: "text-[#0c9de8]", iconBg: "bg-blue-50", action: "channel",
+    icon: Tv, iconCls: "text-[#0c9de8]", iconBg: "bg-blue-50",
+    hoverCls: "hover:border-blue-200 hover:bg-blue-50/60",
+    action: "channel",
   },
   {
     label: "Mini App", desc: "Integrate rewarded ads directly inside your Mini App.",
-    icon: Smartphone, iconCls: "text-emerald-500", iconBg: "bg-emerald-50", action: "miniapp",
+    icon: Smartphone, iconCls: "text-emerald-500", iconBg: "bg-emerald-50",
+    hoverCls: "hover:border-emerald-200 hover:bg-emerald-50/60",
+    action: "miniapp",
   },
   {
     label: "Bot", desc: "Broadcast sponsored ads to your bot's user base.",
-    icon: Bot, iconCls: "text-violet-500", iconBg: "bg-violet-50", action: "bot",
+    icon: Bot, iconCls: "text-violet-500", iconBg: "bg-violet-50",
+    hoverCls: "hover:border-violet-200 hover:bg-violet-50/60",
+    action: "bot",
   },
 ];
 
 // ── StatusBadge ───────────────────────────────────────────────────────────────
 
 function StatusBadge({ status }: { status: Status }) {
-  const map: Record<string, { label: string; cls: string; Icon: React.ElementType }> = {
-    active:   { label: "Active",   cls: "bg-emerald-100 text-emerald-700", Icon: CheckCircle2 },
-    approved: { label: "Active",   cls: "bg-emerald-100 text-emerald-700", Icon: CheckCircle2 },
-    pending:  { label: "Pending",  cls: "bg-amber-100 text-amber-700",     Icon: Clock },
-    rejected: { label: "Rejected", cls: "bg-red-100 text-red-600",         Icon: XCircle },
-    paused:   { label: "Paused",   cls: "bg-slate-100 text-slate-500",     Icon: PauseCircle },
+  const map: Record<string, { label: string; cls: string; dot: string }> = {
+    active:   { label: "Active",   cls: "bg-emerald-100 text-emerald-700", dot: "bg-emerald-500" },
+    approved: { label: "Active",   cls: "bg-emerald-100 text-emerald-700", dot: "bg-emerald-500" },
+    pending:  { label: "Pending",  cls: "bg-amber-100 text-amber-700",     dot: "bg-amber-400"  },
+    rejected: { label: "Rejected", cls: "bg-red-100 text-red-600",         dot: "bg-red-500"    },
+    paused:   { label: "Paused",   cls: "bg-slate-100 text-slate-500",     dot: "bg-slate-400"  },
   };
   const c = map[status] ?? map.pending;
   return (
     <span className={cn(
-      "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide",
+      "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold",
       c.cls,
     )}>
-      <c.Icon size={10} />
+      <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", c.dot)} />
       {c.label}
     </span>
   );
@@ -454,6 +466,8 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
   const [botPPD,      setBotPPD]      = useState(1);
   const [botCats,     setBotCats]     = useState<string[]>([]);
   const [botConts,    setBotConts]    = useState<string[]>([]);
+  const [tokenVerify, setTokenVerify] = useState<{ status: "idle" | "loading" | "ok" | "error"; message: string }>({ status: "idle", message: "" });
+  const tokenVerifyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // miniapp state
   const [maName,      setMaName]      = useState("");
@@ -463,11 +477,13 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
   const [maMaUrl,     setMaMaUrl]     = useState("");
 
   // channel input validation (computed)
-  const chInviteLinkErr = chInviteLink.length > 0 && !/^https:\/\/t\.me\/(\+|joinchat\/)/.test(chInviteLink.trim())
+  const normalizedChInviteLink = normalizePrivateInviteLink(chInviteLink);
+  const normalizedChUsername = normalizePublicChannelUsername(chUsername);
+  const chInviteLinkErr = chInviteLink.length > 0 && !normalizedChInviteLink
     ? "Must be a valid invite link (e.g. https://t.me/+xxxxxxxxxxxx)"
     : "";
-  const chUsernameErr = chUsername.length > 0 && !/^[A-Za-z0-9_]{3,}$/.test(chUsername.trim())
-    ? "Enter a valid Telegram username (letters, numbers, underscores, min 3 chars)"
+  const chUsernameErr = chUsername.length > 0 && !normalizedChUsername
+    ? "Enter a username, @username, or https://t.me/username"
     : "";
 
   // shared UI
@@ -476,6 +492,127 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
     type: "success" | "error"; title: string; message: string;
   } | null>(null);
   const [permModal, setPermModal] = useState({ isOpen: false, message: "" });
+
+  // channel-1 bot-admin pre-check ("idle"|"checking"|"ok"|"failed")
+  const [botAdminCheck, setBotAdminCheck] = useState<"idle" | "checking" | "ok" | "failed">("idle");
+  const [botAdminError, setBotAdminError] = useState("");
+  const [botPermissions, setBotPermissions] = useState<{
+    is_admin?: boolean;
+    can_post_messages?: boolean;
+    can_delete_messages?: boolean;
+    can_invite_users?: boolean;
+    can_access?: boolean;
+  } | null>(null);
+  const [privateVerificationToken, setPrivateVerificationToken] = useState<string | null>(null);
+
+  useEffect(() => {
+    setPrivateVerificationToken(null);
+  }, [chIsPrivate, normalizedChInviteLink]);
+
+  // Bot token inline auto-verify (debounced)
+  useEffect(() => {
+    if (tokenVerifyTimer.current) clearTimeout(tokenVerifyTimer.current);
+    const trimmed = botToken.trim();
+    if (!trimmed || !/^\d+:[A-Za-z0-9_-]{10,}$/.test(trimmed)) {
+      setTokenVerify({ status: "idle", message: "" });
+      return;
+    }
+    setTokenVerify({ status: "loading", message: "" });
+    tokenVerifyTimer.current = setTimeout(async () => {
+      try {
+        const res  = await fetch(`https://api.telegram.org/bot${trimmed}/getMe`);
+        const data = await res.json();
+        if (!data.ok) {
+          setTokenVerify({ status: "error", message: data.description || "Invalid bot token" });
+          return;
+        }
+        setTokenVerify({ status: "ok", message: `@${data.result.username} — ${data.result.first_name}` });
+      } catch {
+        setTokenVerify({ status: "error", message: "Could not reach Telegram to verify" });
+      }
+    }, 700);
+    return () => { if (tokenVerifyTimer.current) clearTimeout(tokenVerifyTimer.current); };
+  }, [botToken]);
+
+  // Auto-verify bot admin status in channel-1 step.
+  // Starts polling (8 s interval) as soon as the user provides valid input.
+  // Stops automatically when the bot is confirmed as admin.
+  useEffect(() => {
+    if (step !== "channel-1") {
+      setBotAdminCheck("idle");
+      setBotAdminError("");
+      setBotPermissions(null);
+      return;
+    }
+
+    const rawInput = chIsPrivate ? normalizedChInviteLink : normalizedChUsername;
+    const inputValid = Boolean(rawInput);
+
+    if (!rawInput || !inputValid) {
+      setBotAdminCheck("idle");
+      setBotAdminError("");
+      setBotPermissions(null);
+      return;
+    }
+
+    let cancelled = false;
+    let pollTimer: number | null = null;
+
+    const checkBotAdmin = async () => {
+      if (cancelled) return;
+      setBotAdminCheck("checking");
+      setBotAdminError("");
+      try {
+        const res = chIsPrivate
+          ? await apiFetch("/api/telegram/chat-info", {
+              method: "POST",
+              body: JSON.stringify({ invite_link: rawInput }),
+              timeoutMs: 20000,
+            })
+          : await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(rawInput)}`);
+        const data = await res.json();
+        if (cancelled) return;
+        setBotPermissions(data.permissions || null);
+        if (res.ok) {
+          if (chIsPrivate && data.verification_token) {
+            setPrivateVerificationToken(data.verification_token);
+          }
+          if (chIsPrivate) {
+            logPrivateChannelDiagnostic("frontend_poll_response", {
+              token_received: Boolean(data.verification_token),
+              token_valid: Boolean(data.verification_token),
+              token_error_code: data.verification_token ? "none" : "token_missing_from_response",
+              token_has_chat_id: Boolean(data.id),
+              digest_match: Boolean(data.verification_token),
+              submit_channel_type: "private",
+              normalized_input_type: normalizedChInviteLink ? "private_invite" : "invalid_private_invite",
+              final_reject_reason: data.verification_token ? "none" : "token_missing_from_response",
+            });
+          }
+          setBotAdminCheck("ok");
+          setBotAdminError("");
+        } else {
+          setBotAdminCheck("failed");
+          setBotAdminError(data.message || data.error || "Could not verify the channel setup.");
+          if (!cancelled) pollTimer = window.setTimeout(checkBotAdmin, 8000);
+        }
+      } catch {
+        if (!cancelled) {
+          setBotAdminCheck("failed");
+          setBotAdminError("Verification request failed. Retrying automatically.");
+          pollTimer = window.setTimeout(checkBotAdmin, 8000);
+        }
+      }
+    };
+
+    // Debounce initial trigger (1.2 s after the last input change)
+    pollTimer = window.setTimeout(checkBotAdmin, 1200);
+
+    return () => {
+      cancelled = true;
+      if (pollTimer) window.clearTimeout(pollTimer);
+    };
+  }, [step, chIsPrivate, normalizedChInviteLink, normalizedChUsername]);
 
   const isSelect = step === "select";
 
@@ -499,9 +636,9 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
   // ── Channel logic ─────────────────────────────────────────────────────────
 
   async function handleChFetch() {
-    const canFetch = chIsPrivate ? chInviteLink.trim() : chUsername.trim();
+    const canFetch = chIsPrivate ? normalizedChInviteLink : normalizedChUsername;
     if (!canFetch || isLoading) return;
-    if (chIsPrivate && !/^https:\/\/t\.me\/(\+|joinchat\/)/.test(chInviteLink.trim())) {
+    if (chIsPrivate && !normalizedChInviteLink) {
       setChVerifyState("error");
       setChVerifyError("Invalid private invite link");
       setToast({ type: "error", title: "Invalid Invite Link", message: "Use a valid Telegram invite link like https://t.me/+xxxxxxxxxxxx." });
@@ -513,10 +650,13 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
     setChVerifyError("");
     go("channel-verifying");
     try {
-      const query = chIsPrivate
-        ? `invite_link=${encodeURIComponent(chInviteLink.trim())}`
-        : `username=${chUsername.trim()}`;
-      const res  = await apiFetch(`/api/telegram/chat-info?${query}`);
+      const res = chIsPrivate
+        ? await apiFetch("/api/telegram/chat-info", {
+            method: "POST",
+            body: JSON.stringify({ invite_link: normalizedChInviteLink }),
+            timeoutMs: 20000,
+          })
+        : await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(normalizedChUsername!)}`);
       const data = await res.json();
       if (!res.ok) {
         if (data.error === "PERMISSION_REQUIRED") {
@@ -528,6 +668,21 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
         throw new Error(data.error || "Failed to fetch channel info");
       }
       setChInfo(data);
+      if (chIsPrivate && data.verification_token) {
+        setPrivateVerificationToken(data.verification_token);
+      }
+      if (chIsPrivate) {
+        logPrivateChannelDiagnostic("frontend_verification_response", {
+          token_received: Boolean(data.verification_token),
+          token_valid: Boolean(data.verification_token),
+          token_error_code: data.verification_token ? "none" : "token_missing_from_response",
+          token_has_chat_id: Boolean(data.id),
+          digest_match: Boolean(data.verification_token),
+          submit_channel_type: "private",
+          normalized_input_type: normalizedChInviteLink ? "private_invite" : "invalid_private_invite",
+          final_reject_reason: data.verification_token ? "none" : "token_missing_from_response",
+        });
+      }
       setChTitle(data.title);
       setChVerifyState("success");
       window.setTimeout(() => go("channel-2"), 550);
@@ -603,13 +758,29 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
     setIsLoading(true);
     setToast(null);
     try {
+      const verificationToken = verifiedChannelType === "private"
+        ? (chInfo.verification_token || privateVerificationToken)
+        : null;
+      if (verifiedChannelType === "private") {
+        logPrivateChannelDiagnostic("frontend_channel_submit", {
+          token_received: Boolean(verificationToken),
+          token_valid: Boolean(verificationToken),
+          token_error_code: verificationToken ? "none" : "token_missing_before_submit",
+          token_has_chat_id: Boolean(chInfo.id),
+          digest_match: Boolean(verificationToken && normalizedChInviteLink),
+          submit_channel_type: "private",
+          normalized_input_type: normalizedChInviteLink ? "private_invite" : "invalid_private_invite",
+          final_reject_reason: verificationToken ? "none" : "token_missing_before_submit",
+        });
+      }
       const res = await apiFetch("/api/publisher/channels", {
         method: "POST",
         body: JSON.stringify({
           chat_id: chInfo.id,
           username: verifiedChannelType === "private" ? (chInfo.username || null) : chInfo.username,
           channel_type: verifiedChannelType,
-          invite_link: verifiedChannelType === "private" ? chInviteLink.trim() : null,
+          invite_link: verifiedChannelType === "private" ? normalizedChInviteLink : null,
+          verification_token: verificationToken,
           subscriber_count: chInfo.subscriber_count,
           title,
           posts_per_day: chPPD,
@@ -728,7 +899,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
     }
   }
 
-  const botAdminLink = `https://t.me/${process.env.NEXT_PUBLIC_BOT_USERNAME || "Ads_Galaxy_bot"}?startchannel&admin=add_admins+post_messages+edit_messages+delete_messages+invite_users`;
+  const botAdminLink = `https://t.me/${process.env.NEXT_PUBLIC_BOT_USERNAME || "Ads_Galaxy_bot"}?startchannel&admin=post_messages+edit_messages+delete_messages+invite_users`;
 
   return (
     <>
@@ -785,12 +956,15 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                   <button
                     key={opt.action}
                     onClick={() => handleSelectType(opt.action)}
-                    className="group flex flex-col items-center gap-2 rounded-2xl border border-slate-100 bg-slate-50 p-3.5 text-center transition-all hover:border-blue-100 hover:bg-blue-50 active:scale-95"
+                    className={cn(
+                      "group flex flex-col items-center gap-2.5 rounded-2xl border border-slate-200 bg-white p-4 text-center shadow-sm transition-all active:scale-[0.97]",
+                      opt.hoverCls,
+                    )}
                   >
-                    <div className={cn("flex h-11 w-11 items-center justify-center rounded-full border border-white shadow-sm", opt.iconBg)}>
-                      <opt.icon size={20} className={opt.iconCls} />
+                    <div className={cn("flex h-12 w-12 items-center justify-center rounded-2xl", opt.iconBg)}>
+                      <opt.icon size={22} className={opt.iconCls} />
                     </div>
-                    <p className="text-xs font-black text-slate-800">{opt.label}</p>
+                    <p className="text-[13px] font-black text-slate-900">{opt.label}</p>
                     <p className="text-[10px] leading-relaxed text-slate-400">{opt.desc}</p>
                   </button>
                 ))}
@@ -907,12 +1081,12 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                             <p className="text-sm text-slate-500">
                               {chIsPrivate
                                 ? "Paste your private Telegram channel invite link. AdsGalaxy uses this only to verify and connect your channel."
-                                : "Enter the public @username of your Telegram channel."}
+                                : "Enter a username, @username, or full t.me link for your public Telegram channel."}
                             </p>
                           </div>
                           <div className="space-y-2 pt-2">
                             <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">
-                              {chIsPrivate ? "Private channel invite link" : "Public channel username"}
+                              {chIsPrivate ? "Private channel invite link" : "Public channel username or link"}
                             </label>
                             {chIsPrivate ? (
                               <>
@@ -940,16 +1114,13 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                             ) : (
                               <>
                                 <div className="relative">
-                                  <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
-                                    <span className="text-blue-500 font-black text-lg">@</span>
-                                  </div>
                                   <input
                                     type="text"
                                     value={chUsername}
-                                    onChange={e => setChUsername(e.target.value.replace("@", ""))}
-                                    placeholder="yourchannel"
+                                    onChange={e => setChUsername(e.target.value)}
+                                    placeholder="yourchannel, @yourchannel, or https://t.me/yourchannel"
                                     className={cn(
-                                      "w-full pl-10 pr-4 py-3 bg-slate-50 rounded-2xl focus:bg-white transition-all outline-none font-bold text-lg text-slate-900 border",
+                                      "w-full px-4 py-3 bg-slate-50 rounded-2xl focus:bg-white transition-all outline-none font-bold text-base text-slate-900 border",
                                       chUsernameErr
                                         ? "border-red-300 focus:ring-2 focus:ring-red-300/30"
                                         : chUsername && !chUsernameErr
@@ -969,51 +1140,138 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                           </div>
                         </div>
 
-                        <div className="space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                          <div>
-                            <p className="font-black text-xs uppercase tracking-widest text-[#0c9de8]">Setup checklist</p>
-                            <p className="mt-1 text-sm text-slate-500 leading-relaxed">
-                              Add AdsGalaxy Bot as admin and verify the permissions below before continuing.
-                            </p>
-                          </div>
-                          <div className="grid gap-2">
-                            {(chIsPrivate
-                              ? ["Add AdsGalaxy Bot as administrator", "Allow posting messages", "Allow deleting messages", "Invite link must be valid", "Bot must be able to access the private channel"]
-                              : ["Add AdsGalaxy Bot as administrator", "Allow posting messages", "Allow deleting messages", "Channel must be accessible by username"]
-                            ).map((item) => (
-                              <div key={item} className="flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-xs font-bold text-slate-600">
-                                <CheckCircle2 size={15} className="text-[#0c9de8]" />
-                                {item}
-                              </div>
-                            ))}
-                          </div>
-                          <a
-                            href={botAdminLink}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="flex items-center justify-center gap-2 w-full py-3 bg-[#0c9de8] text-white rounded-2xl text-sm font-black hover:bg-blue-600 transition-all"
-                          >
-                            Add Bot as Admin <ExternalLink size={16} />
-                          </a>
-                        </div>
+                        {/* ── Setup Checklist (live bot-admin verification) ── */}
+                        {(() => {
+                          const items = chIsPrivate
+                            ? [
+                                "Add AdsGalaxy Bot as administrator",
+                                "Allow posting messages",
+                                "Allow deleting messages",
+                                "Invite link must be valid",
+                                "Allow adding members for view tracking",
+                                "Bot must be able to access the private channel",
+                              ]
+                            : [
+                                "Add AdsGalaxy Bot as administrator",
+                                "Allow posting messages",
+                                "Allow deleting messages",
+                                "Channel must be accessible by username",
+                              ];
 
-                        <button
-                          onClick={handleChFetch}
-                          disabled={
-                            chIsPrivate
-                              ? !chInviteLink.trim() || !!chInviteLinkErr || isLoading
-                              : !chUsername.trim() || !!chUsernameErr || isLoading
-                          }
-                          className={cn(
-                            "w-full py-3.5 font-black rounded-2xl flex items-center justify-center gap-2 text-sm",
-                            (chIsPrivate ? (!chInviteLink.trim() || !!chInviteLinkErr) : (!chUsername.trim() || !!chUsernameErr)) || isLoading
-                              ? "bg-slate-200 text-slate-400 cursor-not-allowed"
-                              : "shiny-btn text-white"
-                          )}
-                        >
-                          {isLoading ? <Loader2 className="animate-spin" size={20} /> : <Search size={20} />}
-                          {chIsPrivate ? "Verify Private Channel" : "Verify Public Channel"}
-                        </button>
+                          type ItemStatus = "idle" | "checking" | "ok" | "failed";
+                          const getStatus = (index: number): ItemStatus => {
+                            // "Invite link must be valid" is verified client-side
+                            if (chIsPrivate && index === 3) {
+                              if (!chInviteLink.trim()) return "idle";
+                              return chInviteLinkErr ? "failed" : "ok";
+                            }
+                            const permissionKey = chIsPrivate
+                              ? (["is_admin", "can_post_messages", "can_delete_messages", null, "can_invite_users", "can_access"] as const)[index]
+                              : (["is_admin", "can_post_messages", "can_delete_messages", "can_access"] as const)[index];
+                            if (!permissionKey) return "idle";
+
+                            const value = botPermissions?.[permissionKey];
+                            if (value === true) return "ok";
+                            if (value === false && botAdminCheck === "failed") return "failed";
+                            if (botAdminCheck === "checking") return "checking";
+                            return "idle";
+                          };
+
+                          return (
+                            <div className="space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                              <div>
+                                <p className="font-black text-xs uppercase tracking-widest text-[#0c9de8]">
+                                  Setup Checklist
+                                </p>
+                                <p className="mt-1 text-sm text-slate-500 leading-relaxed">
+                                  Add AdsGalaxy Bot as admin. Permissions are verified automatically.
+                                </p>
+                              </div>
+
+                              <div className="grid gap-2">
+                                {items.map((item, index) => {
+                                  const s = getStatus(index);
+                                  return (
+                                    <div
+                                      key={item}
+                                      className={cn(
+                                        "flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-xs font-bold transition-colors",
+                                        s === "ok"                    && "text-emerald-700",
+                                        s === "failed"                && "text-red-600",
+                                        (s === "idle" || s === "checking") && "text-slate-600",
+                                      )}
+                                    >
+                                      {s === "idle"     && <div className="h-[15px] w-[15px] shrink-0 rounded-full border-2 border-slate-200" />}
+                                      {s === "checking" && <Loader2 size={15} className="text-[#0c9de8] animate-spin shrink-0" />}
+                                      {s === "ok"       && <CheckCircle2 size={15} className="text-emerald-500 shrink-0" />}
+                                      {s === "failed"   && <XCircle size={15} className="text-red-500 shrink-0" />}
+                                      {item}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+
+                              {/* Status hint below list */}
+                              {botAdminCheck === "checking" && (
+                                <p className="text-[11px] font-medium text-slate-400">
+                                  Checking bot permissions…
+                                </p>
+                              )}
+                              {botAdminCheck === "failed" && (
+                                <p className="text-[11px] font-bold text-red-500">
+                                  {botAdminError || "Could not verify the channel setup."} We&apos;ll recheck automatically every 8 seconds.
+                                </p>
+                              )}
+                              {botAdminCheck === "ok" && (
+                                <p className="text-[11px] font-bold text-emerald-600">
+                                  Bot admin confirmed. You can now proceed.
+                                </p>
+                              )}
+
+                              <a
+                                href={botAdminLink}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center justify-center gap-2 w-full py-3 bg-[#0c9de8] text-white rounded-2xl text-sm font-black hover:bg-blue-600 transition-all"
+                              >
+                                Add Bot as Admin <ExternalLink size={16} />
+                              </a>
+                            </div>
+                          );
+                        })()}
+
+                        {/* Verify button — gated on confirmed bot admin status */}
+                        {(() => {
+                          const inputMissing = chIsPrivate
+                            ? !chInviteLink.trim() || !!chInviteLinkErr
+                            : !chUsername.trim() || !!chUsernameErr;
+                          const isDisabled = isLoading || inputMissing || botAdminCheck !== "ok";
+                          const label = isLoading
+                            ? "Verifying…"
+                            : botAdminCheck === "checking"
+                              ? "Checking Bot Admin…"
+                              : botAdminCheck === "failed"
+                                ? "Fix Channel Setup"
+                                : chIsPrivate
+                                  ? "Verify Private Channel"
+                                  : "Verify Public Channel";
+                          return (
+                            <button
+                              onClick={handleChFetch}
+                              disabled={isDisabled}
+                              className={cn(
+                                "w-full py-3.5 font-black rounded-2xl flex items-center justify-center gap-2 text-sm",
+                                isDisabled ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "shiny-btn text-white",
+                              )}
+                            >
+                              {isLoading || botAdminCheck === "checking"
+                                ? <Loader2 className="animate-spin" size={20} />
+                                : <Search size={20} />
+                              }
+                              {label}
+                            </button>
+                          );
+                        })()}
                       </div>
                     )}
 
@@ -1238,7 +1496,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                     {step === "bot-1" && (
                       <div className="p-6 space-y-8">
                         <div className="space-y-4">
-                          <div className="w-14 h-14 bg-indigo-50 rounded-2xl flex items-center justify-center text-indigo-600">
+                          <div className="w-14 h-14 bg-blue-50 rounded-2xl flex items-center justify-center text-[#0c9de8]">
                             <Bot size={28} />
                           </div>
                           <div>
@@ -1247,19 +1505,47 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                           </div>
                           <div className="space-y-2 pt-2">
                             <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Bot API Token</label>
-                            <input
-                              type="text"
-                              value={botToken}
-                              onChange={e => setBotToken(e.target.value)}
-                              placeholder="123456789:ABCDefGhIjKlMnOpQrStUvWxYz"
-                              className="w-full px-4 py-3 bg-slate-50 border-none rounded-2xl focus:bg-white focus:ring-2 focus:ring-indigo-500/20 transition-all outline-none font-mono text-sm text-slate-900"
-                            />
-                            <p className="text-[10px] text-slate-400 font-medium">
-                              Get this token from{" "}
-                              <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" className="text-indigo-600 underline">
-                                @BotFather
-                              </a>.
-                            </p>
+                            <div className="relative">
+                              <input
+                                type="text"
+                                value={botToken}
+                                onChange={e => setBotToken(e.target.value)}
+                                placeholder="123456789:ABCDefGhIjKlMnOpQrStUvWxYz"
+                                className={cn(
+                                  "w-full px-4 py-3 pr-10 bg-slate-50 rounded-2xl focus:bg-white transition-all outline-none font-mono text-sm text-slate-900 border",
+                                  tokenVerify.status === "error"
+                                    ? "border-red-300 focus:ring-2 focus:ring-red-300/30"
+                                    : tokenVerify.status === "ok"
+                                      ? "border-emerald-400 focus:ring-2 focus:ring-emerald-500/20"
+                                      : "border-transparent focus:ring-2 focus:ring-blue-500/20"
+                                )}
+                              />
+                              {tokenVerify.status === "loading" && (
+                                <span className="absolute right-3 top-1/2 -translate-y-1/2">
+                                  <Loader2 size={16} className="animate-spin text-slate-400" />
+                                </span>
+                              )}
+                              {tokenVerify.status === "ok" && (
+                                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-black text-emerald-500">✓</span>
+                              )}
+                              {tokenVerify.status === "error" && (
+                                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-black text-red-500">✕</span>
+                              )}
+                            </div>
+                            {tokenVerify.status === "ok" && (
+                              <p className="text-[11px] font-bold text-emerald-600 pl-1">✓ {tokenVerify.message}</p>
+                            )}
+                            {tokenVerify.status === "error" && (
+                              <p className="text-[11px] font-bold text-red-500 pl-1">{tokenVerify.message}</p>
+                            )}
+                            {tokenVerify.status === "idle" && (
+                              <p className="text-[10px] text-slate-400 font-medium">
+                                Get this token from{" "}
+                                <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" className="text-[#0c9de8] underline">
+                                  @BotFather
+                                </a>.
+                              </p>
+                            )}
                           </div>
                         </div>
 
@@ -1336,7 +1622,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                                 onClick={() => setBotPPD(n)}
                                 className={cn(
                                   "relative z-10 flex-1 h-full flex items-center justify-center font-black text-xs transition-colors duration-300",
-                                  botPPD === n ? "text-indigo-600" : "text-slate-400",
+                                  botPPD === n ? "text-[#0c9de8]" : "text-slate-400",
                                 )}
                               >
                                 {n} {n === 1 ? "post" : "posts"}
@@ -1356,8 +1642,8 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                                 className={cn(
                                   "px-3 py-2 rounded-xl text-[10px] font-black uppercase transition-all border",
                                   botCats.includes(cat)
-                                    ? "bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-100"
-                                    : "bg-white border-slate-200 text-slate-400 hover:border-indigo-200",
+                                    ? "bg-blue-600 border-blue-600 text-white shadow-md shadow-blue-100"
+                                    : "bg-white border-slate-200 text-slate-400 hover:border-blue-200",
                                 )}
                               >
                                 {cat}
@@ -1377,7 +1663,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                                 className={cn(
                                   "px-5 py-3 text-sm font-bold rounded-2xl transition-all flex flex-col items-start gap-1 text-left border-2",
                                   botConts.includes(cont.name)
-                                    ? "bg-indigo-50 border-indigo-500/30 text-indigo-700"
+                                    ? "bg-blue-50 border-blue-500/30 text-blue-700"
                                     : "bg-slate-50 border-transparent text-slate-500 hover:bg-slate-100",
                                 )}
                               >
@@ -1387,7 +1673,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                                 </div>
                                 <span className={cn(
                                   "text-[10px] font-bold uppercase tracking-wider",
-                                  botConts.includes(cont.name) ? "text-indigo-400" : "text-slate-400",
+                                  botConts.includes(cont.name) ? "text-blue-400" : "text-slate-400",
                                 )}>
                                   {cont.countries}
                                 </span>
@@ -1399,7 +1685,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                         <button
                           onClick={handleBotSubmit}
                           disabled={isLoading || botConts.length === 0 || botCats.length === 0}
-                          className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 text-white font-black rounded-2xl transition-all flex items-center justify-center gap-2 text-sm"
+                          className="w-full py-3.5 bg-[#0c9de8] hover:bg-blue-600 disabled:bg-slate-200 text-white font-black rounded-2xl transition-all flex items-center justify-center gap-2 text-sm"
                         >
                           {isLoading && <Loader2 className="animate-spin" size={20} />}
                           Complete Registration
@@ -1551,12 +1837,9 @@ export default function MonetizePage() {
     ["paused", "bot_removed", "channel_not_found", "permission_missing"].includes(status);
 
   function refetch() {
-    const hasBeta = typeof window !== "undefined" && window.localStorage.getItem("ag_miniapp_beta") === "1";
     Promise.all([
       apiFetch("/api/publisher/channels").then(r => r.ok ? r.json() : []).catch(() => []),
-      hasBeta
-        ? apiFetch("/api/publisher/miniapps").then(r => r.ok ? r.json() : []).catch(() => [])
-        : Promise.resolve([]),
+      apiFetch("/api/publisher/miniapps").then(r => r.ok ? r.json() : []).catch(() => []),
       apiFetch("/api/publisher/bots").then(r => r.ok ? r.json() : []).catch(() => []),
     ]).then(([ch, ma, bt]) => {
       setChannels(Array.isArray(ch) ? ch : []);
@@ -1567,12 +1850,9 @@ export default function MonetizePage() {
 
   useEffect(() => {
     setTitle("Monetize");
-    const hasBeta = typeof window !== "undefined" && window.localStorage.getItem("ag_miniapp_beta") === "1";
     Promise.all([
       apiFetch("/api/publisher/channels").then(r => r.ok ? r.json() : []).catch(() => []),
-      hasBeta
-        ? apiFetch("/api/publisher/miniapps").then(r => r.ok ? r.json() : []).catch(() => [])
-        : Promise.resolve([]),
+      apiFetch("/api/publisher/miniapps").then(r => r.ok ? r.json() : []).catch(() => []),
       apiFetch("/api/publisher/bots").then(r => r.ok ? r.json() : []).catch(() => []),
     ]).then(([ch, ma, bt]) => {
       setChannels(Array.isArray(ch) ? ch : []);
@@ -1609,7 +1889,14 @@ export default function MonetizePage() {
 
       <AnimatePresence>
         {viewingChannel && (
-          <ChannelDetailsScreen channel={viewingChannel} onClose={() => setViewingChannel(null)} />
+          <ChannelDetailsScreen
+            channel={viewingChannel}
+            onClose={() => setViewingChannel(null)}
+            onEdit={() => { setViewingChannel(null); setEditingChannel(viewingChannel); }}
+            onToggleStatus={() => { handleToggleChannelStatus(viewingChannel); setViewingChannel(null); }}
+            canToggleStatus={!["pending", "deleted"].includes(viewingChannel.status)}
+            isResuming={canReactivate(viewingChannel.status)}
+          />
         )}
       </AnimatePresence>
 
@@ -1625,7 +1912,14 @@ export default function MonetizePage() {
 
       <AnimatePresence>
         {viewingBot && (
-          <BotDetailsScreen bot={viewingBot} onClose={() => setViewingBot(null)} />
+          <BotDetailsScreen
+            bot={viewingBot}
+            onClose={() => setViewingBot(null)}
+            onEdit={() => { setViewingBot(null); setEditingBot(viewingBot); }}
+            onToggleStatus={() => { handleToggleBotStatus(viewingBot); setViewingBot(null); }}
+            canToggleStatus={!["pending", "deleted"].includes(viewingBot.status)}
+            isResuming={canReactivate(viewingBot.status)}
+          />
         )}
       </AnimatePresence>
 
@@ -1641,7 +1935,14 @@ export default function MonetizePage() {
 
       <AnimatePresence>
         {viewingMiniApp && (
-          <MiniAppDetailsScreen miniapp={viewingMiniApp} onClose={() => setViewingMiniApp(null)} />
+          <MiniAppDetailsScreen
+            miniapp={viewingMiniApp}
+            onClose={() => setViewingMiniApp(null)}
+            onEdit={() => { setViewingMiniApp(null); setEditingMiniApp(viewingMiniApp); }}
+            onToggleStatus={() => { handleToggleMiniAppStatus(viewingMiniApp); setViewingMiniApp(null); }}
+            canToggleStatus={!["pending", "deleted"].includes(viewingMiniApp.status)}
+            isResuming={viewingMiniApp.status === "paused"}
+          />
         )}
       </AnimatePresence>
 
@@ -1693,18 +1994,40 @@ export default function MonetizePage() {
       <div className="space-y-5">
 
         {/* ── Header ── */}
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-black uppercase tracking-tight text-slate-900">Monetize</h1>
-            <p className="mt-0.5 text-[10px] font-bold uppercase tracking-widest text-slate-400">Your assets</p>
+        <div className="relative overflow-hidden rounded-[2rem] bg-white p-5 shadow-xl shadow-blue-100/50 border border-blue-100">
+          <div className="absolute -right-10 -top-10 h-28 w-28 rounded-full bg-[#0c9de8]/15 blur-2xl" />
+          <div className="relative flex items-center justify-between gap-4">
+            <div className="space-y-2">
+              <div className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-[#0c9de8]">
+                <Sparkles size={12} />
+                Publisher studio
+              </div>
+              <div>
+                <h1 className="text-2xl font-black uppercase tracking-tight text-slate-950">Monetize</h1>
+                <p className="mt-0.5 text-[11px] font-bold uppercase tracking-widest text-slate-400">Channels, bots, and mini apps in one earning stack</p>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowFlow(true)}
+              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#0c9de8] text-white shadow-lg shadow-[#0c9de8]/25 transition-all hover:bg-blue-500 active:scale-95"
+              aria-label="Add asset"
+            >
+              <Plus size={21} />
+            </button>
           </div>
-          <button
-            onClick={() => setShowFlow(true)}
-            className="flex h-9 w-9 items-center justify-center rounded-full bg-[#0c9de8] text-white shadow-md transition-all hover:bg-blue-500 active:scale-95"
-            aria-label="Add asset"
-          >
-            <Plus size={18} />
-          </button>
+          <div className="relative mt-4 grid grid-cols-3 gap-2">
+            {[
+              { label: "Assets", value: total, icon: ShieldCheck },
+              { label: "Active", value: totalActive, icon: CheckCircle2 },
+              { label: "Review", value: totalPending, icon: Clock },
+            ].map((item) => (
+              <div key={item.label} className="rounded-2xl border border-slate-100 bg-slate-50/80 p-3">
+                <item.icon size={14} className="text-[#0c9de8]" />
+                <p className="mt-2 text-lg font-black text-slate-950">{item.value}</p>
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{item.label}</p>
+              </div>
+            ))}
+          </div>
         </div>
 
         {/* ── Loading ── */}
@@ -1733,13 +2056,16 @@ export default function MonetizePage() {
                 <button
                   key={opt.action}
                   onClick={() => setShowFlow(true)}
-                  className="flex flex-col items-center gap-2 rounded-2xl bg-slate-50 p-3.5 text-center transition-all hover:bg-blue-50 active:scale-95"
+                  className={cn(
+                    "flex flex-col items-center gap-2.5 rounded-2xl border border-slate-200 bg-white p-4 text-center shadow-sm transition-all active:scale-[0.97]",
+                    opt.hoverCls,
+                  )}
                 >
-                  <div className={cn("flex h-10 w-10 items-center justify-center rounded-full border border-white shadow-sm", opt.iconBg)}>
-                    <opt.icon size={18} className={opt.iconCls} />
+                  <div className={cn("flex h-11 w-11 items-center justify-center rounded-2xl", opt.iconBg)}>
+                    <opt.icon size={20} className={opt.iconCls} />
                   </div>
-                  <p className="text-xs font-black text-slate-800">{opt.label}</p>
-                  <p className="text-[10px] text-slate-400 leading-relaxed">{opt.desc}</p>
+                  <p className="text-[13px] font-black text-slate-900">{opt.label}</p>
+                  <p className="text-[10px] leading-relaxed text-slate-400">{opt.desc}</p>
                 </button>
               ))}
             </div>
@@ -1788,29 +2114,30 @@ export default function MonetizePage() {
         {/* ── Channels ── */}
         {!loading && channels.length > 0 && (
           <section className="space-y-3">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2.5 border-b border-slate-100 pb-2.5">
+              <Tv size={13} className="shrink-0 text-[#0c9de8]" />
               <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Channels</span>
-              <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-500">{channels.length}</span>
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">{channels.length}</span>
             </div>
             <div className="space-y-2">
               {channels.map(ch => {
                 const cats = parseJSON<string[]>(ch.categories, []);
                 return (
-                  <div key={ch.id} className="rounded-2xl border border-slate-100 bg-white px-4 py-4 shadow-sm space-y-3">
+                  <div key={ch.id} className="rounded-3xl border border-slate-200/80 bg-white px-4 py-4 shadow-sm space-y-3 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50">
                     {/* Top row */}
                     <div className="flex items-center gap-3">
-                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-blue-50">
-                        <Tv size={18} className="text-[#0c9de8]" />
+                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-blue-50">
+                        <Tv size={19} className="text-[#0c9de8]" />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-bold text-slate-900">{ch.title}</p>
+                        <p className="truncate text-[15px] font-black text-slate-900">{ch.title}</p>
                         {ch.username && <p className="text-[11px] text-slate-400">@{ch.username}</p>}
                       </div>
                       <StatusBadge status={ch.status} />
                       <div className="relative shrink-0">
                         <button
                           onClick={e => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); setOpenMenu(openMenu === `ch-${ch.id}` ? null : `ch-${ch.id}`); }}
-                          className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 transition-colors"
+                          className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 transition-colors"
                         >
                           <MoreVertical size={15} />
                         </button>
@@ -1869,6 +2196,15 @@ export default function MonetizePage() {
                         </>
                       )}
                     </div>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold text-slate-500">
+                        <span>{formatCount(ch.total_impressions)} impressions</span>
+                        <span className="text-slate-300">·</span>
+                        <span>{formatCount(ch.total_clicks)} clicks</span>
+                        <span className="text-slate-300">·</span>
+                        <span>{Number(ch.total_impressions) > 0 ? (Number(ch.total_clicks || 0) / Number(ch.total_impressions) * 100).toFixed(1) : "0.0"}% CTR</span>
+                        <span className="text-slate-300">·</span>
+                        <span className="font-bold text-emerald-600">${Number(ch.total_revenue || 0).toFixed(4)} earned</span>
+                    </div>
                   </div>
                 );
               })}
@@ -1879,28 +2215,29 @@ export default function MonetizePage() {
         {/* ── Mini Apps ── */}
         {!loading && miniapps.length > 0 && (
           <section className="space-y-3">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2.5 border-b border-slate-100 pb-2.5">
+              <Smartphone size={13} className="shrink-0 text-emerald-500" />
               <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Mini Apps</span>
-              <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-500">{miniapps.length}</span>
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">{miniapps.length}</span>
             </div>
             <div className="space-y-2">
               {miniapps.map(app => {
-                const hasActivity = Number(app.total_requests) > 0 || Number(app.total_impressions) > 0;
+                const hasActivity = Number(app.total_clicks) > 0 || Number(app.total_impressions) > 0;
                 return (
-                  <div key={app.id} className="rounded-2xl border border-slate-100 bg-white px-4 py-4 shadow-sm space-y-3">
+                  <div key={app.id} className="rounded-3xl border border-slate-200/80 bg-white px-4 py-4 shadow-sm space-y-3 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50">
                     <div className="flex items-center gap-3">
-                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-emerald-50">
-                        <Smartphone size={18} className="text-emerald-500" />
+                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-50">
+                        <Smartphone size={19} className="text-emerald-500" />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-bold text-slate-900">{app.miniapp_name}</p>
+                        <p className="truncate text-[15px] font-black text-slate-900">{app.miniapp_name}</p>
                         {app.miniapp_username && <p className="text-[11px] text-slate-400">@{app.miniapp_username}</p>}
                       </div>
                       <StatusBadge status={app.status} />
                       <div className="relative shrink-0">
                         <button
                           onClick={e => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); setOpenMenu(openMenu === `ma-${app.id}` ? null : `ma-${app.id}`); }}
-                          className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 transition-colors"
+                          className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 transition-colors"
                         >
                           <MoreVertical size={15} />
                         </button>
@@ -1946,17 +2283,13 @@ export default function MonetizePage() {
                     </div>
                     {hasActivity ? (
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-slate-50 pt-2.5 text-[11px] font-semibold text-slate-500">
-                        <span>{formatCount(app.total_requests)} requests</span>
-                        <span className="text-slate-300">·</span>
                         <span>{formatCount(app.total_impressions)} impressions</span>
                         <span className="text-slate-300">·</span>
-                        <span>{Number(app.fill_rate || 0).toFixed(1)}% fill</span>
-                        {app.last_activity_at && (
-                          <>
-                            <span className="text-slate-300">·</span>
-                            <span>{timeAgo(app.last_activity_at)}</span>
-                          </>
-                        )}
+                        <span>{formatCount(app.total_clicks)} clicks</span>
+                        <span className="text-slate-300">·</span>
+                        <span>{Number(app.total_impressions) > 0 ? (Number(app.total_clicks || 0) / Number(app.total_impressions) * 100).toFixed(1) : "0.0"}% CTR</span>
+                        <span className="text-slate-300">·</span>
+                        <span className="font-bold text-emerald-600">${Number(app.total_revenue || 0).toFixed(4)} earned</span>
                       </div>
                     ) : (
                       <p className="text-[11px] text-slate-400 border-t border-slate-50 pt-2.5">
@@ -1973,26 +2306,29 @@ export default function MonetizePage() {
         {/* ── Bots ── */}
         {!loading && bots.length > 0 && (
           <section className="space-y-3">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2.5 border-b border-slate-100 pb-2.5">
+              <Bot size={13} className="shrink-0 text-violet-500" />
               <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Bots</span>
-              <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-500">{bots.length}</span>
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">{bots.length}</span>
             </div>
             <div className="space-y-2">
-              {bots.map(bot => (
-                <div key={bot.id} className="rounded-2xl border border-slate-100 bg-white px-4 py-4 shadow-sm space-y-3">
+              {bots.map(bot => {
+                const cats = parseJSON<string[]>(bot.categories, []);
+                return (
+                <div key={bot.id} className="rounded-3xl border border-slate-200/80 bg-white px-4 py-4 shadow-sm space-y-3 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50">
                   <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-violet-50">
-                      <Bot size={18} className="text-violet-500" />
+                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-violet-50">
+                      <Bot size={19} className="text-violet-500" />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-bold text-slate-900">{bot.bot_name}</p>
+                      <p className="truncate text-[15px] font-black text-slate-900">{bot.bot_name}</p>
                       {bot.bot_username && <p className="text-[11px] text-slate-400">@{bot.bot_username}</p>}
                     </div>
                     <StatusBadge status={bot.status} />
                     <div className="relative shrink-0">
                       <button
                         onClick={e => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); setOpenMenu(openMenu === `bt-${bot.id}` ? null : `bt-${bot.id}`); }}
-                        className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 transition-colors"
+                        className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 transition-colors"
                       >
                         <MoreVertical size={15} />
                       </button>
@@ -2049,9 +2385,25 @@ export default function MonetizePage() {
                     )}
                     <span className="text-slate-300">·</span>
                     <span>{bot.posts_per_day ?? 1}/day</span>
+                    {cats.length > 0 && (
+                      <>
+                        <span className="text-slate-300">·</span>
+                        <span>{cats.slice(0, 2).join(", ")}{cats.length > 2 ? ` +${cats.length - 2}` : ""}</span>
+                      </>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold text-slate-500">
+                      <span>{formatCount(bot.total_impressions)} impressions</span>
+                      <span className="text-slate-300">·</span>
+                      <span>{formatCount(bot.total_clicks)} clicks</span>
+                      <span className="text-slate-300">·</span>
+                      <span>{Number(bot.total_impressions) > 0 ? (Number(bot.total_clicks || 0) / Number(bot.total_impressions) * 100).toFixed(1) : "0.0"}% CTR</span>
+                      <span className="text-slate-300">·</span>
+                      <span className="font-bold text-emerald-600">${Number(bot.total_revenue || 0).toFixed(4)} earned</span>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         )}

@@ -296,19 +296,21 @@ export default function AdminMiniAppsPage() {
   };
 
   const StatusBadge = ({ status }: { status: MiniApp["status"] }) => (
-    <span className={`rounded border px-2 py-0.5 text-xs font-semibold ${statusClass(status)}`}>{statusLabel(status)}</span>
+    <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold ${statusClass(status)}`}>
+      {statusLabel(status)}
+    </span>
   );
 
   const ActionButtons = ({ miniapp }: { miniapp: MiniApp }) => (
-    <div className="flex flex-wrap items-center justify-end gap-2">
+    <div className="flex flex-wrap items-center justify-end gap-1.5">
       {miniapp.status === "pending" && (
         <button
           onClick={() => setPendingAction({ miniapp, action: "await", title: "Begin Network Onboarding", message: `Move ${miniapp.miniapp_name} to Awaiting while AdsGalaxy prepares network configuration?` })}
           disabled={actionLoading === miniapp.id}
-          className="rounded-md border border-blue-100 bg-blue-50 p-1.5 text-blue-600 transition-colors hover:bg-blue-100 disabled:opacity-50"
+          className="rounded-lg border border-blue-200 bg-blue-50 p-2 text-blue-600 transition-colors hover:bg-blue-100 disabled:opacity-50"
           title="Begin onboarding"
         >
-          {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />}
+          {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />}
         </button>
       )}
       {miniapp.status !== "pending" && miniapp.status !== "rejected" && (
@@ -321,35 +323,35 @@ export default function AdminMiniAppsPage() {
             danger: miniapp.status !== "paused",
           })}
           disabled={actionLoading === miniapp.id}
-          className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:bg-slate-50 hover:text-blue-600 disabled:opacity-50"
+          className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 transition-colors hover:bg-slate-50 hover:text-blue-600 disabled:opacity-50"
           title={miniapp.status === "paused" ? "Resume" : "Pause"}
         >
-          {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={16} /> : miniapp.status === "paused" ? <Play size={16} /> : <Pause size={16} />}
+          {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={15} /> : miniapp.status === "paused" ? <Play size={15} /> : <Pause size={15} />}
         </button>
       )}
       {miniapp.status !== "rejected" && (
         <button
           onClick={() => setPendingAction({ miniapp, action: "reject", title: "Reject Mini App", message: `Reject ${miniapp.miniapp_name}?`, danger: true })}
           disabled={actionLoading === miniapp.id}
-          className="rounded-md border border-red-100 bg-red-50 p-1.5 text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
+          className="rounded-lg border border-red-100 bg-red-50 p-2 text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
           title="Reject"
         >
-          {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={16} /> : <X size={16} />}
+          {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={15} /> : <X size={15} />}
         </button>
       )}
       <button
         onClick={() => openReport(miniapp)}
-        className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:bg-slate-50 hover:text-blue-600"
+        className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 transition-colors hover:bg-slate-50 hover:text-blue-600"
         title="Reports"
       >
-        <BarChart3 size={16} />
+        <BarChart3 size={15} />
       </button>
       <button
         onClick={() => openNetworks(miniapp)}
-        className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:bg-slate-50 hover:text-blue-600"
+        className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 transition-colors hover:bg-slate-50 hover:text-blue-600"
         title="Network configuration"
       >
-        <Settings2 size={16} />
+        <Settings2 size={15} />
       </button>
       <button
         onClick={() => setPendingAction({
@@ -360,10 +362,10 @@ export default function AdminMiniAppsPage() {
           danger: true,
         })}
         disabled={actionLoading === miniapp.id}
-        className="rounded-md border border-red-100 bg-red-50 p-1.5 text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
+        className="rounded-lg border border-red-100 bg-red-50 p-2 text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
         title="Delete Mini App"
       >
-        {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={16} /> : <Trash2 size={16} />}
+        {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={15} /> : <Trash2 size={15} />}
       </button>
     </div>
   );
@@ -382,73 +384,97 @@ export default function AdminMiniAppsPage() {
         isLoading={actionLoading !== null}
       />
 
+      {/* Network Configuration Modal */}
       {networkMiniApp && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/50 p-4">
-          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-lg border border-slate-200 bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 p-4">
+          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-start justify-between border-b border-slate-200 px-6 py-5">
               <div>
-                <h3 className="text-lg font-bold text-slate-900">Network Configuration</h3>
-                <p className="text-xs text-slate-500">{networkMiniApp.miniapp_name}</p>
-                <div className="mt-2 flex flex-wrap gap-1">
-                  <span className="rounded border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-bold text-blue-700">
-                    Configured {networks.filter((network) => network.enabled).length} / 6
+                <h3 className="text-base font-bold text-slate-900">Network Configuration</h3>
+                <p className="mt-0.5 text-sm text-slate-500">{networkMiniApp.miniapp_name}</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+                    <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+                    {networks.filter((n) => n.enabled).length} / 6 Configured
                   </span>
-                  <span className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-bold text-slate-600">
-                    Enabled {networks.filter((network) => network.enabled).length}
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                    {networks.filter((n) => n.enabled).length} Enabled
                   </span>
                 </div>
               </div>
-              <button onClick={() => setNetworkMiniApp(null)} className="text-slate-400 hover:text-slate-600"><X size={20} /></button>
+              <button onClick={() => setNetworkMiniApp(null)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+                <X size={18} />
+              </button>
             </div>
-            <div className="space-y-3 overflow-y-auto p-5">
+            <div className="space-y-3 overflow-y-auto p-6">
               {networksLoading ? (
-                <div className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></div>
+                <div className="p-10 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={24} /></div>
               ) : networks.map((network, index) => (
-                <div key={network.network_name} className="rounded-lg border border-slate-200 p-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-bold text-slate-900">{networkLabels[network.network_name] || network.network_name}</div>
-                      <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{placementLabels[network.network_name]}</div>
+                <div
+                  key={network.network_name}
+                  className={`rounded-xl border p-4 transition-colors ${network.enabled ? "border-blue-200 bg-blue-50/30" : "border-slate-200 bg-white"}`}
+                >
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${network.enabled ? "bg-emerald-500" : "bg-slate-300"}`} />
+                      <div>
+                        <div className="font-semibold text-slate-900">{networkLabels[network.network_name] || network.network_name}</div>
+                        <div className="text-xs text-slate-500">{placementLabels[network.network_name]}</div>
+                      </div>
                     </div>
-                    <button
-                      onClick={() => setNetworks((prev) => prev.map((item, itemIndex) => itemIndex === index ? { ...item, enabled: !item.enabled } : item))}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${network.enabled ? "bg-blue-600" : "bg-slate-200"}`}
-                    >
-                      <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${network.enabled ? "translate-x-6" : "translate-x-1"}`} />
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <span className={`text-xs font-semibold ${network.enabled ? "text-emerald-600" : "text-slate-400"}`}>
+                        {network.enabled ? "Enabled" : "Disabled"}
+                      </span>
+                      <button
+                        onClick={() => setNetworks((prev) => prev.map((item, i) => i === index ? { ...item, enabled: !item.enabled } : item))}
+                        className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors focus:outline-none ${network.enabled ? "bg-blue-600" : "bg-slate-200"}`}
+                      >
+                        <span className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${network.enabled ? "translate-x-6" : "translate-x-1"}`} />
+                      </button>
+                    </div>
                   </div>
                   {network.network_name !== "AdsGalaxyInternal" && (
-                    <input
-                      value={network.network_placement_id}
-                      onChange={(event) => setNetworks((prev) => prev.map((item, itemIndex) => itemIndex === index ? { ...item, network_placement_id: event.target.value } : item))}
-                      className="mt-3 w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                      placeholder={placementLabels[network.network_name]}
-                    />
+                    <div className="mt-4 grid grid-cols-3 gap-3">
+                      <div className="col-span-2">
+                        <label className="mb-1.5 block text-xs font-semibold text-slate-600">{placementLabels[network.network_name] || "Placement ID"}</label>
+                        <input
+                          value={network.network_placement_id}
+                          onChange={(e) => setNetworks((prev) => prev.map((item, i) => i === index ? { ...item, network_placement_id: e.target.value } : item))}
+                          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                          placeholder={placementLabels[network.network_name]}
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1.5 block text-xs font-semibold text-slate-600">Priority</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={4}
+                          value={network.priority_order || index + 1}
+                          onChange={(e) => setNetworks((prev) => prev.map((item, i) => i === index ? { ...item, priority_order: Number(e.target.value) || index + 1 } : item))}
+                          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                        />
+                      </div>
+                    </div>
                   )}
-                  <label className="mt-3 block text-[10px] font-bold uppercase tracking-wide text-slate-400">
-                    Priority
-                    <input
-                      type="number"
-                      min={1}
-                      max={4}
-                      value={network.priority_order || index + 1}
-                      onChange={(event) => setNetworks((prev) => prev.map((item, itemIndex) => itemIndex === index ? { ...item, priority_order: Number(event.target.value) || index + 1 } : item))}
-                      className="mt-1 w-24 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500"
-                    />
-                  </label>
-                  <div className="mt-3 flex items-center gap-2">
+                  <div className="mt-3 flex items-center gap-3">
                     {network.network_name !== "AdsGalaxyInternal" && (
                       <button
                         onClick={() => testNetwork(network.network_name)}
                         disabled={networkTestLoading === network.network_name || networksLoading}
-                        className="inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
                       >
-                        {networkTestLoading === network.network_name && <Loader2 className="animate-spin" size={14} />}
+                        {networkTestLoading === network.network_name && <Loader2 className="animate-spin" size={13} />}
                         Test Init
                       </button>
                     )}
                     {networkTestResult[network.network_name] && (
-                      <span className="min-w-0 truncate text-xs text-slate-500" title={networkTestResult[network.network_name]}>
+                      <span
+                        className={`min-w-0 truncate text-xs font-medium ${networkTestResult[network.network_name].startsWith("Ready") ? "text-emerald-600" : "text-red-600"}`}
+                        title={networkTestResult[network.network_name]}
+                      >
                         {networkTestResult[network.network_name]}
                       </span>
                     )}
@@ -456,116 +482,180 @@ export default function AdminMiniAppsPage() {
                 </div>
               ))}
             </div>
-            <div className="flex gap-3 border-t border-slate-200 p-4">
-              <button onClick={() => setNetworkMiniApp(null)} className="flex-1 rounded-md border border-slate-200 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel</button>
-              <button onClick={saveNetworks} disabled={networksLoading} className="flex flex-1 items-center justify-center gap-2 rounded-md bg-blue-600 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:bg-slate-200">
+            <div className="flex gap-3 border-t border-slate-200 px-6 py-4">
+              <button onClick={() => setNetworkMiniApp(null)} className="flex-1 rounded-xl border border-slate-200 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50">
+                Cancel
+              </button>
+              <button onClick={saveNetworks} disabled={networksLoading} className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-blue-600 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400">
                 {networksLoading && <Loader2 className="animate-spin" size={16} />}
-                Save
+                Save Changes
               </button>
             </div>
           </div>
         </div>
       )}
 
+      {/* Report Modal */}
       {reportMiniApp && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/50 p-4">
-          <div className="flex max-h-[92vh] w-full max-w-6xl flex-col rounded-lg border border-slate-200 bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 p-4">
+          <div className="flex max-h-[92vh] w-full max-w-6xl flex-col rounded-xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
               <div>
-                <h3 className="text-lg font-bold text-slate-900">Mini App Report</h3>
-                <p className="text-xs text-slate-500">{reportMiniApp.miniapp_name}</p>
+                <h3 className="text-base font-bold text-slate-900">Mini App Report</h3>
+                <p className="mt-0.5 text-sm text-slate-500">{reportMiniApp.miniapp_name}</p>
               </div>
-              <button onClick={() => setReportMiniApp(null)} className="text-slate-400 hover:text-slate-600"><X size={20} /></button>
+              <button onClick={() => setReportMiniApp(null)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+                <X size={18} />
+              </button>
             </div>
-            <div className="overflow-y-auto p-5">
-              <div className="mb-4 grid gap-3 sm:grid-cols-3">
-                <input type="date" value={reportStart} onChange={(event) => setReportStart(event.target.value)} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm" />
-                <input type="date" value={reportEnd} onChange={(event) => setReportEnd(event.target.value)} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm" />
-                <div className="flex gap-2">
-                  <input value={reportDateSearch} onChange={(event) => setReportDateSearch(event.target.value)} placeholder="Search date" className="min-w-0 flex-1 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm" />
-                  <button onClick={() => fetchReport(reportMiniApp)} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Apply</button>
+            <div className="overflow-y-auto p-6">
+              {/* Date Filters */}
+              <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end">
+                <div className="flex-1">
+                  <label className="mb-1.5 block text-xs font-semibold text-slate-600">Start Date</label>
+                  <input type="date" value={reportStart} onChange={(e) => setReportStart(e.target.value)} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
+                </div>
+                <div className="flex-1">
+                  <label className="mb-1.5 block text-xs font-semibold text-slate-600">End Date</label>
+                  <input type="date" value={reportEnd} onChange={(e) => setReportEnd(e.target.value)} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
+                </div>
+                <div className="flex-1">
+                  <label className="mb-1.5 block text-xs font-semibold text-slate-600">Search Date</label>
+                  <div className="flex gap-2">
+                    <input value={reportDateSearch} onChange={(e) => setReportDateSearch(e.target.value)} placeholder="YYYY-MM-DD" className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-500" />
+                    <button onClick={() => fetchReport(reportMiniApp)} className="whitespace-nowrap rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700">Apply</button>
+                  </div>
                 </div>
               </div>
 
               {reportLoading || !report ? (
-                <div className="p-10 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={24} /></div>
+                <div className="p-16 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={28} /></div>
               ) : (
-                <div className="space-y-5">
-                  <div className="grid grid-cols-2 gap-2 lg:grid-cols-4 xl:grid-cols-8">
-                    {[
-                      ["Today Impressions", numberValue(report.summary.today_impressions)],
-                      ["Yesterday Impressions", numberValue(report.summary.yesterday_impressions)],
-                      ["Total Impressions", numberValue(report.summary.total_impressions)],
-                      ["Today's Revenue", money(report.summary.today_revenue)],
-                      ["Lifetime Revenue", money(report.summary.lifetime_revenue)],
-                      ["External Ad Revenue", money(report.summary.external_revenue)],
-                      ["Platform Fee Revenue", money(report.summary.ads_galaxy_fee)],
-                      ["Internal Ad Revenue", money(report.summary.internal_revenue)],
-                      ["Publisher Revenue", money(report.summary.net_revenue)],
-                      ["Settled Amount", money(report.summary.total_settled_earnings)],
-                      ["Locked Amount", money(report.summary.locked_earnings)],
-                      ["Unlocked Amount", money(report.summary.unlocked_earnings)],
-                      ["Unsettled Amount", money(report.summary.unsettled_earnings)],
-                      ["Blended CPM", money(report.summary.blended_cpm)],
-                    ].map(([label, value]) => (
-                      <div key={label} className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                        <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</div>
-                        <div className="mt-1 text-sm font-bold text-slate-900">{value}</div>
-                      </div>
-                    ))}
+                <div className="space-y-6">
+                  {/* Performance Summary */}
+                  <div>
+                    <h4 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-400">Performance Summary</h4>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+                      {[
+                        ["Today Impressions", numberValue(report.summary.today_impressions)],
+                        ["Yesterday", numberValue(report.summary.yesterday_impressions)],
+                        ["Total Impressions", numberValue(report.summary.total_impressions)],
+                        ["Today's Revenue", money(report.summary.today_revenue)],
+                        ["Lifetime Revenue", money(report.summary.lifetime_revenue)],
+                        ["Blended CPM", money(report.summary.blended_cpm)],
+                      ].map(([label, value]) => (
+                        <div key={label} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                          <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</div>
+                          <div className="mt-1.5 text-sm font-bold text-slate-900">{value}</div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
 
+                  {/* Revenue Breakdown */}
+                  <div>
+                    <h4 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-400">Revenue Breakdown</h4>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
+                      {[
+                        ["External Ad Revenue", money(report.summary.external_revenue)],
+                        ["Platform Fee", money(report.summary.ads_galaxy_fee)],
+                        ["Internal Ad Revenue", money(report.summary.internal_revenue)],
+                        ["Publisher Revenue", money(report.summary.net_revenue)],
+                        ["Settled Amount", money(report.summary.total_settled_earnings)],
+                        ["Locked Amount", money(report.summary.locked_earnings)],
+                        ["Unlocked Amount", money(report.summary.unlocked_earnings)],
+                        ["Unsettled Amount", money(report.summary.unsettled_earnings)],
+                      ].map(([label, value]) => (
+                        <div key={label} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                          <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</div>
+                          <div className="mt-1.5 text-sm font-bold text-slate-900">{value}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Network Breakdown + Enabled Networks */}
                   <div className="grid gap-4 lg:grid-cols-2">
-                    <div className="rounded-lg border border-slate-200">
-                      <div className="border-b border-slate-200 px-3 py-2 text-xs font-bold uppercase text-slate-400">Network Breakdown</div>
+                    <div className="rounded-xl border border-slate-200 bg-white">
+                      <div className="border-b border-slate-200 px-4 py-3">
+                        <h4 className="text-xs font-bold uppercase tracking-widest text-slate-400">Network Breakdown</h4>
+                      </div>
                       <div className="max-h-72 overflow-auto">
-                        <table className="w-full min-w-[620px] text-left text-sm">
-                          <thead className="sticky top-0 bg-slate-50 text-xs text-slate-500">
-                            <tr><th className="px-3 py-2">Network</th><th className="px-3 py-2">Impressions</th><th className="px-3 py-2">Gross</th><th className="px-3 py-2">Publisher</th><th className="px-3 py-2">CPM</th></tr>
+                        <table className="w-full min-w-[580px] text-left text-sm">
+                          <thead className="sticky top-0 border-b border-slate-100 bg-slate-50 text-xs text-slate-500">
+                            <tr>
+                              <th className="px-4 py-2.5 font-medium">Network</th>
+                              <th className="px-4 py-2.5 font-medium">Impressions</th>
+                              <th className="px-4 py-2.5 font-medium">Gross</th>
+                              <th className="px-4 py-2.5 font-medium">Publisher</th>
+                              <th className="px-4 py-2.5 font-medium">CPM</th>
+                            </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100">
                             {report.networks.length === 0 ? (
                               <tr><td colSpan={5} className="p-6 text-center text-slate-500">No network stats.</td></tr>
                             ) : report.networks.map((row) => (
-                              <tr key={String(row.network_name)}><td className="px-3 py-2 font-semibold">{networkLabels[String(row.network_name)] || row.network_name}</td><td className="px-3 py-2">{numberValue(row.impressions)}</td><td className="px-3 py-2">{money(row.gross_revenue)}</td><td className="px-3 py-2">{money(row.publisher_revenue)}</td><td className="px-3 py-2">{money(row.gross_cpm)}</td></tr>
+                              <tr key={String(row.network_name)} className="hover:bg-slate-50">
+                                <td className="px-4 py-3 font-semibold text-slate-900">{networkLabels[String(row.network_name)] || row.network_name}</td>
+                                <td className="px-4 py-3 text-slate-700">{numberValue(row.impressions)}</td>
+                                <td className="px-4 py-3 text-slate-700">{money(row.gross_revenue)}</td>
+                                <td className="px-4 py-3 text-slate-700">{money(row.publisher_revenue)}</td>
+                                <td className="px-4 py-3 text-slate-700">{money(row.gross_cpm)}</td>
+                              </tr>
                             ))}
                           </tbody>
                         </table>
                       </div>
                     </div>
 
-                    <div className="rounded-lg border border-slate-200">
-                      <div className="border-b border-slate-200 px-3 py-2 text-xs font-bold uppercase text-slate-400">Enabled Networks</div>
+                    <div className="rounded-xl border border-slate-200 bg-white">
+                      <div className="border-b border-slate-200 px-4 py-3">
+                        <h4 className="text-xs font-bold uppercase tracking-widest text-slate-400">Enabled Networks</h4>
+                      </div>
                       <div className="divide-y divide-slate-100">
                         {report.enabled_networks.length === 0 ? (
                           <div className="p-6 text-center text-sm text-slate-500">No network configuration.</div>
                         ) : report.enabled_networks.map((network) => (
-                          <div key={network.network_name} className="flex items-center justify-between gap-3 p-3 text-sm">
-                            <div><div className="font-semibold text-slate-900">{networkLabels[network.network_name] || network.network_name}</div><div className="text-xs text-slate-500">{network.network_name === "AdsGalaxyInternal" ? "Internal demand toggle" : network.network_placement_id || "No placement ID"}</div></div>
-                            <span className={`rounded border px-2 py-0.5 text-xs font-semibold ${network.enabled ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-slate-50 text-slate-500"}`}>{network.enabled ? "Enabled" : "Disabled"}</span>
+                          <div key={network.network_name} className="flex items-center justify-between gap-3 px-4 py-3">
+                            <div>
+                              <div className="font-semibold text-slate-900">{networkLabels[network.network_name] || network.network_name}</div>
+                              <div className="text-xs text-slate-500">{network.network_name === "AdsGalaxyInternal" ? "Internal demand toggle" : network.network_placement_id || "No placement ID"}</div>
+                            </div>
+                            <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${network.enabled ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-slate-50 text-slate-500"}`}>
+                              {network.enabled ? "Enabled" : "Disabled"}
+                            </span>
                           </div>
                         ))}
                       </div>
                     </div>
                   </div>
 
-                  <div className="rounded-lg border border-slate-200">
-                    <div className="border-b border-slate-200 px-3 py-2 text-xs font-bold uppercase text-slate-400">Network Selection Diagnostics</div>
+                  {/* Network Selection Diagnostics */}
+                  <div className="rounded-xl border border-slate-200 bg-white">
+                    <div className="border-b border-slate-200 px-4 py-3">
+                      <h4 className="text-xs font-bold uppercase tracking-widest text-slate-400">Network Selection Diagnostics</h4>
+                    </div>
                     <div className="max-h-80 overflow-auto">
                       <table className="w-full min-w-[860px] text-left text-sm">
-                        <thead className="sticky top-0 bg-slate-50 text-xs text-slate-500">
-                          <tr><th className="px-3 py-2">Time</th><th className="px-3 py-2">Selected</th><th className="px-3 py-2">Candidate Pool</th><th className="px-3 py-2">Excluded Networks</th><th className="px-3 py-2">Reason</th></tr>
+                        <thead className="sticky top-0 border-b border-slate-100 bg-slate-50 text-xs text-slate-500">
+                          <tr>
+                            <th className="px-4 py-2.5 font-medium">Time</th>
+                            <th className="px-4 py-2.5 font-medium">Selected</th>
+                            <th className="px-4 py-2.5 font-medium">Candidates</th>
+                            <th className="px-4 py-2.5 font-medium">Excluded</th>
+                            <th className="px-4 py-2.5 font-medium">Reason</th>
+                          </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                           {(!report.network_diagnostics || report.network_diagnostics.length === 0) ? (
                             <tr><td colSpan={5} className="p-6 text-center text-slate-500">No recent selection diagnostics.</td></tr>
                           ) : report.network_diagnostics.map((row) => (
-                            <tr key={row.request_id}>
-                              <td className="px-3 py-2 text-xs">{formatDate(row.created_at)}</td>
-                              <td className="px-3 py-2 font-semibold">{row.selected_network || "None"}</td>
-                              <td className="px-3 py-2 text-xs">{row.candidate_pool.length ? row.candidate_pool.join(", ") : "None"}</td>
-                              <td className="px-3 py-2 text-xs">{row.excluded_networks.length ? row.excluded_networks.map((item) => `${item.network_name}: ${item.reason}`).join(" / ") : "None"}</td>
-                              <td className="px-3 py-2 text-xs">{row.decision_reason || row.final_result}</td>
+                            <tr key={row.request_id} className="hover:bg-slate-50">
+                              <td className="px-4 py-3 text-xs text-slate-500">{formatDate(row.created_at)}</td>
+                              <td className="px-4 py-3 font-semibold text-slate-900">{row.selected_network || "None"}</td>
+                              <td className="px-4 py-3 text-xs text-slate-600">{row.candidate_pool.length ? row.candidate_pool.join(", ") : "None"}</td>
+                              <td className="px-4 py-3 text-xs text-slate-600">{row.excluded_networks.length ? row.excluded_networks.map((i) => `${i.network_name}: ${i.reason}`).join(" / ") : "None"}</td>
+                              <td className="px-4 py-3 text-xs text-slate-600">{row.decision_reason || row.final_result}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -573,34 +663,72 @@ export default function AdminMiniAppsPage() {
                     </div>
                   </div>
 
-                  <div className="overflow-x-auto rounded-lg border border-slate-200">
-                    <table className="w-full min-w-[1060px] text-left text-sm">
-                      <thead className="bg-slate-50 text-xs text-slate-500">
-                        <tr><th className="px-3 py-2">Date</th><th className="px-3 py-2">External Impressions</th><th className="px-3 py-2">External Revenue</th><th className="px-3 py-2">Fee</th><th className="px-3 py-2">Net External</th><th className="px-3 py-2">Internal Impressions</th><th className="px-3 py-2">Internal Revenue</th><th className="px-3 py-2">Total Revenue</th><th className="px-3 py-2">Blended CPM</th></tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {report.daily.length === 0 ? (
-                          <tr><td colSpan={9} className="p-6 text-center text-slate-500">No daily stats.</td></tr>
-                        ) : report.daily.map((row) => (
-                          <tr key={String(row.date)}><td className="px-3 py-2 font-semibold">{String(row.date).slice(0, 10)}</td><td className="px-3 py-2">{numberValue(row.external_impressions)}</td><td className="px-3 py-2">{money(row.external_revenue)}</td><td className="px-3 py-2">{money(row.ads_galaxy_fee)}</td><td className="px-3 py-2">{money(row.external_net_revenue)}</td><td className="px-3 py-2">{numberValue(row.internal_impressions)}</td><td className="px-3 py-2">{money(row.internal_revenue)}</td><td className="px-3 py-2">{money(row.total_revenue)}</td><td className="px-3 py-2">{money(row.blended_cpm)}</td></tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  {/* Daily Breakdown */}
+                  <div className="rounded-xl border border-slate-200 bg-white">
+                    <div className="border-b border-slate-200 px-4 py-3">
+                      <h4 className="text-xs font-bold uppercase tracking-widest text-slate-400">Daily Breakdown</h4>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[1060px] text-left text-sm">
+                        <thead className="border-b border-slate-100 bg-slate-50 text-xs text-slate-500">
+                          <tr>
+                            <th className="px-4 py-2.5 font-medium">Date</th>
+                            <th className="px-4 py-2.5 font-medium">Ext. Impressions</th>
+                            <th className="px-4 py-2.5 font-medium">Ext. Revenue</th>
+                            <th className="px-4 py-2.5 font-medium">Fee</th>
+                            <th className="px-4 py-2.5 font-medium">Net External</th>
+                            <th className="px-4 py-2.5 font-medium">Int. Impressions</th>
+                            <th className="px-4 py-2.5 font-medium">Int. Revenue</th>
+                            <th className="px-4 py-2.5 font-medium">Total Revenue</th>
+                            <th className="px-4 py-2.5 font-medium">Blended CPM</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {report.daily.length === 0 ? (
+                            <tr><td colSpan={9} className="p-6 text-center text-slate-500">No daily stats.</td></tr>
+                          ) : report.daily.map((row) => (
+                            <tr key={String(row.date)} className="hover:bg-slate-50">
+                              <td className="px-4 py-3 font-semibold text-slate-900">{String(row.date).slice(0, 10)}</td>
+                              <td className="px-4 py-3 text-slate-700">{numberValue(row.external_impressions)}</td>
+                              <td className="px-4 py-3 text-slate-700">{money(row.external_revenue)}</td>
+                              <td className="px-4 py-3 text-slate-700">{money(row.ads_galaxy_fee)}</td>
+                              <td className="px-4 py-3 text-slate-700">{money(row.external_net_revenue)}</td>
+                              <td className="px-4 py-3 text-slate-700">{numberValue(row.internal_impressions)}</td>
+                              <td className="px-4 py-3 text-slate-700">{money(row.internal_revenue)}</td>
+                              <td className="px-4 py-3 font-semibold text-slate-900">{money(row.total_revenue)}</td>
+                              <td className="px-4 py-3 text-slate-700">{money(row.blended_cpm)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
 
-                  <div className="max-h-64 overflow-y-auto rounded-lg border border-slate-200">
-                    <table className="w-full text-left text-sm">
-                      <thead className="sticky top-0 bg-slate-50 text-xs text-slate-500">
-                        <tr><th className="px-3 py-2">Country</th><th className="px-3 py-2">Impressions</th></tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {report.countries.length === 0 ? (
-                          <tr><td colSpan={2} className="p-6 text-center text-slate-500">No country stats.</td></tr>
-                        ) : report.countries.map((row) => (
-                          <tr key={row.country}><td className="px-3 py-2 font-semibold">{row.country}</td><td className="px-3 py-2">{numberValue(row.impressions)}</td></tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  {/* Geographic Breakdown */}
+                  <div className="rounded-xl border border-slate-200 bg-white">
+                    <div className="border-b border-slate-200 px-4 py-3">
+                      <h4 className="text-xs font-bold uppercase tracking-widest text-slate-400">Geographic Breakdown</h4>
+                    </div>
+                    <div className="max-h-64 overflow-y-auto">
+                      <table className="w-full text-left text-sm">
+                        <thead className="sticky top-0 border-b border-slate-100 bg-slate-50 text-xs text-slate-500">
+                          <tr>
+                            <th className="px-4 py-2.5 font-medium">Country</th>
+                            <th className="px-4 py-2.5 font-medium">Impressions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {report.countries.length === 0 ? (
+                            <tr><td colSpan={2} className="p-6 text-center text-slate-500">No country stats.</td></tr>
+                          ) : report.countries.map((row) => (
+                            <tr key={row.country} className="hover:bg-slate-50">
+                              <td className="px-4 py-3 font-semibold text-slate-900">{row.country}</td>
+                              <td className="px-4 py-3 text-slate-700">{numberValue(row.impressions)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
@@ -609,8 +737,15 @@ export default function AdminMiniAppsPage() {
         </div>
       )}
 
+      {/* Page Header */}
+      <div className="mb-6">
+        <h1 className="text-xl font-bold text-slate-900">Mini Apps</h1>
+        <p className="mt-0.5 text-sm text-slate-500">Review and manage publisher mini app monetization</p>
+      </div>
+
+      {/* Revenue Summary Cards */}
       {revenueSummary && (
-        <div className="mb-4 grid grid-cols-2 gap-2 lg:grid-cols-5">
+        <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-5">
           {[
             ["External Ad Revenue", money(revenueSummary.external_ad_revenue)],
             ["Platform Fee Revenue", money(revenueSummary.platform_fee_revenue)],
@@ -618,166 +753,253 @@ export default function AdminMiniAppsPage() {
             ["Publisher Revenue", money(revenueSummary.publisher_revenue)],
             ["Blended CPM", money(revenueSummary.blended_cpm)],
           ].map(([label, value]) => (
-            <div key={label} className="rounded-md border border-slate-200 bg-white p-3 shadow-sm">
-              <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</div>
-              <div className="mt-1 text-sm font-bold text-slate-900">{value}</div>
+            <div key={label} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{label}</div>
+              <div className="mt-2 text-lg font-black text-slate-900">{value}</div>
             </div>
           ))}
         </div>
       )}
 
-      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-        <div className="flex flex-col gap-4 border-b border-slate-200 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-          <h2 className="text-sm font-semibold text-slate-900">Mini Apps</h2>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <div className="relative w-full sm:w-72">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-              <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search Mini Apps..." className="w-full rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-10 pr-4 text-xs outline-none focus:ring-2 focus:ring-blue-500" />
+      {/* Main Table Card */}
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        {/* Filters Toolbar */}
+        <div className="flex flex-col gap-4 border-b border-slate-200 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+          <h2 className="text-sm font-semibold text-slate-900">All Mini Apps</h2>
+          <div className="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-center">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
+              <input
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                placeholder="Search Mini Apps..."
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-9 pr-4 text-xs outline-none focus:ring-2 focus:ring-blue-500 lg:w-64"
+              />
             </div>
-            <div className="flex flex-wrap rounded-md border border-slate-200/50 bg-slate-100 p-0.5">
-              {["all", "pending", "awaiting", "approved", "rejected", "paused"].map((filter) => (
-                <button key={filter} onClick={() => { setPage(1); setStatusFilter(filter); }} className={`flex-1 rounded px-3 py-1.5 text-xs font-medium ${statusFilter === filter ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}>
-                  {filter === "all" ? "All" : statusLabel(filter as MiniApp["status"])}
-                </button>
-              ))}
+            <div className="flex overflow-x-auto">
+              <div className="flex flex-shrink-0 rounded-lg border border-slate-200/50 bg-slate-100 p-0.5">
+                {["all", "pending", "awaiting", "approved", "rejected", "paused"].map((filter) => (
+                  <button
+                    key={filter}
+                    onClick={() => { setPage(1); setStatusFilter(filter); }}
+                    className={`whitespace-nowrap rounded px-3 py-1.5 text-xs font-medium transition-all ${statusFilter === filter ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}
+                  >
+                    {filter === "all" ? "All" : statusLabel(filter as MiniApp["status"])}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="flex flex-wrap rounded-md border border-slate-200/50 bg-slate-100 p-0.5">
-              {["all", "0", "1", "2", "3", "4"].map((filter) => (
-                <button key={filter} onClick={() => { setPage(1); setNetworkCountFilter(filter); }} className={`flex-1 rounded px-3 py-1.5 text-xs font-medium ${networkCountFilter === filter ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}>
-                  {filter === "all" ? "All Config" : `${filter} ${filter === "1" ? "Network" : "Networks"}`}
-                </button>
-              ))}
+            <div className="flex overflow-x-auto">
+              <div className="flex flex-shrink-0 rounded-lg border border-slate-200/50 bg-slate-100 p-0.5">
+                {["all", "0", "1", "2", "3", "4"].map((filter) => (
+                  <button
+                    key={filter}
+                    onClick={() => { setPage(1); setNetworkCountFilter(filter); }}
+                    className={`whitespace-nowrap rounded px-3 py-1.5 text-xs font-medium transition-all ${networkCountFilter === filter ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}
+                  >
+                    {filter === "all" ? "All Networks" : `${filter} ${filter === "1" ? "Network" : "Networks"}`}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         </div>
 
+        {/* Desktop Table */}
         <div className="hidden overflow-x-auto md:block">
-          <table className="w-full min-w-[900px] text-left text-sm">
-            <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
+          <table className="w-full min-w-[960px] text-left text-sm">
+            <thead className="border-b border-slate-200 bg-slate-50">
               <tr>
-                <th className="px-4 py-3 font-medium">Mini App</th>
-                <th className="px-4 py-3 font-medium">Publisher</th>
-                <th className="px-4 py-3 font-medium">Bot ID</th>
-                <th className="px-4 py-3 font-medium">URLs</th>
-                <th className="px-4 py-3 font-medium">Network Status</th>
-                <th className="px-4 py-3 font-medium">Traffic Quality</th>
-                <th className="px-4 py-3 font-medium">Status / Updated</th>
-                <th className="px-4 py-3 text-right font-medium">Actions</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Mini App</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Publisher</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Bot ID</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">URLs</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Network Status</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Traffic Quality</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Status</th>
+                <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <tr><td colSpan={8} className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></td></tr>
+                <tr><td colSpan={8} className="p-10 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={24} /></td></tr>
               ) : miniapps.length === 0 ? (
-                <tr><td colSpan={8} className="p-8 text-center text-slate-500">No Mini Apps found.</td></tr>
+                <tr><td colSpan={8} className="p-10 text-center text-slate-500">No Mini Apps found.</td></tr>
               ) : miniapps.map((miniapp) => (
-                <tr key={miniapp.id} className="hover:bg-slate-50">
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-2 font-semibold text-slate-900"><Smartphone size={14} className="text-blue-500" /> {miniapp.miniapp_name}</div>
-                    <div className="text-xs text-slate-500">@{miniapp.miniapp_username} - #{miniapp.id}</div>
+                <tr key={miniapp.id} className="transition-colors hover:bg-slate-50/80">
+                  <td className="px-5 py-4">
+                    <div className="flex items-center gap-2 font-semibold text-slate-900">
+                      <Smartphone size={14} className="flex-shrink-0 text-blue-500" />
+                      <span>{miniapp.miniapp_name}</span>
+                    </div>
+                    <div className="mt-0.5 text-xs text-slate-500">@{miniapp.miniapp_username}</div>
+                    <div className="text-xs text-slate-400">#{miniapp.id}</div>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-5 py-4">
                     <div className="font-medium text-slate-900">{displayOwner(miniapp)}</div>
                     <div className="text-xs text-slate-500">User #{miniapp.user_id}</div>
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-slate-700">{miniapp.bot_id}</td>
-                  <td className="px-4 py-3">
-                    <div className="max-w-[240px] truncate text-xs text-blue-600" title={miniapp.webapp_url}>{miniapp.webapp_url}</div>
-                    <div className="max-w-[240px] truncate text-xs text-slate-500" title={miniapp.miniapp_url}>{miniapp.miniapp_url}</div>
+                  <td className="px-5 py-4 font-mono text-xs text-slate-700">{miniapp.bot_id}</td>
+                  <td className="px-5 py-4">
+                    <div className="max-w-[220px] truncate text-xs font-medium text-blue-600" title={miniapp.webapp_url}>{miniapp.webapp_url}</div>
+                    <div className="max-w-[220px] truncate text-xs text-slate-500" title={miniapp.miniapp_url}>{miniapp.miniapp_url}</div>
                   </td>
-                  <td className="px-4 py-3">
-                    <div className="flex flex-wrap gap-1">
-                      <span className="rounded border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-bold text-blue-700">
-                        Configured {numberValue(miniapp.enabled_network_count ?? miniapp.configured_network_count)} / 6
+                  <td className="px-5 py-4">
+                    <div className="mb-2 flex flex-wrap gap-1.5">
+                      <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-bold text-blue-700">
+                        {numberValue(miniapp.enabled_network_count ?? miniapp.configured_network_count)} / 6 Configured
                       </span>
-                      <span className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-bold text-slate-600">
-                        Enabled {numberValue(miniapp.enabled_network_count)}
+                      <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
+                        {numberValue(miniapp.enabled_network_count)} Enabled
                       </span>
                     </div>
-                    <div className="mt-1 max-w-[240px] truncate text-xs text-slate-500" title={miniapp.enabled_network_names || "No networks enabled"}>
-                      {miniapp.enabled_network_names || "No networks enabled"}
-                    </div>
-                    <div className="mt-1 text-[10px] text-slate-500">Requests {numberValue(miniapp.mediation_request_count)}</div>
-                    <div className="text-[10px] text-slate-400">{formatDate(miniapp.last_mediation_request_at)}</div>
-                    <div className="text-[10px] text-slate-500">
-                      No-fill {numberValue(miniapp.no_fill_count)} · Failures {numberValue(miniapp.recent_network_failures)}
-                    </div>
-                    <div className="text-[10px] text-slate-500">
-                      Fill {numberValue(miniapp.fill_rate)}% · Ratio {numberValue(miniapp.request_to_impression_ratio)} · Flags {numberValue(miniapp.suspicious_flag_count)}
-                    </div>
-                    {miniapp.network_health && miniapp.network_health.length > 0 && (
-                      <div className="max-w-[240px] truncate text-[10px] text-slate-400" title={miniapp.network_health.map((item) => `${item.network_name}: ${item.health_score}`).join(", ")}>
-                        Scores {miniapp.network_health.map((item) => `${item.network_name} ${item.health_score}`).join(" / ")}
+                    <div className="space-y-0.5">
+                      <div className="max-w-[200px] truncate text-xs text-slate-600" title={miniapp.enabled_network_names || "No networks enabled"}>
+                        {miniapp.enabled_network_names || "No networks enabled"}
                       </div>
-                    )}
-                    {miniapp.temporarily_disabled_networks && (
-                      <div className="max-w-[220px] truncate text-[10px] font-semibold text-amber-600" title={miniapp.temporarily_disabled_networks}>
-                        Disabled {miniapp.temporarily_disabled_networks}
+                      <div className="flex gap-3 text-[10px] text-slate-500">
+                        <span>Requests {numberValue(miniapp.mediation_request_count)}</span>
+                        <span>Fill {numberValue(miniapp.fill_rate)}%</span>
                       </div>
-                    )}
-                    <div className="mt-1 text-[10px] font-semibold text-slate-500">
-                      Monetag {miniapp.monetag_status || "Active"} · {miniapp.monetag_status === "Locked" ? formatDate(miniapp.monetag_locked_until) : `${numberValue(miniapp.monetag_opportunity_count)} / ${numberValue(miniapp.monetag_next_allowed_opportunity)}`}
+                      <div className="flex gap-3 text-[10px] text-slate-500">
+                        <span>No-fill {numberValue(miniapp.no_fill_count)}</span>
+                        <span>Failures {numberValue(miniapp.recent_network_failures)}</span>
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        Ratio {numberValue(miniapp.request_to_impression_ratio)} · Flags {numberValue(miniapp.suspicious_flag_count)}
+                      </div>
+                      <div className="text-[10px] text-slate-400">{formatDate(miniapp.last_mediation_request_at)}</div>
+                      {miniapp.network_health && miniapp.network_health.length > 0 && (
+                        <div className="max-w-[200px] truncate text-[10px] text-slate-400" title={miniapp.network_health.map((item) => `${item.network_name}: ${item.health_score}`).join(", ")}>
+                          Scores {miniapp.network_health.map((item) => `${item.network_name} ${item.health_score}`).join(" / ")}
+                        </div>
+                      )}
+                      {miniapp.temporarily_disabled_networks && (
+                        <div className="max-w-[200px] truncate text-[10px] font-semibold text-amber-600" title={miniapp.temporarily_disabled_networks}>
+                          Disabled: {miniapp.temporarily_disabled_networks}
+                        </div>
+                      )}
+                      <div className="text-[10px] font-medium text-slate-500">
+                        Monetag {miniapp.monetag_status || "Active"}
+                        {miniapp.monetag_status === "Locked"
+                          ? ` · Until ${formatDate(miniapp.monetag_locked_until)}`
+                          : ` · ${numberValue(miniapp.monetag_opportunity_count)} / ${numberValue(miniapp.monetag_next_allowed_opportunity)}`}
+                      </div>
+                      {miniapp.monetag_last_user_masked && (
+                        <div className="text-[10px] text-slate-400">Last user {miniapp.monetag_last_user_masked}</div>
+                      )}
                     </div>
-                    {miniapp.monetag_last_user_masked && (
-                      <div className="text-[10px] text-slate-400">Last user {miniapp.monetag_last_user_masked}</div>
-                    )}
                   </td>
-                  <td className="px-4 py-3">
-                    <Link href={`/admin/traffic-quality/miniapp/${miniapp.id}`} className="font-black text-blue-700 hover:text-blue-900">{numberValue(miniapp.traffic_quality_score)}</Link>
-                    <div className="text-xs capitalize text-slate-500">{qualityLabel(miniapp.traffic_quality_tier)} / {qualityLabel(miniapp.traffic_risk_level)} risk</div>
-                    <div className="text-[10px] text-slate-400">{formatDate(miniapp.traffic_quality_updated_at)}</div>
+                  <td className="px-5 py-4">
+                    <Link href={`/admin/traffic-quality/miniapp/${miniapp.id}`} className="text-base font-black text-blue-700 hover:text-blue-900">
+                      {numberValue(miniapp.traffic_quality_score)}
+                    </Link>
+                    <div className="mt-0.5 text-xs capitalize text-slate-500">{qualityLabel(miniapp.traffic_quality_tier)}</div>
+                    <div className="text-xs capitalize text-slate-500">{qualityLabel(miniapp.traffic_risk_level)} risk</div>
+                    <div className="mt-0.5 text-[10px] text-slate-400">{formatDate(miniapp.traffic_quality_updated_at)}</div>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-5 py-4">
                     <StatusBadge status={miniapp.status} />
-                    <div className="mt-1 text-[10px] text-slate-400">Updated {formatDate(miniapp.updated_at)}</div>
+                    <div className="mt-1.5 text-[10px] text-slate-400">Updated {formatDate(miniapp.updated_at)}</div>
                   </td>
-                  <td className="px-4 py-3 text-right"><ActionButtons miniapp={miniapp} /></td>
+                  <td className="px-5 py-4 text-right">
+                    <ActionButtons miniapp={miniapp} />
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
 
-        <div className="space-y-3 p-3 md:hidden">
+        {/* Mobile Cards */}
+        <div className="space-y-3 p-4 md:hidden">
           {loading ? (
-            <div className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={20} /></div>
+            <div className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={24} /></div>
           ) : miniapps.length === 0 ? (
             <div className="p-8 text-center text-sm text-slate-500">No Mini Apps found.</div>
           ) : miniapps.map((miniapp) => (
-            <div key={miniapp.id} className="rounded-lg border border-slate-200 p-3 shadow-sm">
+            <div key={miniapp.id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2 font-semibold text-slate-900"><Smartphone size={14} className="text-blue-500" /> <span className="truncate">{miniapp.miniapp_name}</span></div>
-                  <div className="text-xs text-slate-500">@{miniapp.miniapp_username}</div>
-                  <div className="text-xs text-slate-400">{displayOwner(miniapp)}</div>
+                  <div className="flex items-center gap-2 font-semibold text-slate-900">
+                    <Smartphone size={14} className="flex-shrink-0 text-blue-500" />
+                    <span className="truncate">{miniapp.miniapp_name}</span>
+                  </div>
+                  <div className="mt-0.5 text-xs text-slate-500">@{miniapp.miniapp_username} · {displayOwner(miniapp)}</div>
                 </div>
                 <StatusBadge status={miniapp.status} />
               </div>
               <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Bot ID</div><div className="truncate font-semibold text-slate-900">{miniapp.bot_id}</div></div>
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">User</div><div className="font-semibold text-slate-900">#{miniapp.user_id}</div></div>
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Configured Networks</div><div className="font-semibold text-slate-900">{numberValue(miniapp.enabled_network_count ?? miniapp.configured_network_count)} / 6</div></div>
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Networks Enabled</div><div className="font-semibold text-slate-900">{numberValue(miniapp.enabled_network_count)}</div></div>
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Last Updated</div><div className="truncate font-semibold text-slate-900">{formatDate(miniapp.updated_at)}</div></div>
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Requests</div><div className="font-semibold text-slate-900">{numberValue(miniapp.mediation_request_count)}</div></div>
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">No-fill</div><div className="font-semibold text-slate-900">{numberValue(miniapp.no_fill_count)}</div></div>
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Failures</div><div className="font-semibold text-slate-900">{numberValue(miniapp.recent_network_failures)}</div></div>
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Fill Rate</div><div className="font-semibold text-slate-900">{numberValue(miniapp.fill_rate)}%</div></div>
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Flags</div><div className="font-semibold text-slate-900">{numberValue(miniapp.suspicious_flag_count)}</div></div>
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Monetag</div><div className="font-semibold text-slate-900">{miniapp.monetag_status || "Active"}</div></div>
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Last User</div><div className="font-semibold text-slate-900">{miniapp.monetag_last_user_masked || "N/A"}</div></div>
-                  <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Quality</div><Link href={`/admin/traffic-quality/miniapp/${miniapp.id}`} className="font-semibold text-blue-700 hover:text-blue-900">{numberValue(miniapp.traffic_quality_score)} / {qualityLabel(miniapp.traffic_risk_level)}</Link></div>
+                <div className="rounded-lg bg-slate-50 p-2.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Bot ID</div>
+                  <div className="mt-1 truncate font-semibold text-slate-900">{miniapp.bot_id}</div>
                 </div>
-              <div className="mt-3"><ActionButtons miniapp={miniapp} /></div>
+                <div className="rounded-lg bg-slate-50 p-2.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">User</div>
+                  <div className="mt-1 font-semibold text-slate-900">#{miniapp.user_id}</div>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-2.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Configured</div>
+                  <div className="mt-1 font-semibold text-slate-900">{numberValue(miniapp.enabled_network_count ?? miniapp.configured_network_count)} / 6</div>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-2.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Enabled</div>
+                  <div className="mt-1 font-semibold text-emerald-700">{numberValue(miniapp.enabled_network_count)}</div>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-2.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Requests</div>
+                  <div className="mt-1 font-semibold text-slate-900">{numberValue(miniapp.mediation_request_count)}</div>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-2.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Fill Rate</div>
+                  <div className="mt-1 font-semibold text-slate-900">{numberValue(miniapp.fill_rate)}%</div>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-2.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">No-fill</div>
+                  <div className="mt-1 font-semibold text-slate-900">{numberValue(miniapp.no_fill_count)}</div>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-2.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Failures</div>
+                  <div className="mt-1 font-semibold text-red-700">{numberValue(miniapp.recent_network_failures)}</div>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-2.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Monetag</div>
+                  <div className="mt-1 font-semibold text-slate-900">{miniapp.monetag_status || "Active"}</div>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-2.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Flags</div>
+                  <div className="mt-1 font-semibold text-slate-900">{numberValue(miniapp.suspicious_flag_count)}</div>
+                </div>
+                <div className="col-span-2 rounded-lg bg-slate-50 p-2.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Traffic Quality</div>
+                  <Link href={`/admin/traffic-quality/miniapp/${miniapp.id}`} className="mt-1 block font-semibold text-blue-700 hover:text-blue-900">
+                    {numberValue(miniapp.traffic_quality_score)} · {qualityLabel(miniapp.traffic_risk_level)} risk
+                  </Link>
+                </div>
+                {miniapp.monetag_last_user_masked && (
+                  <div className="col-span-2 rounded-lg bg-slate-50 p-2.5">
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Last Monetag User</div>
+                    <div className="mt-1 font-semibold text-slate-900">{miniapp.monetag_last_user_masked}</div>
+                  </div>
+                )}
+              </div>
+              <div className="mt-3 border-t border-slate-100 pt-3">
+                <ActionButtons miniapp={miniapp} />
+              </div>
             </div>
           ))}
         </div>
 
-        <div className="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs text-slate-500">
+        {/* Pagination */}
+        <div className="flex items-center justify-between border-t border-slate-200 px-5 py-3 text-xs text-slate-500">
           <span>Page {page} of {totalPages}</span>
           <div className="flex gap-1">
-            <button disabled={page === 1 || loading} onClick={() => setPage((p) => p - 1)} className="rounded p-1 text-slate-500 hover:bg-slate-100 disabled:opacity-50"><ChevronLeft size={16} /></button>
-            <button disabled={page === totalPages || loading} onClick={() => setPage((p) => p + 1)} className="rounded p-1 text-slate-500 hover:bg-slate-100 disabled:opacity-50"><ChevronRight size={16} /></button>
+            <button disabled={page === 1 || loading} onClick={() => setPage((p) => p - 1)} className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-40">
+              <ChevronLeft size={15} />
+            </button>
+            <button disabled={page === totalPages || loading} onClick={() => setPage((p) => p + 1)} className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-40">
+              <ChevronRight size={15} />
+            </button>
           </div>
         </div>
       </div>

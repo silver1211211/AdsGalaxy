@@ -10,7 +10,7 @@ Bot ID: 1234567890
 Web App URL: https://your-webapp-url.example.com
 Direct Mini App URL: https://t.me/YourMiniAppBot/app`;
 
-const miniAppScriptExample = `<script src="${publicSdkUrl}/sdk.js?id=YOUR_INTEGRATION_ID"></script>`;
+const miniAppScriptExample = `<script src="${publicSdkUrl}/sdk.js?id=YOUR_MINI_APP_ID"></script>`;
 
 const miniAppButtonExample = `<button onclick="showAd()">Show Ad</button>
 <script>
@@ -32,7 +32,7 @@ const miniAppFullHtmlExample = `<!doctype html>
 <head>
   <meta charset="utf-8" />
   <title>AdsGalaxy Integration Example</title>
-  <script src="${publicSdkUrl}/sdk.js?id=YOUR_INTEGRATION_ID"></script>
+  <script src="${publicSdkUrl}/sdk.js?id=YOUR_MINI_APP_ID"></script>
 </head>
 <body>
   <button onclick="showAd()">Show Ad</button>
@@ -64,9 +64,9 @@ const miniAppFallbackExample = `<script>
   }
 </script>`;
 
-const miniAppReliabilityExample = `<script data-integration-id="YOUR_INTEGRATION_ID">
+const miniAppReliabilityExample = `<script data-miniapp-id="YOUR_MINI_APP_ID">
   !function(){
-    var s=document.currentScript,p=s.getAttribute('data-integration-id')||'default';
+    var s=document.currentScript,p=s.getAttribute('data-miniapp-id')||'default';
     var d=['${publicSdkUrl}','${backupSdkUrl}'],i=0,t,sc;
     function l(){
       sc=document.createElement('script');
@@ -154,6 +154,7 @@ const sections: DocsSection[] = [
     title: "Quick Start",
     body: [
       "After approval, add the AdsGalaxy public script to your Telegram Mini App and call window.showAdsGalaxy() when the user chooses to show ads.",
+      "Use the Mini App ID shown in Publisher > Monetize > Mini Apps > View Details.",
       "Continue your app logic only when the promise resolves. If it rejects, use the structured error code and message to show a retry, no-fill, or Telegram-only message.",
       "Use the script example, add a Show Ad button, then call window.showAdsGalaxy() from your app action.",
     ],
@@ -161,7 +162,7 @@ const sections: DocsSection[] = [
   {
     id: "script-example",
     title: "Script example",
-    body: ["Use one AdsGalaxy Integration ID for the Mini App. Do not add private keys or network-specific IDs to the public page."],
+    body: ["Use the Mini App ID shown in its publisher details. Do not add private keys or network-specific IDs to the public page."],
     code: { language: "html", value: miniAppScriptExample },
   },
   {
@@ -173,7 +174,7 @@ const sections: DocsSection[] = [
   {
     id: "full-html-example",
     title: "Full HTML example",
-    body: ["This minimal page shows the Integration ID script and a Show Ad button in one place."],
+    body: ["This minimal page shows the Mini App ID script and a Show Ad button in one place."],
     code: { language: "html", value: miniAppFullHtmlExample },
   },
   {

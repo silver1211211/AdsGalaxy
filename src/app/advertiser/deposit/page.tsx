@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useState, useEffect } from "react";
+import Image from "next/image";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import {
   Wallet,
@@ -15,6 +16,8 @@ import {
   Loader2,
   AlertCircle,
   Check,
+  Sparkles,
+  ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
@@ -47,6 +50,8 @@ type DepositNetwork = {
   currency: string;
   icon: string;
   tone: string;
+  logo: string;
+  networkLogo: string;
 };
 
 type TelegramWebApp = {
@@ -291,46 +296,66 @@ export default function DepositPage() {
 
   return (
     <DashboardLayout type="advertiser">
-      <div className="space-y-8 max-w-2xl mx-auto">
+      <div className="mx-auto max-w-xl space-y-6">
         <Modal isOpen={!!error} onClose={() => setError("")} type="error" title="Deposit Error">
           {error}
         </Modal>
 
-        {/* Create Deposit Section */}
-        <div className="bg-white rounded-[2.5rem] border border-slate-200/60 p-8 space-y-6 shadow-xl shadow-slate-200/40">
-          <div className="flex items-center gap-4">
-            <div className="w-12 h-12 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-600 shadow-sm border border-blue-100/50">
-              <Wallet size={24} />
+        <div className="relative overflow-hidden rounded-[2rem] bg-slate-950 p-6 text-white shadow-2xl shadow-blue-950/20">
+          <div className="absolute -right-10 -top-12 h-32 w-32 rounded-full bg-[#0c9de8]/30 blur-3xl" />
+          <div className="relative space-y-4">
+            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-blue-100">
+              <Sparkles size={12} />
+              Balance launchpad
             </div>
             <div>
-              <h2 className="text-xl font-black text-slate-900 uppercase tracking-tight">Add Balance</h2>
+              <h1 className="text-3xl font-black tracking-tight">Fund campaigns faster.</h1>
+              <p className="mt-2 max-w-sm text-sm font-medium leading-relaxed text-blue-100/75">
+                Create a crypto invoice, monitor payment status, and keep your campaign balance ready.
+              </p>
+            </div>
+            <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/10 p-3 text-blue-100">
+              <ShieldCheck size={18} className="shrink-0" />
+              <p className="text-[11px] font-bold leading-relaxed">Deposit logic and payment flow are unchanged.</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Create Deposit Section */}
+        <div className="space-y-5 rounded-[2rem] border border-blue-100 bg-white p-4 shadow-xl shadow-blue-100/50 sm:p-6">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-blue-100/60 bg-blue-50 text-blue-600 shadow-sm">
+              <Wallet size={20} />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-lg font-black uppercase tracking-tight text-slate-900">Add Balance</h2>
               <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Fund your advertiser account</p>
             </div>
           </div>
 
-          <div className="space-y-4">
+          <div className="space-y-3.5">
             <div className="space-y-2">
               <div className="flex justify-between items-center px-1">
                 <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Amount to deposit ($)</label>
                 <span className="text-[9px] font-black uppercase tracking-widest text-[#0c9de8]">Min: ${minDeposit.toFixed(2)}</span>
               </div>
               <div className="relative">
-                <DollarSign className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-600" size={18} />
+                <DollarSign className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-600" size={17} />
                 <input
                   type="number"
                   value={amount}
                   onChange={(e) => setAmount(e.target.value)}
                   placeholder="0.00"
                   disabled={!!pendingDeposit || isCreating}
-                  className="w-full pl-12 pr-6 py-4 bg-slate-50/80 border border-slate-200/80 rounded-2xl focus:border-[#0c9de8] focus:bg-white focus:ring-4 focus:ring-[#0c9de8]/10 outline-none font-black text-slate-900 text-lg transition-all disabled:opacity-50"
+                  className="w-full rounded-xl border border-slate-200/80 bg-slate-50/80 py-3.5 pl-10 pr-4 text-base font-black text-slate-900 outline-none transition-all focus:border-[#0c9de8] focus:bg-white focus:ring-4 focus:ring-[#0c9de8]/10 disabled:opacity-50"
                 />
               </div>
             </div>
 
             <div className="space-y-2">
               <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 px-1">Select Network</label>
-              <div className="max-h-[228px] overflow-y-auto pr-1">
-                <div className="grid grid-cols-3 gap-3">
+              <div className="max-h-[248px] overflow-y-auto pr-1">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                 {depositNetworks.map((net) => (
                   <button
                     key={net.id}
@@ -342,18 +367,37 @@ export default function DepositPage() {
                     disabled={!!pendingDeposit || isCreating}
                     title={`${net.name} on ${net.chain}`}
                     className={cn(
-                      "flex h-16 min-w-0 items-center justify-center gap-2 rounded-2xl border-2 px-2 text-left shadow-md transition-all",
+                      "relative flex min-h-14 min-w-0 items-center gap-2 rounded-xl border px-2.5 py-2 pr-5 text-left transition-all active:scale-[0.98]",
                       network === net.id
-                        ? "border-[#0c9de8] bg-blue-50 text-[#0c9de8] shadow-[#0c9de8]/20"
-                        : "border-slate-200 bg-slate-50 text-slate-500 shadow-slate-200/80 hover:border-slate-300 hover:bg-slate-100"
+                        ? "border-[#0c9de8] bg-blue-50/80 text-[#0c9de8] shadow-sm ring-1 ring-[#0c9de8]/20"
+                        : "border-slate-200 bg-slate-50/80 text-slate-500 hover:border-slate-300 hover:bg-slate-100"
                     )}
                   >
-                    <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border text-[8px] font-black", net.tone)}>
-                      {net.icon}
+                    <span className="relative h-8 w-8 shrink-0">
+                      <Image
+                        src={net.logo}
+                        alt={`${net.currency} logo`}
+                        width={32}
+                        height={32}
+                        className="h-8 w-8 rounded-full object-contain shadow-sm"
+                      />
+                      {net.networkLogo !== net.logo && (
+                        <span className="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-white p-0.5 shadow ring-1 ring-slate-200">
+                          <Image
+                            src={net.networkLogo}
+                            alt={`${net.chain} network`}
+                            width={14}
+                            height={14}
+                            className="h-full w-full rounded-full object-contain"
+                          />
+                        </span>
+                      )}
                     </span>
                     <span className="min-w-0">
-                      <span className="block truncate text-[10px] font-black uppercase tracking-tight">{net.chain}</span>
+                      <span className="block truncate text-[11px] font-black uppercase leading-tight text-slate-800">{net.currency}</span>
+                      <span className="mt-0.5 block truncate text-[9px] font-bold uppercase leading-tight text-slate-400">{net.chain}</span>
                     </span>
+                    {network === net.id && <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-[#0c9de8]" />}
                   </button>
                 ))}
                 </div>

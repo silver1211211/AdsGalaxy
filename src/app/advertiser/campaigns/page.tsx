@@ -25,6 +25,8 @@ import {
   MousePointer2,
   Edit2,
   TrendingUp,
+  Sparkles,
+  Megaphone,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
@@ -319,13 +321,32 @@ export default function MyCampaignsPage() {
     <DashboardLayout type="advertiser">
       <div className="space-y-6">
         {/* Header */}
-        <div className="flex items-center justify-between">
-          <h1 className="text-xl font-black text-slate-900 uppercase tracking-tight">Active Ads</h1>
+        <div className="relative overflow-hidden rounded-[2rem] bg-slate-950 p-6 text-white shadow-2xl shadow-blue-950/20">
+          <div className="absolute -right-10 -top-12 h-32 w-32 rounded-full bg-[#0c9de8]/30 blur-3xl" />
+          <div className="absolute bottom-0 left-0 h-24 w-24 rounded-full bg-white/10 blur-2xl" />
+          <div className="relative flex items-center justify-between gap-4">
+            <div className="space-y-3">
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-blue-100">
+                <Sparkles size={12} />
+                Campaign command
+              </div>
+              <div>
+                <h1 className="text-3xl font-black tracking-tight">Active Ads</h1>
+                <p className="mt-1 max-w-sm text-sm font-medium leading-relaxed text-blue-100/75">
+                  Monitor every channel, bot, and rewarded mini app campaign without changing your existing flow.
+                </p>
+              </div>
+            </div>
+            <div className="hidden h-14 w-14 shrink-0 items-center justify-center rounded-3xl bg-white/10 text-blue-100 ring-1 ring-white/10 sm:flex">
+              <Megaphone size={25} />
+            </div>
+          </div>
           <button
             onClick={() => setShowCreateModal(true)}
-            className="w-10 h-10 bg-[#0c9de8] text-white rounded-full flex items-center justify-center hover:bg-blue-600 transition-all active:scale-95 shadow-lg shadow-blue-500/20"
+            className="relative mt-5 w-full rounded-2xl bg-[#0c9de8] px-5 py-4 text-sm font-black uppercase tracking-widest text-white flex items-center justify-center gap-2 hover:bg-blue-500 transition-all active:scale-95 shadow-lg shadow-blue-500/20"
           >
-            <Plus size={24} />
+            <Plus size={18} />
+            Launch Campaign
           </button>
         </div>
 
@@ -345,8 +366,8 @@ export default function MyCampaignsPage() {
             <p className="text-slate-400 text-xs font-bold uppercase tracking-widest">Syncing...</p>
           </div>
         ) : campaigns.length === 0 ? (
-          <div className="py-20 text-center space-y-6">
-            <div className="w-20 h-20 bg-slate-50 rounded-[32px] flex items-center justify-center mx-auto text-slate-300">
+          <div className="py-20 text-center space-y-6 rounded-[2rem] border border-dashed border-blue-100 bg-white/80">
+            <div className="w-20 h-20 bg-blue-50 rounded-[32px] flex items-center justify-center mx-auto text-[#0c9de8]">
               <Target size={40} />
             </div>
             <div className="space-y-2">
@@ -357,7 +378,7 @@ export default function MyCampaignsPage() {
             </div>
             <button
               onClick={() => setShowCreateModal(true)}
-              className="text-[#0c9de8] font-black text-sm uppercase tracking-widest inline-block"
+                className="text-[#0c9de8] font-black text-sm uppercase tracking-widest inline-flex rounded-2xl bg-blue-50 px-5 py-3"
             >
               Launch First Campaign
             </button>
@@ -367,7 +388,7 @@ export default function MyCampaignsPage() {
             {campaigns.map((campaign) => (
               <div
                 key={`${campaign.kind}-${campaign.id}`}
-                className="relative bg-white border border-slate-100 rounded-[2rem] p-5 group hover:border-slate-200 transition-all"
+                className="relative bg-white border border-slate-100 rounded-[2rem] p-5 group hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50 transition-all"
               >
                 <div className="flex items-center gap-4">
                   <div className={cn(
@@ -473,15 +494,15 @@ export default function MyCampaignsPage() {
                     </div>
                     <div className="w-px h-3 bg-slate-100" />
                     <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400">
-                      <DollarSign size={11} className="text-slate-300" />
-                      <span className="font-black text-slate-700">${(campaign.spend || 0).toFixed(2)}</span>
-                      <span>SPEND</span>
-                    </div>
-                    <div className="w-px h-3 bg-slate-100" />
-                    <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400">
                       <TrendingUp size={11} className="text-slate-300" />
                       <span className="font-black text-slate-700">{(campaign.clicks || 0).toLocaleString()}</span>
                       <span>CLICKS</span>
+                    </div>
+                    <div className="w-px h-3 bg-slate-100" />
+                    <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400">
+                      <DollarSign size={11} className="text-slate-300" />
+                      <span className="font-black text-slate-700">${(campaign.spend || 0).toFixed(2)}</span>
+                      <span>SPEND</span>
                     </div>
                   </div>
                 )}

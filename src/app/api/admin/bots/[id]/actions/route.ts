@@ -11,6 +11,31 @@ type StatusRow = RowDataPacket & {
   bot_token: string;
 };
 
+async function getBotColumns() {
+  const [rows] = await pool.query<Array<RowDataPacket & { COLUMN_NAME: string }>>(
+    `SELECT COLUMN_NAME
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'bots'`
+  );
+
+  return new Set(rows.map((row) => row.COLUMN_NAME));
+}
+
+function updateAssignable(columns: Set<string>, values: Record<string, unknown>) {
+  const assignments: string[] = [];
+  const params: unknown[] = [];
+
+  Object.entries(values).forEach(([name, value]) => {
+    if (columns.has(name)) {
+      assignments.push(`${name} = ?`);
+      params.push(value);
+    }
+  });
+
+  return { assignments, params };
+}
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -41,23 +66,31 @@ export async function POST(
 
     const oldStatus = rows[0].status;
     const newStatus = statusMap[normalizedAction];
+    const botColumns = await getBotColumns();
 
     if (normalizedAction === "activate") {
       await reactivateBotAfterHealthCheck(id, rows[0].bot_token);
     } else if (normalizedAction === "delete") {
-      await pool.query(
-        `UPDATE bots
-         SET status = ?, is_deleted = TRUE, paused_reason = 'Bot removed by admin.', suggested_fix = 'Contact support if this was unexpected.', health_status = 'paused'
-         WHERE id = ?`,
-        [newStatus, id]
-      );
+      const { assignments, params } = updateAssignable(botColumns, {
+        status: newStatus,
+        is_deleted: true,
+        paused_reason: "Bot removed by admin.",
+        suggested_fix: "Contact support if this was unexpected.",
+        health_status: "paused",
+      });
+      if (assignments.length > 0) {
+        await pool.query(`UPDATE bots SET ${assignments.join(", ")} WHERE id = ?`, [...params, id]);
+      }
     } else if (normalizedAction === "pause") {
-      await pool.query(
-        `UPDATE bots
-         SET status = ?, paused_reason = 'Paused by admin.', suggested_fix = 'Resolve the admin review item, then reactivate.', health_status = 'paused'
-         WHERE id = ?`,
-        [newStatus, id]
-      );
+      const { assignments, params } = updateAssignable(botColumns, {
+        status: newStatus,
+        paused_reason: "Paused by admin.",
+        suggested_fix: "Resolve the admin review item, then reactivate.",
+        health_status: "paused",
+      });
+      if (assignments.length > 0) {
+        await pool.query(`UPDATE bots SET ${assignments.join(", ")} WHERE id = ?`, [...params, id]);
+      }
     } else {
       await pool.query("UPDATE bots SET status = ? WHERE id = ?", [newStatus, id]);
     }

@@ -2,7 +2,9 @@
 
 import React from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { AlertCircle, X } from "lucide-react";
+import { AlertCircle, AlertTriangle, X } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { usePopupQueue } from "@/context/PopupQueueContext";
 
 interface ConfirmationModalProps {
   isOpen: boolean;
@@ -31,96 +33,132 @@ export default function ConfirmationModal({
   message,
   children,
   confirmBtnText = "Confirm",
-  closeBtnText = "Close",
+  closeBtnText = "Cancel",
   confirmBtnVariant = "primary",
   isLoading = false,
   typedConfirmation,
 }: ConfirmationModalProps) {
-  if (!isOpen) return null;
-  const typedConfirmationMatches = !typedConfirmation || typedConfirmation.value === typedConfirmation.phrase;
+  const isQueueActive = usePopupQueue(isOpen, `confirmation:${title}:${message}`);
+  if (!isOpen || !isQueueActive) return null;
+
+  const typedConfirmationMatches =
+    !typedConfirmation || typedConfirmation.value === typedConfirmation.phrase;
 
   return (
     <AnimatePresence>
-      <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4">
+      <div
+        className="fixed inset-0 z-[1000] flex items-center justify-center p-4"
+        aria-modal="true"
+        role="dialog"
+      >
         {/* Backdrop */}
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
+          transition={{ duration: 0.18 }}
           onClick={onClose}
-          className="absolute inset-0 bg-black/40 backdrop-blur-[2px]"
+          className="absolute inset-0 bg-slate-950/45 backdrop-blur-md"
+          aria-hidden="true"
         />
 
-        {/* Modal content */}
+        {/* Container */}
         <motion.div
-          initial={{ opacity: 0, scale: 0.9, y: 20 }}
+          initial={{ opacity: 0, scale: 0.96, y: 16 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.9, y: 20 }}
-          className="relative w-full max-w-[400px] bg-white rounded-[28px] p-6 shadow-2xl overflow-hidden"
+          exit={{ opacity: 0, scale: 0.96, y: 16 }}
+          transition={{ type: "spring", damping: 28, stiffness: 340 }}
+          className="relative w-full max-w-sm bg-white rounded-3xl shadow-[0_20px_60px_rgba(15,23,42,0.16)] overflow-hidden"
         >
-          <div className="space-y-6">
-            {/* Header with Icon and Title */}
-            <div className="flex items-center gap-4">
-              <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                confirmBtnVariant === "danger" ? "bg-red-50 text-red-500" : "bg-blue-50 text-blue-500"
-              }`}>
-                <AlertCircle size={20} />
+          {/* Close button */}
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="absolute top-4 right-4 z-10 h-8 w-8 flex items-center justify-center rounded-full bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-slate-700 transition-colors"
+          >
+            <X size={16} />
+          </button>
+
+          <div className="p-6 space-y-5">
+            {/* Header */}
+            <div className="flex items-start gap-4 pr-10">
+              <div
+                className={cn(
+                  "h-11 w-11 shrink-0 flex items-center justify-center rounded-2xl",
+                  confirmBtnVariant === "danger"
+                    ? "bg-red-50 text-red-600"
+                    : "bg-blue-50 text-[#0c9de8]",
+                )}
+              >
+                {confirmBtnVariant === "danger" ? (
+                  <AlertTriangle size={20} />
+                ) : (
+                  <AlertCircle size={20} />
+                )}
               </div>
-              <h3 className="text-xl font-black text-slate-900 leading-none">{title}</h3>
+              <div className="flex-1 min-w-0 pt-1.5">
+                <h3 className="text-[17px] font-black text-slate-900 leading-snug">
+                  {title}
+                </h3>
+              </div>
             </div>
 
-            <p className="text-sm text-slate-500 font-medium leading-relaxed">
+            {/* Message */}
+            <p className="text-sm font-medium text-slate-500 leading-relaxed">
               {message}
             </p>
 
+            {/* Custom content */}
             {children}
 
+            {/* Typed confirmation input */}
             {typedConfirmation && (
               <div className="space-y-2">
-                <label className="block text-xs font-black uppercase tracking-wide text-slate-500">
-                  {typedConfirmation.label || `Type ${typedConfirmation.phrase} to continue`}
+                <label className="block text-[11px] font-black uppercase tracking-widest text-slate-400">
+                  {typedConfirmation.label ||
+                    `Type "${typedConfirmation.phrase}" to continue`}
                 </label>
                 <input
                   value={typedConfirmation.value}
-                  onChange={(event) => typedConfirmation.onChange(event.target.value)}
-                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:border-blue-500"
+                  onChange={(e) => typedConfirmation.onChange(e.target.value)}
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:border-[#0c9de8] focus:ring-4 focus:ring-[#0c9de8]/10 transition-shadow"
                   placeholder={typedConfirmation.phrase}
                 />
               </div>
             )}
 
-            <div className="flex gap-3 w-full pt-2">
+            {/* Action buttons */}
+            <div className="flex gap-3 pt-1">
               <button
+                type="button"
                 disabled={isLoading}
                 onClick={onClose}
-                className="flex-1 py-3.5 bg-slate-100 text-slate-600 font-black rounded-2xl hover:bg-slate-200 transition-all text-sm"
+                className="flex-1 py-3.5 rounded-2xl text-sm font-black bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {closeBtnText}
               </button>
               <button
+                type="button"
                 disabled={isLoading || !typedConfirmationMatches}
                 onClick={onConfirm}
-                className={`flex-1 py-3.5 rounded-2xl font-black text-sm transition-all flex items-center justify-center ${
+                className={cn(
+                  "flex-1 py-3.5 rounded-2xl text-sm font-black transition-colors flex items-center justify-center",
                   confirmBtnVariant === "danger"
                     ? "bg-red-500 text-white hover:bg-red-600"
-                    : "bg-[#0c9de8] text-white hover:bg-blue-600"
-                } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    : "bg-[#0c9de8] text-white hover:bg-blue-600",
+                  (isLoading || !typedConfirmationMatches) &&
+                    "opacity-50 cursor-not-allowed",
+                )}
               >
                 {isLoading ? (
-                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  <div className="h-5 w-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 ) : (
                   confirmBtnText
                 )}
               </button>
             </div>
           </div>
-
-          <button 
-            onClick={onClose}
-            className="absolute top-4 right-4 p-1 text-slate-400 hover:text-slate-600 transition-colors"
-          >
-            <X size={18} />
-          </button>
         </motion.div>
       </div>
     </AnimatePresence>

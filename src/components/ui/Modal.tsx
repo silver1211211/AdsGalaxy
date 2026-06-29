@@ -1,86 +1,143 @@
 "use client";
 
 import React, { useEffect } from "react";
-import { X, AlertCircle } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { X, CheckCircle2, AlertCircle, AlertTriangle, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { usePopupQueue } from "@/context/PopupQueueContext";
 
 interface ModalProps {
   isOpen: boolean;
   onClose: () => void;
   title?: string;
   children: React.ReactNode;
-  type?: "error" | "info" | "success";
+  type?: "error" | "info" | "success" | "warning";
 }
 
-export default function Modal({ isOpen, onClose, title, children, type = "info" }: ModalProps) {
-  useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = "hidden";
-    } else {
-      document.body.style.overflow = "unset";
-    }
-    return () => { document.body.style.overflow = "unset"; };
-  }, [isOpen]);
+const TYPE_CONFIG = {
+  info: {
+    iconBg: "bg-blue-50",
+    iconColor: "text-[#0c9de8]",
+    Icon: Info,
+    btnClass: "bg-[#0c9de8] text-white hover:bg-blue-600",
+  },
+  success: {
+    iconBg: "bg-emerald-50",
+    iconColor: "text-emerald-600",
+    Icon: CheckCircle2,
+    btnClass: "bg-emerald-500 text-white hover:bg-emerald-600",
+  },
+  warning: {
+    iconBg: "bg-amber-50",
+    iconColor: "text-amber-600",
+    Icon: AlertTriangle,
+    btnClass: "bg-amber-500 text-white hover:bg-amber-600",
+  },
+  error: {
+    iconBg: "bg-red-50",
+    iconColor: "text-red-600",
+    Icon: AlertCircle,
+    btnClass: "bg-red-500 text-white hover:bg-red-600",
+  },
+} as const;
 
-  if (!isOpen) return null;
+export default function Modal({
+  isOpen,
+  onClose,
+  title,
+  children,
+  type = "info",
+}: ModalProps) {
+  const isQueueActive = usePopupQueue(isOpen, `modal:${type}:${title || ""}:${typeof children === "string" ? children : ""}`);
+
+  useEffect(() => {
+    if (isOpen && isQueueActive) document.body.style.overflow = "hidden";
+    else document.body.style.overflow = "";
+    return () => { document.body.style.overflow = ""; };
+  }, [isOpen, isQueueActive]);
+
+  const cfg = TYPE_CONFIG[type];
 
   return (
-    <div className="fixed inset-0 z-[600] flex items-center justify-center p-4 sm:p-6">
-      {/* Backdrop */}
-      <div 
-        className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200" 
-        onClick={onClose} 
-      />
-      
-      {/* Modal Content */}
-      <div className={cn(
-        "relative w-full max-w-md bg-white rounded-[2rem] border-4 border-slate-900 overflow-hidden shadow-[8px_8px_0px_0px_rgba(15,23,42,1)] animate-in zoom-in-95 fade-in duration-200",
-        type === "error" && "border-red-600 shadow-[8px_8px_0px_0px_rgba(220,38,38,1)]"
-      )}>
-        {/* Header */}
-        <div className={cn(
-          "px-6 py-4 border-b-4 border-slate-900 flex items-center justify-between",
-          type === "error" ? "bg-red-50 border-red-600" : "bg-slate-50"
-        )}>
-          <div className="flex items-center gap-2">
-            {type === "error" && <AlertCircle className="text-red-600" size={20} />}
-            <h3 className={cn(
-              "font-black uppercase tracking-tight",
-              type === "error" ? "text-red-600" : "text-slate-900"
-            )}>
-              {title || (type === "error" ? "Error" : "Attention")}
-            </h3>
-          </div>
-          <button 
+    <AnimatePresence>
+      {isOpen && isQueueActive && (
+        <div
+          className="fixed inset-0 z-[600] flex items-center justify-center p-4"
+          aria-modal="true"
+          role="dialog"
+        >
+          {/* Backdrop */}
+          <motion.div
+            key="modal-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="absolute inset-0 bg-slate-950/45 backdrop-blur-md"
             onClick={onClose}
-            className={cn(
-              "p-1 hover:bg-slate-200 rounded-lg transition-colors",
-              type === "error" && "hover:bg-red-100 text-red-600"
-            )}
-          >
-            <X size={20} />
-          </button>
-        </div>
+            aria-hidden="true"
+          />
 
-        {/* Body */}
-        <div className="p-8">
-          <div className="text-slate-600 font-bold leading-relaxed">
-            {children}
-          </div>
-          
-          <button 
-            onClick={onClose}
-            className={cn(
-              "w-full mt-8 py-4 rounded-2xl font-black uppercase tracking-widest transition-none active:translate-y-1 active:shadow-none",
-              type === "error" 
-                ? "bg-red-600 text-white shadow-[0px_4px_0px_0px_rgba(153,27,27,1)]" 
-                : "bg-slate-900 text-white shadow-[0px_4px_0px_0px_rgba(15,23,42,1)]"
-            )}
+          {/* Container */}
+          <motion.div
+            key="modal-container"
+            initial={{ opacity: 0, scale: 0.96, y: 16 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: 16 }}
+            transition={{ type: "spring", damping: 28, stiffness: 340 }}
+            className="relative w-full max-w-sm bg-white rounded-3xl shadow-[0_20px_60px_rgba(15,23,42,0.16)] overflow-hidden"
           >
-            Close
-          </button>
+            {/* Close button */}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              className="absolute top-4 right-4 z-10 h-8 w-8 flex items-center justify-center rounded-full bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-slate-700 transition-colors"
+            >
+              <X size={16} />
+            </button>
+
+            <div className="p-6 space-y-5">
+              {/* Header */}
+              <div className="flex items-start gap-4 pr-10">
+                <div
+                  className={cn(
+                    "h-11 w-11 shrink-0 flex items-center justify-center rounded-2xl",
+                    cfg.iconBg,
+                    cfg.iconColor,
+                  )}
+                >
+                  <cfg.Icon size={20} />
+                </div>
+                {title && (
+                  <div className="flex-1 min-w-0 pt-1.5">
+                    <h3 className="text-[17px] font-black text-slate-900 leading-snug">
+                      {title}
+                    </h3>
+                  </div>
+                )}
+              </div>
+
+              {/* Content */}
+              <div className="text-sm font-medium text-slate-500 leading-relaxed">
+                {children}
+              </div>
+
+              {/* Primary action */}
+              <button
+                type="button"
+                onClick={onClose}
+                className={cn(
+                  "w-full py-3.5 rounded-2xl text-sm font-black transition-colors",
+                  cfg.btnClass,
+                )}
+              >
+                Close
+              </button>
+            </div>
+          </motion.div>
         </div>
-      </div>
-    </div>
+      )}
+    </AnimatePresence>
   );
 }

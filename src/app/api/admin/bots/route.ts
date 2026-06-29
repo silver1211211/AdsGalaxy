@@ -3,6 +3,50 @@ import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
+import type { RowDataPacket } from "mysql2/promise";
+
+async function getTableColumns(tableName: string) {
+  const [rows] = await pool.query<Array<RowDataPacket & { COLUMN_NAME: string }>>(
+    `SELECT COLUMN_NAME
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?`,
+    [tableName]
+  );
+
+  return new Set(rows.map((row) => row.COLUMN_NAME));
+}
+
+async function tableExists(tableName: string) {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT 1
+     FROM INFORMATION_SCHEMA.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+     LIMIT 1`,
+    [tableName]
+  );
+
+  return rows.length > 0;
+}
+
+function col(columns: Set<string>, name: string, fallback: string) {
+  return columns.has(name) ? `b.${name}` : fallback;
+}
+
+function updateAssignable(columns: Set<string>, values: Record<string, unknown>) {
+  const assignments: string[] = [];
+  const params: unknown[] = [];
+
+  Object.entries(values).forEach(([name, value]) => {
+    if (columns.has(name)) {
+      assignments.push(`${name} = ?`);
+      params.push(value);
+    }
+  });
+
+  return { assignments, params };
+}
 
 export async function GET(request: Request) {
   if (!(await checkAdminAuth())) {
@@ -19,58 +63,108 @@ export async function GET(request: Request) {
   const offset = (page - 1) * limit;
 
   try {
+    const [botColumns, botUserColumns, hasBotUsers] = await Promise.all([
+      getTableColumns("bots"),
+      getTableColumns("bot_users"),
+      tableExists("bot_users"),
+    ]);
+    const isDeletedExpr = col(botColumns, "is_deleted", "FALSE");
+    const healthStatusExpr = col(botColumns, "health_status", "'active'");
+    const qualityScoreExpr = col(botColumns, "traffic_quality_score", "60");
+    const qualityTierExpr = col(botColumns, "traffic_quality_tier", "'good'");
+    const riskLevelExpr = col(botColumns, "traffic_risk_level", "'low'");
+    const botUserActiveCondition = hasBotUsers
+      ? [
+          botUserColumns.has("is_active") ? "is_active = TRUE" : "1=1",
+          botUserColumns.has("status") ? "status = 'active'" : "1=1",
+        ].join(" AND ")
+      : "1=0";
+    const botUserInactiveCondition = hasBotUsers
+      ? [
+          botUserColumns.has("is_active") ? "is_active = FALSE" : "0=1",
+          botUserColumns.has("status") ? "status != 'active'" : "0=1",
+        ].join(" OR ")
+      : "1=0";
+    const activeCountExpr = hasBotUsers
+      ? `(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND ${botUserActiveCondition})`
+      : "0";
+    const blockedCountExpr = hasBotUsers
+      ? `(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND (${botUserInactiveCondition}))`
+      : "0";
+    const botUsersSummary = hasBotUsers
+      ? {
+          total: "(SELECT COUNT(*) FROM bot_users)",
+          active: `(SELECT COUNT(*)
+         FROM bot_users bu
+         JOIN bots active_bots ON active_bots.id = bu.bot_id
+         WHERE active_bots.status = 'active'
+           AND ${botColumns.has("is_deleted") ? "active_bots.is_deleted = FALSE" : "1=1"}
+           AND COALESCE(${botColumns.has("health_status") ? "active_bots.health_status" : "'active'"}, 'active') = 'active'
+           AND ${botUserColumns.has("is_active") ? "bu.is_active = TRUE" : "1=1"}
+           AND ${botUserColumns.has("status") ? "bu.status = 'active'" : "1=1"})`,
+          inactive: `(SELECT COUNT(*)
+         FROM bot_users bu
+         JOIN bots parent_bots ON parent_bots.id = bu.bot_id
+         WHERE ${botUserColumns.has("is_active") ? "bu.is_active = FALSE" : "0=1"}
+            OR ${botUserColumns.has("status") ? "bu.status != 'active'" : "0=1"}
+            OR parent_bots.status != 'active'
+            OR COALESCE(${botColumns.has("health_status") ? "parent_bots.health_status" : "'active'"}, 'active') != 'active'
+            OR ${botColumns.has("is_deleted") ? "parent_bots.is_deleted = TRUE" : "0=1"})`,
+        }
+      : { total: "0", active: "0", inactive: "0" };
+
     let query = `
       SELECT
         b.id,
         b.user_id,
-        b.bot_username,
-        b.bot_name,
-        b.posts_per_day,
-        b.continents,
-        b.categories,
+        ${col(botColumns, "bot_username", "NULL")} as bot_username,
+        ${col(botColumns, "bot_name", "NULL")} as bot_name,
+        ${col(botColumns, "posts_per_day", "1")} as posts_per_day,
+        ${col(botColumns, "continents", "NULL")} as continents,
+        ${col(botColumns, "categories", "NULL")} as categories,
         b.status,
-        b.paused_reason,
-        b.suggested_fix,
-        b.health_status,
-        b.last_successful_broadcast_at,
-        b.last_failure_at,
-        b.failure_reason,
-        COALESCE(b.traffic_quality_score, 60) as traffic_quality_score,
-        COALESCE(b.traffic_quality_tier, 'good') as traffic_quality_tier,
-        COALESCE(b.traffic_risk_level, 'low') as traffic_risk_level,
-        b.traffic_quality_updated_at,
-        b.is_deleted,
-        b.created_at,
-        b.updated_at,
+        ${col(botColumns, "paused_reason", "NULL")} as paused_reason,
+        ${col(botColumns, "suggested_fix", "NULL")} as suggested_fix,
+        ${healthStatusExpr} as health_status,
+        ${col(botColumns, "last_successful_broadcast_at", "NULL")} as last_successful_broadcast_at,
+        ${col(botColumns, "last_failure_at", "NULL")} as last_failure_at,
+        ${col(botColumns, "failure_reason", "NULL")} as failure_reason,
+        COALESCE(${qualityScoreExpr}, 60) as traffic_quality_score,
+        COALESCE(${qualityTierExpr}, 'good') as traffic_quality_tier,
+        COALESCE(${riskLevelExpr}, 'low') as traffic_risk_level,
+        ${col(botColumns, "traffic_quality_updated_at", "NULL")} as traffic_quality_updated_at,
+        ${isDeletedExpr} as is_deleted,
+        ${col(botColumns, "created_at", "NULL")} as created_at,
+        ${col(botColumns, "updated_at", "NULL")} as updated_at,
         u.first_name,
         u.last_name,
         u.username AS owner_username,
         u.telegram_id as owner_telegram_id,
         CASE
-          WHEN b.status = 'active' AND COALESCE(b.health_status, 'active') = 'active'
-            THEN (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND is_active = TRUE AND status = 'active')
+          WHEN b.status = 'active' AND COALESCE(${healthStatusExpr}, 'active') = 'active'
+            THEN ${activeCountExpr}
           ELSE 0
         END as active_count,
-        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND (is_active = FALSE OR status != 'active')) as blocked_count
+        ${blockedCountExpr} as blocked_count
       FROM bots b
       LEFT JOIN users u ON b.user_id = u.id
     `;
     let countQuery = "SELECT COUNT(*) as total FROM bots b LEFT JOIN users u ON b.user_id = u.id";
     const queryParams: any[] = [];
 
-    let whereClause = " WHERE b.is_deleted = FALSE";
+    let whereClause = ` WHERE ${isDeletedExpr} = FALSE`;
     
     if (statusFilter !== "all") {
       whereClause += " AND b.status = ?";
       queryParams.push(statusFilter);
     }
 
-    if (qualityFilter !== "all") {
+    if (qualityFilter !== "all" && botColumns.has("traffic_quality_tier")) {
       whereClause += " AND COALESCE(b.traffic_quality_tier, 'good') = ?";
       queryParams.push(qualityFilter);
     }
 
-    if (riskFilter !== "all") {
+    if (riskFilter !== "all" && botColumns.has("traffic_risk_level")) {
       whereClause += " AND COALESCE(b.traffic_risk_level, 'low') = ?";
       queryParams.push(riskFilter);
     }
@@ -95,26 +189,12 @@ export async function GET(request: Request) {
     const [[countRow]]: any = await pool.query(countQuery, queryParams);
     const [[summary]]: any = await pool.query(`
       SELECT
-        SUM(CASE WHEN b.status = 'active' AND b.is_deleted = FALSE AND COALESCE(b.health_status, 'active') = 'active' THEN 1 ELSE 0 END) as monetized_bots,
-        SUM(CASE WHEN b.status IN ('paused', 'token_invalid', 'bot_deleted', 'unreachable') AND b.is_deleted = FALSE THEN 1 ELSE 0 END) as paused_bots,
-        SUM(CASE WHEN b.status IN ('token_invalid', 'bot_deleted', 'unreachable') AND b.is_deleted = FALSE THEN 1 ELSE 0 END) as failed_bots,
-        (SELECT COUNT(*) FROM bot_users) as total_bot_users,
-        (SELECT COUNT(*)
-         FROM bot_users bu
-         JOIN bots active_bots ON active_bots.id = bu.bot_id
-         WHERE active_bots.status = 'active'
-           AND active_bots.is_deleted = FALSE
-           AND COALESCE(active_bots.health_status, 'active') = 'active'
-           AND bu.is_active = TRUE
-           AND bu.status = 'active') as active_bot_users,
-        (SELECT COUNT(*)
-         FROM bot_users bu
-         JOIN bots parent_bots ON parent_bots.id = bu.bot_id
-         WHERE bu.is_active = FALSE
-            OR bu.status != 'active'
-            OR parent_bots.status != 'active'
-            OR COALESCE(parent_bots.health_status, 'active') != 'active'
-            OR parent_bots.is_deleted = TRUE) as inactive_bot_users
+        SUM(CASE WHEN b.status = 'active' AND ${isDeletedExpr} = FALSE AND COALESCE(${healthStatusExpr}, 'active') = 'active' THEN 1 ELSE 0 END) as monetized_bots,
+        SUM(CASE WHEN b.status IN ('paused', 'token_invalid', 'bot_deleted', 'unreachable') AND ${isDeletedExpr} = FALSE THEN 1 ELSE 0 END) as paused_bots,
+        SUM(CASE WHEN b.status IN ('token_invalid', 'bot_deleted', 'unreachable') AND ${isDeletedExpr} = FALSE THEN 1 ELSE 0 END) as failed_bots,
+        ${botUsersSummary.total} as total_bot_users,
+        ${botUsersSummary.active} as active_bot_users,
+        ${botUsersSummary.inactive} as inactive_bot_users
       FROM bots b
     `);
 
@@ -161,6 +241,7 @@ export async function PATCH(request: Request) {
     }
 
     const bot = rows[0];
+    const botColumns = await getTableColumns("bots");
     const statusMap: Record<string, string> = {
       activate: "active",
       pause: "paused",
@@ -177,19 +258,26 @@ export async function PATCH(request: Request) {
     if (normalizedAction === "activate") {
       await reactivateBotAfterHealthCheck(id, bot.bot_token);
     } else if (normalizedAction === "delete") {
-      await pool.query(
-        `UPDATE bots
-         SET status = ?, is_deleted = TRUE, paused_reason = 'Bot removed by admin.', suggested_fix = 'Contact support if this was unexpected.', health_status = 'paused'
-         WHERE id = ?`,
-        [status, id]
-      );
+      const { assignments, params } = updateAssignable(botColumns, {
+        status,
+        is_deleted: true,
+        paused_reason: "Bot removed by admin.",
+        suggested_fix: "Contact support if this was unexpected.",
+        health_status: "paused",
+      });
+      if (assignments.length > 0) {
+        await pool.query(`UPDATE bots SET ${assignments.join(", ")} WHERE id = ?`, [...params, id]);
+      }
     } else if (normalizedAction === "pause") {
-      await pool.query(
-        `UPDATE bots
-         SET status = ?, paused_reason = 'Paused by admin.', suggested_fix = 'Resolve the admin review item, then reactivate.', health_status = 'paused'
-         WHERE id = ?`,
-        [status, id]
-      );
+      const { assignments, params } = updateAssignable(botColumns, {
+        status,
+        paused_reason: "Paused by admin.",
+        suggested_fix: "Resolve the admin review item, then reactivate.",
+        health_status: "paused",
+      });
+      if (assignments.length > 0) {
+        await pool.query(`UPDATE bots SET ${assignments.join(", ")} WHERE id = ?`, [...params, id]);
+      }
     } else {
       await pool.query("UPDATE bots SET status = ? WHERE id = ?", [status, id]);
     }

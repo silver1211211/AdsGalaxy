@@ -1,19 +1,46 @@
 import crypto from "crypto";
 import type { RowDataPacket } from "mysql2";
 import pool from "@/lib/db";
+import {
+  isValidPrivateInviteLink,
+  normalizePrivateInviteLink,
+  normalizePublicChannelUsername,
+} from "@/lib/telegramChannelInput";
+
+export {
+  isValidPrivateInviteLink,
+  normalizePrivateInviteLink,
+  normalizePublicChannelUsername,
+} from "@/lib/telegramChannelInput";
 
 export type ChannelType = "public" | "private";
 
 const CHANNEL_PRIVACY_COLUMNS = [
   "channel_type",
   "invite_link_hash",
+  "private_invite_link_encrypted",
   "view_tracking_status",
+  "tracking_account_status",
+  "tracking_account",
+  "tracking_account_member_status",
+  "tracking_account_assigned_at",
+  "tracking_account_last_success_at",
+  "tracking_account_last_failure_at",
+  "tracking_account_failure_reason",
 ] as const;
 
 export type ChannelPrivacySchema = {
   hasChannelType: boolean;
   hasInviteLinkHash: boolean;
+  hasPrivateInviteLinkEncrypted: boolean;
   hasViewTrackingStatus: boolean;
+  hasTrackingAccountStatus: boolean;
+  hasTrackingAccount: boolean;
+  hasTrackingAccountMemberStatus: boolean;
+  hasTrackingAccountAssignedAt: boolean;
+  hasTrackingAccountLastSuccessAt: boolean;
+  hasTrackingAccountLastFailureAt: boolean;
+  hasTrackingAccountFailureReason: boolean;
 };
 
 export function normalizeChannelType(value: unknown): ChannelType {
@@ -27,22 +54,18 @@ export function parseChannelType(value: unknown): ChannelType | null {
 }
 
 export function normalizeInviteLink(value: unknown) {
-  return String(value || "").trim();
+  return normalizePrivateInviteLink(value) || String(value || "").trim();
 }
 
 export function looksLikePrivateInviteLink(value: unknown) {
-  return /^https:\/\/t\.me\/(\+|joinchat\/)/.test(normalizeInviteLink(value));
-}
-
-export function isValidPrivateInviteLink(value: unknown) {
-  return /^https:\/\/t\.me\/(\+|joinchat\/)[A-Za-z0-9_-]+$/.test(normalizeInviteLink(value));
+  return normalizePrivateInviteLink(value) !== null;
 }
 
 export function inferChannelType(input: { channelType?: unknown; inviteLink?: unknown; username?: unknown }): ChannelType | null {
   const explicit = parseChannelType(input.channelType);
   if (explicit === "private") return "private";
 
-  const normalizedUsername = String(input.username || "").replace(/^@/, "").trim();
+  const normalizedUsername = normalizePublicChannelUsername(input.username);
   const inviteLink = normalizeInviteLink(input.inviteLink);
   if (inviteLink || looksLikePrivateInviteLink(inviteLink)) return "private";
 
@@ -77,6 +100,14 @@ export async function getChannelPrivacySchema(): Promise<ChannelPrivacySchema> {
   return {
     hasChannelType: columns.has("channel_type"),
     hasInviteLinkHash: columns.has("invite_link_hash"),
+    hasPrivateInviteLinkEncrypted: columns.has("private_invite_link_encrypted"),
     hasViewTrackingStatus: columns.has("view_tracking_status"),
+    hasTrackingAccountStatus: columns.has("tracking_account_status"),
+    hasTrackingAccount: columns.has("tracking_account"),
+    hasTrackingAccountMemberStatus: columns.has("tracking_account_member_status"),
+    hasTrackingAccountAssignedAt: columns.has("tracking_account_assigned_at"),
+    hasTrackingAccountLastSuccessAt: columns.has("tracking_account_last_success_at"),
+    hasTrackingAccountLastFailureAt: columns.has("tracking_account_last_failure_at"),
+    hasTrackingAccountFailureReason: columns.has("tracking_account_failure_reason"),
   };
 }

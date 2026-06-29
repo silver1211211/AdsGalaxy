@@ -12,7 +12,9 @@ import {
   Loader2,
   History,
   Lock,
-  ArrowRightLeft
+  ArrowRightLeft,
+  Sparkles,
+  ShieldCheck
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
@@ -60,8 +62,35 @@ export default function WithdrawalPage() {
   return (
     <DashboardLayout type="publisher">
       <div className="space-y-8">
+        <div className="relative overflow-hidden rounded-[2rem] bg-slate-950 p-6 text-white shadow-2xl shadow-blue-950/20">
+          <div className="absolute -right-10 -top-12 h-32 w-32 rounded-full bg-[#0c9de8]/30 blur-3xl" />
+          <div className="absolute bottom-0 left-0 h-24 w-24 rounded-full bg-white/10 blur-2xl" />
+          <div className="relative space-y-5">
+            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-blue-100">
+              <Sparkles size={12} />
+              Secure payout desk
+            </div>
+            <div className="space-y-2">
+              <h1 className="text-3xl font-black tracking-tight">Withdraw with clarity.</h1>
+              <p className="max-w-md text-sm font-medium leading-relaxed text-blue-100/80">
+                Request funds, track locked earnings, and review every payout from one clean control room.
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-2xl border border-white/10 bg-white/10 p-3">
+                <p className="text-[10px] font-black uppercase tracking-widest text-blue-100/70">Available</p>
+                <p className="mt-1 text-xl font-black">${parseFloat(data.balance.balance_available).toFixed(2)}</p>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-white/10 p-3">
+                <p className="text-[10px] font-black uppercase tracking-widest text-blue-100/70">Locked</p>
+                <p className="mt-1 text-xl font-black">${parseFloat(data.balance.balance_locked).toFixed(2)}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* Unified Balance Card */}
-        <div className="bg-white border border-slate-200 rounded-2xl p-8 space-y-6">
+        <div className="bg-white border border-blue-100 rounded-[2rem] p-6 space-y-6 shadow-xl shadow-blue-100/50">
           <div className="flex items-center justify-between">
             <div className="space-y-1">
               <div className="flex items-center gap-2 text-slate-400">
@@ -85,11 +114,17 @@ export default function WithdrawalPage() {
 
           <button 
             onClick={() => setIsWithdrawing(true)}
-            className="w-full py-4 bg-[#0c9de8] text-white rounded-xl text-sm font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2"
+            className="w-full py-4 bg-[#0c9de8] text-white rounded-2xl text-sm font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#0c9de8]/25 hover:-translate-y-0.5 hover:shadow-xl hover:shadow-[#0c9de8]/30"
           >
             <ArrowUpRight size={20} />
             Withdraw Funds
           </button>
+          <div className="flex items-start gap-3 rounded-2xl border border-blue-100 bg-blue-50/70 p-4 text-[#0c5f94]">
+            <ShieldCheck size={18} className="mt-0.5 shrink-0" />
+            <p className="text-[11px] font-bold leading-relaxed">
+              Payout requests keep their existing review flow. This panel only makes the status easier to read.
+            </p>
+          </div>
         </div>
 
         {/* Withdrawal History */}
@@ -132,7 +167,7 @@ export default function WithdrawalPage() {
                 <button
                   key={withdrawal.id}
                   onClick={() => setSelectedWithdrawal(withdrawal)}
-                  className="w-full bg-white border border-slate-200 rounded-2xl p-4 flex items-center gap-4 transition-all"
+                  className="w-full bg-white border border-slate-200 rounded-3xl p-4 flex items-center gap-4 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/60"
                 >
                   <div className={cn(
                     "w-12 h-12 rounded-xl flex items-center justify-center shrink-0",

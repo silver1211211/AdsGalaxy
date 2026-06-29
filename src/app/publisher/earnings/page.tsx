@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
-import { Loader2, DollarSign, Clock, MousePointerClick, Eye, ChevronRight, X, Calendar, Hash, Target, CheckCircle } from "lucide-react";
+import { Loader2, DollarSign, Clock, MousePointerClick, Eye, ChevronRight, X, Calendar, Hash, Target, CheckCircle, Sparkles, TrendingUp } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { apiFetch } from "@/lib/api";
 
@@ -44,9 +44,22 @@ export default function PublisherEarningsPage() {
 
   return (
     <DashboardLayout type="publisher">
-      <div className="mb-6">
-        <h1 className="text-2xl font-black text-slate-900 tracking-tight">My Earnings</h1>
-        <p className="text-slate-500 text-sm mt-1">Track your ad settlements and unlock status.</p>
+      <div className="mb-6 overflow-hidden rounded-[2rem] bg-white p-6 shadow-xl shadow-blue-100/50 border border-blue-100">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-3">
+            <div className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-[#0c9de8]">
+              <Sparkles size={12} />
+              Revenue vault
+            </div>
+            <div>
+              <h1 className="text-3xl font-black text-slate-950 tracking-tight">My Earnings</h1>
+              <p className="text-slate-500 text-sm mt-1">Track ad settlements, unlock status, and campaign-level reward details.</p>
+            </div>
+          </div>
+          <div className="hidden h-14 w-14 shrink-0 items-center justify-center rounded-3xl bg-[#0c9de8] text-white shadow-lg shadow-[#0c9de8]/25 sm:flex">
+            <TrendingUp size={24} />
+          </div>
+        </div>
       </div>
 
       {error ? (
@@ -60,18 +73,18 @@ export default function PublisherEarningsPage() {
       ) : (
         <>
           <div className="grid grid-cols-2 gap-4 mb-8">
-            <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+            <div className="bg-white p-5 rounded-3xl border border-emerald-100 shadow-xl shadow-emerald-100/40">
               <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 flex items-center gap-1"><CheckCircle size={14} className="text-emerald-500"/> Unlocked Total</p>
               <p className="text-2xl font-black text-slate-900">${totalUnlocked.toFixed(4)}</p>
             </div>
-            <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+            <div className="bg-white p-5 rounded-3xl border border-amber-100 shadow-xl shadow-amber-100/40">
               <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 flex items-center gap-1"><Clock size={14} className="text-amber-500"/> Locked Total</p>
               <p className="text-2xl font-black text-slate-900">${totalLocked.toFixed(4)}</p>
             </div>
           </div>
 
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="px-5 py-4 border-b border-slate-200 bg-slate-50">
+          <div className="bg-white rounded-[2rem] border border-slate-200 shadow-xl shadow-slate-200/50 overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-200 bg-gradient-to-r from-blue-50 to-white">
               <h3 className="font-bold text-slate-900">Earning History</h3>
             </div>
             
@@ -83,7 +96,7 @@ export default function PublisherEarningsPage() {
                   <div 
                     key={`${earning.type}-${earning.id}`} 
                     onClick={() => setSelectedEarning(earning)}
-                    className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors cursor-pointer"
+                    className="p-4 flex items-center justify-between hover:bg-blue-50/40 transition-colors cursor-pointer"
                   >
                     <div className="flex items-center gap-4">
                       <div className={`p-3 rounded-full ${earning.type === 'click' ? 'bg-purple-100 text-purple-600' : 'bg-blue-100 text-blue-600'}`}>
@@ -131,7 +144,7 @@ export default function PublisherEarningsPage() {
               animate={{ y: 0 }}
               exit={{ y: "100%" }}
               transition={{ type: "spring", damping: 25, stiffness: 200 }}
-              className="fixed bottom-0 left-0 right-0 z-50 bg-white rounded-t-[32px] shadow-2xl border-t border-slate-200 overflow-hidden"
+              className="fixed bottom-0 left-0 right-0 z-50 bg-white rounded-t-[32px] shadow-2xl border-t border-blue-100 overflow-hidden"
             >
               <div className="p-6">
                 <div className="w-12 h-1.5 bg-slate-200 rounded-full mx-auto mb-6" />
@@ -148,7 +161,7 @@ export default function PublisherEarningsPage() {
                   </button>
                 </div>
 
-                <div className="bg-slate-50 rounded-xl p-5 border border-slate-100 mb-6 flex items-center justify-between">
+                <div className="bg-gradient-to-br from-blue-50 to-white rounded-3xl p-5 border border-blue-100 mb-6 flex items-center justify-between">
                   <div>
                     <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Total Reward</p>
                     <p className="text-3xl font-black text-slate-900">${parseFloat(selectedEarning.amount).toFixed(4)}</p>
@@ -196,7 +209,7 @@ export default function PublisherEarningsPage() {
 
                 <button 
                   onClick={() => setSelectedEarning(null)}
-                  className="w-full py-3 bg-slate-900 text-white rounded-xl text-sm font-bold hover:bg-slate-800 transition-colors"
+                  className="w-full py-3 bg-[#0c9de8] text-white rounded-2xl text-sm font-bold hover:bg-blue-500 transition-colors shadow-lg shadow-[#0c9de8]/25"
                 >
                   Close Details
                 </button>

@@ -5,11 +5,17 @@ import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { ensureDefaultChannelDistribution } from "@/lib/channelLifecycle";
 import { sendTelegramMessage } from "@/lib/telegram";
+import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
+import {
+  clearPrivateTrackingAssignment,
+  onboardPrivateChannelTracking,
+} from "@/lib/privateChannelTrackingOnboarding";
 
 type StatusRow = RowDataPacket & {
   id: number;
   status: string;
   chat_id: string | number;
+  channel_type: "public" | "private" | null;
   title: string | null;
   username: string | null;
   owner_telegram_id: string | number | null;
@@ -39,7 +45,7 @@ export async function POST(
     }
 
     const [rows] = await pool.query<StatusRow[]>(
-      `SELECT c.id, c.status, c.chat_id, c.title, c.username, u.telegram_id as owner_telegram_id
+      `SELECT c.id, c.status, c.chat_id, c.channel_type, c.title, c.username, u.telegram_id as owner_telegram_id
        FROM channels c
        LEFT JOIN users u ON u.id = c.user_id
        WHERE c.id = ?
@@ -68,8 +74,19 @@ export async function POST(
         [id]
       );
       await ensureDefaultChannelDistribution();
+      const privacySchema = await getChannelPrivacySchema();
+      await onboardPrivateChannelTracking({
+        channelId: id,
+        chatId: rows[0].chat_id,
+        channelType: rows[0].channel_type === "private" ? "private" : "public",
+        schema: privacySchema,
+      }).catch((trackingError: unknown) => {
+        const message = trackingError instanceof Error ? trackingError.message : "tracking_onboarding_error";
+        console.warn("Private tracking onboarding after admin approval failed", { channel_id: id, error: message });
+      });
     } else if (normalizedAction === "delete") {
       await pool.query("UPDATE channels SET status = ?, is_deleted = TRUE, paused_reason = 'Deleted by admin.', suggested_fix = NULL WHERE id = ?", [newStatus, id]);
+      await clearPrivateTrackingAssignment(id, await getChannelPrivacySchema());
     } else {
       await pool.query("UPDATE channels SET status = ?, paused_reason = ?, suggested_fix = ? WHERE id = ?", [
         newStatus,

@@ -1,6 +1,15 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import type { RowDataPacket } from "mysql2/promise";
+
+type OwnerBotRow = RowDataPacket & { id: number; bot_token?: string };
+type CountRow = RowDataPacket & { total: number; active: number | null; blocked: number | null };
+type ExistingUserRow = RowDataPacket & { chat_id: string };
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Internal Server Error";
+}
 
 export async function GET(
   request: Request,
@@ -12,13 +21,13 @@ export async function GET(
     const { id: botId } = await params;
 
     // Verify ownership
-    const [bots]: any = await pool.query("SELECT id FROM bots WHERE id = ? AND user_id = ?", [botId, user.id]);
+    const [bots] = await pool.query<OwnerBotRow[]>("SELECT id FROM bots WHERE id = ? AND user_id = ?", [botId, user.id]);
     if (bots.length === 0) {
       return NextResponse.json({ error: "Bot not found" }, { status: 404 });
     }
 
     // Get detailed counts
-    const [counts]: any = await pool.query(
+    const [counts] = await pool.query<CountRow[]>(
       `SELECT 
         COUNT(*) as total,
         SUM(CASE WHEN is_active = TRUE AND status = 'active' THEN 1 ELSE 0 END) as active,
@@ -32,8 +41,8 @@ export async function GET(
       active: counts[0].active || 0,
       blocked: counts[0].blocked || 0
     });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error) }, { status: getAuthErrorStatus(error) });
   }
 }
 
@@ -53,18 +62,18 @@ export async function POST(
     }
 
     // 1. Verify ownership and get token
-    const [bots]: any = await pool.query("SELECT id, bot_token FROM bots WHERE id = ? AND user_id = ?", [botId, user.id]);
+    const [bots] = await pool.query<OwnerBotRow[]>("SELECT id, bot_token FROM bots WHERE id = ? AND user_id = ?", [botId, user.id]);
     if (bots.length === 0) {
       return NextResponse.json({ error: "Bot not found" }, { status: 404 });
     }
     const botToken = bots[0].bot_token;
 
     // 2. Filter out already added users
-    const [existing]: any = await pool.query(
+    const [existing] = await pool.query<ExistingUserRow[]>(
       "SELECT chat_id FROM bot_users WHERE bot_id = ? AND chat_id IN (?)",
       [botId, chat_ids]
     );
-    const existingIds = new Set(existing.map((row: any) => row.chat_id.toString()));
+    const existingIds = new Set(existing.map((row) => row.chat_id.toString()));
     
     const alreadyAddedCount = existingIds.size;
     
@@ -103,7 +112,7 @@ export async function POST(
           if (tgData.ok) {
             return chatId;
           }
-        } catch (e) {}
+        } catch {}
         return null;
       });
 
@@ -113,8 +122,8 @@ export async function POST(
 
       if (validIds.length > 0) {
         // Bulk insert valid IDs
-        const values = validIds.map(id => [botId, id, true, "active"]);
-        await pool.query("INSERT IGNORE INTO bot_users (bot_id, chat_id, is_active, status) VALUES ?", [values]);
+        const values = validIds.map(id => [botId, id, id, true, "active"]);
+        await pool.query("INSERT IGNORE INTO bot_users (bot_id, user_id, chat_id, is_active, status) VALUES ?", [values]);
         newlyAddedCount += validIds.length;
       }
     }
@@ -124,8 +133,8 @@ export async function POST(
       alreadyAdded: alreadyAddedCount,
       invalid: invalidCount
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Bulk Add Bot Users Error:", error);
-    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
+    return NextResponse.json({ error: errorMessage(error) }, { status: getAuthErrorStatus(error) });
   }
 }

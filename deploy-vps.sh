@@ -62,7 +62,8 @@ for MIG in \
   "20260624_0035_production_safety_controls.sql" \
   "20260624_0037_cron_auth_residual_risks.sql" \
   "20260624_0038_suspicious_revenue_review_workflow.sql" \
-  "20260624_0040_self_promotion_ads.sql"
+  "20260624_0040_self_promotion_ads.sql" \
+  "20260628_0047_publisher_bot_webhooks.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   if [ -f "$FILE" ]; then

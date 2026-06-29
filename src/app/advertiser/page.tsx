@@ -17,6 +17,8 @@ import {
   Smartphone,
   Bot,
   X,
+  Sparkles,
+  Megaphone,
 } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
@@ -221,10 +223,31 @@ export default function AdvertiserDashboard() {
   return (
     <DashboardLayout type="advertiser">
       <div className="space-y-8">
-        {/* Header Section */}
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-bold text-slate-900">Advertiser Dashboard</h1>
-          <p className="text-slate-500">Track and manage your Telegram advertising campaigns.</p>
+        {/* Premium Header Section */}
+        <div className="relative overflow-hidden rounded-[2rem] bg-slate-950 p-6 text-white shadow-2xl shadow-blue-950/10">
+          <div className="absolute -right-16 -top-20 h-52 w-52 rounded-full bg-[#0c9de8]/40 blur-3xl" />
+          <div className="absolute -bottom-20 left-8 h-40 w-40 rounded-full bg-indigo-500/20 blur-3xl" />
+          <div className="relative">
+            <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.22em] text-blue-100">
+              <Sparkles size={12} />
+              Advertiser Command Center
+            </div>
+            <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <h1 className="text-3xl font-black tracking-tight">Launch campaigns with confidence.</h1>
+                <p className="mt-2 max-w-xl text-sm font-medium leading-6 text-white/65">
+                  Track budget, reach, trust level, and campaign performance across Telegram inventory.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowCreateModal(true)}
+                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-white px-5 py-3 text-xs font-black uppercase tracking-wide text-[#0c9de8] shadow-lg shadow-white/10"
+              >
+                <Megaphone size={15} />
+                Create Campaign
+              </button>
+            </div>
+          </div>
         </div>
 
         {loadError && (
@@ -242,7 +265,7 @@ export default function AdvertiserDashboard() {
 
         {/* Balance Section */}
         {!loadError && <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm flex items-center justify-between">
+          <div className="flex items-center justify-between rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
             <div className="space-y-1">
               <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Ad Balance</p>
               <p className="text-3xl font-black text-slate-900">${stats.ad_balance.toFixed(2)}</p>
@@ -256,7 +279,7 @@ export default function AdvertiserDashboard() {
             </div>
           </div>
 
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm flex items-center justify-between">
+          <div className="flex items-center justify-between rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
             <div className="space-y-1">
               <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Locked Balance</p>
               <p className="text-3xl font-black text-slate-900">${stats.ad_balance_locked.toFixed(2)}</p>
@@ -269,7 +292,7 @@ export default function AdvertiserDashboard() {
               <Lock size={32} />
             </div>
           </div>
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm flex items-center justify-between">
+          <div className="flex items-center justify-between rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
             <div className="space-y-1">
               <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Trust Level</p>
               <p className="text-2xl font-black text-slate-900">{stats.advertiser_trust_label || "New Advertiser"}</p>
@@ -289,7 +312,7 @@ export default function AdvertiserDashboard() {
           {isLoading ? [1, 2, 3, 4, 5, 6, 7, 8].map((item) => (
             <div key={item} className="h-32 rounded-2xl border border-slate-100 bg-white p-4 shadow-sm animate-pulse" />
           )) : statCards.map((stat) => (
-            <div key={stat.label} className="bg-white p-4 md:p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+            <div key={stat.label} className="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-xl md:p-6">
               <div className="flex items-center justify-between mb-4">
                 <div className={`p-2 md:p-3 rounded-xl ${stat.bg}`}>
                   <stat.icon className={stat.color} size={20} />
