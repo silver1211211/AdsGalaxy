@@ -11,7 +11,6 @@ const HeaderContext = createContext<HeaderContextType | undefined>(undefined);
 
 export function HeaderProvider({ children }: { children: ReactNode }) {
   const [title, setTitle] = useState("Welcome");
-
   return (
     <HeaderContext.Provider value={{ title, setTitle }}>
       {children}

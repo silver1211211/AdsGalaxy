@@ -1,6 +1,13 @@
 import "server-only";
 
 import crypto from "crypto";
+import type { Pool, PoolConnection, RowDataPacket } from "mysql2/promise";
+
+type WebhookDb = Pool | PoolConnection;
+
+type StoredWebhookRow = RowDataPacket & {
+  webhook_url: string | null;
+};
 
 function clean(value: unknown) {
   return String(value || "").trim();
@@ -21,11 +28,32 @@ export function createBotWebhookSecret(botId: number | string, botToken: string)
     .slice(0, 40);
 }
 
-export function verifyBotWebhookSecret(botId: number | string, botToken: string, suppliedSecret: string) {
-  const expected = createBotWebhookSecret(botId, botToken);
-  const supplied = clean(suppliedSecret);
+function secretsMatch(expected: string | null, supplied: string) {
   if (!expected || expected.length !== supplied.length) return false;
   return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(supplied));
+}
+
+function secretFromStoredWebhookUrl(webhookUrl: unknown) {
+  const value = clean(webhookUrl);
+  if (!value) return null;
+  try {
+    const segments = new URL(value).pathname.split("/").filter(Boolean);
+    return clean(segments.at(-1)) || null;
+  } catch {
+    return null;
+  }
+}
+
+export function verifyBotWebhookSecret(
+  botId: number | string,
+  botToken: string,
+  suppliedSecret: string,
+  storedWebhookUrl?: string | null
+) {
+  const supplied = clean(suppliedSecret);
+  const storedSecret = secretFromStoredWebhookUrl(storedWebhookUrl);
+  if (secretsMatch(storedSecret, supplied)) return true;
+  return secretsMatch(createBotWebhookSecret(botId, botToken), supplied);
 }
 
 export function createBotWebhookUrl(origin: string, botId: number | string, botToken: string) {
@@ -38,7 +66,44 @@ export function createBotWebhookUrl(origin: string, botId: number | string, botT
     || origin
   ).replace(/\/$/, "");
 
+  if (!configuredOrigin) return null;
+
   return `${configuredOrigin}/api/bot/webhook/${encodeURIComponent(clean(botId))}/${secret}`;
+}
+
+export async function ensureStoredBotWebhookUrl(
+  db: WebhookDb,
+  origin: string,
+  botId: number | string,
+  botToken: string
+) {
+  const [rows] = await db.query<StoredWebhookRow[]>(
+    "SELECT webhook_url FROM bots WHERE id = ? LIMIT 1",
+    [botId]
+  );
+  const bot = rows[0];
+  if (!bot) throw new Error("Bot not found");
+
+  const existingUrl = clean(bot.webhook_url);
+  if (existingUrl) return existingUrl;
+
+  const webhookUrl = createBotWebhookUrl(origin, botId, botToken);
+  if (!webhookUrl) {
+    throw new Error("Bot webhook configuration is unavailable");
+  }
+
+  await db.query(
+    `UPDATE bots
+     SET webhook_url = COALESCE(NULLIF(webhook_url, ''), ?)
+     WHERE id = ?`,
+    [webhookUrl, botId]
+  );
+
+  const [storedRows] = await db.query<StoredWebhookRow[]>(
+    "SELECT webhook_url FROM bots WHERE id = ? LIMIT 1",
+    [botId]
+  );
+  return clean(storedRows[0]?.webhook_url) || webhookUrl;
 }
 
 type TelegramActor = { id?: unknown };

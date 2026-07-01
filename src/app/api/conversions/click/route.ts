@@ -3,6 +3,10 @@ import pool from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth";
 import { appendClickId, recordAdClick } from "@/lib/conversionTracking";
 
+export function OPTIONS() {
+  return new Response(null, { status: 204 });
+}
+
 function clean(value: unknown) {
   return String(value || "").trim();
 }

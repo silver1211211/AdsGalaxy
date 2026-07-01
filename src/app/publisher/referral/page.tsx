@@ -109,7 +109,7 @@ function RewardDetailsModal({ data, onClose }: { data: any; onClose: () => void 
   if (!isQueueActive) return null;
 
   return (
-    <div className="fixed inset-0 z-[200] flex flex-col sm:items-center sm:justify-center sm:p-4 bg-black/40 sm:bg-black/50 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex flex-col bg-black/40 pt-16 backdrop-blur-sm sm:items-center sm:justify-center sm:p-4 lg:pl-64 lg:pt-4" onClick={onClose}>
       <div className="w-full sm:max-w-lg flex-1 sm:flex-none sm:max-h-[90vh] bg-white sm:rounded-3xl flex flex-col shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
         <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-6 pt-6 pb-4">
           <div className="flex items-center gap-3">
@@ -292,6 +292,16 @@ export default function ReferralPage() {
       .catch(console.error)
       .finally(() => setIsLoading(false));
   }, [setTitle]);
+
+  useEffect(() => {
+    const closeOverlaysForNavigation = () => {
+      setShowRewards(false);
+      setSuccessPopup(null);
+      setFraudPopup(null);
+    };
+    window.addEventListener("adsgalaxy:navigation-start", closeOverlaysForNavigation);
+    return () => window.removeEventListener("adsgalaxy:navigation-start", closeOverlaysForNavigation);
+  }, []);
 
   useEffect(() => {
     const notification = (data?.notifications || []).find((item: any) =>

@@ -67,9 +67,11 @@ export async function POST(
     const oldStatus = rows[0].status;
     const newStatus = statusMap[normalizedAction];
     const botColumns = await getBotColumns();
+    let webhookUrl: string | null = null;
 
     if (normalizedAction === "activate") {
-      await reactivateBotAfterHealthCheck(id, rows[0].bot_token);
+      const activation = await reactivateBotAfterHealthCheck(id, rows[0].bot_token, pool, new URL(request.url).origin);
+      webhookUrl = activation.webhookUrl;
     } else if (normalizedAction === "delete") {
       const { assignments, params } = updateAssignable(botColumns, {
         status: newStatus,
@@ -106,7 +108,7 @@ export async function POST(
       },
     });
 
-    return NextResponse.json({ success: true, status: newStatus });
+    return NextResponse.json({ success: true, status: newStatus, webhook_url: webhookUrl });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Internal Server Error";
     console.error("Admin Bot Action Error:", error);

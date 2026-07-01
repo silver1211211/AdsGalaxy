@@ -113,6 +113,7 @@ export default function BotDetailsScreen({
 }: BotDetailsScreenProps) {
   const [webhookDetails, setWebhookDetails] = useState<WebhookDetails | null>(null);
   const [webhookLoading, setWebhookLoading] = useState(true);
+  const [webhookError, setWebhookError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -134,9 +135,17 @@ export default function BotDetailsScreen({
       .then(async (response) => {
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.error || "Failed to load webhook details");
-        if (!cancelled) setWebhookDetails(data as WebhookDetails);
+        if (!cancelled) {
+          setWebhookDetails(data as WebhookDetails);
+          setWebhookError(null);
+        }
       })
-      .catch(() => { if (!cancelled) setWebhookDetails(null); })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setWebhookDetails(null);
+          setWebhookError(error instanceof Error ? error.message : "Failed to load webhook details");
+        }
+      })
       .finally(() => { if (!cancelled) setWebhookLoading(false); });
     return () => { cancelled = true; };
   }, [bot.id]);
@@ -290,6 +299,10 @@ export default function BotDetailsScreen({
 
               {webhookLoading ? (
                 <div className="h-16 animate-pulse rounded-xl bg-slate-100" />
+              ) : webhookError ? (
+                <div className="rounded-xl bg-red-50 px-3 py-3 text-xs font-bold text-red-700">
+                  {webhookError}
+                </div>
               ) : webhookDetails?.webhook_url ? (
                 <div className="rounded-xl border border-slate-200 bg-slate-950 p-3">
                   <p className="mb-2 text-[9px] font-black uppercase tracking-widest text-slate-400">Bot Webhook URL</p>

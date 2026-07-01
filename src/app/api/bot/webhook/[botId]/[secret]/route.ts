@@ -6,6 +6,7 @@ import { parsePublisherBotUpdate, verifyBotWebhookSecret } from "@/lib/botWebhoo
 type BotCredentialRow = RowDataPacket & {
   id: number;
   bot_token: string;
+  webhook_url: string | null;
 };
 
 export async function POST(
@@ -14,12 +15,12 @@ export async function POST(
 ) {
   const { botId, secret } = await params;
   const [bots] = await pool.query<BotCredentialRow[]>(
-    "SELECT id, bot_token FROM bots WHERE id = ? AND is_deleted = FALSE LIMIT 1",
+    "SELECT id, bot_token, webhook_url FROM bots WHERE id = ? AND is_deleted = FALSE LIMIT 1",
     [botId]
   );
   const bot = bots[0];
 
-  if (!bot || !verifyBotWebhookSecret(bot.id, bot.bot_token, secret)) {
+  if (!bot || !verifyBotWebhookSecret(bot.id, bot.bot_token, secret, bot.webhook_url)) {
     return NextResponse.json({ ok: false }, { status: 404 });
   }
 

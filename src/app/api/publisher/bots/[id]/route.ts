@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
-import { createBotWebhookUrl } from "@/lib/botWebhook";
+import { ensureStoredBotWebhookUrl } from "@/lib/botWebhook";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
 type PublisherBotDetailsRow = RowDataPacket & {
@@ -13,6 +13,7 @@ type PublisherBotDetailsRow = RowDataPacket & {
   status: string;
   created_at: string;
   webhook_last_update_at: string | null;
+  webhook_url: string | null;
   subscriber_count: number;
   active_count: number;
 };
@@ -35,6 +36,7 @@ export async function GET(
         b.bot_token,
         b.status,
         b.created_at,
+        b.webhook_url,
         b.webhook_last_update_at,
         (SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id) as subscriber_count,
         (SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.is_active = TRUE AND bu.status = 'active') as active_count
@@ -48,7 +50,12 @@ export async function GET(
       return NextResponse.json({ error: "Bot not found" }, { status: 404 });
     }
 
-    const webhookUrl = createBotWebhookUrl(new URL(request.url).origin, bot.id, bot.bot_token);
+    const webhookUrl = await ensureStoredBotWebhookUrl(
+      pool,
+      new URL(request.url).origin,
+      bot.id,
+      bot.bot_token
+    );
     let webhookConfigured = false;
     if (webhookUrl) {
       try {
@@ -132,8 +139,13 @@ export async function PATCH(
 
       const newStatus = currentStatus === "active" ? "paused" : "active";
       if (newStatus === "active") {
-        await reactivateBotAfterHealthCheck(id, rows[0].bot_token);
-        return NextResponse.json({ success: true, status: "active" });
+        const activation = await reactivateBotAfterHealthCheck(
+          id,
+          rows[0].bot_token,
+          pool,
+          new URL(request.url).origin
+        );
+        return NextResponse.json({ success: true, status: "active", webhook_url: activation.webhookUrl });
       }
 
       await pool.query(

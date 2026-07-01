@@ -8,6 +8,10 @@ import { validateMiniappRevenue } from "@/lib/miniappRevenueValidation";
 
 export const dynamic = "force-dynamic";
 
+export function OPTIONS() {
+  return new Response(null, { status: 204 });
+}
+
 type RequestRow = RowDataPacket & {
   id: number;
   miniapp_id: number;

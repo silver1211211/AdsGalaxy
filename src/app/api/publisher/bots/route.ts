@@ -41,14 +41,15 @@ export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
-    const [hasBroadcastDeliveries, hasWebhookTimestamp] = await Promise.all([
+    const [hasBroadcastDeliveries, hasWebhookTimestamp, hasBroadcastPublisherReward] = await Promise.all([
       tableExists("broadcast_deliveries"),
       columnExists("bots", "webhook_last_update_at"),
+      columnExists("broadcast_deliveries", "publisher_reward"),
     ]);
     const botImpressionsExpr = hasBroadcastDeliveries
       ? "COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id), 0)"
       : "0";
-    const botRevenueExpr = hasBroadcastDeliveries
+    const botRevenueExpr = hasBroadcastDeliveries && hasBroadcastPublisherReward
       ? "COALESCE((SELECT SUM(bd.publisher_reward) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id), 0)"
       : "0";
     const webhookTimestampExpr = hasWebhookTimestamp

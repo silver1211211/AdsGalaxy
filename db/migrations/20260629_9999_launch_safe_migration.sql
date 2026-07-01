@@ -117,6 +117,9 @@ CREATE INDEX IF NOT EXISTS `idx_channels_invite_hash`
 ALTER TABLE `bots`
   ADD COLUMN IF NOT EXISTS `webhook_last_update_at` DATETIME NULL;
 
+ALTER TABLE `bots`
+  ADD COLUMN IF NOT EXISTS `webhook_url` VARCHAR(500) NULL AFTER `bot_token`;
+
 ALTER TABLE `bot_users`
   ADD COLUMN IF NOT EXISTS `chat_id` BIGINT NULL AFTER `telegram_id`;
 

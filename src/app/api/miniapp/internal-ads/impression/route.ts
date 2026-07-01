@@ -25,6 +25,10 @@ type RequestRow = RowDataPacket & {
   is_deleted: number | boolean;
 };
 
+export function OPTIONS() {
+  return new Response(null, { status: 204 });
+}
+
 function cleanText(value: unknown) {
   return String(value || "").trim();
 }

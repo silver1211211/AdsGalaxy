@@ -1,6 +1,7 @@
 import type { PoolConnection } from "mysql2/promise";
 import pool from "@/lib/db";
 import { createSystemLog, maskEntityId } from "@/lib/systemLogs";
+import { ensureStoredBotWebhookUrl } from "@/lib/botWebhook";
 
 type Db = typeof pool | PoolConnection;
 
@@ -169,7 +170,13 @@ export async function markBotUserDeliverySuccess(userId: number | string, db: Db
   );
 }
 
-export async function reactivateBotAfterHealthCheck(botId: number | string, token: string, db: Db = pool) {
+export async function reactivateBotAfterHealthCheck(
+  botId: number | string,
+  token: string,
+  db: Db = pool,
+  origin = ""
+) {
+  const webhookUrl = await ensureStoredBotWebhookUrl(db, origin, botId, token);
   const health = await checkBotHealth({ id: botId, bot_token: token }, db);
   if (!health.ok) {
     throw new Error(health.reason || "Bot health check failed");
@@ -187,7 +194,7 @@ export async function reactivateBotAfterHealthCheck(botId: number | string, toke
      WHERE id = ?`,
     [botId]
   );
-  return health;
+  return { ...health, webhookUrl };
 }
 
 export async function sendWithRetries(send: () => Promise<any>) {

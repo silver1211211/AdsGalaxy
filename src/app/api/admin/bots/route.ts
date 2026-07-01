@@ -254,9 +254,11 @@ export async function PATCH(request: Request) {
     }
 
     const status = statusMap[normalizedAction];
+    let webhookUrl: string | null = null;
 
     if (normalizedAction === "activate") {
-      await reactivateBotAfterHealthCheck(id, bot.bot_token);
+      const activation = await reactivateBotAfterHealthCheck(id, bot.bot_token, pool, new URL(request.url).origin);
+      webhookUrl = activation.webhookUrl;
     } else if (normalizedAction === "delete") {
       const { assignments, params } = updateAssignable(botColumns, {
         status,
@@ -291,7 +293,7 @@ export async function PATCH(request: Request) {
       await sendTelegramMessage(bot.telegram_id, message);
     }
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, webhook_url: webhookUrl });
   } catch (error: any) {
     console.error("Admin Bots Update Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });

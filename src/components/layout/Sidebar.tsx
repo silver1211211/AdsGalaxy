@@ -1,8 +1,8 @@
 "use client";
 
-import React from "react";
+import React, { useEffect } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   Tv,
@@ -25,6 +25,7 @@ interface SidebarProps {
 
 export default function Sidebar({ type, isOpen, onClose }: SidebarProps) {
   const pathname = usePathname();
+  const router = useRouter();
 
   const publisherLinks = [
     { name: "Dashboard", href: "/publisher", icon: LayoutDashboard },
@@ -44,6 +45,15 @@ export default function Sidebar({ type, isOpen, onClose }: SidebarProps) {
   ];
 
   const links = type === "publisher" ? publisherLinks : advertiserLinks;
+
+  useEffect(() => {
+    links.forEach((link) => router.prefetch(link.href));
+  }, [links, router]);
+
+  const handleNavigation = () => {
+    onClose();
+    window.dispatchEvent(new Event("adsgalaxy:navigation-start"));
+  };
 
   return (
     <>
@@ -85,7 +95,7 @@ export default function Sidebar({ type, isOpen, onClose }: SidebarProps) {
               <Link
                 key={link.name}
                 href={link.href}
-                onClick={onClose}
+                onClick={handleNavigation}
                 className={cn(
                   "group flex items-center gap-3 rounded-2xl px-3 py-3 text-sm font-bold transition-all",
                   isActive
@@ -109,6 +119,7 @@ export default function Sidebar({ type, isOpen, onClose }: SidebarProps) {
         <div className="relative border-t border-white/10 p-4">
           <Link
             href={type === "publisher" ? "/advertiser" : "/publisher"}
+            onClick={handleNavigation}
             className="group flex w-full items-center justify-between rounded-2xl border border-white/15 bg-white/10 px-4 py-3 shadow-inner shadow-white/5 transition-colors hover:bg-white/20"
           >
             <div className="flex flex-col items-start">

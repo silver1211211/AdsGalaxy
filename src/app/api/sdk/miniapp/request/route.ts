@@ -9,6 +9,10 @@ import { isMiniappNetworkGloballyDisabled, requireAdServingAllowed } from "@/lib
 
 export const dynamic = "force-dynamic";
 
+export function OPTIONS() {
+  return new Response(null, { status: 204 });
+}
+
 function clean(value: unknown) {
   return String(value || "").trim();
 }
