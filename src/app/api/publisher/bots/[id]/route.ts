@@ -5,6 +5,8 @@ import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
 import { ensureStoredBotWebhookUrl } from "@/lib/botWebhook";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
+export const dynamic = "force-dynamic";
+
 type PublisherBotDetailsRow = RowDataPacket & {
   id: number;
   bot_name: string;
@@ -19,6 +21,20 @@ type PublisherBotDetailsRow = RowDataPacket & {
 };
 
 type BotStatusRow = RowDataPacket & { status: string; bot_token: string };
+
+function normalizeWebhookUrl(value: unknown) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    url.hash = "";
+    url.search = "";
+    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return raw.replace(/\/+$/, "");
+  }
+}
 
 export async function GET(
   request: Request,
@@ -56,22 +72,32 @@ export async function GET(
       bot.id,
       bot.bot_token
     );
-    let webhookConfigured = false;
+    let telegramWebhookUrl = "";
+    let webhookCheckError: string | null = null;
     if (webhookUrl) {
       try {
-        const response = await fetch(`https://api.telegram.org/bot${bot.bot_token}/getWebhookInfo`, {
+        const response = await fetch(`https://api.telegram.org/bot${bot.bot_token.trim()}/getWebhookInfo`, {
           signal: AbortSignal.timeout(5000),
           cache: "no-store",
         });
         const data = await response.json().catch(() => ({}));
-        webhookConfigured = Boolean(data.ok && String(data.result?.url || "").replace(/\/$/, "") === webhookUrl.replace(/\/$/, ""));
-      } catch {
-        webhookConfigured = false;
+        telegramWebhookUrl = String(data.result?.url || "").trim();
+        if (!data.ok) webhookCheckError = String(data.description || `Telegram HTTP ${response.status}`);
+      } catch (error: unknown) {
+        webhookCheckError = error instanceof Error ? error.message : "Telegram webhook check failed";
       }
     }
 
+    const webhookUrlsMatch = Boolean(
+      webhookUrl
+      && telegramWebhookUrl
+      && normalizeWebhookUrl(telegramWebhookUrl) === normalizeWebhookUrl(webhookUrl)
+    );
+    const webhookConfigured = webhookUrlsMatch;
     const webhookStatus = webhookConfigured
-      ? (bot.webhook_last_update_at ? "receiving_users" : "configured")
+      ? bot.webhook_last_update_at
+        ? "receiving_users"
+        : "configured"
       : "not_configured";
 
     return NextResponse.json({
@@ -84,9 +110,13 @@ export async function GET(
       subscriber_count: Number(bot.subscriber_count || 0),
       active_count: Number(bot.active_count || 0),
       webhook_url: webhookUrl,
+      telegram_webhook_url: telegramWebhookUrl || null,
       webhook_configured: webhookConfigured,
       webhook_status: webhookStatus,
       webhook_last_update_at: bot.webhook_last_update_at,
+      webhook_check_error: webhookCheckError,
+    }, {
+      headers: { "Cache-Control": "private, no-store, max-age=0" },
     });
   } catch (error: unknown) {
     console.error("GET Bot Details Error:", error instanceof Error ? error.message : "unknown");

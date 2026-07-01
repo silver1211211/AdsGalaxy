@@ -35,6 +35,8 @@ type PublisherBot = {
 
 type WebhookDetails = {
   webhook_url: string | null;
+  telegram_webhook_url: string | null;
+  webhook_configured: boolean;
   webhook_status: "configured" | "not_configured" | "receiving_users";
   webhook_last_update_at: string | null;
 };
@@ -131,7 +133,7 @@ export default function BotDetailsScreen({
 
   useEffect(() => {
     let cancelled = false;
-    apiFetch(`/api/publisher/bots/${bot.id}`)
+    const loadWebhookDetails = () => apiFetch(`/api/publisher/bots/${bot.id}`, { cache: "no-store" })
       .then(async (response) => {
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.error || "Failed to load webhook details");
@@ -142,12 +144,23 @@ export default function BotDetailsScreen({
       })
       .catch((error: unknown) => {
         if (!cancelled) {
-          setWebhookDetails(null);
           setWebhookError(error instanceof Error ? error.message : "Failed to load webhook details");
         }
       })
       .finally(() => { if (!cancelled) setWebhookLoading(false); });
-    return () => { cancelled = true; };
+
+    void loadWebhookDetails();
+    const refreshTimer = window.setInterval(loadWebhookDetails, 15000);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void loadWebhookDetails();
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(refreshTimer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
   }, [bot.id]);
 
   useEffect(() => () => {
@@ -299,14 +312,14 @@ export default function BotDetailsScreen({
 
               {webhookLoading ? (
                 <div className="h-16 animate-pulse rounded-xl bg-slate-100" />
-              ) : webhookError ? (
-                <div className="rounded-xl bg-red-50 px-3 py-3 text-xs font-bold text-red-700">
-                  {webhookError}
-                </div>
               ) : webhookDetails?.webhook_url ? (
                 <div className="rounded-xl border border-slate-200 bg-slate-950 p-3">
                   <p className="mb-2 text-[9px] font-black uppercase tracking-widest text-slate-400">Bot Webhook URL</p>
                   <code className="block break-all text-[11px] leading-5 text-blue-100">{webhookDetails.webhook_url}</code>
+                </div>
+              ) : webhookError ? (
+                <div className="rounded-xl bg-red-50 px-3 py-3 text-xs font-bold text-red-700">
+                  {webhookError}
                 </div>
               ) : (
                 <div className="rounded-xl bg-red-50 px-3 py-3 text-xs font-bold text-red-700">
