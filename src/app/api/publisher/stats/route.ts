@@ -15,7 +15,7 @@ export async function GET(request: Request) {
 
     // Fetch total channels count
     const [channelCountRows]: any = await pool.query(
-      "SELECT COUNT(*) as total FROM channels WHERE user_id = ? AND is_deleted = FALSE AND status = 'active' AND COALESCE(health_status, 'active') = 'active'",
+      "SELECT COUNT(*) as total FROM channels WHERE user_id = ? AND is_deleted = FALSE AND status = 'active' AND COALESCE(health_status, 'healthy') IN ('healthy','warning')",
       [user.id]
     );
 
@@ -25,7 +25,7 @@ export async function GET(request: Request) {
       [user.id]
     );
     const [miniappCountRows]: any = await pool.query(
-      "SELECT COUNT(*) as total FROM miniapps WHERE user_id = ? AND is_deleted = FALSE AND status IN ('active', 'approved')",
+      "SELECT COUNT(*) as total FROM miniapps WHERE user_id = ? AND is_deleted = FALSE AND status IN ('active', 'approved', 'monetized')",
       [user.id]
     );
 
@@ -35,13 +35,21 @@ export async function GET(request: Request) {
       [user.id]
     );
 
-    // Fetch last 3 added monetized items across channels, bots, mini apps
+    // Fetch last 3 added items across channels, bots, mini apps (any status except deleted,
+    // so newly added items still awaiting admin approval remain visible on the dashboard)
     const [recentMonetized]: any = await pool.query(
-      `(SELECT 'channel' AS type, id, title AS name, username, status, created_at FROM channels WHERE user_id = ? AND is_deleted = FALSE AND status = 'active' AND COALESCE(health_status, 'active') = 'active')
+      `(SELECT 'channel' AS type, id, title AS name, username, status, created_at,
+          posts_per_day, audience_continents, categories, channel_type
+        FROM channels WHERE user_id = ? AND is_deleted = FALSE)
        UNION ALL
-       (SELECT 'bot' AS type, id, bot_name AS name, bot_username AS username, status, created_at FROM bots WHERE user_id = ? AND is_deleted = FALSE AND status IN ('active', 'approved'))
+       (SELECT 'bot' AS type, id, bot_name AS name, bot_username AS username, status, created_at,
+          posts_per_day, continents AS audience_continents, categories, NULL AS channel_type
+        FROM bots WHERE user_id = ? AND is_deleted = FALSE)
        UNION ALL
-       (SELECT 'miniapp' AS type, id, miniapp_name AS name, miniapp_username AS username, status, created_at FROM miniapps WHERE user_id = ? AND is_deleted = FALSE AND status IN ('active', 'approved'))
+       (SELECT 'miniapp' AS type, id, miniapp_name AS name, miniapp_username AS username,
+          CASE WHEN status = 'awaiting' THEN 'pending' WHEN status = 'monetized' THEN 'approved' ELSE status END AS status,
+          created_at, NULL AS posts_per_day, NULL AS audience_continents, NULL AS categories, NULL AS channel_type
+        FROM miniapps WHERE user_id = ? AND is_deleted = FALSE)
        ORDER BY created_at DESC LIMIT 3`,
       [user.id, user.id, user.id]
     );

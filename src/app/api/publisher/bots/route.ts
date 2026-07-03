@@ -3,6 +3,7 @@ import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import { botTokenHash, encryptBotToken, ensureBotIntegration, isBotEncryptionError, publisherBotEncryptionErrorMessage, resolveBotIntegrationStatus } from "@/lib/botIntegration";
 
 type ExistingBotRow = RowDataPacket & { id: number; user_id: number; is_deleted: boolean | number };
 
@@ -63,6 +64,9 @@ export async function GET(request: Request) {
         b.bot_name,
         b.bot_username,
         b.status,
+        b.integration_installed_at,
+        b.integration_last_received_at,
+        b.integration_last_error_at,
         b.paused_reason,
         b.suggested_fix,
         b.health_status,
@@ -81,16 +85,28 @@ export async function GET(request: Request) {
             THEN (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND is_active = TRUE AND status = 'active')
           ELSE 0
         END as active_count,
-        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND (is_active = FALSE OR status != 'active')) as blocked_count,
+        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND (is_active = FALSE OR status IN ('inactive','blocked_bot','user_not_found','chat_not_found','unreachable'))) as blocked_count,
+        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND status = 'pending_verification') as pending_verification_count,
+        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND source = 'integration') as integration_user_count,
+        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND source <> 'integration') as manually_imported_count,
         ${botImpressionsExpr} as total_impressions,
-        0 as total_clicks,
         ${botRevenueExpr} as total_revenue
        FROM bots b 
        WHERE b.user_id = ? AND b.is_deleted = FALSE 
        ORDER BY b.created_at DESC`, 
       [user.id]
     );
-    return NextResponse.json(rows);
+    return NextResponse.json((rows as Array<Record<string, unknown>>).map((row) => ({
+      ...row,
+      integration_status: resolveBotIntegrationStatus({
+        botStatus: row.status,
+        registrationCount: row.active_count,
+        pendingVerificationCount: row.pending_verification_count,
+        installedAt: row.integration_installed_at,
+        lastReceivedAt: row.integration_last_received_at,
+        lastErrorAt: row.integration_last_error_at,
+      }),
+    })));
   } catch (error: unknown) {
     console.error("API Error:", error);
     return NextResponse.json({ error: errorMessage(error, "Failed to fetch bots") }, { status: getAuthErrorStatus(error) });
@@ -113,7 +129,11 @@ export async function POST(request: Request) {
     }
 
     // 1. Validate bot token with Telegram
-    const tgRes = await fetch(`https://api.telegram.org/bot${bot_token}/getMe`);
+    const normalizedToken = String(bot_token).trim();
+    if (!/^\d{5,15}:[A-Za-z0-9_-]{20,}$/.test(normalizedToken)) {
+      return NextResponse.json({ error: "Bot token format is invalid" }, { status: 400 });
+    }
+    const tgRes = await fetch(`https://api.telegram.org/bot${normalizedToken}/getMe`, { signal: AbortSignal.timeout(8000), cache: "no-store" });
     const tgData = await tgRes.json();
 
     if (!tgData.ok) {
@@ -124,8 +144,8 @@ export async function POST(request: Request) {
 
     // 2. Check if bot already exists
     const [existing] = await pool.query<ExistingBotRow[]>(
-      "SELECT id, user_id, is_deleted FROM bots WHERE bot_token = ?",
-      [bot_token]
+      "SELECT id, user_id, is_deleted FROM bots WHERE bot_token_hash = ? OR bot_token = ?",
+      [botTokenHash(normalizedToken), normalizedToken]
     );
 
     if (existing.length > 0) {
@@ -142,8 +162,9 @@ export async function POST(request: Request) {
       // Reactivate soft-deleted bot
       await pool.query(
         `UPDATE bots SET 
-          bot_username = ?, 
+          bot_username = ?,
           bot_name = ?, 
+          bot_token = ?, bot_token_encrypted = ?, bot_token_hash = ?,
           posts_per_day = ?, 
           continents = ?, 
           categories = ?,
@@ -155,22 +176,28 @@ export async function POST(request: Request) {
           failure_reason = NULL,
           reactivated_at = NOW()
          WHERE id = ?`,
-        [bot_username, bot_name, posts_per_day, JSON.stringify(continents), JSON.stringify(categories || []), bot.id]
+        [bot_username, bot_name, `secure:${botTokenHash(normalizedToken)}`, encryptBotToken(normalizedToken), botTokenHash(normalizedToken), posts_per_day, JSON.stringify(continents), JSON.stringify(categories || []), bot.id]
       );
 
-      return NextResponse.json({ success: true, id: bot.id, message: "Bot reactivated and updated" });
+      const integrationUrl = await ensureBotIntegration(pool, new URL(request.url).origin, bot.id);
+      return NextResponse.json({ success: true, id: bot.id, bot_id: bot.id, integration_url: integrationUrl, message: "Bot reactivated and updated" });
     }
 
     // 3. Insert new bot
     const [result] = await pool.query<ResultSetHeader>(
-      `INSERT INTO bots (user_id, bot_token, bot_username, bot_name, posts_per_day, continents, categories, status) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
-      [user.id, bot_token, bot_username, bot_name, posts_per_day, JSON.stringify(continents), JSON.stringify(categories || [])]
+      `INSERT INTO bots (user_id, bot_token, bot_token_encrypted, bot_token_hash, bot_username, bot_name, posts_per_day, continents, categories, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      [user.id, `secure:${botTokenHash(normalizedToken)}`, encryptBotToken(normalizedToken), botTokenHash(normalizedToken), bot_username, bot_name, posts_per_day, JSON.stringify(continents), JSON.stringify(categories || [])]
     );
 
-    return NextResponse.json({ success: true, id: result.insertId });
+    const integrationUrl = await ensureBotIntegration(pool, new URL(request.url).origin, result.insertId);
+    return NextResponse.json({ success: true, id: result.insertId, bot_id: result.insertId, integration_url: integrationUrl }, { status: 201 });
   } catch (error: unknown) {
     console.error("API Error:", error);
+    if (isBotEncryptionError(error)) {
+      console.error("Publisher bot encryption/configuration failure", { code: error.code });
+      return NextResponse.json({ error: publisherBotEncryptionErrorMessage() }, { status: 503 });
+    }
     return NextResponse.json({ error: errorMessage(error, "Failed to add bot") }, { status: getAuthErrorStatus(error) });
   }
 }

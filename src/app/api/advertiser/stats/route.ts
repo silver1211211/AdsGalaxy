@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
-import { advertiserTrustLabel } from "@/lib/advertiserTrust";
 import { advertiserConversionSummary } from "@/lib/conversionTracking";
 import { columnExists } from "@/lib/schemaGuards";
 
@@ -62,9 +61,8 @@ export async function GET(request: Request) {
     ];
 
     // 1. Get Ad Balance from user table
-    const [userRows]: any = await pool.query("SELECT ad_balance, advertiser_trust_level FROM users WHERE id = ?", [user.id]);
+    const [userRows]: any = await pool.query("SELECT ad_balance FROM users WHERE id = ?", [user.id]);
     const adBalance = parseFloat(userRows[0]?.ad_balance || "0");
-    const advertiserTrustLevel = userRows[0]?.advertiser_trust_level || "new";
 
     // 2. Calculate Locked Balance (Sum of budgets of pending, active, and paused campaigns)
     const [lockedResult]: any = await pool.query(
@@ -132,7 +130,7 @@ export async function GET(request: Request) {
        FROM campaigns c
        WHERE c.user_id = ?
        ORDER BY c.created_at DESC
-       LIMIT 5`,
+       LIMIT 3`,
       [user.id]
     );
     const [miniAppCampaigns]: any = await pool.query(
@@ -156,12 +154,12 @@ export async function GET(request: Request) {
        FROM miniapp_rewarded_campaigns c
        WHERE c.advertiser_id = ?
        ORDER BY c.created_at DESC
-       LIMIT 5`,
+       LIMIT 3`,
       [user.id]
     );
     const recentCampaigns = [...channelAndBotCampaigns, ...miniAppCampaigns]
       .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-      .slice(0, 5);
+      .slice(0, 3);
 
     // 6. Stats (Views, Clicks, Spent)
     // Get actual clicks from campaign_clicks table
@@ -230,8 +228,6 @@ export async function GET(request: Request) {
       cost_per_conversion: conversions > 0 ? adSpend / conversions : 0,
       conversion_value: conversionValue,
       miniapp_impressions: miniappImpressions,
-      advertiser_trust_level: advertiserTrustLevel,
-      advertiser_trust_label: advertiserTrustLabel(advertiserTrustLevel),
       recent_campaigns: recentCampaigns
     });
 

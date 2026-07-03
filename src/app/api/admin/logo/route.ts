@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { writeFile } from "fs/promises";
 import path from "path";
-import { checkAdminAuth } from "@/lib/adminAuth";
+import { requireAdminPermission } from "@/lib/adminAuth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,9 +9,8 @@ export const dynamic = "force-dynamic";
 const MAX_LOGO_BYTES = 5 * 1024 * 1024;
 
 export async function POST(request: Request) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const formData = await request.formData();

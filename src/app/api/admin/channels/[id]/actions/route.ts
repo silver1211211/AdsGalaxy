@@ -1,129 +1,135 @@
 import { NextResponse } from "next/server";
-import type { RowDataPacket } from "mysql2/promise";
+import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
-import { ensureDefaultChannelDistribution } from "@/lib/channelLifecycle";
-import { sendTelegramMessage } from "@/lib/telegram";
+import { checkChannelHealth, markChannelHealthSuccess, autoPauseChannel } from "@/lib/channelLifecycle";
+import { clearPrivateTrackingAssignment } from "@/lib/privateChannelTrackingOnboarding";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
-import {
-  clearPrivateTrackingAssignment,
-  onboardPrivateChannelTracking,
-} from "@/lib/privateChannelTrackingOnboarding";
+import { refreshChannelViews } from "@/lib/channelAdminViewRefresh";
+import { settleChannelCampaigns } from "@/lib/channelSettlement";
+import { getPublisherQuality } from "@/lib/publisherQuality";
 
-type StatusRow = RowDataPacket & {
-  id: number;
-  status: string;
-  chat_id: string | number;
-  channel_type: "public" | "private" | null;
-  title: string | null;
-  username: string | null;
-  owner_telegram_id: string | number | null;
+type ChannelRow = RowDataPacket & {
+  id: number; user_id: number; status: string; is_deleted: number;
+  chat_id: string; publisher_trust_score: number | string;
+  trust_score_frozen_until: Date | null; under_review: number;
+  settlement_excluded_until: Date | null; publisher_status: string; publisher_is_banned: number;
 };
 
-export async function POST(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { admin, response } = await requireAdminPermission("operate");
+const DANGEROUS = new Set(["delete", "adjust_trust", "reinstate", "settlement", "exclude_settlement", "include_settlement", "mark_false_positive"]);
+const REASON_REQUIRED = new Set(["adjust_trust", "reinstate", "exclude_settlement", "mark_false_positive"]);
+
+async function audit(adminId: number | undefined, channel: ChannelRow, action: string, reason: string, oldValue: unknown, newValue: unknown) {
+  await pool.query(
+    `INSERT INTO channel_admin_action_audits(admin_id,action,channel_id,publisher_id,old_value,new_value,reason)
+     VALUES (?,?,?,?,?,?,?)`,
+    [adminId || null, action, channel.id, channel.user_id, JSON.stringify(oldValue), JSON.stringify(newValue), reason]
+  );
+  await recordAdminActionAudit({ adminId, action: `channel_${action}`, entityType: "channel", entityId: channel.id, reason, metadata: { publisher_id: channel.user_id, old_value: oldValue, new_value: newValue } });
+}
+
+export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const body = await request.json() as { action?: string; reason?: string; value?: unknown; duration_hours?: unknown; fraud_event_id?: unknown };
+  const action = body.action === "activate" ? "resume" : body.action || "";
+  const permission = DANGEROUS.has(action) ? "dangerous" : "operate";
+  const { admin, response } = await requireAdminPermission(permission);
   if (response) return response;
+  const channelId = Number((await params).id);
+  const reason = String(body.reason || "").trim();
+  if (!Number.isInteger(channelId) || channelId <= 0) return NextResponse.json({ error: "Invalid channel" }, { status: 400 });
+  if (REASON_REQUIRED.has(action) && reason.length < 3) return NextResponse.json({ error: "A reason is required" }, { status: 400 });
 
-  try {
-    const { id } = await params;
-    const { action } = await request.json();
-    const normalizedAction = action === "deny" ? "reject" : action === "approve" ? "activate" : action;
-    const statusMap: Record<string, string> = {
-      activate: "active",
-      pause: "paused",
-      reject: "rejected",
-      deny: "rejected",
-      delete: "deleted",
-    };
+  const [rows] = await pool.query<ChannelRow[]>(
+    `SELECT ch.id,ch.user_id,ch.status,ch.is_deleted,ch.chat_id,ch.publisher_trust_score,
+       ch.trust_score_frozen_until,ch.under_review,ch.settlement_excluded_until,
+       u.status publisher_status,u.is_banned publisher_is_banned
+     FROM channels ch JOIN users u ON u.id=ch.user_id WHERE ch.id=? LIMIT 1`, [channelId]
+  );
+  const channel = rows[0];
+  if (!channel) return NextResponse.json({ error: "Channel not found" }, { status: 404 });
+  let result: unknown = { success: true };
+  let oldValue: unknown = { status: channel.status };
+  let newValue: unknown = oldValue;
 
-    if (!statusMap[normalizedAction]) {
-      return NextResponse.json({ error: "Invalid action" }, { status: 400 });
-    }
-
-    const [rows] = await pool.query<StatusRow[]>(
-      `SELECT c.id, c.status, c.chat_id, c.channel_type, c.title, c.username, u.telegram_id as owner_telegram_id
-       FROM channels c
-       LEFT JOIN users u ON u.id = c.user_id
-       WHERE c.id = ?
-       LIMIT 1`,
-      [id]
+  if (action === "pause") {
+    await pool.query("UPDATE channels SET status='paused',paused_reason='Paused by admin control center' WHERE id=?", [channelId]);
+    newValue = { status: "paused" };
+  } else if (action === "resume") {
+    await pool.query("UPDATE channels SET status='active',is_deleted=FALSE,paused_reason=NULL,failure_reason=NULL,reactivated_at=NOW() WHERE id=?", [channelId]);
+    newValue = { status: "active" };
+  } else if (action === "reject") {
+    await pool.query("UPDATE channels SET status='rejected',paused_reason='Rejected by admin control center' WHERE id=?", [channelId]);
+    newValue = { status: "rejected" };
+  } else if (action === "delete") {
+    await pool.query("UPDATE channels SET status='deleted',is_deleted=TRUE,paused_reason=? WHERE id=?", [reason, channelId]);
+    await clearPrivateTrackingAssignment(channelId, await getChannelPrivacySchema());
+    newValue = { status: "deleted", is_deleted: true };
+  } else if (action === "mark_review" || action === "clear_review") {
+    const underReview = action === "mark_review" ? 1 : 0;
+    oldValue = { under_review: Boolean(channel.under_review) };
+    newValue = { under_review: Boolean(underReview) };
+    await pool.query("UPDATE channels SET under_review=? WHERE id=?", [underReview, channelId]);
+  } else if (action === "health_check") {
+    const health = await checkChannelHealth({ id: channelId, chat_id: channel.chat_id });
+    if (health.ok) await markChannelHealthSuccess(channelId);
+    else await autoPauseChannel(channelId, health);
+    oldValue = { health_status: "requested" };
+    newValue = health;
+    result = { success: true, health };
+  } else if (action === "view_refresh") {
+    result = { success: true, refresh: await refreshChannelViews(channelId) };
+    oldValue = { operation: "view_refresh" };
+    newValue = result;
+  } else if (action === "settlement") {
+    result = { success: true, settlement: await settleChannelCampaigns({ channelId }) };
+    oldValue = { operation: "settlement" };
+    newValue = result;
+  } else if (action === "adjust_trust") {
+    const score = Number(body.value);
+    if (!Number.isFinite(score) || score < -100 || score > 100) return NextResponse.json({ error: "Trust score must be between -100 and 100" }, { status: 400 });
+    oldValue = { trust_score: Number(channel.publisher_trust_score) };
+    newValue = { trust_score: score };
+    await pool.query("UPDATE channels SET publisher_trust_score=? WHERE id=?", [score, channelId]);
+    await pool.query("UPDATE users SET publisher_trust_score=(SELECT AVG(publisher_trust_score) FROM channels WHERE user_id=? AND is_deleted=FALSE) WHERE id=?", [channel.user_id, channel.user_id]);
+    await getPublisherQuality(channelId);
+  } else if (action === "freeze_trust") {
+    const hours = Math.min(720, Math.max(1, Number(body.duration_hours) || 24));
+    oldValue = { frozen_until: channel.trust_score_frozen_until };
+    await pool.query("UPDATE channels SET trust_score_frozen_until=DATE_ADD(NOW(),INTERVAL ? HOUR) WHERE id=?", [hours, channelId]);
+    newValue = { duration_hours: hours };
+  } else if (action === "unfreeze_trust") {
+    oldValue = { frozen_until: channel.trust_score_frozen_until };
+    await pool.query("UPDATE channels SET trust_score_frozen_until=NULL WHERE id=?", [channelId]);
+    newValue = { frozen_until: null };
+  } else if (action === "mark_false_positive") {
+    const eventId = Number(body.fraud_event_id);
+    const [update] = await pool.query<ResultSetHeader>(
+      `UPDATE channel_fraud_events SET false_positive_at=NOW(),false_positive_by=?,false_positive_reason=?
+       WHERE id=COALESCE(NULLIF(?,0),(SELECT event_id FROM (SELECT id event_id FROM channel_fraud_events WHERE channel_id=? ORDER BY created_at DESC LIMIT 1) latest)) AND channel_id=?`,
+      [admin?.id || null, reason, eventId || 0, channelId, channelId]
     );
-    if (rows.length === 0) {
-      return NextResponse.json({ error: "Channel not found" }, { status: 404 });
-    }
-
-    const oldStatus = rows[0].status;
-    const newStatus = statusMap[normalizedAction];
-
-    if (normalizedAction === "activate") {
-      await pool.query(
-        `UPDATE channels
-         SET status = 'active',
-             is_deleted = FALSE,
-             paused_reason = NULL,
-             suggested_fix = NULL,
-             failure_reason = NULL,
-             health_status = 'active',
-             health_checked_at = NOW(),
-             reactivated_at = NOW()
-         WHERE id = ?`,
-        [id]
-      );
-      await ensureDefaultChannelDistribution();
-      const privacySchema = await getChannelPrivacySchema();
-      await onboardPrivateChannelTracking({
-        channelId: id,
-        chatId: rows[0].chat_id,
-        channelType: rows[0].channel_type === "private" ? "private" : "public",
-        schema: privacySchema,
-      }).catch((trackingError: unknown) => {
-        const message = trackingError instanceof Error ? trackingError.message : "tracking_onboarding_error";
-        console.warn("Private tracking onboarding after admin approval failed", { channel_id: id, error: message });
-      });
-    } else if (normalizedAction === "delete") {
-      await pool.query("UPDATE channels SET status = ?, is_deleted = TRUE, paused_reason = 'Deleted by admin.', suggested_fix = NULL WHERE id = ?", [newStatus, id]);
-      await clearPrivateTrackingAssignment(id, await getChannelPrivacySchema());
-    } else {
-      await pool.query("UPDATE channels SET status = ?, paused_reason = ?, suggested_fix = ? WHERE id = ?", [
-        newStatus,
-        newStatus === "paused" ? "Paused by admin." : null,
-        newStatus === "paused" ? "Contact support or reactivate after fixing channel access." : null,
-        id,
-      ]);
-    }
-
-    if ((normalizedAction === "activate" || normalizedAction === "reject") && rows[0].owner_telegram_id) {
-      const channelLabel = rows[0].username ? `@${rows[0].username}` : "your private channel";
-      const message = normalizedAction === "activate"
-        ? `✅ <b>Channel Approved!</b>\n\nYour channel <b>${rows[0].title || "Channel"}</b> (${channelLabel}) has been approved and is now active in the advertisements network.`
-        : `❌ <b>Channel Rejected</b>\n\nUnfortunately, your channel <b>${rows[0].title || "Channel"}</b> (${channelLabel}) was not approved for monetization at this time.`;
-
-      await sendTelegramMessage(rows[0].owner_telegram_id, message).catch((notifyError: unknown) => {
-        const notifyMessage = notifyError instanceof Error ? notifyError.message : "Unknown notification error";
-        console.warn("Admin channel notification failed", { channel_id: id, action: normalizedAction, error: notifyMessage });
-      });
-    }
-
-    await recordAdminActionAudit({
-      adminId: admin?.id,
-      action: `channel_${normalizedAction}`,
-      entityType: "channel",
-      entityId: id,
-      reason: `admin_${normalizedAction}`,
-      metadata: {
-        old_status: oldStatus,
-        new_status: newStatus,
-      },
-    });
-
-    return NextResponse.json({ success: true, status: newStatus });
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Internal Server Error";
-    console.error("Admin Channel Action Error:", error);
-    return NextResponse.json({ error: message }, { status: 500 });
+    if (!update.affectedRows) return NextResponse.json({ error: "Fraud event not found" }, { status: 404 });
+    oldValue = { fraud_event_id: eventId || "latest", false_positive: false };
+    newValue = { fraud_event_id: eventId || "latest", false_positive: true };
+  } else if (action === "reinstate") {
+    await pool.query("UPDATE users SET status='active',is_banned=0,banned_at=NULL,ban_reason=NULL,publisher_trust_score=60 WHERE id=?", [channel.user_id]);
+    await pool.query("UPDATE channels SET status='active',is_deleted=FALSE,paused_reason=NULL,under_review=0,publisher_trust_score=60,trust_score_frozen_until=DATE_ADD(NOW(),INTERVAL 24 HOUR),reactivated_at=NOW() WHERE user_id=? AND is_deleted=FALSE", [channel.user_id]);
+    oldValue = { publisher_status: channel.publisher_status, publisher_is_banned: Boolean(channel.publisher_is_banned), channel_status: channel.status };
+    newValue = { publisher_status: "active", publisher_is_banned: false, channel_status: "active", publisher_trust_score: 60, trust_enforcement_frozen_hours: 24 };
+  } else if (action === "exclude_settlement") {
+    const hours = Math.min(720, Math.max(1, Number(body.duration_hours) || 24));
+    oldValue = { excluded_until: channel.settlement_excluded_until };
+    await pool.query("UPDATE channels SET settlement_excluded_until=DATE_ADD(NOW(),INTERVAL ? HOUR),settlement_exclusion_reason=? WHERE id=?", [hours, reason, channelId]);
+    newValue = { duration_hours: hours, reason };
+  } else if (action === "include_settlement") {
+    oldValue = { excluded_until: channel.settlement_excluded_until };
+    await pool.query("UPDATE channels SET settlement_excluded_until=NULL,settlement_exclusion_reason=NULL WHERE id=?", [channelId]);
+    newValue = { excluded_until: null };
+  } else {
+    return NextResponse.json({ error: "Invalid action" }, { status: 400 });
   }
+
+  await audit(admin?.id, channel, action, reason || `admin_${action}`, oldValue, newValue);
+  return NextResponse.json(result);
 }

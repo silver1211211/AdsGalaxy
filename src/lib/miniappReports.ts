@@ -63,7 +63,7 @@ export async function buildMiniAppReport(miniappId: number | string, startDate: 
   const [dailyRows]: any = await pool.query(
     `SELECT
        ? as miniapp_id,
-       date,
+       DATE_FORMAT(date, '%Y-%m-%d') as date,
        SUM(CASE WHEN network_name <> 'AdsGalaxyInternal' THEN impressions ELSE 0 END) as external_impressions,
        SUM(CASE WHEN network_name <> 'AdsGalaxyInternal' THEN gross_revenue ELSE 0 END) as external_gross_revenue,
        SUM(CASE WHEN network_name <> 'AdsGalaxyInternal' THEN ads_galaxy_fee ELSE 0 END) as external_fee,
@@ -78,6 +78,17 @@ export async function buildMiniAppReport(miniappId: number | string, startDate: 
      GROUP BY date
      ORDER BY date DESC`,
     [miniappId, ...params]
+  );
+
+  const [fillRateRows]: any = await pool.query(
+    `SELECT
+       DATE_FORMAT(created_at, '%Y-%m-%d') as date,
+       COUNT(CASE WHEN parent_request_id IS NULL THEN 1 END) as requests,
+       COUNT(CASE WHEN impression_confirmed = 1 THEN 1 END) as confirmed_impressions
+     FROM miniapp_mediation_requests
+     WHERE miniapp_id = ? AND DATE(created_at) BETWEEN ? AND ? AND CAST(DATE(created_at) AS CHAR) LIKE ?
+     GROUP BY DATE_FORMAT(created_at, '%Y-%m-%d')`,
+    params
   );
 
   const [totalRows]: any = await pool.query(
@@ -198,26 +209,44 @@ export async function buildMiniAppReport(miniappId: number | string, startDate: 
       incomplete_rate: completionAnalytics.incomplete_rate,
       ...reconciliation,
     },
-    daily: dailyRows.map((row: any) => {
-      const dailyReconciliation = reconcileRevenue(row);
-      return {
-        date: row.date,
-        impressions: toNumber(row.total_impressions),
-        external_impressions: toNumber(row.external_impressions),
-        external_revenue: toNumber(row.external_gross_revenue),
-        external_gross_revenue: toNumber(row.external_gross_revenue),
-        ads_galaxy_fee: toNumber(row.external_fee),
-        external_net_revenue: toNumber(row.external_net_revenue),
-        internal_impressions: toNumber(row.internal_impressions),
-        internal_revenue: toNumber(row.internal_revenue),
-        total_revenue: toNumber(row.total_revenue),
-        gross_revenue: toNumber(row.external_gross_revenue) + toNumber(row.internal_revenue),
-        publisher_revenue: toNumber(row.total_revenue),
-        blended_cpm: toNumber(row.blended_cpm),
-        net_cpm: toNumber(row.blended_cpm),
-        ...dailyReconciliation,
-      };
-    }),
+    daily: (() => {
+      const dailyByDate = new Map<string, any>();
+      for (const row of dailyRows) dailyByDate.set(String(row.date), row);
+
+      const fillRateByDate = new Map<string, number | null>();
+      for (const row of fillRateRows) {
+        const requests = toNumber(row.requests);
+        const confirmed = toNumber(row.confirmed_impressions);
+        fillRateByDate.set(String(row.date), requests > 0 ? (confirmed / requests) * 100 : null);
+      }
+
+      const allDates = new Set<string>([...dailyByDate.keys(), ...fillRateByDate.keys()]);
+
+      return Array.from(allDates)
+        .sort((a, b) => b.localeCompare(a))
+        .map((date) => {
+          const row = dailyByDate.get(date) || {};
+          const dailyReconciliation = reconcileRevenue(row);
+          return {
+            date,
+            impressions: toNumber(row.total_impressions),
+            external_impressions: toNumber(row.external_impressions),
+            external_revenue: toNumber(row.external_gross_revenue),
+            external_gross_revenue: toNumber(row.external_gross_revenue),
+            ads_galaxy_fee: toNumber(row.external_fee),
+            external_net_revenue: toNumber(row.external_net_revenue),
+            internal_impressions: toNumber(row.internal_impressions),
+            internal_revenue: toNumber(row.internal_revenue),
+            total_revenue: toNumber(row.total_revenue),
+            gross_revenue: toNumber(row.external_gross_revenue) + toNumber(row.internal_revenue),
+            publisher_revenue: toNumber(row.total_revenue),
+            blended_cpm: toNumber(row.blended_cpm),
+            net_cpm: toNumber(row.blended_cpm),
+            fill_rate: fillRateByDate.has(date) ? fillRateByDate.get(date) : null,
+            ...dailyReconciliation,
+          };
+        });
+    })(),
     countries: countryRows.map((row: any) => ({
       country: row.country,
       impressions: toNumber(row.impressions),

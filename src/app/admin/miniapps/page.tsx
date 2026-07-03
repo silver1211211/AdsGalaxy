@@ -1,11 +1,12 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy Mini App admin payloads are not schema-generated */
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Modal from "@/components/ui/Modal";
-import { BarChart3, Check, ChevronLeft, ChevronRight, Loader2, Pause, Play, Search, Settings2, Smartphone, Trash2, X } from "lucide-react";
+import { BarChart3, Check, ChevronLeft, ChevronRight, Copy, ExternalLink, Link2, Loader2, Pause, Play, Search, Settings2, Smartphone, Trash2, X } from "lucide-react";
 
 type MiniApp = {
   id: number;
@@ -15,6 +16,7 @@ type MiniApp = {
   bot_id: string;
   webapp_url: string;
   miniapp_url: string;
+  admin_approved_at?: string | null;
   status: "pending" | "awaiting" | "approved" | "paused" | "rejected";
   traffic_quality_score?: string | number;
   traffic_quality_tier?: string;
@@ -77,7 +79,7 @@ type RevenueSummary = Record<string, number>;
 
 type PendingAction = {
   miniapp: MiniApp;
-  action: "await" | "reject" | "pause" | "resume" | "delete";
+  action: "await" | "approve" | "reject" | "pause" | "resume" | "delete";
   title: string;
   message: string;
   danger?: boolean;
@@ -138,6 +140,11 @@ function qualityLabel(value?: string) {
   return String(value || "good").replace(/_/g, " ");
 }
 
+function miniAppBotUrl(miniapp: MiniApp) {
+  const username = String(miniapp.miniapp_username || "").trim().replace(/^@/, "");
+  return username ? `https://t.me/${username}` : "";
+}
+
 export default function AdminMiniAppsPage() {
   const [miniapps, setMiniapps] = useState<MiniApp[]>([]);
   const [loading, setLoading] = useState(true);
@@ -150,6 +157,9 @@ export default function AdminMiniAppsPage() {
   const [error, setError] = useState("");
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [networkMiniApp, setNetworkMiniApp] = useState<MiniApp | null>(null);
+  const [approvalEnabled, setApprovalEnabled] = useState(false);
+  const [detailsMiniApp, setDetailsMiniApp] = useState<MiniApp | null>(null);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
   const [networks, setNetworks] = useState<NetworkConfig[]>([]);
   const [networksLoading, setNetworksLoading] = useState(false);
   const [networkTestLoading, setNetworkTestLoading] = useState<string | null>(null);
@@ -208,6 +218,7 @@ export default function AdminMiniAppsPage() {
 
   const openNetworks = async (miniapp: MiniApp) => {
     setNetworkMiniApp(miniapp);
+    setApprovalEnabled(Boolean(miniapp.admin_approved_at) || miniapp.status === "approved");
     setNetworksLoading(true);
     setNetworkTestResult({});
     try {
@@ -223,6 +234,17 @@ export default function AdminMiniAppsPage() {
     }
   };
 
+  const copyValue = async (label: string, value: string) => {
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedField(label);
+      window.setTimeout(() => setCopiedField((current) => current === label ? null : current), 1600);
+    } catch {
+      setError(`Could not copy ${label}.`);
+    }
+  };
+
   const saveNetworks = async () => {
     if (!networkMiniApp) return;
     setNetworksLoading(true);
@@ -230,7 +252,7 @@ export default function AdminMiniAppsPage() {
       const res = await fetch(`/api/admin/miniapps/${networkMiniApp.id}/networks`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ networks }),
+        body: JSON.stringify({ networks, approval_enabled: approvalEnabled }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to save networks");
@@ -313,7 +335,7 @@ export default function AdminMiniAppsPage() {
           {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />}
         </button>
       )}
-      {miniapp.status !== "pending" && miniapp.status !== "rejected" && (
+      {(miniapp.status === "approved" || miniapp.status === "paused") && (
         <button
           onClick={() => setPendingAction({
             miniapp,
@@ -339,6 +361,13 @@ export default function AdminMiniAppsPage() {
           {actionLoading === miniapp.id ? <Loader2 className="animate-spin" size={15} /> : <X size={15} />}
         </button>
       )}
+      <button
+        onClick={() => { setDetailsMiniApp(miniapp); setCopiedField(null); }}
+        className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 transition-colors hover:bg-slate-50 hover:text-blue-600"
+        title="View IDs and URLs"
+      >
+        <Link2 size={15} />
+      </button>
       <button
         onClick={() => openReport(miniapp)}
         className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 transition-colors hover:bg-slate-50 hover:text-blue-600"
@@ -384,6 +413,51 @@ export default function AdminMiniAppsPage() {
         isLoading={actionLoading !== null}
       />
 
+      {/* Mini App IDs and URLs */}
+      {detailsMiniApp && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/60 p-4">
+          <div className="w-full max-w-xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-start justify-between border-b border-slate-200 px-6 py-5">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Mini App IDs and URLs</h3>
+                <p className="mt-0.5 text-sm text-slate-500">{detailsMiniApp.miniapp_name}</p>
+              </div>
+              <button onClick={() => setDetailsMiniApp(null)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600" aria-label="Close details">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="space-y-3 p-6">
+              {[
+                { label: "Bot ID", value: String(detailsMiniApp.bot_id || ""), url: false },
+                { label: "Bot URL", value: miniAppBotUrl(detailsMiniApp), url: true },
+                { label: "Mini App URL", value: detailsMiniApp.miniapp_url || "", url: true },
+                { label: "Web App URL", value: detailsMiniApp.webapp_url || "", url: true },
+              ].map((item) => (
+                <div key={item.label} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">{item.label}</div>
+                  <div className="flex items-center gap-2">
+                    <div className="min-w-0 flex-1 break-all font-mono text-xs font-semibold text-slate-800">{item.value || "Not provided"}</div>
+                    {item.url && item.value && (
+                      <a href={item.value} target="_blank" rel="noopener noreferrer" className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:text-blue-600" title={`Open ${item.label}`}>
+                        <ExternalLink size={14} />
+                      </a>
+                    )}
+                    <button
+                      onClick={() => copyValue(item.label, item.value)}
+                      disabled={!item.value}
+                      className="inline-flex min-w-20 items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:bg-slate-300"
+                    >
+                      {copiedField === item.label ? <Check size={14} /> : <Copy size={14} />}
+                      {copiedField === item.label ? "Copied" : "Copy"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Network Configuration Modal */}
       {networkMiniApp && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 p-4">
@@ -403,9 +477,27 @@ export default function AdminMiniAppsPage() {
                   </span>
                 </div>
               </div>
-              <button onClick={() => setNetworkMiniApp(null)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
-                <X size={18} />
-              </button>
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="text-right">
+                    <div className={`text-xs font-bold ${approvalEnabled ? "text-emerald-700" : "text-slate-600"}`}>Approval</div>
+                    <div className="text-[10px] font-medium text-slate-400">{approvalEnabled ? (networkMiniApp.status === "paused" ? "Approved · Paused" : "Approved") : "Awaiting"}</div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={approvalEnabled}
+                    onClick={() => setApprovalEnabled((enabled) => !enabled)}
+                    className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${approvalEnabled ? "bg-emerald-500" : "bg-slate-300"}`}
+                    title={approvalEnabled ? "Turn approval off" : "Approve Mini App"}
+                  >
+                    <span className={`inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${approvalEnabled ? "translate-x-6" : "translate-x-1"}`} />
+                  </button>
+                </div>
+                <button onClick={() => setNetworkMiniApp(null)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+                  <X size={18} />
+                </button>
+              </div>
             </div>
             <div className="space-y-3 overflow-y-auto p-6">
               {networksLoading ? (

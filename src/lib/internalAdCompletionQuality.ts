@@ -102,7 +102,7 @@ export async function recordInternalAdCompletionEvent(input: {
   };
 
   await input.conn.query(`
-    INSERT INTO miniapp_internal_ad_completion_events
+    INSERT IGNORE INTO miniapp_internal_ad_completion_events
       (
         request_id, miniapp_id, campaign_id, telegram_user_id, event_type,
         watch_duration_seconds, quality_tier, fraud_escalation_level,

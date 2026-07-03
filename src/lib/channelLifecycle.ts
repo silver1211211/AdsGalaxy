@@ -80,12 +80,14 @@ function sleep(ms: number) {
 }
 
 export function channelLifecycleLogHook(_event: string, _payload: Record<string, unknown>) {
+  void _event;
+  void _payload;
   // Future integration point for System Logs, Posting Logs, and Channel Health Logs.
 }
 
 export async function ensureDefaultChannelDistribution(db: Db = pool) {
   const [channels] = await db.query<ChannelScheduleRow[]>(
-    "SELECT id FROM channels WHERE status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'active') = 'active' ORDER BY id ASC"
+    "SELECT id FROM channels WHERE status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'healthy') IN ('healthy','warning') ORDER BY id ASC"
   );
 
   const randomized = [...channels].sort((a, b) => deterministicWeight(Number(a.id)) - deterministicWeight(Number(b.id)));
@@ -112,7 +114,7 @@ export async function ensureDefaultChannelDistribution(db: Db = pool) {
        WHERE id = ?
          AND status = 'active'
          AND is_deleted = FALSE
-         AND COALESCE(health_status, 'active') = 'active'
+         AND COALESCE(health_status, 'healthy') IN ('healthy','warning')
          AND (
            scheduler_slot IS NULL
            OR scheduler_slot <> ?
@@ -193,11 +195,11 @@ async function checkChannelHealthOnce(channel: ChannelHealthInput): Promise<Heal
     }
 
     return { ok: true, status: "active", reason: null, suggestedFix: null, permanent: false };
-  } catch (error: any) {
+  } catch (error: unknown) {
     return {
       ok: false,
       status: "paused",
-      reason: error?.message || "Temporary Telegram verification failure.",
+      reason: error instanceof Error ? error.message : "Temporary Telegram verification failure.",
       suggestedFix: "Try again later.",
       permanent: false,
     };
@@ -207,7 +209,7 @@ async function checkChannelHealthOnce(channel: ChannelHealthInput): Promise<Heal
 export async function markChannelHealthSuccess(channelId: number | string, db: Db = pool) {
   await db.query(
     `UPDATE channels
-     SET health_status = 'active',
+     SET health_status = 'healthy',
          health_checked_at = NOW(),
          failure_reason = NULL
      WHERE id = ?`,
@@ -224,10 +226,10 @@ export async function autoPauseChannel(channelId: number | string, health: Healt
          failure_reason = ?,
          last_failure_at = NOW(),
          health_checked_at = NOW(),
-         health_status = ?,
+         health_status = 'critical',
          auto_paused_at = NOW()
      WHERE id = ?`,
-    [health.status, health.reason, health.suggestedFix, health.reason, health.status, channelId]
+    [health.status, health.reason, health.suggestedFix, health.reason, channelId]
   );
 
   await createSystemLog({
@@ -258,7 +260,7 @@ export async function recordChannelPostSuccess(channelId: number | string, db: D
      SET last_successful_post_at = NOW(),
          last_failure_at = NULL,
          failure_reason = NULL,
-         health_status = 'active',
+         health_status = CASE WHEN health_status IS NULL OR health_status NOT IN ('warning','critical','disabled') THEN 'healthy' ELSE health_status END,
          health_checked_at = NOW()
      WHERE id = ?`,
     [channelId]
@@ -270,7 +272,7 @@ export async function recordChannelPostFailure(channelId: number | string, reaso
     `UPDATE channels
      SET last_failure_at = NOW(),
          failure_reason = ?,
-         health_status = COALESCE(health_status, 'paused')
+         health_status = CASE WHEN health_status='critical' THEN health_status ELSE 'warning' END
      WHERE id = ?`,
     [reason.slice(0, 255), channelId]
   );
@@ -294,7 +296,7 @@ export async function reactivateChannelAfterHealthCheck(channelId: number | stri
          paused_reason = NULL,
          suggested_fix = NULL,
          failure_reason = NULL,
-         health_status = 'active',
+         health_status = 'healthy',
          health_checked_at = NOW(),
          reactivated_at = NOW()
      WHERE id = ?`,

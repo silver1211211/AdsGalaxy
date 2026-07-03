@@ -1,3 +1,11 @@
+if (process.env.NODE_ENV === 'production') {
+  throw new Error('init-db.js is disabled in production. Use versioned migrations.');
+}
+
+if (process.env.ALLOW_DESTRUCTIVE_DB_INIT !== 'YES_I_UNDERSTAND') {
+  throw new Error('Destructive database initialization is disabled. Set ALLOW_DESTRUCTIVE_DB_INIT=YES_I_UNDERSTAND only for an expendable local database.');
+}
+
 const mysql = require('mysql2/promise');
 require('dotenv').config({ path: '.env' });
 
@@ -168,7 +176,6 @@ INSERT INTO \`faqs\` (\`id\`, \`question\`, \`answer\`, \`type\`, \`created_at\`
     console.log(" -> Populating table: settings");
     await pool.query(`
 INSERT INTO \`settings\` (\`key\`, \`value\`, \`description\`) VALUES
-('click_ad_reward_percentage', '50', 'Percentage of CPM paid to the publisher for click ads'),
 ('last_cron_run', '1777626412309', 'Timestamp of the last successful cron run'),
 ('last_settlement_run', '1777699824537', 'Timestamp of the last settlement cron run'),
 ('last_settlement_views_run', '0', 'Timestamp of the last views settlement cron run'),
@@ -181,8 +188,9 @@ INSERT INTO \`settings\` (\`key\`, \`value\`, \`description\`) VALUES
 ('min_cpm_views', '0.50', 'Minimum CPM for view campaigns'),
 ('min_deposit_amount', '0.1', 'Minimum deposit amount'),
 ('min_withdraw', '10.00', 'Minimum withdrawal amount'),
+('platform_margin_percent', '40', 'Channel campaign advertiser debit retained as AdsGalaxy platform margin'),
 ('referral_percent', '5', 'Percentage earned from referral earnings'),
-('view_ad_reward_percentage', '50', 'Percentage of CPM paid to the publisher for view-based ads');
+('safety_reserve_percent', '10', 'Percent of the post-margin channel publisher pool retained as safety reserve');
     `);
 
     // 5. Re-enable foreign key checks

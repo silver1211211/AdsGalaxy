@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { checkAdminAuth } from "@/lib/adminAuth";
+import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import {
   createDirectDeal,
   createFeaturedListing,
@@ -35,9 +35,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const body = await request.json();
@@ -63,9 +62,8 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const body = await request.json();

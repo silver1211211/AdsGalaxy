@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy aggregate query payloads are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
@@ -15,6 +16,18 @@ export async function GET() {
 
     const [campaignsQuery]: any = await pool.query("SELECT status, COUNT(*) as count FROM campaigns GROUP BY status");
     const campaignsStats = campaignsQuery.reduce((acc: any, row: any) => ({ ...acc, [row.status]: row.count }), {});
+    const [[campaignTypeStats]]: any = await pool.query(`
+      SELECT
+        SUM(CASE WHEN status = 'pending' AND type != 'broadcast' THEN 1 ELSE 0 END) AS channel_pending,
+        SUM(CASE WHEN status = 'pending' AND type = 'broadcast' THEN 1 ELSE 0 END) AS bot_pending
+      FROM campaigns
+    `);
+    const [miniappCampaignsQuery]: any = await pool.query(
+      "SELECT status, COUNT(*) as count FROM miniapp_rewarded_campaigns GROUP BY status"
+    );
+    const miniappCampaignsStats = miniappCampaignsQuery.reduce((acc: any, row: any) => ({ ...acc, [row.status]: row.count }), {});
+    const standardCampaignTotal = Object.values(campaignsStats).reduce((sum: number, value: any) => sum + Number(value || 0), 0);
+    const miniappCampaignTotal = Object.values(miniappCampaignsStats).reduce((sum: number, value: any) => sum + Number(value || 0), 0);
 
     const [channelsQuery]: any = await pool.query("SELECT status, COUNT(*) as count FROM channels WHERE is_deleted = FALSE GROUP BY status");
     const channelsStats = channelsQuery.reduce((acc: any, row: any) => ({ ...acc, [row.status]: row.count }), {});
@@ -23,7 +36,7 @@ export async function GET() {
       FROM channels
       WHERE is_deleted = FALSE
         AND status = 'active'
-        AND COALESCE(health_status, 'active') = 'active'
+        AND COALESCE(health_status, 'healthy') IN ('healthy','warning')
     `);
 
     const [withdrawalsQuery]: any = await pool.query("SELECT status, COUNT(*) as count FROM withdrawals GROUP BY status");
@@ -37,7 +50,7 @@ export async function GET() {
       FROM channels
       WHERE is_deleted = FALSE
         AND status = 'active'
-        AND COALESCE(health_status, 'active') = 'active'
+        AND COALESCE(health_status, 'healthy') IN ('healthy','warning')
     `);
     
     const [[botsTotal]]: any = await pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status = 'active' AND COALESCE(health_status, 'active') = 'active'");
@@ -95,6 +108,16 @@ export async function GET() {
     const [[conversionReviews]]: any = await pool.query("SELECT COUNT(*) as open_count FROM conversion_review_queue WHERE status IN ('open', 'monitor')");
     const [[attributionSetting]]: any = await pool.query("SELECT value FROM settings WHERE `key` = 'conversion_attribution_window_days' LIMIT 1");
 
+    const [[miniappsActive]]: any = await pool.query(
+      "SELECT COUNT(*) as count FROM miniapps WHERE is_deleted = FALSE AND status IN ('approved', 'monetized')"
+    );
+    const [[impressionsToday]]: any = await pool.query(
+      "SELECT COALESCE(SUM(impressions), 0) as count FROM miniapp_daily_stats WHERE date = CURDATE()"
+    );
+    const [[impressionsYesterday]]: any = await pool.query(
+      "SELECT COALESCE(SUM(impressions), 0) as count FROM miniapp_daily_stats WHERE date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)"
+    );
+
     return NextResponse.json({
       users: {
         total: usersTotal.count,
@@ -103,11 +126,16 @@ export async function GET() {
         month: usersMonth.count
       },
       campaigns: {
-        pending: campaignsStats.pending || 0,
-        active: campaignsStats.active || 0,
-        rejected: campaignsStats.rejected || 0,
-        paused: campaignsStats.paused || 0,
-        total: Object.values(campaignsStats).reduce((a: any, b: any) => a + b, 0)
+        pending: Number(campaignsStats.pending || 0) + Number(miniappCampaignsStats.pending || 0),
+        pending_by_type: {
+          channel: Number(campaignTypeStats.channel_pending || 0),
+          bot: Number(campaignTypeStats.bot_pending || 0),
+          miniapp: Number(miniappCampaignsStats.pending || 0),
+        },
+        active: Number(campaignsStats.active || 0) + Number(miniappCampaignsStats.approved || 0) + Number(miniappCampaignsStats.monetized || 0),
+        rejected: Number(campaignsStats.rejected || 0) + Number(miniappCampaignsStats.rejected || 0),
+        paused: Number(campaignsStats.paused || 0) + Number(miniappCampaignsStats.paused || 0),
+        total: standardCampaignTotal + miniappCampaignTotal
       },
       channels: {
         pending: channelsStats.pending || 0,
@@ -124,6 +152,11 @@ export async function GET() {
         activeUsers: botUsersActive.count,
         paused: botsPaused.count,
         inactiveUsers: botUsersInactive.count
+      },
+      miniapps: {
+        active: miniappsActive.count || 0,
+        impressionsToday: impressionsToday.count || 0,
+        impressionsYesterday: impressionsYesterday.count || 0
       },
       withdrawals: {
         pending: withdrawalsStats.pending || 0,

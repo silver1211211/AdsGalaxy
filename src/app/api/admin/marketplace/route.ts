@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { checkAdminAuth } from "@/lib/adminAuth";
+import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { normalizeMarketplaceType, publicMarketplaceQuality, publicInventoryRank } from "@/lib/publisherMarketplace";
 
 const tables = {
@@ -69,9 +69,8 @@ export async function GET(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   const body = await request.json();
   const type = normalizeMarketplaceType(body.inventory_type);

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { checkAdminAuth } from "@/lib/adminAuth";
+import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
+import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { sendTelegramMessage } from "@/lib/telegram";
 
 export async function GET(request: Request) {
@@ -95,9 +96,8 @@ export async function GET(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { admin, response } = await requireAdminPermission("dangerous");
+  if (response) return response;
 
   const conn = await pool.getConnection();
   try {
@@ -156,6 +156,14 @@ export async function PATCH(request: Request) {
     await conn.query("UPDATE campaign_views_audit SET status = 'invalid' WHERE post_id = ?", [post_id]);
 
     await conn.commit();
+    await recordAdminActionAudit({
+      adminId: admin?.id,
+      action: "campaign_view_settlement_invalidate",
+      entityType: "campaign_post",
+      entityId: post_id,
+      reason: "admin_view_audit_invalidation",
+      metadata: { advertiser_refund: totalAdvPaid, publisher_locked_reversal: totalPubReward },
+    });
 
     // Send Notifications safely
     if (post.advertiser_telegram_id && totalAdvPaid > 0) {

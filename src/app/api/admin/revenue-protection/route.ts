@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { getAuthenticatedAdmin } from "@/lib/adminAuth";
+import { requireAdminPermission } from "@/lib/adminAuth";
 import {
   applyRevenueProtectionOverride,
   recordRevenueProtectionAudit,
@@ -171,8 +171,8 @@ async function reviewSuspiciousRevenue(input: {
 }
 
 export async function GET() {
-  const admin = await getAuthenticatedAdmin();
-  if (!admin) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { response } = await requireAdminPermission("read");
+  if (response) return response;
 
   try {
     const [
@@ -206,26 +206,19 @@ export async function GET() {
           COALESCE(sp.spend, 0) - COALESCE(sp.publisher_earnings, 0) - COALESCE(sp.reserve_revenue, 0) as net_profit
         FROM campaigns c
         LEFT JOIN (
-          SELECT campaign_id, SUM(advertiser_paid) as spend, SUM(publisher_reward) as publisher_earnings, 0 as reserve_revenue
-          FROM (
-            SELECT campaign_id, advertiser_paid, publisher_reward FROM ad_settlements
-            UNION ALL
-            SELECT campaign_id, advertiser_paid, publisher_reward FROM ad_settlements_views
-          ) x GROUP BY campaign_id
+          SELECT campaign_id, SUM(advertiser_debit) as spend,
+            SUM(publisher_distribution) as publisher_earnings, SUM(reserve_amount) as reserve_revenue
+          FROM channel_settlement_ledger GROUP BY campaign_id
         ) sp ON sp.campaign_id = c.id
         ORDER BY net_profit DESC
         LIMIT 10
       `),
       getRows(`
         SELECT COALESCE(c.category, 'Uncategorized') as category,
-          SUM(x.advertiser_paid) as spend,
-          SUM(x.publisher_reward) as publisher_earnings,
-          SUM(x.advertiser_paid - x.publisher_reward) as net_profit
-        FROM (
-          SELECT campaign_id, advertiser_paid, publisher_reward FROM ad_settlements
-          UNION ALL
-          SELECT campaign_id, advertiser_paid, publisher_reward FROM ad_settlements_views
-        ) x
+          SUM(x.advertiser_debit) as spend,
+          SUM(x.publisher_distribution) as publisher_earnings,
+          SUM(x.platform_revenue) as net_profit
+        FROM channel_settlement_ledger x
         JOIN campaigns c ON c.id = x.campaign_id
         GROUP BY COALESCE(c.category, 'Uncategorized')
         ORDER BY net_profit DESC
@@ -235,9 +228,9 @@ export async function GET() {
         SELECT inventory_type, inventory_id, SUM(spend) as spend, SUM(publisher_earnings) as publisher_earnings,
           SUM(spend - publisher_earnings - reserve_revenue) as net_profit
         FROM (
-          SELECT 'channel' as inventory_type, channel_id as inventory_id, advertiser_paid as spend, publisher_reward as publisher_earnings, 0 as reserve_revenue FROM ad_settlements
-          UNION ALL
-          SELECT 'channel', channel_id, advertiser_paid, publisher_reward, 0 FROM ad_settlements_views
+          SELECT 'channel' as inventory_type, channel_id as inventory_id,
+            advertiser_debit as spend, publisher_distribution as publisher_earnings, reserve_amount as reserve_revenue
+          FROM channel_settlement_ledger
           UNION ALL
           SELECT 'miniapp', miniapp_id, cost, publisher_revenue, reserve_revenue FROM miniapp_internal_ad_impressions
         ) x
@@ -302,15 +295,15 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
-  const admin = await getAuthenticatedAdmin();
-  if (!admin) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { admin, response } = await requireAdminPermission("dangerous");
+  if (response) return response;
 
   try {
     const body = await request.json();
     const action = clean(body.action);
 
     if (action === "run_scan") {
-      const result = await runRevenueProtectionScan({ autoPause: Boolean(body.auto_pause), actorId: admin.id });
+      const result = await runRevenueProtectionScan({ autoPause: Boolean(body.auto_pause), actorId: admin?.id });
       return NextResponse.json({ success: true, result });
     }
 
@@ -337,7 +330,7 @@ export async function PATCH(request: Request) {
         const nextStatus = action === "approve_review" ? "approved" : "rejected";
         const stat = await reviewSuspiciousRevenue({
           conn,
-          adminId: admin.id,
+          adminId: admin!.id,
           statId,
           status: nextStatus,
           note: clean(body.note),
@@ -345,13 +338,13 @@ export async function PATCH(request: Request) {
 
         await recordRevenueProtectionAudit({
           actorType: "admin",
-          actorId: admin.id,
+          actorId: admin!.id,
           action: nextStatus === "approved" ? "revenue_review_approved" : "revenue_review_rejected",
           entityType: "miniapp_daily_stat",
           entityId: stat.id,
           reason: clean(body.note),
           metadata: {
-            admin_id: admin.id,
+            admin_id: admin!.id,
             stat_id: stat.id,
             miniapp_id: stat.miniapp_id,
             publisher_id: stat.publisher_id,

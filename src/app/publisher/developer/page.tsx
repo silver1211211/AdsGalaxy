@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { apiFetch } from "@/lib/api";
-import { BarChart3, Code2, Copy, ExternalLink, Loader2, Plus, ShieldCheck, TestTube2, Webhook } from "lucide-react";
+import { BarChart3, Bot, Code2, Copy, ExternalLink, Loader2, Plus, ShieldCheck, TestTube2, Webhook } from "lucide-react";
 
 const eventOptions = ["*", "campaign.approved", "campaign.rejected", "conversion.recorded", "referral.verified", "postback.conversion", "ad.click", "ad.completed"];
 
@@ -90,16 +90,33 @@ export default function DeveloperCenterPage() {
   return (
     <DashboardLayout type="publisher">
       <div className="space-y-6">
-        <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:flex-row md:items-center md:justify-between">
+        <div className="flex flex-col gap-3 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 md:flex-row md:items-center md:justify-between">
           <div>
             <p className="text-[10px] font-black uppercase tracking-widest text-blue-600">Developer Platform</p>
-            <h1 className="mt-1 text-2xl font-black text-slate-900">Developer Center</h1>
-            <p className="mt-1 text-sm font-semibold text-slate-500">Create apps, copy Integration IDs, test AdsGalaxy ads, and monitor publisher analytics.</p>
+            <h1 className="mt-1 text-2xl font-black text-slate-900 dark:text-white">Developer Center</h1>
+            <p className="mt-1 text-sm font-semibold text-slate-500 dark:text-slate-400">Manage API sandbox applications, keys, webhooks, and verified test events.</p>
           </div>
           <Link href="/docs/developers" className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-xs font-black uppercase tracking-widest text-white">
             <Code2 size={16} /> Docs
           </Link>
         </div>
+
+        <section className="overflow-hidden rounded-3xl border border-blue-200 bg-gradient-to-br from-slate-950 via-blue-950 to-slate-900 p-5 text-white shadow-xl shadow-blue-950/10 sm:p-7">
+          <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-4">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-blue-500/20 text-blue-300 ring-1 ring-blue-400/30"><Bot size={24} /></div>
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-blue-300">Publisher Developer Center</p>
+                <h2 className="mt-1 text-xl font-black">Bot Integration</h2>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-300">Add one secure call inside your existing /start handler. Keep complete ownership of your Telegram webhook and bot experience.</p>
+              </div>
+            </div>
+            <div className="grid shrink-0 gap-2 sm:grid-cols-2">
+              <Link href="/docs/publisher/bots" className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-500 px-4 py-3 text-xs font-black text-white"><Code2 size={15} /> Documentation</Link>
+              <Link href="/publisher/bots" className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/10 px-4 py-3 text-xs font-black text-white"><TestTube2 size={15} /> Manage & Test</Link>
+            </div>
+          </div>
+        </section>
 
         {message && <div className="rounded-xl border border-blue-100 bg-blue-50 p-3 text-sm font-bold text-blue-700">{message}</div>}
         {secret && (
@@ -116,18 +133,18 @@ export default function DeveloperCenterPage() {
           <div className="py-16 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={28} /></div>
         ) : (
           <>
-            <div className="grid gap-3 md:grid-cols-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
               {[
-                ["Requests", stat(data.analytics?.requests), BarChart3],
+                ["API Requests", stat(data.analytics?.requests), BarChart3],
                 ["Impressions", stat(data.analytics?.impressions), BarChart3],
                 ["Completions", stat(data.analytics?.completions), ShieldCheck],
                 ["Fill Rate", fillRate, ShieldCheck],
                 ["Errors", stat(data.analytics?.errors), ShieldCheck],
                 ["Revenue", `$${Number(data.analytics?.revenue || 0).toFixed(2)}`, BarChart3],
               ].map(([label, value, Icon]: any) => (
-                <div key={label} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                <div key={label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
                   <div className="flex items-center gap-2 text-xs font-black uppercase tracking-widest text-slate-400"><Icon size={14} /> {label}</div>
-                  <div className="mt-2 text-2xl font-black text-slate-900">{value}</div>
+                  <div className="mt-2 text-2xl font-black text-slate-900 dark:text-white">{value}</div>
                 </div>
               ))}
             </div>
@@ -135,7 +152,7 @@ export default function DeveloperCenterPage() {
             <div className="grid gap-4 xl:grid-cols-2">
               <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <h2 className="flex items-center gap-2 text-sm font-black uppercase tracking-widest text-slate-900"><Plus size={16} /> Create Application</h2>
-                <p className="mt-2 text-sm font-semibold text-slate-500">Each app receives one Sandbox Integration ID and one Production Integration ID. Use the current mode ID in your Mini App script.</p>
+                <p className="mt-2 text-sm font-semibold text-slate-500">Developer applications are for API sandbox testing and webhooks. Mini App ad delivery uses the Mini App ID shown in Mini App Details.</p>
                 <div className="mt-4 grid gap-3">
                   <input value={appForm.name} onChange={(e) => setAppForm({ ...appForm, name: e.target.value })} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm" />
                   <div className="grid gap-3 sm:grid-cols-2">
@@ -148,7 +165,7 @@ export default function DeveloperCenterPage() {
                     </select>
                     <select value={appForm.mode} onChange={(e) => setAppForm({ ...appForm, mode: e.target.value })} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
                       <option value="sandbox">Sandbox</option>
-                      <option value="production">Production</option>
+                      <option value="production" disabled>Production (not enabled)</option>
                     </select>
                   </div>
                   <textarea value={appForm.allowed_ips} onChange={(e) => setAppForm({ ...appForm, allowed_ips: parseTextList(e.target.value) })} placeholder="Allowed IPs, one per line" className="min-h-20 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm" />
@@ -177,9 +194,9 @@ export default function DeveloperCenterPage() {
             </div>
 
             <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-              <div className="border-b border-slate-100 p-4 text-xs font-black uppercase tracking-widest text-slate-400">Applications and Integration IDs</div>
+              <div className="border-b border-slate-100 p-4 text-xs font-black uppercase tracking-widest text-slate-400">API applications and reference IDs</div>
               <div className="grid gap-4 p-4 lg:grid-cols-2">
-                {data.apps.length === 0 ? <p className="text-sm text-slate-500">No developer applications yet.</p> : data.apps.map((app: any) => (
+                {data.apps.length === 0 ? <div className="col-span-full rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-10 text-center dark:border-slate-700 dark:bg-slate-900"><Code2 className="mx-auto text-slate-300" size={28} /><p className="mt-3 text-sm font-black text-slate-700 dark:text-slate-200">No API applications yet</p><p className="mt-1 text-xs text-slate-500">Create a sandbox application to test signed API events and webhooks.</p></div> : data.apps.map((app: any) => (
                   <div key={app.id} className="rounded-xl border border-slate-100 bg-slate-50 p-4">
                     <div className="flex items-center justify-between gap-3">
                       <div>
@@ -189,7 +206,7 @@ export default function DeveloperCenterPage() {
                       <span className="rounded-lg bg-white px-2 py-1 text-xs font-black uppercase text-slate-500">{app.mode}</span>
                     </div>
                     <div className="mt-4 rounded-xl bg-white p-3">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Current Integration ID</p>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">API Application Reference</p>
                       <div className="mt-2 flex items-center gap-2">
                         <code className="min-w-0 flex-1 rounded-lg bg-slate-950 px-3 py-2 font-mono text-sm font-black text-white">{app.integration_id}</code>
                         <button onClick={() => copyText(app.integration_id)} className="rounded-lg bg-blue-600 p-2 text-white" aria-label="Copy Integration ID"><Copy size={16} /></button>
@@ -197,11 +214,11 @@ export default function DeveloperCenterPage() {
                     </div>
                     <div className="mt-3 grid gap-2 sm:grid-cols-2">
                       <button onClick={() => copyText(app.sandbox_integration_id)} className="rounded-lg bg-white px-3 py-2 text-left text-xs font-bold text-slate-600">
-                        <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400">Sandbox Integration ID</span>
+                        <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400">Sandbox Reference</span>
                         {app.sandbox_integration_id}
                       </button>
                       <button onClick={() => copyText(app.production_integration_id)} className="rounded-lg bg-white px-3 py-2 text-left text-xs font-bold text-slate-600">
-                        <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400">Production Integration ID</span>
+                        <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400">Production Reference</span>
                         {app.production_integration_id}
                       </button>
                     </div>

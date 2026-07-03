@@ -1,9 +1,28 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { checkAdminAuth } from "@/lib/adminAuth";
+import { requireAdminPermission } from "@/lib/adminAuth";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
 import type { RowDataPacket } from "mysql2/promise";
+import { loadBotToken } from "@/lib/botIntegration";
+
+type AdminBotRow = RowDataPacket & Record<string, unknown>;
+type CountRow = RowDataPacket & { total: number };
+type BotSummaryRow = RowDataPacket & {
+  monetized_bots: number | string | null;
+  paused_bots: number | string | null;
+  failed_bots: number | string | null;
+  total_bot_users: number | string | null;
+  active_bot_users: number | string | null;
+  inactive_bot_users: number | string | null;
+};
+type BotActionRow = RowDataPacket & {
+  bot_name: string;
+  bot_username: string;
+  bot_token: string;
+  bot_token_encrypted: string | null;
+  telegram_id: string;
+};
 
 async function getTableColumns(tableName: string) {
   const [rows] = await pool.query<Array<RowDataPacket & { COLUMN_NAME: string }>>(
@@ -49,13 +68,12 @@ function updateAssignable(columns: Set<string>, values: Record<string, unknown>)
 }
 
 export async function GET(request: Request) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("read");
+  if (response) return response;
 
   const { searchParams } = new URL(request.url);
-  const page = parseInt(searchParams.get("page") || "1");
-  const limit = parseInt(searchParams.get("limit") || "10");
+  const page = Math.max(1, parseInt(searchParams.get("page") || "1") || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(searchParams.get("limit") || "10") || 10));
   const statusFilter = searchParams.get("status") || "all";
   const qualityFilter = searchParams.get("quality") || "all";
   const riskFilter = searchParams.get("risk") || "all";
@@ -150,7 +168,7 @@ export async function GET(request: Request) {
       LEFT JOIN users u ON b.user_id = u.id
     `;
     let countQuery = "SELECT COUNT(*) as total FROM bots b LEFT JOIN users u ON b.user_id = u.id";
-    const queryParams: any[] = [];
+    const queryParams: unknown[] = [];
 
     let whereClause = ` WHERE ${isDeletedExpr} = FALSE`;
     
@@ -185,9 +203,9 @@ export async function GET(request: Request) {
     query += whereClause + " ORDER BY b.id DESC LIMIT ? OFFSET ?";
     countQuery += whereClause;
     
-    const [rows]: any = await pool.query(query, [...queryParams, limit, offset]);
-    const [[countRow]]: any = await pool.query(countQuery, queryParams);
-    const [[summary]]: any = await pool.query(`
+    const [rows] = await pool.query<AdminBotRow[]>(query, [...queryParams, limit, offset]);
+    const [countRows] = await pool.query<CountRow[]>(countQuery, queryParams);
+    const [summaryRows] = await pool.query<BotSummaryRow[]>(`
       SELECT
         SUM(CASE WHEN b.status = 'active' AND ${isDeletedExpr} = FALSE AND COALESCE(${healthStatusExpr}, 'active') = 'active' THEN 1 ELSE 0 END) as monetized_bots,
         SUM(CASE WHEN b.status IN ('paused', 'token_invalid', 'bot_deleted', 'unreachable') AND ${isDeletedExpr} = FALSE THEN 1 ELSE 0 END) as paused_bots,
@@ -198,6 +216,8 @@ export async function GET(request: Request) {
       FROM bots b
     `);
 
+    const countRow = countRows[0];
+    const summary = summaryRows[0];
     return NextResponse.json({
       bots: rows,
       total: countRow.total,
@@ -212,24 +232,23 @@ export async function GET(request: Request) {
         inactive_bot_users: Number(summary?.inactive_bot_users || 0),
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Admin Bots API Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
 }
 
 export async function PATCH(request: Request) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const { id, action } = await request.json();
     const normalizedAction = action === "deny" ? "reject" : action === "approve" ? "activate" : action;
 
     // Fetch bot and owner details
-    const [rows]: any = await pool.query(
-      `SELECT b.bot_name, b.bot_username, b.bot_token, u.telegram_id 
+    const [rows] = await pool.query<BotActionRow[]>(
+      `SELECT b.bot_name, b.bot_username, b.bot_token, b.bot_token_encrypted, u.telegram_id
        FROM bots b 
        JOIN users u ON b.user_id = u.id 
        WHERE b.id = ?`,
@@ -254,11 +273,8 @@ export async function PATCH(request: Request) {
     }
 
     const status = statusMap[normalizedAction];
-    let webhookUrl: string | null = null;
-
     if (normalizedAction === "activate") {
-      const activation = await reactivateBotAfterHealthCheck(id, bot.bot_token, pool, new URL(request.url).origin);
-      webhookUrl = activation.webhookUrl;
+      await reactivateBotAfterHealthCheck(id, await loadBotToken(pool, { ...bot, id }), pool, new URL(request.url).origin);
     } else if (normalizedAction === "delete") {
       const { assignments, params } = updateAssignable(botColumns, {
         status,
@@ -293,8 +309,8 @@ export async function PATCH(request: Request) {
       await sendTelegramMessage(bot.telegram_id, message);
     }
 
-    return NextResponse.json({ success: true, webhook_url: webhookUrl });
-  } catch (error: any) {
+    return NextResponse.json({ success: true });
+  } catch (error: unknown) {
     console.error("Admin Bots Update Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }

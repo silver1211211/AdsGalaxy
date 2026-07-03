@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { creditUserLockedBalance } from "@/lib/earnings";
-import { getMiniAppPublisherCpmSettings } from "@/lib/miniappPublisherCpmEngine";
 import { recordPayoutSafetyCheck } from "@/lib/revenueProtection";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 
@@ -23,6 +22,19 @@ type DailyStatRow = RowDataPacket & {
   revenue_review_status?: string;
 };
 
+type InternalLedgerRow = RowDataPacket & {
+  impressions: string | number;
+  gross_revenue: string | number;
+  ads_galaxy_fee: string | number;
+  reserve_revenue: string | number;
+  publisher_revenue: string | number;
+};
+type SettingRow = RowDataPacket & { value: string };
+
+function moneyMatches(left: unknown, right: unknown) {
+  return Math.abs(toNumber(left) - toNumber(right)) <= 0.00000001;
+}
+
 function toNumber(value: unknown) {
   return Number.parseFloat(String(value ?? 0)) || 0;
 }
@@ -42,11 +54,12 @@ export async function GET(_req: NextRequest) {
   }
 
   try {
-    const [[behaviorRow]]: any = await pool.query(
+    const [behaviorRows] = await pool.query<SettingRow[]>(
       "SELECT value FROM revenue_protection_settings WHERE `key` = 'suspicious_revenue_settlement_behavior' LIMIT 1"
     );
+    const behaviorRow = behaviorRows[0];
     const suspiciousRevenueBehavior = normalizeSuspiciousRevenueBehavior(behaviorRow?.value);
-    const revenueValidationCondition = suspiciousRevenueBehavior === "allow"
+    const externalRevenueValidationCondition = suspiciousRevenueBehavior === "allow"
       ? "(ds.revenue_validation_status = 'passed' OR ds.revenue_validation_status = 'suspicious')"
       : suspiciousRevenueBehavior === "review"
         ? "(ds.revenue_validation_status = 'passed' OR (ds.revenue_validation_status = 'suspicious' AND ds.revenue_review_status = 'approved'))"
@@ -73,7 +86,8 @@ export async function GET(_req: NextRequest) {
         AND m.status IN ('approved', 'monetized')
         AND m.is_deleted = FALSE
         AND ds.publisher_revenue > 0
-        AND ${revenueValidationCondition}
+        AND ds.date < CURDATE()
+        AND (ds.network_name = 'AdsGalaxyInternal' OR ${externalRevenueValidationCondition})
       ORDER BY ds.date ASC, ds.id ASC
       LIMIT 500
     `);
@@ -110,7 +124,8 @@ export async function GET(_req: NextRequest) {
             WHERE ds.id = ?
               AND m.status IN ('approved', 'monetized')
               AND m.is_deleted = FALSE
-              AND ${revenueValidationCondition}
+              AND ds.date < CURDATE()
+              AND (ds.network_name = 'AdsGalaxyInternal' OR ${externalRevenueValidationCondition})
             FOR UPDATE
           `, [stat.id]);
 
@@ -126,15 +141,49 @@ export async function GET(_req: NextRequest) {
           let expectedPublisherRevenue = rawPublisherRevenue;
           let expectedPlatformRevenue = toNumber(lockedStat.ads_galaxy_fee);
           let expectedReserveRevenue = toNumber(lockedStat.reserve_revenue);
+          let advertiserPaid = toNumber(lockedStat.gross_revenue);
           if (lockedStat.network_name === "AdsGalaxyInternal") {
-            const cpmSettings = await getMiniAppPublisherCpmSettings(conn);
-            const publisherShareCeiling = toNumber(lockedStat.gross_revenue) * (cpmSettings.publisher_share_percent / 100);
-            expectedPublisherRevenue = publisherShareCeiling;
-            expectedPlatformRevenue = toNumber(lockedStat.gross_revenue) * (cpmSettings.ads_galaxy_share_percent / 100);
-            expectedReserveRevenue = cpmSettings.reserve_pool_enabled
-              ? toNumber(lockedStat.gross_revenue) * (cpmSettings.reserve_percent / 100)
-              : 0;
-            publisherRevenue = Math.min(rawPublisherRevenue, publisherShareCeiling);
+            const [ledgerRows] = await conn.query<InternalLedgerRow[]>(
+              `SELECT COUNT(*) AS impressions,
+                 COALESCE(SUM(cost), 0) AS gross_revenue,
+                 COALESCE(SUM(ads_galaxy_revenue), 0) AS ads_galaxy_fee,
+                 COALESCE(SUM(reserve_revenue), 0) AS reserve_revenue,
+                 COALESCE(SUM(publisher_revenue), 0) AS publisher_revenue
+               FROM miniapp_internal_ad_impressions
+               WHERE miniapp_id = ? AND DATE(created_at) = ?`,
+              [lockedStat.miniapp_id, lockedStat.date]
+            );
+            const ledger = ledgerRows[0];
+            const reconciled = Number(ledger?.impressions || 0) === Math.floor(toNumber(lockedStat.impressions))
+              && moneyMatches(ledger?.gross_revenue, lockedStat.gross_revenue)
+              && moneyMatches(ledger?.ads_galaxy_fee, lockedStat.ads_galaxy_fee)
+              && moneyMatches(ledger?.reserve_revenue, lockedStat.reserve_revenue)
+              && moneyMatches(ledger?.publisher_revenue, lockedStat.publisher_revenue);
+            if (!reconciled) {
+              await conn.query(
+                `UPDATE miniapp_daily_stats
+                 SET revenue_validation_status = 'rejected',
+                     revenue_validation_reason = 'internal_impression_ledger_mismatch',
+                     revenue_validated_at = NOW()
+                 WHERE id = ?`,
+                [lockedStat.id]
+              );
+              await conn.commit();
+              results.skipped++;
+              continue;
+            }
+            advertiserPaid = toNumber(ledger.gross_revenue);
+            publisherRevenue = toNumber(ledger.publisher_revenue);
+            expectedPublisherRevenue = publisherRevenue;
+            expectedPlatformRevenue = toNumber(ledger.ads_galaxy_fee);
+            expectedReserveRevenue = toNumber(ledger.reserve_revenue);
+            await conn.query(
+              `UPDATE miniapp_daily_stats
+               SET revenue_validation_status = 'passed', revenue_validation_reason = NULL,
+                   revenue_validation_metadata = ?, revenue_validated_at = NOW(), revenue_review_status = 'not_required'
+               WHERE id = ?`,
+              [JSON.stringify({ source: "server_internal_impression_ledger", reconciled: true }), lockedStat.id]
+            );
           }
 
           if (publisherRevenue <= 0) {
@@ -147,7 +196,7 @@ export async function GET(_req: NextRequest) {
             settlementType: "miniapp_daily",
             settlementId: Number(lockedStat.id),
             publisherId: Number(lockedStat.user_id),
-            advertiserPaid: toNumber(lockedStat.gross_revenue),
+            advertiserPaid,
             publisherShare: publisherRevenue,
             platformShare: toNumber(lockedStat.ads_galaxy_fee),
             reserveShare: toNumber(lockedStat.reserve_revenue),
@@ -207,9 +256,10 @@ export async function GET(_req: NextRequest) {
     }
 
     return NextResponse.json({ success: true, results });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Mini App Settlement Cron Error:", error);
-    return NextResponse.json({ error: error.message || "Mini App settlement failed" }, { status: 500 });
+    const message = error instanceof Error ? error.message : "Mini App settlement failed";
+    return NextResponse.json({ error: message }, { status: 500 });
   } finally {
     await releaseCronLock(lock);
   }

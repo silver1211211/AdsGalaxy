@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { listMarketplaceInventory, normalizeMarketplaceType } from "@/lib/publisherMarketplace";
+import { publicAdvertiserInventory } from "@/lib/advertiserResponsePrivacy";
 
 export async function GET(request: Request) {
   try {
@@ -22,8 +23,9 @@ export async function GET(request: Request) {
       limit: 9,
     }, user.id);
 
-    return NextResponse.json({ inventory });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Failed to load recommended inventory" }, { status: getAuthErrorStatus(error) });
+    return NextResponse.json({ inventory: inventory.map(publicAdvertiserInventory) });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Failed to load recommended inventory";
+    return NextResponse.json({ error: message }, { status: getAuthErrorStatus(error) });
   }
 }

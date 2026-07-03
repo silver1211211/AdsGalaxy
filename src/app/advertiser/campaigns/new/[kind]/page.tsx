@@ -108,6 +108,7 @@ export default function NewCampaignWizardPage() {
     direct_categories: "",
     direct_countries: "",
     direct_languages: "",
+    excluded_inventory: "",
   });
 
   const [image, setImage] = useState<File | null>(null);
@@ -916,6 +917,21 @@ export default function NewCampaignWizardPage() {
                   </div>
                 </div>
               </div>
+            </div>
+
+            {/* ── Budget card ── */}
+            <div className="rounded-2xl border border-slate-100 bg-white shadow-sm p-5 space-y-3">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                Exclude {isBotCampaign ? "Bots" : "Channels"} (optional)
+              </p>
+              <textarea
+                value={formData.excluded_inventory}
+                onChange={(event) => setFormData((previous) => ({ ...previous, excluded_inventory: event.target.value }))}
+                rows={4}
+                placeholder={isBotCampaign ? "@example_bot, example_bot, or https://t.me/example_bot" : "@examplechannel, examplechannel, or https://t.me/examplechannel"}
+                className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold outline-none focus:border-[#0c9de8]"
+              />
+              <p className="text-xs font-semibold text-slate-400">One per line or comma-separated. We do not reveal whether an entry is part of our inventory.</p>
             </div>
 
             {/* ── Budget card ── */}

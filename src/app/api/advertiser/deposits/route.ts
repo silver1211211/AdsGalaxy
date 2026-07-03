@@ -57,7 +57,9 @@ export async function GET(request: Request) {
     );
 
     const [rows] = await pool.query<DepositRow[]>(
-      "SELECT * FROM deposits WHERE user_id = ? ORDER BY created_at DESC",
+      `SELECT id, track_id, order_id, amount, pay_amount, currency, pay_currency,
+         network, address, status, expired_at, created_at
+       FROM deposits WHERE user_id = ? ORDER BY created_at DESC`,
       [user.id]
     );
 
@@ -104,7 +106,8 @@ export async function POST(request: Request) {
 
     // Check for pending invoices
     const [pending] = await pool.query<DepositRow[]>(
-      "SELECT * FROM deposits WHERE user_id = ? AND status IN ('pending', 'waiting', 'paying')",
+      `SELECT id, track_id, expired_at
+       FROM deposits WHERE user_id = ? AND status IN ('pending', 'waiting', 'paying')`,
       [user.id]
     );
 

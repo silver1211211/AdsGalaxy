@@ -64,7 +64,26 @@ function requestIp(request: Request) {
 }
 
 function requestOrigin(request: Request) {
-  return clean(request.headers.get("origin") || request.headers.get("referer"));
+  const value = clean(request.headers.get("origin") || request.headers.get("referer"));
+  if (!value) return "";
+  try { return new URL(value).origin.toLowerCase(); } catch { return ""; }
+}
+
+function normalizedAllowedOrigin(value: string) {
+  try { return new URL(value).origin.toLowerCase(); } catch { return ""; }
+}
+
+function validatedWebhookUrl(value: unknown) {
+  const raw = clean(value);
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new Error("Webhook URL must be valid HTTPS"); }
+  const host = url.hostname.toLowerCase();
+  const privateHost = host === "localhost" || host === "127.0.0.1" || host === "::1"
+    || /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+    || /^169\.254\./.test(host);
+  if (url.protocol !== "https:" || privateHost || !host.includes(".")) throw new Error("Webhook URL must be a public HTTPS endpoint");
+  url.username = ""; url.password = ""; url.hash = "";
+  return url.toString();
 }
 
 async function getSettings(db: Db = pool) {
@@ -114,7 +133,7 @@ export async function createDeveloperApplication(userId: number, input: {
       JSON.stringify(permissions),
       clean(input.allowedIps),
       clean(input.allowedOrigins),
-      clean(input.webhookUrl) || null,
+      clean(input.webhookUrl) ? validatedWebhookUrl(input.webhookUrl) : null,
       webhookSecret,
     ]
   );
@@ -173,8 +192,16 @@ export async function getDeveloperDashboard(userId: number) {
      WHERE user_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`,
     [userId]
   );
-  const requests = Number(analytics[0]?.requests || 0);
-  const successes = Number(analytics[0]?.successes || 0);
+  const [eventAnalytics]: any = await pool.query(
+    `SELECT
+       SUM(CASE WHEN event_type IN ('ad_requested', 'rewarded_requested') THEN 1 ELSE 0 END) as ad_requests,
+       SUM(CASE WHEN event_type = 'ad_impression' THEN 1 ELSE 0 END) as impressions,
+       SUM(CASE WHEN event_type = 'ad_completion' THEN 1 ELSE 0 END) as completions
+     FROM developer_sandbox_events
+     WHERE application_id IN (SELECT id FROM developer_applications WHERE user_id = ?)
+       AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`,
+    [userId]
+  );
   const errors = Number(analytics[0]?.errors || 0);
   return {
     apps: apps.map((app: any) => withIntegrationIds({ ...app, permissions: parseJsonArray(app.permissions) })),
@@ -183,9 +210,12 @@ export async function getDeveloperDashboard(userId: number) {
     deliveries,
     analytics: {
       ...(analytics[0] || {}),
-      impressions: successes,
-      completions: Number(analytics[0]?.reward_validations || 0),
-      fill_rate: requests ? (successes / requests) * 100 : 100,
+      ad_requests: Number(eventAnalytics[0]?.ad_requests || 0),
+      impressions: Number(eventAnalytics[0]?.impressions || 0),
+      completions: Number(eventAnalytics[0]?.completions || 0),
+      fill_rate: Number(eventAnalytics[0]?.ad_requests || 0) > 0
+        ? Number(eventAnalytics[0]?.impressions || 0) / Number(eventAnalytics[0]?.ad_requests || 1) * 100
+        : 0,
       errors,
       revenue: 0,
     },
@@ -250,8 +280,11 @@ export async function validateDeveloperApiRequest(request: Request, requiredPerm
   if (allowedIps.length > 0 && !allowedIps.includes(ip)) {
     throw Object.assign(new Error("IP address is not allowed for this key"), { statusCode: 403 });
   }
-  if (allowedOrigins.length > 0 && origin && !allowedOrigins.some((allowed) => origin.startsWith(allowed))) {
-    throw Object.assign(new Error("Origin is not allowed for this key"), { statusCode: 403 });
+  if (allowedOrigins.length > 0) {
+    const normalizedOrigins = allowedOrigins.map(normalizedAllowedOrigin).filter(Boolean);
+    if (!origin || !normalizedOrigins.includes(origin)) {
+      throw Object.assign(new Error("Origin is not allowed for this key"), { statusCode: 403 });
+    }
   }
 
   const settings = await getSettings();
@@ -338,7 +371,7 @@ export async function saveDeveloperWebhook(userId: number, input: { applicationI
   const secret = randomToken("whsec");
   await pool.query(
     "INSERT INTO developer_webhooks (application_id, user_id, url, secret, events) VALUES (?, ?, ?, ?, ?)",
-    [input.applicationId, userId, clean(input.url), secret, JSON.stringify(parseJsonArray(input.events, ["*"]))]
+    [input.applicationId, userId, validatedWebhookUrl(input.url), secret, JSON.stringify(parseJsonArray(input.events, ["*"]))]
   );
   return { secret };
 }

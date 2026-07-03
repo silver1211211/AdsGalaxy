@@ -23,6 +23,8 @@ import { createSystemLog, upsertBroadcastHourlyLog } from "@/lib/systemLogs";
 import { requireAdServingAllowed, upsertAdminAlert } from "@/lib/productionSafety";
 import { processBoundedQueue } from "@/lib/concurrency";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
+import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
+import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 
 export const dynamic = 'force-dynamic';
 
@@ -95,6 +97,7 @@ export async function GET(req: NextRequest) {
     const failureReasons: Record<string, number> = {};
     let pausedBotsSkipped = 0;
     let failedBots = 0;
+    const encryptionFailedBotIds = new Set<number>();
     const incrementFailure = (reason: string) => {
       failureReasons[reason] = (failureReasons[reason] || 0) + 1;
     };
@@ -149,6 +152,7 @@ export async function GET(req: NextRequest) {
     let totalDispatched = 0;
     const limit = 20;
     const dispatches = [];
+    const botExclusions = await loadCampaignExclusions(pool, "campaign", campaigns.map((campaign: { id: number | string }) => Number(campaign.id)), "bot");
 
     for (const campaign of campaigns) {
       if (totalDispatched >= limit) break;
@@ -163,6 +167,30 @@ export async function GET(req: NextRequest) {
 
       const healthyBots = [];
       for (const bot of bots) {
+        if (campaignExcludesIdentifier(botExclusions, Number(campaign.id), bot.bot_username)) continue;
+        if (encryptionFailedBotIds.has(Number(bot.id))) continue;
+        try {
+          bot.bot_token = await loadBotToken(pool, bot);
+        } catch (error: unknown) {
+          if (!isBotEncryptionError(error)) throw error;
+          encryptionFailedBotIds.add(Number(bot.id));
+          pausedBotsSkipped++;
+          failedBots++;
+          incrementFailure(error.code);
+          console.error("Broadcast bot credential decryption skipped", { bot_id: bot.id, code: error.code });
+          await createSystemLog({
+            logType: "system_error",
+            status: "failed",
+            title: "Bot credential decryption failed",
+            summary: "Bot was skipped because its encrypted token could not be decrypted. The bot was not paused.",
+            failedCount: 1,
+            skippedCount: 1,
+            failureReasons: { [error.code]: 1 },
+            affectedEntities: [{ bot_id: bot.id }],
+            metadata: { route: "/api/cron/process-broadcast", bot_id: bot.id, code: error.code },
+          });
+          continue;
+        }
         const health = await checkBotHealth({ id: bot.id, bot_token: bot.bot_token });
         if (health.ok) {
           healthyBots.push(bot);
@@ -203,7 +231,7 @@ export async function GET(req: NextRequest) {
           SELECT bu.* 
           FROM bot_users bu
           WHERE bu.bot_id = ? AND bu.is_active = TRUE
-          AND bu.status = 'active'
+          AND bu.status IN ('active','pending_verification')
           AND (bu.last_broadcast_at IS NULL OR bu.last_broadcast_at < NOW() - INTERVAL ? HOUR)
           AND (
             SELECT COUNT(*) FROM broadcast_deliveries bd 
@@ -218,6 +246,7 @@ export async function GET(req: NextRequest) {
                 AND bd.created_at >= CURDATE()
             ) < ?
           )
+          ORDER BY CASE WHEN bu.status='active' THEN 0 ELSE 1 END, bu.id
           LIMIT ?
         `, [
           bot.id,

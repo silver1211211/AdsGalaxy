@@ -25,12 +25,28 @@ export async function POST(request: Request) {
     }
 
     const initData = request.headers.get("x-telegram-init-data");
-    if (initData) await getAuthenticatedUser(initData);
 
     const ip = request.headers.get("x-forwarded-for")?.split(",")[0] || "127.0.0.1";
     const userAgent = request.headers.get("user-agent") || "unknown";
 
     if (campaignType === "miniapp") {
+      if (!initData) return NextResponse.json({ error: "Unauthorized: initData required" }, { status: 401 });
+      const authenticatedUser = await getAuthenticatedUser(initData);
+      if (!requestId || !Number.isInteger(miniappId) || miniappId <= 0) {
+        return NextResponse.json({ error: "request_id and miniapp_id are required" }, { status: 400 });
+      }
+      const [requestRows]: any = await pool.query(
+        `SELECT miniapp_id, telegram_user_id, internal_campaign_id
+         FROM miniapp_mediation_requests WHERE request_id = ? LIMIT 1`,
+        [requestId]
+      );
+      const adRequest = requestRows[0];
+      if (!adRequest
+        || Number(adRequest.miniapp_id) !== miniappId
+        || Number(adRequest.internal_campaign_id) !== campaignId
+        || String(adRequest.telegram_user_id) !== String(authenticatedUser.telegram_id)) {
+        return NextResponse.json({ error: "Click does not match the issued ad request" }, { status: 403 });
+      }
       const [rows]: any = await pool.query(
         "SELECT id, advertiser_id, image_url, categories, landing_url FROM miniapp_rewarded_campaigns WHERE id = ?",
         [campaignId]
@@ -52,6 +68,8 @@ export async function POST(request: Request) {
       });
       return NextResponse.json({ success: true, click_id: clickId, url: appendClickId(rows[0].landing_url, clickId) });
     }
+
+    if (initData) await getAuthenticatedUser(initData);
 
     const [rows]: any = await pool.query(
       "SELECT id, user_id, image_url, category, link FROM campaigns WHERE id = ?",

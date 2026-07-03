@@ -19,9 +19,9 @@ export async function GET(request: Request) {
     const endingSoon = await notifyReferralSprintEndingSoon();
     const active = await ensureActiveReferralSprint();
     return NextResponse.json({ success: true, settlement, result, endingSoon, active_sprint_id: active?.id || null });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Referral Sprint Cron Error:", error);
-    return NextResponse.json({ error: error.message || "Referral sprint cron failed" }, { status: 500 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Referral sprint cron failed" }, { status: 500 });
   } finally {
     await releaseCronLock(lock);
   }

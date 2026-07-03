@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { checkAdminAuth } from "@/lib/adminAuth";
+import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { ensureDefaultChannelDistribution } from "@/lib/channelLifecycle";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
@@ -85,11 +85,11 @@ export async function GET(request: Request) {
     const [[countRow]]: any = await pool.query(countQuery, queryParams);
     const [[summary]]: any = await pool.query(`
       SELECT
-        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'active') = 'active' THEN 1 ELSE 0 END) as active_channels,
+        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'healthy') IN ('healthy','warning') THEN 1 ELSE 0 END) as active_channels,
         SUM(CASE WHEN status IN ('paused', 'bot_removed', 'channel_not_found', 'permission_missing') AND is_deleted = FALSE THEN 1 ELSE 0 END) as paused_channels,
         SUM(CASE WHEN status IN ('bot_removed', 'channel_not_found', 'permission_missing') AND is_deleted = FALSE THEN 1 ELSE 0 END) as failed_channels,
         SUM(CASE WHEN status = 'deleted' OR is_deleted = TRUE THEN 1 ELSE 0 END) as deleted_channels,
-        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'active') = 'active' THEN subscriber_count ELSE 0 END) as active_subscribers
+        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'healthy') IN ('healthy','warning') THEN subscriber_count ELSE 0 END) as active_subscribers
       FROM channels
     `);
 
@@ -107,9 +107,8 @@ export async function GET(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const { id, action } = await request.json();
@@ -150,7 +149,7 @@ export async function PATCH(request: Request) {
              paused_reason = NULL,
              suggested_fix = NULL,
              failure_reason = NULL,
-             health_status = 'active',
+             health_status = 'healthy',
              health_checked_at = NOW(),
              reactivated_at = NOW()
          WHERE id = ?`,

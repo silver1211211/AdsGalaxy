@@ -30,6 +30,7 @@ import {
 import {
   normalizePrivateInviteLink,
   normalizePublicChannelUsername,
+  publicChannelUrl,
 } from "@/lib/telegramChannelInput";
 import { logPrivateChannelDiagnostic } from "@/lib/privateChannelDiagnostics";
 
@@ -1894,7 +1895,7 @@ export default function MonetizePage() {
             onClose={() => setViewingChannel(null)}
             onEdit={() => { setViewingChannel(null); setEditingChannel(viewingChannel); }}
             onToggleStatus={() => { handleToggleChannelStatus(viewingChannel); setViewingChannel(null); }}
-            canToggleStatus={!["pending", "deleted"].includes(viewingChannel.status)}
+            canToggleStatus={viewingChannel.status === "active" || canReactivate(viewingChannel.status)}
             isResuming={canReactivate(viewingChannel.status)}
           />
         )}
@@ -2131,7 +2132,11 @@ export default function MonetizePage() {
                       </div>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-[15px] font-black text-slate-900">{ch.title}</p>
-                        {ch.username && <p className="text-[11px] text-slate-400">@{ch.username}</p>}
+                         {ch.username && publicChannelUrl(ch.username) && (
+                           <a href={publicChannelUrl(ch.username)!} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} className="inline-flex items-center gap-1 text-[11px] text-[#0c9de8] hover:underline">
+                             @{ch.username}<ExternalLink size={10} />
+                           </a>
+                         )}
                       </div>
                       <StatusBadge status={ch.status} />
                       <div className="relative shrink-0">
@@ -2160,11 +2165,11 @@ export default function MonetizePage() {
                             </button>
                             <div className="border-t border-slate-100" />
                             <button
-                              disabled={ch.status === "pending" || ch.status === "deleted" || processingId === `ch-${ch.id}`}
+                              disabled={(ch.status !== "active" && !canReactivate(ch.status)) || processingId === `ch-${ch.id}`}
                               onClick={() => handleToggleChannelStatus(ch)}
                               className={cn(
                                 "flex items-center gap-3 w-full px-4 py-3 text-xs font-bold transition-colors",
-                                ch.status === "pending" || ch.status === "deleted" || processingId === `ch-${ch.id}`
+                                 (ch.status !== "active" && !canReactivate(ch.status)) || processingId === `ch-${ch.id}`
                                   ? "text-slate-300 cursor-not-allowed"
                                   : "text-slate-700 hover:bg-slate-50"
                               )}
@@ -2394,10 +2399,6 @@ export default function MonetizePage() {
                   </div>
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold text-slate-500">
                       <span>{formatCount(bot.total_impressions)} impressions</span>
-                      <span className="text-slate-300">·</span>
-                      <span>{formatCount(bot.total_clicks)} clicks</span>
-                      <span className="text-slate-300">·</span>
-                      <span>{Number(bot.total_impressions) > 0 ? (Number(bot.total_clicks || 0) / Number(bot.total_impressions) * 100).toFixed(1) : "0.0"}% CTR</span>
                       <span className="text-slate-300">·</span>
                       <span className="font-bold text-emerald-600">${Number(bot.total_revenue || 0).toFixed(4)} earned</span>
                   </div>

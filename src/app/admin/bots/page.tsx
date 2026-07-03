@@ -4,8 +4,11 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
 import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Bot, Search, Users, ShieldOff, Pause, Play, Trash2 } from "lucide-react";
+import EmptyState from "@/components/ui/EmptyState";
+import { SkeletonCard, SkeletonTableRows } from "@/components/ui/Skeleton";
 import Modal from "@/components/ui/Modal";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
+import ManualBotUserImport from "@/components/admin/ManualBotUserImport";
 
 type BotAction = "activate" | "reject" | "pause" | "delete";
 type PendingAction = {
@@ -219,6 +222,7 @@ export default function AdminBotsPage() {
   };
 
   const qualityLabel = (value?: string) => String(value || "good").replace(/_/g, " ");
+  const isFiltering = search.trim().length > 0 || statusFilter !== "all";
 
   return (
     <AdminLayout>
@@ -355,6 +359,8 @@ export default function AdminBotsPage() {
                   </div>
                 </div>
               </div>
+
+              <ManualBotUserImport botId={Number(selectedBot.id)} onImported={() => void fetchBots(page, statusFilter, search)} />
             </div>
           </div>
         </div>
@@ -430,9 +436,17 @@ export default function AdminBotsPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <tr><td colSpan={8} className="p-10 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={24} /></td></tr>
+                <SkeletonTableRows columns={8} rows={6} />
               ) : bots.length === 0 ? (
-                <tr><td colSpan={8} className="p-10 text-center text-slate-500">No bots found.</td></tr>
+                <tr>
+                  <td colSpan={8} className="p-10">
+                    <EmptyState
+                      icon={isFiltering ? Search : Bot}
+                      title={isFiltering ? "No bots match your filters" : "No bots yet"}
+                      message={isFiltering ? "Try a different search term or status filter." : "Publisher bots will appear here once submitted."}
+                    />
+                  </td>
+                </tr>
               ) : (
                 bots.map((bot: any) => (
                   <tr key={bot.id} className="transition-colors hover:bg-slate-50">
@@ -481,9 +495,17 @@ export default function AdminBotsPage() {
         {/* Mobile Cards */}
         <div className="space-y-3 p-4 md:hidden">
           {loading ? (
-            <div className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={24} /></div>
+            <div className="space-y-3">
+              <SkeletonCard />
+              <SkeletonCard />
+              <SkeletonCard />
+            </div>
           ) : bots.length === 0 ? (
-            <div className="p-8 text-center text-sm text-slate-500">No bots found.</div>
+            <EmptyState
+              icon={isFiltering ? Search : Bot}
+              title={isFiltering ? "No bots match your filters" : "No bots yet"}
+              message={isFiltering ? "Try a different search term or status filter." : "Publisher bots will appear here once submitted."}
+            />
           ) : (
             bots.map((bot: any) => (
               <div key={bot.id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">

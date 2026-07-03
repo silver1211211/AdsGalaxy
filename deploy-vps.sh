@@ -22,8 +22,8 @@ run_migration() {
   local name
   name=$(basename "$file")
   echo "  --> $name"
-  mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$file" 2>&1 \
-    | grep -v "^$" | grep -v "Query OK" || true
+  [ -f "$file" ] || { echo "  ERROR: Required migration is missing: $name"; return 1; }
+  mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$file"
 }
 
 echo "==> [1/4] Applying database migrations..."
@@ -64,14 +64,31 @@ for MIG in \
   "20260624_0038_suspicious_revenue_review_workflow.sql" \
   "20260624_0040_self_promotion_ads.sql" \
   "20260628_0047_publisher_bot_webhooks.sql" \
-  "20260630_0053_store_publisher_bot_webhook_urls.sql"
+  "20260630_0053_store_publisher_bot_webhook_urls.sql" \
+  "20260701_0054_bot_forwarded_start_integration.sql" \
+  "20260701_0055_channel_view_fetch_engine.sql" \
+  "20260701_0056_channel_statistics_foundation.sql" \
+  "20260701_0057_channel_settlement_engine.sql" \
+  "20260701_0058_channel_settlement_margin_reserve.sql" \
+  "20260701_0059_channel_publisher_quality_engine.sql" \
+  "20260701_0060_channel_distribution_statistics.sql" \
+  "20260701_0061_channel_monetization_verification_fixes.sql" \
+  "20260701_0062_channel_fraud_detection.sql" \
+  "20260701_0063_publisher_trust_enforcement.sql" \
+  "20260701_0064_admin_channel_control_center.sql" \
+  "20260701_0065_channel_health_monitor.sql" \
+  "20260702_0066_channel_post_expiry.sql" \
+  "20260702_0067_referral_join_immediate_credit.sql" \
+  "20260702_0068_miniapp_integration_hardening.sql" \
+  "20260703_0069_channel_post_stats_lookup_index.sql" \
+  "20260703_0070_miniapp_payg_cpm_billing.sql" \
+  "20260703_0071_miniapp_manual_approval_gate.sql" \
+  "20260703_0072_campaign_inventory_exclusions.sql" \
+  "20260703_0073_channel_fraud_billing_policy.sql" \
+  "20260703_0074_bot_user_reachability_status.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
-  if [ -f "$FILE" ]; then
-    run_migration "$FILE"
-  else
-    echo "  [SKIP] $MIG not found"
-  fi
+  run_migration "$FILE"
 done
 
 echo "    All migrations applied."
@@ -91,6 +108,55 @@ pm2 restart "$PM2_APP" \
   || { echo "    WARNING: pm2 restart failed — trying reload..."; pm2 reload "$PM2_APP"; }
 
 pm2 save
+
+# Install one managed, idempotent production cron block.
+CRON_SECRET=$(grep '^CRON_SECRET=' "$ENV_FILE" | cut -d'=' -f2-)
+if [ -z "$CRON_SECRET" ]; then
+  echo "    WARNING: CRON_SECRET is missing; production crons were not installed."
+else
+  CRON_BASE='curl -fsS --max-time 240 -H "x-cron-secret: '"$CRON_SECRET"'" https://app.adsgalaxy.online/api/cron'
+  CRON_BEGIN="# BEGIN ADSGALAXY MANAGED CRONS"
+  CRON_END="# END ADSGALAXY MANAGED CRONS"
+  EXISTING_CRONTAB=$(crontab -l 2>/dev/null || true)
+  CLEAN_CRONTAB=$(printf '%s\n' "$EXISTING_CRONTAB" | awk -v begin="$CRON_BEGIN" -v end="$CRON_END" '
+    $0 == begin { managed=1; next }
+    $0 == end { managed=0; next }
+    !managed
+  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|referral-sprint)([[:space:]?]|$)' || true)
+
+  {
+    printf '%s\n' "$CLEAN_CRONTAB"
+    echo "$CRON_BEGIN"
+    echo "* * * * * $CRON_BASE/process-ads >/dev/null 2>&1"
+    echo "* * * * * $CRON_BASE/process-broadcast >/dev/null 2>&1"
+    echo "*/10 * * * * $CRON_BASE/update-views >/dev/null 2>&1"
+    echo "3-59/10 * * * * $CRON_BASE/channel-settlement >/dev/null 2>&1"
+    echo "17 * * * * $CRON_BASE/publisher-trust-enforcement >/dev/null 2>&1"
+    echo "*/30 * * * * $CRON_BASE/channel-fraud-detection >/dev/null 2>&1"
+    echo "7-59/15 * * * * $CRON_BASE/channel-health-monitor >/dev/null 2>&1"
+    echo "*/5 * * * * $CRON_BASE/unlock-balances >/dev/null 2>&1"
+    echo "1-59/5 * * * * $CRON_BASE/unlock-miniapp >/dev/null 2>&1"
+    echo "6-59/10 * * * * $CRON_BASE/settle-miniapp >/dev/null 2>&1"
+    echo "25 */6 * * * $CRON_BASE/update-subscribers >/dev/null 2>&1"
+    echo "12 * * * * $CRON_BASE/traffic-quality >/dev/null 2>&1"
+    echo "35 2 * * * $CRON_BASE/inventory-optimization >/dev/null 2>&1"
+    echo "45 3 * * * $CRON_BASE/system-logs-cleanup >/dev/null 2>&1"
+    echo "*/15 * * * * $CRON_BASE/developer-webhooks >/dev/null 2>&1"
+    echo "*/5 * * * * $CRON_BASE/delete-expired-posts >/dev/null 2>&1"
+    echo "2 0 * * * $CRON_BASE/referral-sprint >/dev/null 2>&1"
+    echo "$CRON_END"
+  } | sed '/^[[:space:]]*$/d' | crontab -
+  echo "    Production crons installed without duplicate routes."
+fi
+
+# Private-channel schema verification (do not rerun one-time migrations here):
+# SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+# WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'channels'
+#   AND COLUMN_NAME IN ('channel_type','tracking_account','tracking_account_status',
+#     'view_tracking_status','invite_link_hash','private_invite_link_encrypted');
+# Expected: all six rows. They are supplied by one-time migrations 0046, 0051, and 0052
+# and consolidated by one-time launch migration 9999. Those migrations must already have
+# been applied before this recurring deploy script is used; do not duplicate them here.
 
 echo ""
 echo "==> Deployment complete. Checking application status..."

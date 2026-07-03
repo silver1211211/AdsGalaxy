@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy admin referral payload is dynamically shaped */
 
 import React, { useEffect, useMemo, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
@@ -69,6 +70,10 @@ const SETTING_LABELS: Record<string, string> = {
   team_second_reward: "Team 2nd Place Reward",
   team_third_reward: "Team 3rd Place Reward",
   team_league_unlock_referrals: "Team League Unlock Referrals",
+  referral_settlement_time: "Daily Settlement Time",
+  referral_fraud_min_channel_conversion_percent: "Minimum Quality Conversion %",
+  team_sprint_referral_target: "Daily Team Referral Target",
+  team_sprint_reward_pool: "Daily Team Reward Pool",
 };
 
 const SETTING_DESCRIPTIONS: Record<string, string> = {
@@ -204,7 +209,7 @@ export default function AdminReferralsPage() {
   const [message, setMessage] = useState("");
   const [setting, setSetting] = useState({ key: "referral_reward_amount", value: "0.015", description: "" });
   const [sprint, setSprint] = useState({ name: "Referral Sprint", duration_days: "14", first_place_reward: "10", second_place_reward: "5", third_place_reward: "2", best_team_reward: "15", second_team_reward: "8", third_team_reward: "4", auto_restart: true });
-  const [milestone, setMilestone] = useState({ scope: "user", threshold_count: "10", reward_type: "withdrawable_balance", reward_amount: "0.25", reward_label: "10 verified referrals", status: "active" });
+  const [milestone, setMilestone] = useState({ id: "", scope: "user", threshold_count: "10", reward_type: "withdrawable_balance", reward_amount: "0.25", reward_label: "10 verified referrals", status: "active" });
   const [teamName, setTeamName] = useState("");
   const [event, setEvent] = useState({ name: "Double Referral Week", team_id: "", multiplier: "2", starts_at: "", ends_at: "", status: "active" });
 
@@ -246,7 +251,16 @@ export default function AdminReferralsPage() {
   };
 
   useEffect(() => {
-    fetchData();
+    let active = true;
+    void fetch("/api/admin/referrals")
+      .then(async (response) => ({ response, json: await response.json().catch(() => ({})) }))
+      .then(({ response, json }) => {
+        if (!active) return;
+        if (response.ok) setData(json);
+        else setMessage(json.error || "Failed to load referral growth.");
+      })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
   }, []);
 
   const submit = async (payload: Record<string, unknown>, success = "Saved.") => {
@@ -496,6 +510,20 @@ export default function AdminReferralsPage() {
                 ["Count", (row) => String(row.threshold_count)],
                 ["Reward", (row) => money(row.reward_amount)],
                 ["Status", (row) => row.status],
+                ["Action", (row) => (
+                  <button
+                    onClick={() => setMilestone({
+                      id: String(row.id),
+                      scope: String(row.scope || "user"),
+                      threshold_count: String(row.threshold_count || "1"),
+                      reward_type: String(row.reward_type || "withdrawable_balance"),
+                      reward_amount: String(row.reward_amount || "0"),
+                      reward_label: String(row.reward_label || ""),
+                      status: String(row.status || "active"),
+                    })}
+                    className="rounded-lg bg-blue-50 px-3 py-1.5 text-[10px] font-black uppercase text-[#0c9de8]"
+                  >Edit</button>
+                )],
               ]} />
               <Table title="Active & Scheduled Events" rows={data.events} columns={[
                 ["Name", (row) => row.name],

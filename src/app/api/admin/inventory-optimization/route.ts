@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedAdmin } from "@/lib/adminAuth";
+import { getAuthenticatedAdmin, requireAdminPermission } from "@/lib/adminAuth";
 import {
   getDeliveryOptimizationSettings,
   publicInventoryQuality,
@@ -98,8 +98,8 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
-  const admin = await getAuthenticatedAdmin();
-  if (!admin) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { admin, response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const body = await request.json();

@@ -71,7 +71,7 @@ interface Campaign {
   name: string;
   kind: "channel" | "bot" | "miniapp";
   type: string;
-  status: "pending" | "active" | "paused" | "completed" | "rejected" | "budget_exhausted";
+  status: "pending" | "approved" | "active" | "paused" | "completed" | "rejected" | "budget_exhausted";
   budget: string | number;
   cpm: string | number;
   message_text: string;
@@ -111,6 +111,7 @@ export default function MyCampaignsPage() {
     message: string;
     confirmText: string;
     action: "remove" | "status";
+    kind?: Campaign["kind"];
   }>({
     isOpen: false,
     id: null,
@@ -270,6 +271,29 @@ export default function MyCampaignsPage() {
     }
   };
 
+  const handleMiniappToggleStatus = async (campaign: Campaign) => {
+    setIsActionLoading(true);
+    setProcessingId(campaign.id);
+    try {
+      const action = campaign.status === "paused" ? "resume" : "pause";
+      const res = await apiFetch(`/api/advertiser/miniapp-rewarded-campaigns/${campaign.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ action }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Failed to ${action} campaign`);
+      await fetchCampaigns(true);
+      setNotification({ type: "success", title: "Status Updated", message: `Campaign ${action === "pause" ? "paused" : "resumed"} successfully.` });
+      setConfirmModal((previous) => ({ ...previous, isOpen: false }));
+    } catch (error: unknown) {
+      setNotification({ type: "error", title: "Update Failed", message: error instanceof Error ? error.message : "Failed to update campaign" });
+    } finally {
+      setIsActionLoading(false);
+      setProcessingId(null);
+      setMenuOpenId(null);
+    }
+  };
+
   const handleRemove = async (id: number) => {
     setIsActionLoading(true);
     setProcessingId(id);
@@ -309,6 +333,7 @@ export default function MyCampaignsPage() {
 
   const getStatusIcon = (status: string) => {
     switch (status) {
+      case "approved":
       case "active": return <CheckCircle2 className="text-emerald-500" size={14} />;
       case "pending": return <Clock className="text-amber-500" size={14} />;
       case "rejected": return <XCircle className="text-red-500" size={14} />;
@@ -361,9 +386,18 @@ export default function MyCampaignsPage() {
 
         {/* Campaigns List */}
         {isLoading ? (
-          <div className="flex flex-col items-center justify-center py-20 gap-3">
-            <div className="w-8 h-8 border-3 border-blue-100 border-t-blue-600 rounded-full animate-spin" />
-            <p className="text-slate-400 text-xs font-bold uppercase tracking-widest">Syncing...</p>
+          <div className="space-y-3">
+            {[1, 2, 3].map((item) => (
+              <div key={item} className="animate-pulse rounded-[2rem] border border-slate-100 bg-white p-5">
+                <div className="flex items-center gap-4">
+                  <div className="h-14 w-14 shrink-0 rounded-2xl bg-slate-100" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3.5 w-1/2 rounded-full bg-slate-100" />
+                    <div className="h-2.5 w-2/3 rounded-full bg-slate-100" />
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         ) : campaigns.length === 0 ? (
           <div className="py-20 text-center space-y-6 rounded-[2rem] border border-dashed border-blue-100 bg-white/80">
@@ -437,12 +471,28 @@ export default function MyCampaignsPage() {
                           onClick={(e) => e.stopPropagation()}
                         >
                           {campaign.kind === 'miniapp' ? (
-                            <button
-                              onClick={() => openEdit(campaign)}
-                              className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all"
-                            >
-                              <Edit2 size={16} /> Edit Campaign
-                            </button>
+                            <>
+                              <button
+                                onClick={() => openEdit(campaign)}
+                                className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all"
+                              >
+                                <Edit2 size={16} /> Edit Campaign
+                              </button>
+                              <button
+                                disabled={!['approved', 'active', 'paused'].includes(campaign.status) || processingId === campaign.id}
+                                onClick={() => {
+                                  if (campaign.status === 'paused') {
+                                    handleMiniappToggleStatus(campaign);
+                                  } else {
+                                    setConfirmModal({ isOpen: true, id: campaign.id, kind: 'miniapp', title: 'Pause Campaign', message: 'Pause this Mini App campaign? It will stop serving ads until you resume it.', confirmText: 'Pause', action: 'status' });
+                                    setMenuOpenId(null);
+                                  }
+                                }}
+                                className={cn("mt-1 w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-xs font-bold transition-all", ['approved', 'active', 'paused'].includes(campaign.status) ? "text-slate-700 hover:bg-slate-50" : "cursor-not-allowed text-slate-200")}
+                              >
+                                {processingId === campaign.id ? <><Loader2 className="animate-spin" size={16} /> Processing...</> : campaign.status === 'paused' ? <><Play size={16} /> Resume Ad</> : <><Pause size={16} /> Pause Ad</>}
+                              </button>
+                            </>
                           ) : (
                             <>
                               <button
@@ -583,7 +633,12 @@ export default function MyCampaignsPage() {
         onConfirm={() => {
           if (!confirmModal.id) return;
           if (confirmModal.action === "status") {
-            handleToggleStatus(confirmModal.id);
+            if (confirmModal.kind === "miniapp") {
+              const campaign = campaigns.find((item) => item.id === confirmModal.id && item.kind === "miniapp");
+              if (campaign) handleMiniappToggleStatus(campaign);
+            } else {
+              handleToggleStatus(confirmModal.id);
+            }
           } else {
             handleRemove(confirmModal.id);
           }

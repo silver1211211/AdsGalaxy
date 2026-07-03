@@ -103,7 +103,7 @@ const sections: DocsSection[] = [
     title: "How Mini App monetization works",
     body: [
       "Mini App monetization lets approved Telegram Mini App publishers earn from ad activity inside their Mini Apps.",
-      "Mini App monetization is live for all publisher accounts. Approved Mini Apps can serve ads after AdsGalaxy configures at least one delivery network.",
+      "Mini App monetization is available to approved publisher accounts with Mini App access. Approved Mini Apps can serve ads after AdsGalaxy configures at least one delivery network.",
     ],
   },
   {
@@ -156,6 +156,7 @@ const sections: DocsSection[] = [
       "After approval, add the AdsGalaxy public script to your Telegram Mini App and call window.showAdsGalaxy() when the user chooses to show ads.",
       "Use the Mini App ID shown in Publisher > Monetize > Mini Apps > View Details.",
       "Continue your app logic only when the promise resolves. If it rejects, use the structured error code and message to show a retry, no-fill, or Telegram-only message.",
+      "The SDK uses Telegram initData automatically and binds each ad request to the authenticated Telegram user. Never call mediation endpoints without initData.",
       "Use the script example, add a Show Ad button, then call window.showAdsGalaxy() from your app action.",
     ],
   },
@@ -207,6 +208,20 @@ const sections: DocsSection[] = [
     body: [
       "Publisher Mini App reporting shows daily performance, impressions, revenue summaries when available, and country impression counts.",
       "Country reporting tracks impressions only. Revenue by country is intentionally not shown.",
+      "External provider revenue remains pending until AdsGalaxy receives a trusted provider import or postback; browser-supplied revenue is never accepted as confirmed earnings.",
+    ],
+  },
+  {
+    id: "reward-security",
+    title: "Reward security",
+    body: [
+      "Grant your in-app reward only after window.showAdsGalaxy() resolves successfully. A rejected promise, no-fill response, timeout, or user-close result must not receive a reward.",
+      "Keep your own reward operation idempotent by storing the returned request_id and refusing to credit it twice.",
+    ],
+    bullets: [
+      "Do not trust a client-only button state as completion proof.",
+      "Do not submit revenue, provider credentials, or API keys from browser code.",
+      "Use the Mini App ID from Mini App Details—not a Developer Center API reference.",
     ],
   },
   {

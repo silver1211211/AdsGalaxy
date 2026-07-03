@@ -1,18 +1,17 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy Mini App aggregate payloads are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedAdmin } from "@/lib/adminAuth";
+import { requireAdminPermission } from "@/lib/adminAuth";
 import { getMiniAppGlobalRevenueSummary } from "@/lib/miniappRevenueEngine";
 import { getMiniAppNetworkHealthScores } from "@/lib/miniappOptimization";
 
 export async function GET(request: Request) {
-  const admin = await getAuthenticatedAdmin();
-  if (!admin) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("read");
+  if (response) return response;
 
   const { searchParams } = new URL(request.url);
-  const page = parseInt(searchParams.get("page") || "1");
-  const limit = parseInt(searchParams.get("limit") || "10");
+  const page = Math.max(1, parseInt(searchParams.get("page") || "1") || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(searchParams.get("limit") || "10") || 10));
   const statusFilter = searchParams.get("status") || "all";
   const networkCountFilter = searchParams.get("network_count") || "all";
   const qualityFilter = searchParams.get("quality") || "all";
@@ -30,6 +29,7 @@ export async function GET(request: Request) {
         m.bot_id,
         m.webapp_url,
         m.miniapp_url,
+        m.admin_approved_at,
         CASE WHEN m.status = 'monetized' THEN 'approved' ELSE m.status END as status,
         COALESCE(m.traffic_quality_score, 60) as traffic_quality_score,
         COALESCE(m.traffic_quality_tier, 'good') as traffic_quality_tier,

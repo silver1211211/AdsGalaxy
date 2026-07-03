@@ -40,14 +40,6 @@ function todayDate() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function toNonNegativeNumber(value: unknown, fallback: number) {
-  const parsed = value === undefined || value === null || value === "" ? fallback : Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    throw new Error("gross_revenue must be greater than or equal to 0");
-  }
-  return parsed;
-}
-
 function toPositiveImpressions(value: unknown) {
   const parsed = value === undefined || value === null || value === "" ? 1 : Number(value);
   if (!Number.isFinite(parsed) || parsed < 1) {
@@ -77,7 +69,8 @@ export async function POST(request: Request) {
     const networkName = cleanText(body.network_name);
     const telegramUserId = cleanText(body.telegram_user_id);
     const impressions = toPositiveImpressions(body.impressions);
-    const grossRevenue = toNonNegativeNumber(body.gross_revenue, 0);
+    // Never trust browser-supplied revenue. Trusted provider imports use the internal stats endpoint.
+    const grossRevenue = 0;
     const country = normalizeCountry(body.country);
 
     if (!requestId) {

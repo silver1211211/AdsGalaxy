@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAuthenticatedAdmin } from "@/lib/adminAuth";
+import { getAuthenticatedAdmin, requireAdminPermission } from "@/lib/adminAuth";
 import { generateDeveloperApiKey, getAdminDeveloperPlatformData } from "@/lib/developerPlatform";
 import pool from "@/lib/db";
 
@@ -19,8 +19,8 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
-  const admin = await getAuthenticatedAdmin();
-  if (!admin) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { admin, response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const body = await request.json();

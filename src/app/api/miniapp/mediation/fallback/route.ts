@@ -70,6 +70,14 @@ export async function POST(request: Request) {
       await conn.rollback();
       return NextResponse.json({ error: "telegram_user_id does not match authenticated user" }, { status: 403 });
     }
+    if (String(mediationRequest.final_result) !== "selected") {
+      await conn.rollback();
+      return NextResponse.json({ error: "Fallback was already processed" }, { status: 409 });
+    }
+    if (failedNetwork !== mediationRequest.selected_network) {
+      await conn.rollback();
+      return NextResponse.json({ error: "failed_network does not match the selected network" }, { status: 400 });
+    }
 
     await assertMiniAppOwnerBetaAccess(mediationRequest.miniapp_id, conn);
 

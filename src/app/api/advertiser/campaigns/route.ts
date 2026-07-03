@@ -8,6 +8,8 @@ import { validatePostbackUrl } from "@/lib/conversionTracking";
 import { normalizeMarketplaceType, publicSelectionMetadata, recordMarketplaceEvent, validateDirectPlacementTargets } from "@/lib/publisherMarketplace";
 import { evaluateCampaignAutomation } from "@/lib/approvalAutomation";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
+import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 
 export async function POST(request: Request) {
   try {
@@ -74,14 +76,7 @@ export async function POST(request: Request) {
       }
     }
 
-    // 2. Check Ad Balance
-    const [userRows]: any = await pool.query("SELECT ad_balance, advertiser_trust_level, telegram_id FROM users WHERE id = ?", [user.id]);
-    const adBalance = parseFloat(userRows[0].ad_balance || "0");
-    if (adBalance < budget) {
-      return NextResponse.json({ error: "Insufficient ad balance. Please deposit funds." }, { status: 400 });
-    }
-
-    // 3. Handle Image Upload to External API
+    // 2. Handle Image Upload to External API
     let imageUrl = null;
     if (imageFile) {
       if (imageFile.size > 1024 * 1024) {
@@ -108,10 +103,29 @@ export async function POST(request: Request) {
       }
     }
 
-    // 4. Create Campaign (Transaction)
+    // 3. Create Campaign (Transaction)
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
+
+      const [balanceResult] = await conn.query<ResultSetHeader>(
+        `UPDATE users
+         SET ad_balance = ad_balance - ?
+         WHERE id = ? AND ad_balance >= ?`,
+        [budget, user.id, budget]
+      );
+      if (balanceResult.affectedRows !== 1) {
+        await conn.rollback();
+        return NextResponse.json({ error: "Insufficient ad balance. Please deposit funds." }, { status: 400 });
+      }
+
+      const [userRows] = await conn.query<Array<RowDataPacket & {
+        advertiser_trust_level: string | null;
+        telegram_id: string | number | null;
+      }>>(
+        "SELECT advertiser_trust_level, telegram_id FROM users WHERE id = ?",
+        [user.id]
+      );
 
       const quality = await calculateCampaignQualityScore(user.id, {
         name,
@@ -131,12 +145,6 @@ export async function POST(request: Request) {
         inventoryIds: Array.isArray(directInventoryIds) ? directInventoryIds : [],
         cpm,
       }, conn);
-
-      // Deduct from balance
-      await conn.query(
-        "UPDATE users SET ad_balance = ad_balance - ? WHERE id = ?",
-        [budget, user.id]
-      );
 
       // Insert campaign
       const [result]: any = await conn.query(
@@ -191,6 +199,13 @@ export async function POST(request: Request) {
         }, conn);
       }
 
+      await replaceCampaignExclusions(conn, {
+        campaignType: "campaign",
+        campaignId: result.insertId,
+        inventoryType: type === "broadcast" ? "bot" : "channel",
+        identifiers: formData.get("excluded_inventory"),
+      });
+
       await evaluateCampaignAutomation({
         campaignType: "campaign",
         campaignId: result.insertId,
@@ -231,7 +246,14 @@ export async function GET(request: Request) {
     const user = await getAuthenticatedUser(initData);
 
     const [rows]: any = await pool.query(
-      "SELECT * FROM campaigns WHERE user_id = ? ORDER BY created_at DESC",
+      `SELECT id, name, parse_mode, message_text, image_url, link, postback_url, button_text,
+         type, budget, cpm, category, continents, countries, languages, vpn_policy,
+         device_policy, os_policy, start_at, end_at, daily_budget_limit,
+         frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
+         direct_inventory_metadata, status, paused_at, resume_locked_until,
+         completed_at, budget_exhausted_at, pause_reason, auto_reactivate,
+         created_at, updated_at
+       FROM campaigns WHERE user_id = ? ORDER BY created_at DESC`,
       [user.id]
     );
 

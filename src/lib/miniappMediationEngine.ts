@@ -1,6 +1,5 @@
 import { randomUUID } from "crypto";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
-import pool from "@/lib/db";
 import {
   MINIAPP_NETWORKS,
   buildMiniAppNetworkClientConfig,
@@ -15,6 +14,7 @@ import {
   getMiniAppNetworkHealthScores,
   getMiniAppOptimizationSettings,
 } from "@/lib/miniappOptimization";
+import { isMiniappNetworkGloballyDisabled } from "@/lib/productionSafety";
 
 const FALLBACK_ERROR_CODES = new Set([
   "SDK_LOAD_FAILED",
@@ -46,6 +46,7 @@ type RequestRow = RowDataPacket & {
   root_request_id: string | null;
   attempted_networks: string | null;
   fallback_attempts: string | null;
+  final_result: string | null;
 };
 
 type MiniAppEligibilityRow = RowDataPacket & {
@@ -166,6 +167,11 @@ export async function selectMediationNetwork(input: {
 
     if (!Boolean(network.enabled)) {
       skipped.push({ network_name: network.network_name, reason: "disabled" });
+      continue;
+    }
+
+    if (await isMiniappNetworkGloballyDisabled(network.network_name, input.conn)) {
+      skipped.push({ network_name: network.network_name, reason: "globally_disabled" });
       continue;
     }
 
@@ -367,7 +373,7 @@ export async function createMediationAttempt(input: {
 
 export async function getMediationRequestForFallback(requestId: string, conn: PoolConnection) {
   const [rows] = await conn.query<RequestRow[]>(`
-    SELECT miniapp_id, telegram_user_id, country, ad_format, selected_network, root_request_id, attempted_networks, fallback_attempts
+    SELECT miniapp_id, telegram_user_id, country, ad_format, selected_network, root_request_id, attempted_networks, fallback_attempts, final_result
     FROM miniapp_mediation_requests
     WHERE request_id = ?
     FOR UPDATE

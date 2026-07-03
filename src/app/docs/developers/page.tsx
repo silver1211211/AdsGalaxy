@@ -3,7 +3,7 @@ import DocsArticle from "@/components/docs/DocsArticle";
 const publicSdkUrl = (process.env.NEXT_PUBLIC_SDK_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_ADSGALAXY_APP_URL || "https://app.adsgalaxy.online").replace(/\/$/, "");
 const backupSdkUrl = process.env.NEXT_PUBLIC_BACKUP_SDK_URL || "https://YOUR_BACKUP_ADSGALAXY_DOMAIN";
 
-const addScriptExample = `<script src="${publicSdkUrl}/sdk.js?id=YOUR_INTEGRATION_ID"></script>`;
+const addScriptExample = `<script src="${publicSdkUrl}/sdk.js?id=YOUR_MINI_APP_ID"></script>`;
 
 const showAdsExample = `<button onclick="showAd()">Show Ad</button>
 <script>
@@ -25,7 +25,7 @@ const fullHtmlExample = `<!doctype html>
 <head>
   <meta charset="utf-8" />
   <title>AdsGalaxy Ads Example</title>
-  <script src="${publicSdkUrl}/sdk.js?id=YOUR_INTEGRATION_ID"></script>
+  <script src="${publicSdkUrl}/sdk.js?id=YOUR_MINI_APP_ID"></script>
 </head>
 <body>
   <button onclick="showAd()">Show Ad</button>
@@ -54,9 +54,9 @@ const errorHandlingExample = `window.showAdsGalaxy()
   console.log(error.message);
 });`;
 
-const enhancedLoaderExample = `<script data-integration-id="YOUR_INTEGRATION_ID">
+const enhancedLoaderExample = `<script data-miniapp-id="YOUR_MINI_APP_ID">
   !function(){
-    var s=document.currentScript,p=s.getAttribute('data-integration-id')||'default';
+    var s=document.currentScript,p=s.getAttribute('data-miniapp-id')||'default';
     var d=['${publicSdkUrl}','${backupSdkUrl}'],i=0,t,sc;
     function l(){
       sc=document.createElement('script');
@@ -81,13 +81,13 @@ export default function DeveloperDocsPage() {
     <DocsArticle
       eyebrow="Developer Platform"
       title="AdsGalaxy SDK"
-      intro="Use one Integration ID to display AdsGalaxy Ads in approved publisher Mini Apps. Publishers integrate ads; advertisers buy ads."
+      intro="Use the Mini App ID from Publisher > Mini Apps to display AdsGalaxy ads. Developer API applications are separate sandbox and webhook tools."
       sections={[
         {
           id: "quick-start",
           title: "Part 1: Quick Start",
           body: [
-            "Add Script: paste the AdsGalaxy script in your Mini App page and replace YOUR_INTEGRATION_ID with the 6-10 digit Integration ID from Publisher > Developer Center.",
+            "Add Script: paste the AdsGalaxy script in your Mini App page and replace YOUR_MINI_APP_ID with the numeric ID from Mini App Details.",
             "Show Ads: call window.showAdsGalaxy() from a user action such as a button tap.",
             "Handle Success: continue your app logic only after the promise resolves.",
             "Handle Errors: use the error code to show no-fill, Telegram-only, or app-not-ready messaging.",
@@ -104,16 +104,16 @@ export default function DeveloperDocsPage() {
         },
         {
           id: "integration-id",
-          title: "One Integration ID",
+          title: "Mini App ID and API references",
           body: [
-            "Every publisher app uses one public Integration ID for SDK loading.",
-            "Integration IDs are 6-10 digit non-sequential values such as 839204, 582913, 104728, or 93210482.",
-            "Do not put internal database IDs, project IDs, zone IDs, network IDs, or credentials in public Mini App code.",
+            "The browser SDK uses the Mini App ID shown in Mini App Details.",
+            "Developer Center reference IDs identify API sandbox applications; they are not valid sdk.js IDs.",
+            "Do not put API keys, provider project IDs, zone IDs, or network credentials in public Mini App code.",
           ],
           bullets: [
-            "Sandbox Integration ID: use this while testing.",
-            "Production Integration ID: use this after the app is approved for production delivery.",
-            "Current Mode: Publisher > Developer Center shows whether the app is in sandbox or production.",
+            "Mini App ID: use with sdk.js for approved Telegram Mini Apps.",
+            "API application reference: use only when identifying Developer Center sandbox activity.",
+            "Production rewarded API calls are disabled until a provider-confirmed reward flow is available.",
           ],
         },
         {
@@ -148,8 +148,8 @@ export default function DeveloperDocsPage() {
           id: "sandbox-mode",
           title: "Sandbox Mode",
           body: [
-            "Use the Sandbox Integration ID for testing. Sandbox checks your page flow without affecting production revenue or delivery.",
-            "When your app is ready, switch to the Production Integration ID shown in Publisher > Developer Center.",
+            "Developer Center API applications run sandbox ad, event, reward-verification, and webhook tests without affecting production revenue.",
+            "For real Mini App delivery, use the approved Mini App ID from Mini App Details with sdk.js.",
           ],
         },
         {

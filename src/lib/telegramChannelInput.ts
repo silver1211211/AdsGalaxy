@@ -63,6 +63,11 @@ export function isValidPublicChannelUsername(value: unknown) {
   return normalizePublicChannelUsername(value) !== null;
 }
 
+export function publicChannelUrl(value: unknown) {
+  const username = normalizePublicChannelUsername(value);
+  return username ? `https://t.me/${username}` : null;
+}
+
 export function isValidPrivateInviteLink(value: unknown) {
   return normalizePrivateInviteLink(value) !== null;
 }

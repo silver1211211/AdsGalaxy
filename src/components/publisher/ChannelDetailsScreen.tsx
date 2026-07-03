@@ -1,12 +1,14 @@
 "use client";
 
-import React, { useEffect } from "react";
-import { motion } from "framer-motion";
+import React, { useEffect, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
-  Tv, CheckCircle2, Clock, XCircle, PauseCircle, ChevronLeft,
-  Edit3, Play, Pause, Lock, Copy, ShieldCheck,
+  Tv, CheckCircle2, Clock, XCircle, PauseCircle, ChevronLeft, ChevronDown,
+  Edit3, Play, Pause, Lock, Copy, ShieldCheck, Info, ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import ChannelAnalyticsDashboard from "@/components/publisher/ChannelAnalyticsDashboard";
+import { publicChannelUrl } from "@/lib/telegramChannelInput";
 
 interface ChannelDetailsScreenProps {
   channel: any;
@@ -53,6 +55,10 @@ function getStatusInfo(status: string): StatusInfo {
 export default function ChannelDetailsScreen({
   channel, onClose, onEdit, onToggleStatus, canToggleStatus, isResuming,
 }: ChannelDetailsScreenProps) {
+  const [liveSubscriberCount, setLiveSubscriberCount] = useState<number | null>(null);
+  const subscriberCount = liveSubscriberCount ?? (Number(channel.subscriber_count) || 0);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+
   useEffect(() => {
     const twa = window.Telegram?.WebApp;
     if (twa?.BackButton) {
@@ -77,6 +83,7 @@ export default function ChannelDetailsScreen({
     return channel.categories;
   })();
   const isPrivate = !channel.username || channel.channel_type === "private";
+  const telegramUrl = !isPrivate ? publicChannelUrl(channel.username) : null;
   const rawTrackingStatus = String(channel.tracking_account_status || "");
   const trackingStatus = rawTrackingStatus === "active"
     ? "active"
@@ -99,18 +106,25 @@ export default function ChannelDetailsScreen({
       className="fixed top-16 left-0 right-0 bottom-0 z-[55] flex flex-col bg-[#f8f9fb]"
     >
       {/* ── Top bar ── */}
-      <div className="flex shrink-0 items-center gap-3 border-b border-slate-100 bg-white px-4 py-3.5">
+      <div className="relative z-10 flex shrink-0 items-center gap-3 border-b border-slate-100 bg-white px-4 py-3.5 shadow-sm">
         <button
           onClick={onClose}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 active:scale-95"
         >
           <ChevronLeft size={18} />
         </button>
-        <p className="flex-1 truncate text-sm font-black uppercase tracking-tight text-slate-900">
-          Channel Details
-        </p>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-black uppercase tracking-tight text-slate-900">
+            {channel.title}
+          </p>
+          {telegramUrl && (
+            <a href={telegramUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#0c9de8] hover:underline">
+              @{channel.username}<ExternalLink size={10} />
+            </a>
+          )}
+        </div>
         <span className={cn(
-          "inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold",
+          "inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold shadow-sm ring-1 ring-inset ring-black/[0.03]",
           statusInfo.bg, statusInfo.color,
         )}>
           <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", statusInfo.dot)} />
@@ -175,7 +189,7 @@ export default function ChannelDetailsScreen({
             </div>
           )}
 
-          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
+          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm transition-shadow duration-200 hover:shadow-md">
             <div className="flex items-center gap-4 p-5">
               <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-blue-50">
                 <Tv size={28} className="text-[#0c9de8]" />
@@ -188,162 +202,154 @@ export default function ChannelDetailsScreen({
                     Private Channel
                   </span>
                 ) : (
-                  <p className="mt-0.5 text-sm font-bold text-[#0c9de8]">@{channel.username}</p>
+                  <a href={telegramUrl!} target="_blank" rel="noopener noreferrer" className="mt-0.5 inline-flex items-center gap-1 text-sm font-bold text-[#0c9de8] hover:underline">
+                    @{channel.username}<ExternalLink size={12} />
+                  </a>
                 )}
                 <p className="mt-1 text-xs font-semibold text-slate-400">
-                  {channel.subscriber_count?.toLocaleString() || "0"} subscribers
+                  {subscriberCount.toLocaleString()} subscribers
                 </p>
               </div>
             </div>
           </div>
 
-          {/* ── Status & Approval ── */}
-          <div className={cn("overflow-hidden rounded-2xl border p-4", statusInfo.bg, statusInfo.border)}>
-            <div className="flex items-start gap-3">
-              <span className={cn("mt-0.5 shrink-0", statusInfo.color)}>
-                <statusInfo.Icon size={18} />
-              </span>
-              <div className="flex-1 min-w-0">
-                <p className={cn("text-sm font-black", statusInfo.color)}>{statusInfo.label}</p>
-                <p className={cn("mt-0.5 text-xs font-medium leading-relaxed opacity-80", statusInfo.color)}>
-                  {statusInfo.message}
+          {/* ── Status issue (only shown when there's something to act on) ── */}
+          {(channel.paused_reason || channel.failure_reason || channel.suggested_fix) && (
+            <div className={cn("overflow-hidden rounded-2xl border p-4", statusInfo.bg, statusInfo.border)}>
+              {(channel.paused_reason || channel.failure_reason) && (
+                <p className={cn("text-xs font-bold", statusInfo.color)}>
+                  {channel.paused_reason || channel.failure_reason}
                 </p>
-              </div>
-            </div>
-            {(channel.paused_reason || channel.failure_reason || channel.suggested_fix) && (
-              <div className="mt-3 rounded-xl bg-white/70 p-3 backdrop-blur-sm">
-                {(channel.paused_reason || channel.failure_reason) && (
-                  <p className="text-xs font-bold text-slate-800">
-                    {channel.paused_reason || channel.failure_reason}
-                  </p>
-                )}
-                {channel.suggested_fix && (
-                  <p className="mt-1 text-xs font-medium text-slate-600">{channel.suggested_fix}</p>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* ── General Information ── */}
-          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
-            <div className="border-b border-slate-100 px-4 py-3">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">General Information</p>
-            </div>
-            <div className="divide-y divide-slate-50">
-              <div className="flex items-center justify-between px-4 py-3.5">
-                <span className="text-xs font-semibold text-slate-400">Channel Type</span>
-                <span className="text-sm font-bold text-slate-900">
-                  {isPrivate ? "Private" : "Public"}
-                </span>
-              </div>
-              {!isPrivate && (
-                <div className="flex items-center justify-between px-4 py-3.5">
-                  <span className="text-xs font-semibold text-slate-400">Username</span>
-                  <span className="text-sm font-bold text-[#0c9de8]">@{channel.username}</span>
-                </div>
               )}
-              <div className="flex items-center justify-between px-4 py-3.5">
-                <span className="text-xs font-semibold text-slate-400">Chat ID</span>
-                <span className="font-mono text-sm font-bold text-slate-900">{channel.chat_id}</span>
-              </div>
-              <div className="flex items-center justify-between px-4 py-3.5">
-                <span className="text-xs font-semibold text-slate-400">Registered</span>
-                <span className="text-sm font-bold text-slate-900">
-                  {new Date(channel.created_at).toLocaleDateString()}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* ── Monetization Setup ── */}
-          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
-            <div className="border-b border-slate-100 px-4 py-3">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Monetization Setup</p>
-            </div>
-            <div className="divide-y divide-slate-50">
-              <div className="flex items-center justify-between px-4 py-3.5">
-                <span className="text-xs font-semibold text-slate-400">Ad Posts / Day</span>
-                <span className="text-sm font-bold text-slate-900">{channel.posts_per_day ?? "—"}</span>
-              </div>
-              <div className="flex items-center justify-between px-4 py-3.5">
-                <span className="text-xs font-semibold text-slate-400">Subscribers</span>
-                <span className="text-sm font-bold text-slate-900">
-                  {channel.subscriber_count?.toLocaleString() || "0"}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* ── Categories ── */}
-          {categories.length > 0 && (
-            <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
-              <div className="border-b border-slate-100 px-4 py-3">
-                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Categories</p>
-              </div>
-              <div className="flex flex-wrap gap-2 px-4 py-3.5">
-                {categories.map((cat: string) => (
-                  <span key={cat} className="rounded-full border border-blue-100 bg-blue-50 px-3 py-1.5 text-[11px] font-bold text-blue-700">
-                    {cat}
-                  </span>
-                ))}
-              </div>
+              {channel.suggested_fix && (
+                <p className={cn("mt-1 text-xs font-medium opacity-80", statusInfo.color)}>{channel.suggested_fix}</p>
+              )}
             </div>
           )}
 
-          {/* ── Target Audience ── */}
-          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
-            <div className="border-b border-slate-100 px-4 py-3">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Target Audience</p>
-            </div>
-            <div className="flex flex-wrap gap-2 px-4 py-3.5">
-              {continents.length > 0 ? (
-                continents.map((cont: string) => (
-                  <span key={cont} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] font-bold text-slate-600">
-                    {cont}
-                  </span>
-                ))
-              ) : (
-                <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] font-bold text-slate-500">Global</span>
+          {/* ── Channel Analytics ── */}
+          <ChannelAnalyticsDashboard channelId={channel.id} onSubscriberCount={setLiveSubscriberCount} />
+
+          {/* ── Details (General Info + Monetization Setup + Categories + Target Audience) ── */}
+          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm transition-shadow duration-200 hover:shadow-md">
+            <button
+              type="button"
+              onClick={() => setDetailsOpen((open) => !open)}
+              className="flex w-full items-center gap-3 px-4 py-4 text-left transition hover:bg-slate-50 active:bg-slate-100"
+              aria-expanded={detailsOpen}
+            >
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-200">
+                <Info size={18} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-black text-slate-900">General Information</span>
+                <span className="block text-[11px] font-semibold text-slate-500">Channel type, username, and registration date</span>
+              </span>
+              <ChevronDown size={18} className={cn("shrink-0 text-slate-400 transition-transform duration-200", detailsOpen && "rotate-180")} />
+            </button>
+            <AnimatePresence initial={false}>
+              {detailsOpen && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="overflow-hidden border-t border-slate-100"
+                >
+                  <div className="divide-y divide-slate-50">
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <span className="text-xs font-semibold text-slate-400">Channel Type</span>
+                      <span className="text-sm font-bold text-slate-900">
+                        {isPrivate ? "Private" : "Public"}
+                      </span>
+                    </div>
+                    {!isPrivate && (
+                      <div className="flex items-center justify-between px-4 py-3.5">
+                        <span className="text-xs font-semibold text-slate-400">Username</span>
+                        <a href={telegramUrl!} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-sm font-bold text-[#0c9de8] hover:underline">
+                          @{channel.username}<ExternalLink size={12} />
+                        </a>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <span className="text-xs font-semibold text-slate-400">Registered</span>
+                      <span className="text-sm font-bold text-slate-900">
+                        {new Date(channel.created_at).toLocaleDateString()}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <span className="text-xs font-semibold text-slate-400">Ad Posts / Day</span>
+                      <span className="text-sm font-bold text-slate-900">{channel.posts_per_day ?? "—"}</span>
+                    </div>
+                  </div>
+
+                  {categories.length > 0 && (
+                    <div className="border-t border-slate-100 px-4 py-3.5">
+                      <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-slate-400">Categories</p>
+                      <div className="flex flex-wrap gap-2">
+                        {categories.map((cat: string) => (
+                          <span key={cat} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] font-bold text-slate-600">
+                            {cat}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="border-t border-slate-100 px-4 py-3.5">
+                    <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-slate-400">Target Audience</p>
+                    <div className="flex flex-wrap gap-2">
+                      {continents.length > 0 ? (
+                        continents.map((cont: string) => (
+                          <span key={cont} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] font-bold text-slate-600">
+                            {cont}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] font-bold text-slate-500">Global</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {onEdit && (
+                    <div className="border-t border-slate-100 px-4 py-3.5">
+                      <button
+                        onClick={onEdit}
+                        className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs font-black text-slate-700 transition hover:bg-slate-100 active:scale-[0.98]"
+                      >
+                        <Edit3 size={14} />
+                        Edit Channel
+                      </button>
+                    </div>
+                  )}
+                </motion.div>
               )}
-            </div>
+            </AnimatePresence>
           </div>
 
           {/* ── Actions ── */}
-          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
+          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm transition-shadow duration-200 hover:shadow-md">
             <div className="border-b border-slate-100 px-4 py-3">
               <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Actions</p>
             </div>
             <div className="space-y-2.5 px-4 py-4">
-              {(onEdit || (onToggleStatus && canToggleStatus)) && (
-                <div className="grid grid-cols-2 gap-2.5">
-                  {onEdit && (
-                    <button
-                      onClick={onEdit}
-                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs font-black text-slate-700 transition hover:bg-slate-100 active:scale-[0.98]"
-                    >
-                      <Edit3 size={14} />
-                      Edit Channel
-                    </button>
+              {onToggleStatus && canToggleStatus && (
+                <button
+                  onClick={onToggleStatus}
+                  className={cn(
+                    "inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-black shadow-sm transition hover:shadow active:scale-[0.98]",
+                    isResuming
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                      : "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
                   )}
-                  {onToggleStatus && canToggleStatus && (
-                    <button
-                      onClick={onToggleStatus}
-                      className={cn(
-                        "inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-black transition active:scale-[0.98]",
-                        isResuming
-                          ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                          : "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
-                      )}
-                    >
-                      {isResuming ? <Play size={14} /> : <Pause size={14} />}
-                      {isResuming ? "Resume" : "Pause"}
-                    </button>
-                  )}
-                </div>
+                >
+                  {isResuming ? <Play size={14} /> : <Pause size={14} />}
+                  {isResuming ? "Resume" : "Pause"}
+                </button>
               )}
               <button
                 onClick={onClose}
-                className="w-full rounded-xl bg-slate-900 py-3 text-sm font-black text-white transition-colors hover:bg-slate-800 active:scale-[0.98]"
+                className="w-full rounded-xl bg-slate-900 py-3 text-sm font-black text-white shadow-md shadow-slate-900/10 transition-all hover:bg-slate-800 hover:shadow-lg active:scale-[0.98]"
               >
                 Close
               </button>

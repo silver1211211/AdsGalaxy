@@ -72,7 +72,7 @@ const publisherFaqsDefault = [
     id: -2012,
     type: "publisher",
     question: "How do I monetize a Telegram bot?",
-    answer: "Go to Publisher > Monetize, tap + and select Bot. Enter your bot token, set the posting frequency and audience regions, and submit. Once approved, set up the AdsGalaxy webhook on your bot — open Monetize > Bot > View Details to copy the webhook URL, then register it with Telegram via setWebhook. The docs page under Publisher > Docs > Bots includes a ready-to-run curl command.",
+    answer: "Go to Publisher > Monetize, tap + and select Bot. Enter your bot token, set the posting frequency and audience regions, and submit. Once approved, open Monetize > Bot > View Details, copy the Integration URL, and add this integration to your existing /start handler. Your Telegram webhook and existing bot logic remain unchanged. Publisher > Docs > Bot Integration includes PHP, Node.js, Python, Go, Laravel, and BotMother guidance.",
   },
   {
     id: -2013,

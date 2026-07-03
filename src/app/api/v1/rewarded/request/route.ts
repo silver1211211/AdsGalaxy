@@ -11,7 +11,9 @@ export async function POST(request: Request) {
   let context: any = null;
   try {
     context = await validateDeveloperApiRequest(request, "reward_validation", "/api/v1/rewarded/request");
+    if (context.mode === "production") throw Object.assign(new Error("Production rewarded API is not enabled; use the Mini App SDK"), { statusCode: 501 });
     const body = await request.json().catch(() => ({}));
+    if (!clean(body.external_user_id)) throw Object.assign(new Error("external_user_id is required"), { statusCode: 400 });
     const ad = sandboxAdPayload(context.applicationId, "rewarded");
     const payload = {
       ...ad,

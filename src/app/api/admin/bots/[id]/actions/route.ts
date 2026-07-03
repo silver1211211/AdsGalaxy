@@ -4,11 +4,13 @@ import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
+import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
 
 type StatusRow = RowDataPacket & {
   id: number;
   status: string;
   bot_token: string;
+  bot_token_encrypted: string | null;
 };
 
 async function getBotColumns() {
@@ -59,7 +61,7 @@ export async function POST(
       return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
 
-    const [rows] = await pool.query<StatusRow[]>("SELECT id, status, bot_token FROM bots WHERE id = ?", [id]);
+    const [rows] = await pool.query<StatusRow[]>("SELECT id, status, bot_token, bot_token_encrypted FROM bots WHERE id = ?", [id]);
     if (rows.length === 0) {
       return NextResponse.json({ error: "Bot not found" }, { status: 404 });
     }
@@ -67,11 +69,8 @@ export async function POST(
     const oldStatus = rows[0].status;
     const newStatus = statusMap[normalizedAction];
     const botColumns = await getBotColumns();
-    let webhookUrl: string | null = null;
-
     if (normalizedAction === "activate") {
-      const activation = await reactivateBotAfterHealthCheck(id, rows[0].bot_token, pool, new URL(request.url).origin);
-      webhookUrl = activation.webhookUrl;
+      await reactivateBotAfterHealthCheck(id, await loadBotToken(pool, { ...rows[0], id }), pool, new URL(request.url).origin);
     } else if (normalizedAction === "delete") {
       const { assignments, params } = updateAssignable(botColumns, {
         status: newStatus,
@@ -108,10 +107,13 @@ export async function POST(
       },
     });
 
-    return NextResponse.json({ success: true, status: newStatus, webhook_url: webhookUrl });
+    return NextResponse.json({ success: true, status: newStatus });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Internal Server Error";
     console.error("Admin Bot Action Error:", error);
+    if (isBotEncryptionError(error)) {
+      return NextResponse.json({ error: "Bot credential encryption configuration error", code: error.code }, { status: 503 });
+    }
+    const message = error instanceof Error ? error.message : "Internal Server Error";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

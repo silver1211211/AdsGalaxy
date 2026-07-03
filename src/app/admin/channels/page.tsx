@@ -1,11 +1,16 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy channel list payload is not yet schema-generated */
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Trash2, ExternalLink } from "lucide-react";
+import { ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Trash2, ExternalLink, BadgeCheck, Tv, Loader2 } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
+import EmptyState from "@/components/ui/EmptyState";
+import { SkeletonCard, SkeletonTableRows } from "@/components/ui/Skeleton";
+import ChannelControlCenter from "@/components/admin/ChannelControlCenter";
+import { publicChannelUrl } from "@/lib/telegramChannelInput";
 
 type ChannelAction = "activate" | "reject" | "pause" | "delete";
 type PendingAction = {
@@ -15,6 +20,180 @@ type PendingAction = {
   message: string;
   danger?: boolean;
 } | null;
+
+const AVATAR_TONES = [
+  "bg-blue-50 text-blue-600",
+  "bg-indigo-50 text-indigo-600",
+  "bg-emerald-50 text-emerald-600",
+  "bg-amber-50 text-amber-600",
+  "bg-rose-50 text-rose-600",
+  "bg-cyan-50 text-cyan-600",
+];
+
+function avatarTone(seed: number) {
+  return AVATAR_TONES[Math.abs(seed) % AVATAR_TONES.length];
+}
+
+function formatMetric(value: unknown) {
+  if (value === null || value === undefined || value === "") return "—";
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toLocaleString() : String(value);
+}
+
+function formatMoneyMetric(value: unknown) {
+  if (value === null || value === undefined || value === "") return "—";
+  const number = Number(value);
+  return Number.isFinite(number) ? `$${number.toFixed(2)}` : String(value);
+}
+
+function ChannelAvatar({ channel }: { channel: any }) {
+  const initial = String(channel.title || channel.username || "?").trim().charAt(0).toUpperCase() || "#";
+  return (
+    <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl text-sm font-black ${avatarTone(Number(channel.id) || 0)}`}>
+      {initial || <Tv size={18} />}
+    </div>
+  );
+}
+
+function VerifiedBadge({ channel }: { channel: any }) {
+  if (!channel.is_verified) return null;
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-black text-blue-700" title="Verified channel">
+      <BadgeCheck size={11} />
+      Verified
+    </span>
+  );
+}
+
+const FAILED_STATUSES = ["bot_removed", "channel_not_found", "permission_missing"];
+
+function StatusBadge({ status }: { status: string }) {
+  return (
+    <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold capitalize ${
+      status === "active" ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : status === "pending" ? "border-amber-200 bg-amber-50 text-amber-700"
+      : status === "rejected" || FAILED_STATUSES.includes(status) ? "border-red-200 bg-red-50 text-red-700"
+      : "border-slate-200 bg-slate-100 text-slate-700"
+    }`}>
+      {status.replace(/_/g, " ")}
+    </span>
+  );
+}
+
+function ChannelIdentifier({ channel, mobile = false }: { channel: any; mobile?: boolean }) {
+  if (channel.channel_type === "private") {
+    return channel.private_invite_link_url ? (
+      <a
+        href={channel.private_invite_link_url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={`${mobile ? "text-xs" : "max-w-[220px] text-sm"} inline-flex items-center gap-1.5 font-semibold text-blue-700 hover:text-blue-900 hover:underline`}
+        title={channel.private_invite_link_url}
+      >
+        <span className="truncate">{channel.private_invite_link_url}</span>
+        <ExternalLink size={13} className="shrink-0" />
+      </a>
+    ) : (
+      <span className={`${mobile ? "text-xs" : "text-sm"} font-semibold text-slate-500`}>Private link unavailable</span>
+    );
+  }
+
+  const href = publicChannelUrl(channel.username);
+  return href ? (
+    <a href={href} target="_blank" rel="noopener noreferrer" className={`${mobile ? "text-xs" : "text-sm"} inline-flex items-center gap-1 font-semibold text-blue-700 hover:text-blue-900 hover:underline`}>
+      @{channel.username}<ExternalLink size={12} />
+    </a>
+  ) : <span className={`${mobile ? "text-xs" : "text-sm"} font-semibold text-slate-500`}>N/A</span>;
+}
+
+interface ActionButtonsProps {
+  channel: any;
+  actionLoading: number | null;
+  onView: (channel: any) => void;
+  onAction: (channel: any, action: ChannelAction, title: string, message: string, danger?: boolean) => void;
+}
+
+function ActionButtons({ channel, actionLoading, onView, onAction }: ActionButtonsProps) {
+  return (
+    <div className="flex flex-wrap items-center justify-end gap-1.5">
+      <button
+        onClick={() => onView(channel)}
+        className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 transition-colors hover:bg-blue-50 hover:text-blue-600"
+        title="View Details"
+      >
+        <Eye size={15} />
+      </button>
+      {channel.status === "pending" && (
+        <>
+          <button
+            onClick={() => onAction(channel, "activate", "Activate Channel", "Activate this channel?")}
+            disabled={actionLoading === channel.id}
+            className="rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-emerald-600 transition-colors hover:bg-emerald-100 disabled:opacity-50"
+            title="Approve"
+          >
+            {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />}
+          </button>
+          <button
+            onClick={() => onAction(channel, "reject", "Reject Channel", "Reject this channel?", true)}
+            disabled={actionLoading === channel.id}
+            className="rounded-lg border border-red-100 bg-red-50 p-2 text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
+            title="Reject"
+          >
+            {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <X size={15} />}
+          </button>
+        </>
+      )}
+      {channel.status === "active" && (
+        <button
+          onClick={() => onAction(channel, "pause", "Pause Channel", "Pause this channel?")}
+          disabled={actionLoading === channel.id}
+          className="rounded-lg border border-amber-100 bg-amber-50 p-2 text-amber-600 transition-colors hover:bg-amber-100 disabled:opacity-50"
+          title="Pause"
+        >
+          {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <Pause size={15} />}
+        </button>
+      )}
+      {(channel.status === "paused" || FAILED_STATUSES.includes(channel.status)) && (
+        <button
+          onClick={() => onAction(channel, "activate", "Reactivate Channel", "Reactivate this channel?")}
+          disabled={actionLoading === channel.id}
+          className="rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-emerald-600 transition-colors hover:bg-emerald-100 disabled:opacity-50"
+          title="Reactivate"
+        >
+          {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} />}
+        </button>
+      )}
+      {channel.status === "rejected" && (
+        <button
+          onClick={() => onAction(channel, "activate", "Activate Channel", "Activate this rejected channel?")}
+          disabled={actionLoading === channel.id}
+          className="rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-emerald-600 transition-colors hover:bg-emerald-100 disabled:opacity-50"
+          title="Activate"
+        >
+          {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />}
+        </button>
+      )}
+      {channel.status !== "rejected" && channel.status !== "pending" && channel.status !== "deleted" && (
+        <button
+          onClick={() => onAction(channel, "reject", "Reject Channel", "Reject this channel?", true)}
+          disabled={actionLoading === channel.id}
+          className="rounded-lg border border-red-100 bg-red-50 p-2 text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
+          title="Reject"
+        >
+          {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <X size={15} />}
+        </button>
+      )}
+      <button
+        onClick={() => onAction(channel, "delete", "Delete Channel", "Delete this channel from monetization?", true)}
+        disabled={actionLoading === channel.id}
+        className="rounded-lg border border-red-100 bg-red-50 p-2 text-red-700 transition-colors hover:bg-red-100 disabled:opacity-50"
+        title="Delete"
+      >
+        {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
+      </button>
+    </div>
+  );
+}
 
 export default function AdminChannelsPage() {
   const [channels, setChannels] = useState([]);
@@ -64,6 +243,7 @@ export default function AdminChannelsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Action failed");
+      if (selectedChannel?.id === id) setViewModalOpen(false);
       await fetchChannels(page, statusFilter, search);
     } catch (err: any) {
       setError(err.message);
@@ -88,99 +268,6 @@ export default function AdminChannelsPage() {
     await handleAction(channel.id, action);
   };
 
-  const failedStatuses = ["bot_removed", "channel_not_found", "permission_missing"];
-
-  const StatusBadge = ({ status }: { status: string }) => (
-    <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold capitalize ${
-      status === "active" ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-      : status === "pending" ? "border-amber-200 bg-amber-50 text-amber-700"
-      : status === "rejected" || failedStatuses.includes(status) ? "border-red-200 bg-red-50 text-red-700"
-      : "border-slate-200 bg-slate-100 text-slate-700"
-    }`}>
-      {status.replace(/_/g, " ")}
-    </span>
-  );
-
-  const ActionButtons = ({ channel }: { channel: any }) => (
-    <div className="flex flex-wrap items-center justify-end gap-1.5">
-      <button
-        onClick={() => openViewModal(channel)}
-        className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 transition-colors hover:bg-blue-50 hover:text-blue-600"
-        title="View Details"
-      >
-        <Eye size={15} />
-      </button>
-      {channel.status === "pending" && (
-        <>
-          <button
-            onClick={() => openActionConfirm(channel, "activate", "Activate Channel", "Activate this channel?")}
-            disabled={actionLoading === channel.id}
-            className="rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-emerald-600 transition-colors hover:bg-emerald-100 disabled:opacity-50"
-            title="Approve"
-          >
-            {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />}
-          </button>
-          <button
-            onClick={() => openActionConfirm(channel, "reject", "Reject Channel", "Reject this channel?", true)}
-            disabled={actionLoading === channel.id}
-            className="rounded-lg border border-red-100 bg-red-50 p-2 text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
-            title="Reject"
-          >
-            {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <X size={15} />}
-          </button>
-        </>
-      )}
-      {channel.status === "active" && (
-        <button
-          onClick={() => openActionConfirm(channel, "pause", "Pause Channel", "Pause this channel?")}
-          disabled={actionLoading === channel.id}
-          className="rounded-lg border border-amber-100 bg-amber-50 p-2 text-amber-600 transition-colors hover:bg-amber-100 disabled:opacity-50"
-          title="Pause"
-        >
-          {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <Pause size={15} />}
-        </button>
-      )}
-      {(channel.status === "paused" || failedStatuses.includes(channel.status)) && (
-        <button
-          onClick={() => openActionConfirm(channel, "activate", "Reactivate Channel", "Reactivate this channel?")}
-          disabled={actionLoading === channel.id}
-          className="rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-emerald-600 transition-colors hover:bg-emerald-100 disabled:opacity-50"
-          title="Reactivate"
-        >
-          {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} />}
-        </button>
-      )}
-      {channel.status === "rejected" && (
-        <button
-          onClick={() => openActionConfirm(channel, "activate", "Activate Channel", "Activate this rejected channel?")}
-          disabled={actionLoading === channel.id}
-          className="rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-emerald-600 transition-colors hover:bg-emerald-100 disabled:opacity-50"
-          title="Activate"
-        >
-          {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />}
-        </button>
-      )}
-      {channel.status !== "rejected" && channel.status !== "pending" && channel.status !== "deleted" && (
-        <button
-          onClick={() => openActionConfirm(channel, "reject", "Reject Channel", "Reject this channel?", true)}
-          disabled={actionLoading === channel.id}
-          className="rounded-lg border border-red-100 bg-red-50 p-2 text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
-          title="Reject"
-        >
-          {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <X size={15} />}
-        </button>
-      )}
-      <button
-        onClick={() => openActionConfirm(channel, "delete", "Delete Channel", "Delete this channel from monetization?", true)}
-        disabled={actionLoading === channel.id}
-        className="rounded-lg border border-red-100 bg-red-50 p-2 text-red-700 transition-colors hover:bg-red-100 disabled:opacity-50"
-        title="Delete"
-      >
-        {actionLoading === channel.id ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
-      </button>
-    </div>
-  );
-
   const renderContinents = (continentsStr: string) => {
     if (!continentsStr) return <span className="font-semibold text-slate-900">All</span>;
     try {
@@ -196,7 +283,7 @@ export default function AdminChannelsPage() {
           </div>
         );
       }
-    } catch (e) {}
+    } catch {}
     return <span className="font-semibold text-slate-900">{continentsStr}</span>;
   };
 
@@ -215,32 +302,14 @@ export default function AdminChannelsPage() {
           </div>
         );
       }
-    } catch (e) {}
+    } catch {}
     return <span className="italic text-slate-400">None selected</span>;
   };
 
   const qualityLabel = (value?: string) => String(value || "good").replace(/_/g, " ");
   const trackingLabel = (value?: string) => String(value || "not_required").replace(/_/g, " ");
-  const ChannelIdentifier = ({ channel, mobile = false }: { channel: any; mobile?: boolean }) => {
-    if (channel.channel_type === "private") {
-      return channel.private_invite_link_url ? (
-        <a
-          href={channel.private_invite_link_url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={`${mobile ? "text-xs" : "max-w-[260px] text-sm"} inline-flex items-center gap-1.5 font-semibold text-blue-700 hover:text-blue-900 hover:underline`}
-          title={channel.private_invite_link_url}
-        >
-          <span className="truncate">{channel.private_invite_link_url}</span>
-          <ExternalLink size={13} className="shrink-0" />
-        </a>
-      ) : (
-        <span className={`${mobile ? "text-xs" : "text-sm"} font-semibold text-slate-500`}>Private link unavailable</span>
-      );
-    }
 
-    return <span className={`${mobile ? "text-xs" : "text-sm"} font-semibold text-slate-900`}>@{channel.username || "N/A"}</span>;
-  };
+  const isFiltering = search.trim().length > 0 || statusFilter !== "all";
 
   return (
     <AdminLayout>
@@ -256,21 +325,62 @@ export default function AdminChannelsPage() {
         isLoading={actionLoading !== null}
       />
 
-      {/* Channel Details Modal */}
+      {/* Channel Review Modal */}
       {viewModalOpen && selectedChannel && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 p-4">
-          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
-              <div>
-                <h3 className="text-base font-bold text-slate-900">Channel Details</h3>
-                <p className="mt-0.5 text-sm text-slate-500">#{selectedChannel.id}</p>
+          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center gap-4 border-b border-slate-200 px-6 py-5">
+              <ChannelAvatar channel={selectedChannel} />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="truncate text-base font-black text-slate-900">{selectedChannel.title || "Untitled Channel"}</h3>
+                  <VerifiedBadge channel={selectedChannel} />
+                </div>
+                <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                  <span>#{selectedChannel.id}</span>
+                  <StatusBadge status={selectedChannel.status} />
+                </div>
               </div>
-              <button onClick={() => setViewModalOpen(false)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+              <button onClick={() => setViewModalOpen(false)} className="shrink-0 rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
                 <X size={18} />
               </button>
             </div>
 
-            <div className="overflow-y-auto p-6 space-y-5">
+            <div className="space-y-5 overflow-y-auto p-6">
+              <ChannelControlCenter
+                channelId={Number(selectedChannel.id)}
+                onChanged={() => fetchChannels(page, statusFilter, search)}
+              />
+              {(selectedChannel.failure_reason || selectedChannel.paused_reason) && (
+                <div className="rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-800">
+                  {selectedChannel.failure_reason || selectedChannel.paused_reason}
+                  {selectedChannel.suggested_fix && <div className="mt-1 font-medium text-amber-700">{selectedChannel.suggested_fix}</div>}
+                </div>
+              )}
+
+              {/* Performance */}
+              <div>
+                <h4 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-400">Performance</h4>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Campaigns</div>
+                    <div className="mt-1 text-lg font-black text-slate-900">{formatMetric(selectedChannel.campaign_count)}</div>
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Today&apos;s Views</div>
+                    <div className="mt-1 text-lg font-black text-slate-900">{formatMetric(selectedChannel.today_views)}</div>
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Total Views</div>
+                    <div className="mt-1 text-lg font-black text-slate-900">{formatMetric(selectedChannel.total_views)}</div>
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Earnings</div>
+                    <div className="mt-1 text-lg font-black text-slate-900">{formatMoneyMetric(selectedChannel.earnings_generated)}</div>
+                  </div>
+                </div>
+              </div>
+
               {/* Publisher Info */}
               <div>
                 <h4 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-400">Publisher Profile</h4>
@@ -302,12 +412,14 @@ export default function AdminChannelsPage() {
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                   <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
                     <div>
-                      <div className="text-xs font-medium text-slate-500">Title</div>
-                      <div className="mt-0.5 font-semibold text-slate-900">{selectedChannel.title || "N/A"}</div>
-                    </div>
-                    <div>
                       <div className="text-xs font-medium text-slate-500">Username / Link</div>
-                      <div className="mt-0.5 font-semibold text-blue-600">@{selectedChannel.username || "N/A"}</div>
+                      {selectedChannel.channel_type !== "private" && publicChannelUrl(selectedChannel.username) ? (
+                        <a href={publicChannelUrl(selectedChannel.username)!} target="_blank" rel="noopener noreferrer" className="mt-0.5 inline-flex items-center gap-1 font-semibold text-blue-600 hover:underline">
+                          @{selectedChannel.username}<ExternalLink size={13} />
+                        </a>
+                      ) : (
+                        <div className="mt-0.5 font-semibold text-slate-500">{selectedChannel.channel_type === "private" ? "Private channel" : "N/A"}</div>
+                      )}
                     </div>
                     {selectedChannel.channel_type === "private" && (
                       <div className="col-span-2">
@@ -336,10 +448,6 @@ export default function AdminChannelsPage() {
                       <div className="mt-0.5 font-semibold text-slate-900">{selectedChannel.subscriber_count?.toLocaleString() || "0"}</div>
                     </div>
                     <div>
-                      <div className="text-xs font-medium text-slate-500">Status</div>
-                      <div className="mt-0.5"><StatusBadge status={selectedChannel.status} /></div>
-                    </div>
-                    <div>
                       <div className="text-xs font-medium text-slate-500">Posts / Day</div>
                       <div className="mt-0.5 font-semibold text-slate-900">{selectedChannel.posts_per_day}</div>
                     </div>
@@ -352,32 +460,6 @@ export default function AdminChannelsPage() {
                       <div className="mt-0.5 font-semibold capitalize text-slate-900">{qualityLabel(selectedChannel.traffic_risk_level)} risk</div>
                     </div>
                     <div>
-                      <div className="text-xs font-medium text-slate-500">Tracking Account</div>
-                      <div className="mt-0.5 font-semibold capitalize text-slate-900">
-                        {selectedChannel.tracking_account ? `Account ${selectedChannel.tracking_account}` : "None"} / {trackingLabel(selectedChannel.tracking_account_status)}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-xs font-medium text-slate-500">Tracking Member</div>
-                      <div className="mt-0.5 font-semibold capitalize text-slate-900">{trackingLabel(selectedChannel.tracking_account_member_status || "unknown")}</div>
-                    </div>
-                    <div>
-                      <div className="text-xs font-medium text-slate-500">Tracking Last Success</div>
-                      <div className="mt-0.5 font-semibold text-slate-900">{selectedChannel.tracking_account_last_success_at ? new Date(selectedChannel.tracking_account_last_success_at).toLocaleString() : "Never"}</div>
-                    </div>
-                    <div>
-                      <div className="text-xs font-medium text-slate-500">Tracking Last Failure</div>
-                      <div className="mt-0.5 font-semibold text-slate-900">{selectedChannel.tracking_account_last_failure_at ? new Date(selectedChannel.tracking_account_last_failure_at).toLocaleString() : "Never"}</div>
-                    </div>
-                    {selectedChannel.tracking_account_failure_reason && (
-                      <div className="col-span-2">
-                        <div className="text-xs font-medium text-slate-500">Tracking Failure Reason</div>
-                        <div className="mt-0.5 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
-                          {selectedChannel.tracking_account_failure_reason}
-                        </div>
-                      </div>
-                    )}
-                    <div>
                       <div className="text-xs font-medium text-slate-500">Categories</div>
                       {renderCategories(selectedChannel.categories)}
                     </div>
@@ -388,6 +470,75 @@ export default function AdminChannelsPage() {
                   </div>
                 </div>
               </div>
+
+              {/* Activity & Tracking */}
+              <div>
+                <h4 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-400">Activity &amp; Tracking</h4>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                    <div>
+                      <div className="text-xs font-medium text-slate-500">Last Successful Post</div>
+                      <div className="mt-0.5 font-semibold text-slate-900">{selectedChannel.last_successful_post_at ? new Date(selectedChannel.last_successful_post_at).toLocaleString() : "Never"}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs font-medium text-slate-500">Last Failure</div>
+                      <div className="mt-0.5 font-semibold text-slate-900">{selectedChannel.last_failure_at ? new Date(selectedChannel.last_failure_at).toLocaleString() : "Never"}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs font-medium text-slate-500">Tracking Account</div>
+                      <div className="mt-0.5 font-semibold capitalize text-slate-900">
+                        {selectedChannel.tracking_account ? `Account ${selectedChannel.tracking_account}` : "None"} / {trackingLabel(selectedChannel.tracking_account_status)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs font-medium text-slate-500">Tracking Member</div>
+                      <div className="mt-0.5 font-semibold capitalize text-slate-900">{trackingLabel(selectedChannel.tracking_account_member_status || "unknown")}</div>
+                    </div>
+                    {selectedChannel.tracking_account_failure_reason && (
+                      <div className="col-span-2">
+                        <div className="text-xs font-medium text-slate-500">Tracking Failure Reason</div>
+                        <div className="mt-0.5 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
+                          {selectedChannel.tracking_account_failure_reason}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Review actions */}
+            <div className="border-t border-slate-200 bg-slate-50 px-6 py-4">
+              {selectedChannel.status === "pending" ? (
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => openActionConfirm(selectedChannel, "reject", "Reject Channel", "Reject this channel?", true)}
+                    disabled={actionLoading === selectedChannel.id}
+                    className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-red-200 bg-white px-4 py-2.5 text-sm font-black text-red-600 transition hover:bg-red-50 disabled:opacity-50"
+                  >
+                    <X size={16} />
+                    Reject
+                  </button>
+                  <button
+                    onClick={() => openActionConfirm(selectedChannel, "activate", "Activate Channel", "Activate this channel?")}
+                    disabled={actionLoading === selectedChannel.id}
+                    className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-black text-white transition hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    <Check size={16} />
+                    Approve
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <ActionButtons channel={selectedChannel} actionLoading={actionLoading} onView={openViewModal} onAction={openActionConfirm} />
+                  <button
+                    onClick={() => setViewModalOpen(false)}
+                    className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-black text-slate-600 transition hover:bg-slate-100"
+                  >
+                    Close
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -450,53 +601,72 @@ export default function AdminChannelsPage() {
 
         {/* Desktop Table */}
         <div className="hidden overflow-x-auto md:block">
-          <table className="w-full min-w-[800px] text-left text-sm">
+          <table className="w-full min-w-[980px] text-left text-sm">
             <thead className="border-b border-slate-200 bg-slate-50">
               <tr>
-                <th className="px-5 py-3 text-xs font-semibold text-slate-500">ID & Username</th>
-                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Title</th>
-                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Members</th>
-                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Posts/Day</th>
-                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Lifecycle</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Channel</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Owner</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Subscribers</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Campaigns</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Views (Today / Total)</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Earnings</th>
+                <th className="px-5 py-3 text-xs font-semibold text-slate-500">Quality</th>
                 <th className="px-5 py-3 text-xs font-semibold text-slate-500">Status</th>
                 <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <tr><td colSpan={7} className="p-10 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={24} /></td></tr>
+                <SkeletonTableRows columns={9} rows={6} />
               ) : channels.length === 0 ? (
-                <tr><td colSpan={7} className="p-10 text-center text-slate-500">No channels found.</td></tr>
+                <tr>
+                  <td colSpan={9} className="p-10">
+                    <EmptyState
+                      icon={isFiltering ? Search : Tv}
+                      title={isFiltering ? "No channels match your filters" : "No channels yet"}
+                      message={isFiltering ? "Try a different search term or status filter." : "Publisher channels will appear here once submitted."}
+                    />
+                  </td>
+                </tr>
               ) : (
                 channels.map((channel: any) => (
-                  <tr key={channel.id} className="transition-colors hover:bg-slate-50">
+                  <tr key={channel.id} className="align-top transition-colors hover:bg-slate-50">
                     <td className="px-5 py-4">
-                      <ChannelIdentifier channel={channel} />
-                      <div className="mt-0.5 text-xs text-slate-500">#{channel.id} · User {channel.user_id}</div>
+                      <div className="flex items-start gap-3">
+                        <ChannelAvatar channel={channel} />
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="max-w-[160px] truncate font-semibold text-slate-900" title={channel.title}>{channel.title || "N/A"}</span>
+                            <VerifiedBadge channel={channel} />
+                          </div>
+                          <div className="mt-0.5"><ChannelIdentifier channel={channel} /></div>
+                          <div className="mt-0.5 text-xs text-slate-400">#{channel.id} · User {channel.user_id}</div>
+                        </div>
+                      </div>
                     </td>
                     <td className="px-5 py-4">
-                      <div className="max-w-[200px] truncate font-medium text-slate-900" title={channel.title}>{channel.title || "N/A"}</div>
-                      <div className="mt-0.5 text-xs text-slate-500">Chat ID: {channel.chat_id || "N/A"}</div>
+                      <div className="max-w-[140px] truncate font-semibold text-slate-900">{[channel.first_name, channel.last_name].filter(Boolean).join(" ") || "N/A"}</div>
+                      <div className="text-xs text-slate-500">@{channel.owner_username || "N/A"}</div>
                     </td>
                     <td className="px-5 py-4">
                       <div className="font-semibold text-slate-900">{channel.subscriber_count?.toLocaleString() || "0"}</div>
+                      <div className="text-xs text-slate-500">{channel.posts_per_day} posts/day</div>
                     </td>
                     <td className="px-5 py-4">
-                      <div className="font-semibold text-slate-900">{channel.posts_per_day}</div>
+                      <div className="font-semibold text-slate-900">{formatMetric(channel.campaign_count)}</div>
+                    </td>
+                    <td className="px-5 py-4">
+                      <div className="font-semibold text-slate-900">{formatMetric(channel.today_views)} <span className="font-normal text-slate-400">today</span></div>
+                      <div className="text-xs text-slate-500">{formatMetric(channel.total_views)} total</div>
+                    </td>
+                    <td className="px-5 py-4">
+                      <div className="font-semibold text-slate-900">{formatMoneyMetric(channel.earnings_generated)}</div>
                     </td>
                     <td className="px-5 py-4">
                       <Link href={`/admin/traffic-quality/channel/${channel.id}`} className="text-base font-black text-blue-700 hover:text-blue-900">{channel.traffic_quality_score || 60}</Link>
-                      <div className="mt-0.5 text-xs capitalize text-slate-500">{qualityLabel(channel.traffic_quality_tier)} / {qualityLabel(channel.traffic_risk_level)} risk</div>
-                      <div className="mt-1 text-[10px] text-slate-500">Last success: {channel.last_successful_post_at ? new Date(channel.last_successful_post_at).toLocaleString() : "Never"}</div>
-                      <div className="text-[10px] text-slate-500">Last failure: {channel.last_failure_at ? new Date(channel.last_failure_at).toLocaleString() : "Never"}</div>
-                      {channel.channel_type === "private" && (
-                        <div className="mt-1 text-[10px] font-semibold capitalize text-blue-700">
-                          Tracking: {trackingLabel(channel.tracking_account_status)}
-                          {channel.tracking_account ? ` / account ${channel.tracking_account}` : ""}
-                        </div>
-                      )}
+                      <div className="text-xs capitalize text-slate-500">{qualityLabel(channel.traffic_risk_level)} risk</div>
                       {(channel.failure_reason || channel.paused_reason) && (
-                        <div className="mt-1 max-w-[220px] truncate text-[10px] font-semibold text-amber-600" title={channel.failure_reason || channel.paused_reason}>
+                        <div className="mt-1 max-w-[160px] truncate text-[10px] font-semibold text-amber-600" title={channel.failure_reason || channel.paused_reason}>
                           {channel.failure_reason || channel.paused_reason}
                         </div>
                       )}
@@ -505,7 +675,7 @@ export default function AdminChannelsPage() {
                       <StatusBadge status={channel.status} />
                     </td>
                     <td className="px-5 py-4 text-right">
-                      <ActionButtons channel={channel} />
+                      <ActionButtons channel={channel} actionLoading={actionLoading} onView={openViewModal} onAction={openActionConfirm} />
                     </td>
                   </tr>
                 ))
@@ -517,17 +687,31 @@ export default function AdminChannelsPage() {
         {/* Mobile Cards */}
         <div className="space-y-3 p-4 md:hidden">
           {loading ? (
-            <div className="p-8 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={24} /></div>
+            <div className="space-y-3">
+              <SkeletonCard />
+              <SkeletonCard />
+              <SkeletonCard />
+            </div>
           ) : channels.length === 0 ? (
-            <div className="p-8 text-center text-sm text-slate-500">No channels found.</div>
+            <EmptyState
+              icon={isFiltering ? Search : Tv}
+              title={isFiltering ? "No channels match your filters" : "No channels yet"}
+              message={isFiltering ? "Try a different search term or status filter." : "Publisher channels will appear here once submitted."}
+            />
           ) : (
             channels.map((channel: any) => (
               <div key={channel.id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="truncate font-semibold text-slate-900">{channel.title || "N/A"}</div>
-                    <div className="mt-1 min-w-0"><ChannelIdentifier channel={channel} mobile /></div>
-                    <div className="mt-0.5 text-xs text-slate-500">User #{channel.user_id}</div>
+                  <div className="flex min-w-0 items-start gap-3">
+                    <ChannelAvatar channel={channel} />
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="truncate font-semibold text-slate-900">{channel.title || "N/A"}</span>
+                        <VerifiedBadge channel={channel} />
+                      </div>
+                      <div className="mt-1 min-w-0"><ChannelIdentifier channel={channel} mobile /></div>
+                      <div className="mt-0.5 text-xs text-slate-500">Owner: {[channel.first_name, channel.last_name].filter(Boolean).join(" ") || "N/A"} · #{channel.id}</div>
+                    </div>
                   </div>
                   <StatusBadge status={channel.status} />
                 </div>
@@ -543,28 +727,24 @@ export default function AdminChannelsPage() {
                     <div className="mt-1 font-semibold text-slate-900">{channel.subscriber_count?.toLocaleString() || "0"}</div>
                   </div>
                   <div className="rounded-lg bg-slate-50 p-2.5">
-                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Posts/Day</div>
-                    <div className="mt-1 font-semibold text-slate-900">{channel.posts_per_day || 0}</div>
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Campaigns</div>
+                    <div className="mt-1 font-semibold text-slate-900">{formatMetric(channel.campaign_count)}</div>
                   </div>
                   <div className="rounded-lg bg-slate-50 p-2.5">
-                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Last Success</div>
-                    <div className="mt-1 font-semibold text-slate-900">{channel.last_successful_post_at ? new Date(channel.last_successful_post_at).toLocaleDateString() : "Never"}</div>
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Views (Today / Total)</div>
+                    <div className="mt-1 font-semibold text-slate-900">{formatMetric(channel.today_views)} / {formatMetric(channel.total_views)}</div>
                   </div>
                   <div className="rounded-lg bg-slate-50 p-2.5">
-                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Last Failure</div>
-                    <div className="mt-1 font-semibold text-slate-900">{channel.last_failure_at ? new Date(channel.last_failure_at).toLocaleDateString() : "Never"}</div>
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Earnings</div>
+                    <div className="mt-1 font-semibold text-slate-900">{formatMoneyMetric(channel.earnings_generated)}</div>
                   </div>
                   <div className="col-span-2 rounded-lg bg-slate-50 p-2.5">
                     <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Traffic Quality</div>
                     <Link href={`/admin/traffic-quality/channel/${channel.id}`} className="mt-1 block font-semibold text-blue-700 hover:text-blue-900">{channel.traffic_quality_score || 60} · {qualityLabel(channel.traffic_risk_level)} risk</Link>
                   </div>
                 </div>
-                <div className="mt-3">
-                  <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Categories</div>
-                  {renderCategories(channel.categories)}
-                </div>
                 <div className="mt-3 border-t border-slate-100 pt-3">
-                  <ActionButtons channel={channel} />
+                  <ActionButtons channel={channel} actionLoading={actionLoading} onView={openViewModal} onAction={openActionConfirm} />
                 </div>
               </div>
             ))

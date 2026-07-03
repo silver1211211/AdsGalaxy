@@ -1,8 +1,9 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/static-components -- legacy dashboard helpers are defined inline */
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, Users, Megaphone, Tv, CreditCard, DollarSign, Activity, AlertCircle, CheckCircle, Clock, XCircle, TrendingUp, Bot, ShieldCheck } from "lucide-react";
+import { Loader2, Users, Megaphone, Tv, CreditCard, DollarSign, Activity, AlertCircle, CheckCircle, Clock, XCircle, TrendingUp, Bot, ShieldCheck, Smartphone, Eye } from "lucide-react";
 import Link from "next/link";
 
 export default function AdminDashboard() {
@@ -42,16 +43,24 @@ export default function AdminDashboard() {
     );
   }
 
-  const StatCard = ({ title, value, icon: Icon, bgClass, textClass, subtitle }: any) => (
-    <div className={`bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between`}>
-      <div>
-        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">{title}</p>
-        <h3 className="text-2xl font-black text-slate-900">{value}</h3>
-        {subtitle && <p className="text-xs text-slate-400 mt-1 font-medium">{subtitle}</p>}
+  const StatCard = ({ title, value, icon: Icon, bgClass, textClass, subtitle, secondaryLabel, secondaryValue }: any) => (
+    <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+      <div className="flex items-center justify-between">
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">{title}</p>
+          <h3 className="text-2xl font-black text-slate-900">{value}</h3>
+          {subtitle && <p className="text-xs text-slate-400 mt-1 font-medium">{subtitle}</p>}
+        </div>
+        <div className={`p-3 rounded-lg ${bgClass} flex-shrink-0`}>
+          <Icon size={24} className={textClass} />
+        </div>
       </div>
-      <div className={`p-3 rounded-lg ${bgClass} flex-shrink-0`}>
-        <Icon size={24} className={textClass} />
-      </div>
+      {secondaryLabel && (
+        <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-2">
+          <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{secondaryLabel}</span>
+          <span className="text-sm font-black text-slate-700">{secondaryValue}</span>
+        </div>
+      )}
     </div>
   );
 
@@ -118,8 +127,8 @@ export default function AdminDashboard() {
             <StatCard title="Monetized Bots" value={stats.bots.total} icon={Bot} bgClass="bg-purple-100" textClass="text-purple-600" subtitle="Active in network" />
             <StatCard title="Active Bot Users" value={stats.bots.activeUsers.toLocaleString()} icon={ShieldCheck} bgClass="bg-emerald-100" textClass="text-emerald-600" subtitle="Users receiving ads" />
             <StatCard title="Total Bot Users" value={stats.bots.totalUsers.toLocaleString()} icon={Activity} bgClass="bg-indigo-100" textClass="text-indigo-600" subtitle="All users across bots" />
-            <StatCard title="Paused Bots" value={(stats.bots.paused || 0).toLocaleString()} icon={AlertCircle} bgClass="bg-amber-100" textClass="text-amber-600" subtitle="Excluded from delivery" />
-            <StatCard title="Inactive Bot Users" value={(stats.bots.inactiveUsers || 0).toLocaleString()} icon={XCircle} bgClass="bg-red-100" textClass="text-red-600" subtitle="Blocked, unreachable, or under inactive bots" />
+            <StatCard title="Active Miniapps" value={(stats.miniapps?.active || 0).toLocaleString()} icon={Smartphone} bgClass="bg-amber-100" textClass="text-amber-600" subtitle="Approved and monetizing" />
+            <StatCard title="Impressions Displayed Today" value={(stats.miniapps?.impressionsToday || 0).toLocaleString()} icon={Eye} bgClass="bg-red-100" textClass="text-red-600" secondaryLabel="Displayed Yesterday" secondaryValue={(stats.miniapps?.impressionsYesterday || 0).toLocaleString()} />
           </div>
         </div>
 
@@ -163,7 +172,14 @@ export default function AdminDashboard() {
             </div>
             <div className="p-5 flex-1 flex flex-col justify-center gap-4">
               <div className="flex justify-between items-center">
-                <span className="text-sm font-semibold flex items-center gap-2 text-amber-600"><Clock size={16}/> Pending Review</span>
+                <div>
+                  <span className="text-sm font-semibold flex items-center gap-2 text-amber-600"><Clock size={16}/> Pending Review</span>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 pl-6 text-[11px] font-semibold text-slate-500">
+                    <span>Channel {Number(stats.campaigns.pending_by_type?.channel || 0)}</span>
+                    <span>Bot {Number(stats.campaigns.pending_by_type?.bot || 0)}</span>
+                    <span>Mini App {Number(stats.campaigns.pending_by_type?.miniapp || 0)}</span>
+                  </div>
+                </div>
                 <span className="text-lg font-black">{stats.campaigns.pending}</span>
               </div>
               <div className="flex justify-between items-center">

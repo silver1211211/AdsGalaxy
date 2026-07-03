@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { checkAdminAuth } from "@/lib/adminAuth";
+import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 
 export async function GET() {
   if (!(await checkAdminAuth())) {
@@ -17,9 +17,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const { question, answer, type } = await request.json();
@@ -40,9 +39,8 @@ export async function POST(request: Request) {
 }
 
 export async function PUT(request: Request) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const { id, question, answer, type } = await request.json();
@@ -63,9 +61,8 @@ export async function PUT(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const { id } = await request.json();

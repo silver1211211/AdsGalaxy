@@ -2,9 +2,11 @@
 
 import React, { useEffect, useState } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
-import { Loader2, DollarSign, Clock, MousePointerClick, Eye, ChevronRight, X, Calendar, Hash, Target, CheckCircle, Sparkles, TrendingUp } from "lucide-react";
+import { DollarSign, Clock, MousePointerClick, Eye, ChevronRight, X, Calendar, Hash, Target, CheckCircle, Sparkles, TrendingUp } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { apiFetch } from "@/lib/api";
+import EmptyState from "@/components/ui/EmptyState";
+import { SkeletonBlock } from "@/components/ui/Skeleton";
 
 export default function PublisherEarningsPage() {
   const [earnings, setEarnings] = useState<any[]>([]);
@@ -67,8 +69,16 @@ export default function PublisherEarningsPage() {
           {error}
         </div>
       ) : loading ? (
-        <div className="flex justify-center items-center h-48">
-          <Loader2 className="animate-spin text-blue-600" size={32} />
+        <div className="space-y-6">
+          <div className="grid grid-cols-2 gap-4">
+            <SkeletonBlock className="h-20 rounded-3xl" />
+            <SkeletonBlock className="h-20 rounded-3xl" />
+          </div>
+          <div className="space-y-2.5 rounded-[2rem] border border-slate-200 bg-white p-4">
+            <SkeletonBlock className="h-16 w-full" />
+            <SkeletonBlock className="h-16 w-full" />
+            <SkeletonBlock className="h-16 w-full" />
+          </div>
         </div>
       ) : (
         <>
@@ -87,9 +97,16 @@ export default function PublisherEarningsPage() {
             <div className="px-5 py-4 border-b border-slate-200 bg-gradient-to-r from-blue-50 to-white">
               <h3 className="font-bold text-slate-900">Earning History</h3>
             </div>
-            
+
             {earnings.length === 0 ? (
-              <div className="p-8 text-center text-slate-500 text-sm">No earnings recorded yet.</div>
+              <div className="p-8">
+                <EmptyState
+                  icon={DollarSign}
+                  title="No earnings yet"
+                  message="Settlements from your channels and bots will show up here once ads start delivering."
+                  tone="blue"
+                />
+              </div>
             ) : (
               <div className="divide-y divide-slate-100">
                 {earnings.map((earning) => (

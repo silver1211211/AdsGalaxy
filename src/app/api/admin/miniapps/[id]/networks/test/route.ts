@@ -1,7 +1,8 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- adapter errors are normalized into admin diagnostics */
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { getAuthenticatedAdmin } from "@/lib/adminAuth";
+import { requireAdminPermission } from "@/lib/adminAuth";
 import {
   buildMiniAppNetworkClientConfig,
   isMiniAppNetworkName,
@@ -28,10 +29,8 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const admin = await getAuthenticatedAdmin();
-  if (!admin) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const { id } = await params;
@@ -51,8 +50,8 @@ export async function POST(
       return NextResponse.json({ error: "Mini App not found" }, { status: 404 });
     }
 
-    if (miniapps[0].status !== "approved" && miniapps[0].status !== "monetized") {
-      return NextResponse.json({ error: "Mini App must be approved before adapter testing" }, { status: 400 });
+    if (!["awaiting", "approved", "monetized"].includes(miniapps[0].status)) {
+      return NextResponse.json({ error: "Mini App must be awaiting approval before adapter testing" }, { status: 400 });
     }
 
     const [networks] = await pool.query<NetworkRow[]>(

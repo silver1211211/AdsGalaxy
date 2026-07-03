@@ -47,6 +47,13 @@ export async function POST(request: Request) {
     if (!Number.isInteger(miniappId) || miniappId <= 0) {
       return NextResponse.json({ success: false, error_code: "INVALID_APP", message: "Valid Mini App ID is required" }, { status: 400 });
     }
+    const [[rateRow]]: any = await pool.query(
+      "SELECT COUNT(*) AS count FROM miniapp_mediation_requests WHERE telegram_user_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)",
+      [telegramUserId]
+    );
+    if (Number(rateRow?.count || 0) >= 30) {
+      return NextResponse.json({ success: false, error_code: "RATE_LIMITED", message: "Too many ad requests. Try again shortly." }, { status: 429 });
+    }
 
     const [miniapps]: any = await pool.query(
       "SELECT id, status, is_deleted FROM miniapps WHERE id = ? LIMIT 1",

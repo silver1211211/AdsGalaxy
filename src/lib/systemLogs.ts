@@ -1,4 +1,4 @@
-import type { PoolConnection } from "mysql2/promise";
+import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 
 type Db = typeof pool | PoolConnection;
@@ -8,6 +8,8 @@ export type SystemLogType =
   | "bot_broadcast_hourly"
   | "channel_health"
   | "bot_health"
+  | "publisher_trust_enforcement"
+  | "channel_campaign_pause_delete_settlement"
   | "system_error";
 
 export type SystemLogStatus = "success" | "partial_failure" | "failed";
@@ -59,7 +61,7 @@ export function logStatus(success: number, failed: number): SystemLogStatus {
 
 export async function createSystemLog(input: SystemLogInput, db: Db = pool) {
   try {
-    const [result]: any = await db.query(
+    const [result] = await db.query<ResultSetHeader>(
       `INSERT INTO system_logs
         (log_type, status, title, summary, period_start, period_end, slot_date, slot_time,
          attempted_count, success_count, failed_count, skipped_count, auto_paused_count,
@@ -89,8 +91,8 @@ export async function createSystemLog(input: SystemLogInput, db: Db = pool) {
       ]
     );
     return result?.insertId || null;
-  } catch (error: any) {
-    console.warn("System log write skipped", { type: input.logType, error: error?.message });
+  } catch (error: unknown) {
+    console.warn("System log write skipped", { type: input.logType, error: error instanceof Error ? error.message : "unknown_error" });
     return null;
   }
 }
@@ -148,14 +150,14 @@ export async function upsertBroadcastHourlyLog(input: Omit<SystemLogInput, "logT
         toJson(input.metadata),
       ]
     );
-  } catch (error: any) {
-    console.warn("Broadcast hourly system log write skipped", { error: error?.message });
+  } catch (error: unknown) {
+    console.warn("Broadcast hourly system log write skipped", { error: error instanceof Error ? error.message : "unknown_error" });
   }
 }
 
 export async function cleanupOldSystemLogs(db: Db = pool) {
-  const [[setting]]: any = await db.query("SELECT value FROM settings WHERE `key` = 'system_log_retention_days' LIMIT 1");
+  const [[setting]] = await db.query<Array<RowDataPacket & { value: string }>>("SELECT value FROM settings WHERE `key` = 'system_log_retention_days' LIMIT 1");
   const days = Math.min(365, Math.max(1, parseInt(setting?.value || "60", 10)));
-  const [result]: any = await db.query("DELETE FROM system_logs WHERE created_at < DATE_SUB(NOW(), INTERVAL ? DAY)", [days]);
+  const [result] = await db.query<ResultSetHeader>("DELETE FROM system_logs WHERE created_at < DATE_SUB(NOW(), INTERVAL ? DAY)", [days]);
   return { retentionDays: days, deleted: Number(result?.affectedRows || 0) };
 }

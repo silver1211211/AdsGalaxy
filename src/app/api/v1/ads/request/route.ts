@@ -15,6 +15,7 @@ export async function POST(request: Request) {
     if (blocked) return blocked;
 
     context = await validateDeveloperApiRequest(request, "read_only", "/api/v1/ads/request");
+    if (context.mode === "production") throw Object.assign(new Error("Production Ads API is not enabled; use the Mini App SDK"), { statusCode: 501 });
     const body = await request.json().catch(() => ({}));
     const ad = sandboxAdPayload(context.applicationId, clean(body.ad_format) || "rewarded");
     await recordSandboxEvent(context.applicationId, "ad_requested", { ...body, ...ad });

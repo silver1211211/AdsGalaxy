@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+/* eslint-disable @typescript-eslint/no-explicit-any -- authenticated referral summary is dynamically shaped */
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { getReferralGrowthSummary } from "@/lib/referralSprint";
 import pool from "@/lib/db";

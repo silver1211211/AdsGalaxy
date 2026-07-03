@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy referral API payload is dynamically shaped */
 
 import React, { useEffect, useState } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
@@ -129,7 +130,7 @@ function RewardDetailsModal({ data, onClose }: { data: any; onClose: () => void 
               <div className="flex items-center justify-between rounded-xl bg-blue-50 px-5 py-4">
                 <div>
                   <p className="text-sm font-black text-slate-900">Friend Joins</p>
-                  <p className="mt-0.5 text-xs font-medium text-slate-500">Pending when they start the bot</p>
+                  <p className="mt-0.5 text-xs font-medium text-slate-500">Paid instantly to withdrawable balance</p>
                 </div>
                 <span className="text-lg font-black text-[#0c9de8]">{money(joinReward)}</span>
               </div>
@@ -376,14 +377,13 @@ export default function ReferralPage() {
   const isSprint          = data?.mode === "sprint";
   const totalReferrals    = data?.stats?.total_referrals    || 0;
   const verifiedReferrals = data?.stats?.verified_referrals || 0;
-  const todayRefs         = data?.stats?.today_referrals    || 0;
+  const todayRefs         = data?.stats?.today_verified_referrals ?? data?.stats?.today_referrals ?? 0;
   const teamUnlocked      = isSprint && data?.team_league?.unlocked && data?.team_league?.current_team;
   const leaderboard       = (data?.leaderboard || []) as any[];
   const visibleLeaders    = showAllLeaders ? leaderboard : leaderboard.slice(0, 5);
   const referrals         = (data?.referrals || []) as any[];
   const visibleRefs       = showAllHistory ? referrals : referrals.slice(0, 5);
   const pendingTotal      = Number(data?.pending_rewards_total || 0);
-  const todayPending      = Number(data?.today_pending_amount  || 0);
   const nextSettlement    = data?.next_settlement_date
     ? new Date(data.next_settlement_date).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })
     : "Rolling weekly";
@@ -405,7 +405,7 @@ export default function ReferralPage() {
   const teamProgressPct   = teamUnlocked ? 100 : Math.min(100, Math.round((teamProgressNow / teamProgressGoal) * 100));
   const qualitySignals = [
     verifiedReferrals > 0 ? "Verified referrals are counted for sprint rewards." : "Get your first verified referral to activate reward momentum.",
-    pendingTotal > 0 ? "Rewards are queued safely until settlement." : "No pending settlement yet today.",
+    pendingTotal > 0 ? "Your highest daily milestone is pending for midnight settlement." : "No daily milestone reward is pending yet.",
     teamUnlocked ? "Team league is unlocked — your referrals now push team rank." : "Team league unlocks with more verified referrals.",
   ];
 
@@ -654,39 +654,6 @@ export default function ReferralPage() {
           </div>
         </section>
 
-        <section className="rounded-2xl border border-amber-100 bg-white shadow-sm overflow-hidden">
-          <div className="flex items-center justify-between px-5 py-3.5 bg-amber-50 border-b border-amber-100">
-            <div className="flex items-center gap-2.5">
-              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-white shadow-sm">
-                <Clock size={14} className="text-amber-500" />
-              </div>
-              <p className="text-sm font-black text-slate-900">Pending Rewards</p>
-            </div>
-            <button onClick={() => setShowRewards(true)} className="text-[10px] font-black text-[#0c9de8]">
-              View Details
-            </button>
-          </div>
-          <div className="grid grid-cols-2 divide-x divide-slate-100">
-            <div className="px-5 py-4 text-center">
-              <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Pending Balance</p>
-              <p className="mt-1.5 text-xl font-black text-amber-600">{money(pendingTotal)}</p>
-              <p className="text-[9px] font-medium text-slate-300">USDT</p>
-            </div>
-            <div className="px-5 py-4 text-center">
-              <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Today&apos;s Pending</p>
-              <p className="mt-1.5 text-xl font-black text-slate-900">{money(todayPending)}</p>
-              <p className="text-[9px] font-medium text-slate-300">USDT</p>
-            </div>
-          </div>
-          <div className="flex items-center justify-between border-t border-slate-50 px-5 py-3">
-            <div className="flex items-center gap-1.5 text-xs text-slate-400">
-              <Calendar size={12} />
-              <span>Next Settlement</span>
-            </div>
-            <span className="text-xs font-black text-slate-700">{nextSettlement}</span>
-          </div>
-        </section>
-
         {/* ── 4. DAILY REFERRAL SPRINT ── */}
         {isSprint && (data?.daily_milestones || []).length > 0 && (
           <section className="rounded-2xl border border-slate-100 bg-white shadow-sm overflow-hidden">
@@ -844,6 +811,9 @@ export default function ReferralPage() {
                         MVP: {(data.team_league.current_team as any).mvp.display_name}
                       </p>
                     )}
+                    <p className="mt-1 text-[10px] font-bold text-emerald-600">
+                      Projected team pool: {money((data.team_league.current_team as any).projected_reward_pool || 0)} · Your projected cut: {money((data.team_league.current_team as any).projected_member_reward || 0)}
+                    </p>
                   </div>
                 </div>
 
@@ -865,7 +835,10 @@ export default function ReferralPage() {
                             </span>
                             <span className="text-sm font-bold text-slate-800">{team.name}</span>
                           </div>
-                          <span className="text-xs font-black text-emerald-600">{team.sprint_referrals} refs</span>
+                          <div className="text-right">
+                            <span className="block text-xs font-black text-emerald-600">{team.sprint_referrals} refs</span>
+                            <span className="block text-[9px] font-bold text-violet-500">Pool {money(team.projected_reward_pool || 0)}</span>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -976,7 +949,7 @@ export default function ReferralPage() {
           </div>
           <div className="divide-y divide-slate-50">
             {[
-              { Icon: UserPlus,     label: "Friend Joins",       amount: money(joinReward),         desc: "Pending until settlement",              iconBg: "bg-blue-50",   iconCls: "text-[#0c9de8]",   amtCls: "text-[#0c9de8]" },
+              { Icon: UserPlus,     label: "Friend Joins",       amount: money(joinReward),         desc: "Paid instantly to withdrawable balance", iconBg: "bg-blue-50",   iconCls: "text-[#0c9de8]",   amtCls: "text-[#0c9de8]" },
               { Icon: CheckCircle2, label: "Friend Verifies",    amount: money(verificationReward), desc: "After joining the required channel",     iconBg: "bg-emerald-50",iconCls: "text-emerald-500", amtCls: "text-emerald-600" },
               { Icon: Sparkles,     label: "Total Per Referral", amount: money(totalReward),        desc: "Maximum combined reward per person",     iconBg: "bg-slate-900", iconCls: "text-white",        amtCls: "text-slate-900" },
             ].map(row => (

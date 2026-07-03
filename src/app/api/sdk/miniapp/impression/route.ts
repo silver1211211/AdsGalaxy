@@ -69,7 +69,8 @@ export async function POST(request: Request) {
     }
 
     const impressions = 1;
-    const grossRevenue = Number(body.gross_revenue || 0);
+    // Browser clients can confirm display, but provider revenue must arrive through a trusted import/postback.
+    const grossRevenue = 0;
     const feePercent = await getMiniAppFeePercent();
     const validation = await validateMiniappRevenue({
       conn,

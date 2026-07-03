@@ -2,9 +2,10 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import type { RowDataPacket } from "mysql2/promise";
+import { requireUserWritesAllowed } from "@/lib/productionSafety";
 
-type OwnerBotRow = RowDataPacket & { id: number; bot_token?: string };
-type CountRow = RowDataPacket & { total: number; active: number | null; blocked: number | null };
+type OwnerBotRow = RowDataPacket & { id: number; bot_token?: string; bot_token_encrypted?: string | null };
+type CountRow = RowDataPacket & { total: number; active: number | null; blocked: number | null; integration_users: number | null; manually_imported: number | null; pending_verification: number | null };
 type ExistingUserRow = RowDataPacket & { chat_id: string };
 
 function errorMessage(error: unknown) {
@@ -31,7 +32,10 @@ export async function GET(
       `SELECT 
         COUNT(*) as total,
         SUM(CASE WHEN is_active = TRUE AND status = 'active' THEN 1 ELSE 0 END) as active,
-        SUM(CASE WHEN is_active = FALSE OR status != 'active' THEN 1 ELSE 0 END) as blocked
+        SUM(CASE WHEN is_active = FALSE OR status IN ('inactive','blocked_bot','user_not_found','chat_not_found','unreachable') THEN 1 ELSE 0 END) as blocked,
+        SUM(CASE WHEN source = 'integration' THEN 1 ELSE 0 END) as integration_users,
+        SUM(CASE WHEN source <> 'integration' THEN 1 ELSE 0 END) as manually_imported,
+        SUM(CASE WHEN status = 'pending_verification' THEN 1 ELSE 0 END) as pending_verification
        FROM bot_users WHERE bot_id = ?`, 
       [botId]
     );
@@ -39,7 +43,11 @@ export async function GET(
     return NextResponse.json({ 
       total: counts[0].total || 0,
       active: counts[0].active || 0,
-      blocked: counts[0].blocked || 0
+      blocked: counts[0].blocked || 0,
+      integration_users: counts[0].integration_users || 0,
+      manually_imported: counts[0].manually_imported || 0,
+      verified_reachable: counts[0].active || 0,
+      pending_verification: counts[0].pending_verification || 0
     });
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error) }, { status: getAuthErrorStatus(error) });
@@ -51,6 +59,8 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const blocked = await requireUserWritesAllowed();
+    if (blocked) return blocked;
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
     const { id: botId } = await params;
@@ -60,32 +70,25 @@ export async function POST(
     if (!Array.isArray(chat_ids)) {
       return NextResponse.json({ error: "chat_ids must be an array" }, { status: 400 });
     }
+    const normalizedIds = [...new Set(chat_ids.map((value) => String(value).trim()).filter(Boolean))];
+    if (normalizedIds.length === 0 || normalizedIds.length > 5000 || normalizedIds.some((value) => !/^[1-9]\d{4,19}$/.test(value))) {
+      return NextResponse.json({ error: "Provide 1 to 5,000 unique numeric Telegram user IDs" }, { status: 400 });
+    }
 
-    // 1. Verify ownership and get token
-    const [bots] = await pool.query<OwnerBotRow[]>("SELECT id, bot_token FROM bots WHERE id = ? AND user_id = ?", [botId, user.id]);
+    const [bots] = await pool.query<OwnerBotRow[]>("SELECT id FROM bots WHERE id = ? AND user_id = ? AND is_deleted = FALSE", [botId, user.id]);
     if (bots.length === 0) {
       return NextResponse.json({ error: "Bot not found" }, { status: 404 });
     }
-    const botToken = bots[0].bot_token;
-
-    // 2. Filter out already added users
+    // Existing users remain untouched, including users registered through /start integration.
     const [existing] = await pool.query<ExistingUserRow[]>(
       "SELECT chat_id FROM bot_users WHERE bot_id = ? AND chat_id IN (?)",
-      [botId, chat_ids]
+      [botId, normalizedIds]
     );
     const existingIds = new Set(existing.map((row) => row.chat_id.toString()));
     
     const alreadyAddedCount = existingIds.size;
     
-    // Reactivate existing users if they were blocked
-    if (alreadyAddedCount > 0) {
-      await pool.query(
-        "UPDATE bot_users SET is_active = TRUE, status = 'active', inactive_reason = NULL WHERE bot_id = ? AND chat_id IN (?)",
-        [botId, Array.from(existingIds)]
-      );
-    }
-
-    const newChatIds = chat_ids.filter(id => !existingIds.has(id.toString()));
+    const newChatIds = normalizedIds.filter(id => !existingIds.has(id));
 
     if (newChatIds.length === 0) {
       return NextResponse.json({
@@ -95,43 +98,20 @@ export async function POST(
       });
     }
 
-    // 3. Verify users using Telegram getChat
-    // User said: "using their bot token, get user to see if they are real user"
-    // We'll process in chunks of 10
     let newlyAddedCount = 0;
-    let invalidCount = 0;
-
-    const CHUNK_SIZE = 10;
-    for (let i = 0; i < newChatIds.length; i += CHUNK_SIZE) {
-      const chunk = newChatIds.slice(i, i + CHUNK_SIZE);
-      
-      const promises = chunk.map(async (chatId) => {
-        try {
-          const tgRes = await fetch(`https://api.telegram.org/bot${botToken}/getChat?chat_id=${chatId}`);
-          const tgData = await tgRes.json();
-          if (tgData.ok) {
-            return chatId;
-          }
-        } catch {}
-        return null;
-      });
-
-      const results = await Promise.all(promises);
-      const validIds = results.filter(id => id !== null);
-      invalidCount += (chunk.length - validIds.length);
-
-      if (validIds.length > 0) {
-        // Bulk insert valid IDs
-        const values = validIds.map(id => [botId, id, id, true, "active"]);
-        await pool.query("INSERT IGNORE INTO bot_users (bot_id, user_id, chat_id, is_active, status) VALUES ?", [values]);
-        newlyAddedCount += validIds.length;
-      }
+    for (let i = 0; i < newChatIds.length; i += 1000) {
+      const values = newChatIds.slice(i, i + 1000).map((id) => [botId, id, id, "manual_publisher", true, "pending_verification"]);
+      const [insert] = await pool.query<import("mysql2/promise").ResultSetHeader>(
+        "INSERT IGNORE INTO bot_users (bot_id, user_id, chat_id, source, is_active, status) VALUES ?", [values]
+      );
+      newlyAddedCount += insert.affectedRows;
     }
 
     return NextResponse.json({
       newlyAdded: newlyAddedCount,
       alreadyAdded: alreadyAddedCount,
-      invalid: invalidCount
+      invalid: 0,
+      pendingVerification: newlyAddedCount
     });
   } catch (error: unknown) {
     console.error("Bulk Add Bot Users Error:", error);

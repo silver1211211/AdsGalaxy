@@ -1,6 +1,9 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy Mini App campaign payloads are not schema-generated */
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getMiniAppPublisherCpmSettings, validateAdvertiserCpmBid } from "@/lib/miniappPublisherCpmEngine";
+import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,10 +14,26 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const user = await getAuthenticatedUser(request.headers.get("x-telegram-init-data"));
     const id = parseInt(rawId);
     const [rows]: any = await pool.query(
-      "SELECT * FROM miniapp_rewarded_campaigns WHERE id = ? AND advertiser_id = ?",
+      `SELECT id, campaign_name, title, description, cta_text, title_color, body_color,
+         categories, image_url, landing_url, postback_url, budget, remaining_budget,
+         advertiser_cpm_bid, campaign_budget_mode, daily_budget_mode, target_countries,
+         countries, languages, vpn_policy, device_policy, os_policy, start_at, end_at,
+         daily_budget_limit, frequency_cap_per_user, direct_placement_mode,
+         direct_inventory_scope, direct_inventory_metadata, status, created_at, updated_at
+       FROM miniapp_rewarded_campaigns WHERE id = ? AND advertiser_id = ?`,
       [id, user.id]
     );
     if (!rows.length) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
+    try {
+      const [exclusions]: any = await pool.query(
+        "SELECT normalized_identifier FROM campaign_inventory_exclusions WHERE campaign_type = 'miniapp' AND campaign_id = ? AND inventory_type = 'miniapp' ORDER BY id",
+        [id]
+      );
+      rows[0].excluded_inventory = exclusions.map((row: any) => row.normalized_identifier);
+    } catch (error: any) {
+      if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
+      rows[0].excluded_inventory = [];
+    }
     return NextResponse.json(rows[0]);
   } catch (error: any) {
     console.error("Miniapp campaign GET error:", error);
@@ -31,7 +50,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (!id) return NextResponse.json({ error: "Invalid campaign ID" }, { status: 400 });
 
     const [rows]: any = await pool.query(
-      "SELECT id, advertiser_id, landing_url, image_url, status FROM miniapp_rewarded_campaigns WHERE id = ?",
+      "SELECT id, advertiser_id, landing_url, image_url, status, pause_reason, advertiser_cpm_bid FROM miniapp_rewarded_campaigns WHERE id = ?",
       [id]
     );
     if (!rows.length) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
@@ -41,6 +60,37 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     const prev = rows[0];
 
     const body = await request.json();
+
+    if (body.action === "pause") {
+      const [pauseResult]: any = await pool.query(
+        `UPDATE miniapp_rewarded_campaigns
+         SET status = 'paused', pause_reason = 'advertiser_paused', updated_at = NOW()
+         WHERE id = ? AND advertiser_id = ? AND status = 'approved'`,
+        [id, user.id]
+      );
+      if (pauseResult.affectedRows !== 1) return NextResponse.json({ error: "Campaign cannot be paused in its current status" }, { status: 400 });
+      return NextResponse.json({ success: true, status: "paused" });
+    }
+
+    if (body.excluded_inventory !== undefined) {
+      await replaceCampaignExclusions(pool, { campaignType: "miniapp", campaignId: id, inventoryType: "miniapp", identifiers: body.excluded_inventory });
+    }
+
+    if (body.action === "resume") {
+      const [resumeResult]: any = await pool.query(
+        `UPDATE miniapp_rewarded_campaigns c
+         JOIN users u ON u.id = c.advertiser_id
+         SET c.status = 'approved', c.pause_reason = NULL
+         WHERE c.id = ? AND c.advertiser_id = ?
+           AND c.status = 'paused' AND c.pause_reason IN ('insufficient_balance', 'advertiser_paused')
+           AND u.ad_balance >= (c.advertiser_cpm_bid / 1000)`,
+        [id, user.id]
+      );
+      if (resumeResult.affectedRows !== 1) {
+        return NextResponse.json({ error: "Top up the ad balance before resuming this campaign" }, { status: 400 });
+      }
+      return NextResponse.json({ success: true, status: "approved" });
+    }
 
     const str = (v: unknown, fallback = "") => String(v ?? fallback).trim();
     const updates: Record<string, any> = {};
@@ -62,20 +112,21 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (body.end_at !== undefined) updates.end_at = str(body.end_at) || null;
     if (body.daily_budget_limit !== undefined) updates.daily_budget_limit = str(body.daily_budget_limit) || null;
     if (body.frequency_cap_per_user !== undefined) updates.frequency_cap_per_user = str(body.frequency_cap_per_user) || null;
-    if (body.campaign_budget_mode !== undefined) updates.campaign_budget_mode = body.campaign_budget_mode === "unlimited" ? "unlimited" : "custom";
     if (body.daily_budget_mode !== undefined) updates.daily_budget_mode = body.daily_budget_mode === "unlimited" ? "unlimited" : "custom";
     if (body.advertiser_cpm_bid !== undefined) {
       const cpm = parseFloat(str(body.advertiser_cpm_bid));
-      if (!isNaN(cpm) && cpm > 0) updates.advertiser_cpm_bid = cpm;
-    }
-    if (body.budget !== undefined && updates.campaign_budget_mode !== "unlimited") {
-      const budget = parseFloat(str(body.budget));
-      if (!isNaN(budget) && budget > 0) updates.budget = budget;
+      const settings = await getMiniAppPublisherCpmSettings();
+      validateAdvertiserCpmBid(cpm, settings);
+      updates.advertiser_cpm_bid = cpm;
+      updates.admin_cpm = cpm;
     }
 
-    if (!Object.keys(updates).length) {
+    if (!Object.keys(updates).length && body.excluded_inventory === undefined) {
       return NextResponse.json({ error: "No fields to update" }, { status: 400 });
     }
+    if (!Object.keys(updates).length) return NextResponse.json({ success: true, resubmitted: false });
+    updates.campaign_budget_mode = "pay_as_you_go";
+    updates.remaining_budget = 0;
 
     if (updates.landing_url && !/^https?:\/\//i.test(updates.landing_url)) {
       return NextResponse.json({ error: "Landing URL must start with https://" }, { status: 400 });

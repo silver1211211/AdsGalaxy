@@ -1,19 +1,18 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy Mini App campaign payloads are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { normalizeAdvertiserTargeting, targetingDbParams } from "@/lib/advertiserTargeting";
 import { getMiniAppPublisherCpmSettings, validateAdvertiserCpmBid } from "@/lib/miniappPublisherCpmEngine";
 import { calculateCampaignQualityScore } from "@/lib/advertiserTrust";
-import { publicQualityRating } from "@/lib/trafficQuality";
-import { publicInventoryQuality } from "@/lib/inventoryOptimization";
 import {
-  displayMiniAppCategories,
   normalizeMiniAppCategories,
   requiredMiniAppCategoryCpm,
 } from "@/lib/miniappCreativeCategories";
 import { validatePostbackUrl } from "@/lib/conversionTracking";
 import { normalizeMarketplaceType, publicSelectionMetadata, recordMarketplaceEvent, validateDirectPlacementTargets } from "@/lib/publisherMarketplace";
 import { evaluateCampaignAutomation } from "@/lib/approvalAutomation";
+import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 
 function cleanText(value: unknown) {
   return String(value || "").trim();
@@ -163,9 +162,6 @@ export async function GET(request: Request) {
         c.budget,
         c.remaining_budget,
         c.advertiser_cpm_bid,
-        c.admin_cpm,
-        c.cpm_mode,
-        c.fixed_publisher_cpm,
         c.campaign_budget_mode,
         c.daily_budget_mode,
         c.target_countries,
@@ -185,12 +181,9 @@ export async function GET(request: Request) {
         COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= CURDATE()), 0) as today_impressions,
         COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND i.created_at < CURDATE()), 0) as yesterday_impressions,
         COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as spend,
-        COALESCE((SELECT SUM(i.publisher_revenue) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as publisher_revenue,
         COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0) as clicks,
         COALESCE((SELECT COUNT(*) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0) as conversions,
         COALESCE((SELECT SUM(conv.conversion_value) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0) as conversion_value,
-        COALESCE((SELECT AVG(m.traffic_quality_score) FROM miniapp_internal_ad_impressions i JOIN miniapps m ON i.miniapp_id = m.id WHERE i.campaign_id = c.id), 60) as avg_traffic_quality,
-        COALESCE((SELECT AVG(m.inventory_score) FROM miniapp_internal_ad_impressions i JOIN miniapps m ON i.miniapp_id = m.id WHERE i.campaign_id = c.id), 50) as avg_inventory_quality,
         COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= CURDATE()), 0) as today_spend,
         (SELECT MAX(i.created_at) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id) as last_displayed_at
        FROM miniapp_rewarded_campaigns c
@@ -198,11 +191,7 @@ export async function GET(request: Request) {
        ORDER BY c.created_at DESC`,
       [user.id]
     );
-    return NextResponse.json((rows as any[]).map((row) => ({
-      ...row,
-      traffic_quality_rating: publicQualityRating(row.avg_traffic_quality),
-      inventory_quality_rating: publicInventoryQuality(row.avg_inventory_quality),
-    })));
+    return NextResponse.json(rows);
   } catch (error: any) {
     return NextResponse.json({ error: error.message || "Failed to load Mini App rewarded campaigns" }, { status: getAuthErrorStatus(error) });
   }
@@ -302,17 +291,6 @@ export async function POST(request: Request) {
       image_review_metadata: imageMetadata,
     }, conn);
 
-    if (campaignBudgetMode === "custom") {
-      const [userRows]: any = await conn.query("SELECT ad_balance FROM users WHERE id = ? FOR UPDATE", [user.id]);
-      const adBalance = Number(userRows[0]?.ad_balance || 0);
-      if (adBalance < budget) {
-        await conn.rollback();
-        return NextResponse.json({ error: "Insufficient ad balance. Please deposit funds." }, { status: 400 });
-      }
-
-      await conn.query("UPDATE users SET ad_balance = ad_balance - ? WHERE id = ?", [budget, user.id]);
-    }
-
     const [result]: any = await conn.query(
       `INSERT INTO miniapp_rewarded_campaigns
         (
@@ -341,11 +319,11 @@ export async function POST(request: Request) {
         landingUrl,
         postbackUrl,
         budget,
-        budget,
+        0,
         advertiserCpmBid,
         advertiserCpmBid,
         categoryCpm.required_cpm,
-        campaignBudgetMode,
+        "pay_as_you_go",
         dailyBudgetMode,
         targetCountries || null,
         ...targetingDbParams(targeting),
@@ -375,6 +353,13 @@ export async function POST(request: Request) {
       }, conn);
     }
 
+    await replaceCampaignExclusions(conn, {
+      campaignType: "miniapp",
+      campaignId: result.insertId,
+      inventoryType: "miniapp",
+      identifiers: body.excluded_inventory,
+    });
+
     await evaluateCampaignAutomation({
       campaignType: "miniapp_rewarded",
       campaignId: result.insertId,
@@ -387,13 +372,6 @@ export async function POST(request: Request) {
       destinationUrl: landingUrl,
       creativeText: description,
     }, conn);
-
-    if (campaignBudgetMode === "custom") {
-      await conn.query(
-        "INSERT INTO advertiser_transactions (user_id, amount, type, description) VALUES (?, ?, 'debit', ?)",
-        [user.id, budget, `Mini App Rewarded Campaign: ${campaignName}`]
-      );
-    }
 
     await conn.commit();
     return NextResponse.json({ success: true, id: result.insertId });

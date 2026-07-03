@@ -51,7 +51,7 @@ export async function GET(req: NextRequest) {
           GROUP_CONCAT(ad_settlements.id) as settlement_ids,
           SUM(ad_settlements.publisher_reward) as total_reward
         FROM ad_settlements
-        WHERE ad_settlements.status = 'locked' AND ad_settlements.created_at < NOW() - INTERVAL 30 DAY
+        WHERE ad_settlements.status = 'locked' AND ad_settlements.fraud_adjusted_at IS NULL AND ad_settlements.created_at < NOW() - INTERVAL 30 DAY
         GROUP BY ad_settlements.publisher_id
       `);
 
@@ -62,7 +62,7 @@ export async function GET(req: NextRequest) {
           GROUP_CONCAT(ad_settlements_views.id) as settlement_ids,
           SUM(ad_settlements_views.publisher_reward) as total_reward
         FROM ad_settlements_views
-        WHERE ad_settlements_views.status = 'locked' AND ad_settlements_views.created_at < NOW() - INTERVAL 30 DAY
+        WHERE ad_settlements_views.status = 'locked' AND ad_settlements_views.fraud_adjusted_at IS NULL AND ad_settlements_views.created_at < NOW() - INTERVAL 30 DAY
         GROUP BY ad_settlements_views.publisher_id
       `);
 

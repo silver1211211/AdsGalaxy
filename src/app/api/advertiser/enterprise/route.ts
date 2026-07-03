@@ -18,9 +18,9 @@ export async function GET(request: Request) {
     ]);
 
     const premiumOptions = inventory
-      .filter((item: any) => ["premium", "elite", "sponsored"].includes(String(item.enterprise_inventory_tier)))
+      .filter((item: Record<string, unknown>) => ["premium", "elite", "sponsored"].includes(String(item.enterprise_inventory_tier)))
       .slice(0, 60)
-      .map((item: any) => ({
+      .map((item: Record<string, unknown>) => ({
         inventory_type: item.inventory_type,
         id: item.id,
         name: item.name,
@@ -30,17 +30,30 @@ export async function GET(request: Request) {
         estimated_cpm: Number(item.estimated_cpm || 0),
         category: item.category,
         country: item.country,
-        traffic_quality_score: Number(item.traffic_quality_score || 0),
         admin_approval_required: true,
       }));
 
     return NextResponse.json({
-      packages,
+      packages: packages.map((item: Record<string, unknown>) => ({
+        id: item.id,
+        name: item.name,
+        slug: item.slug,
+        description: item.description,
+        miniapp_impressions: item.miniapp_impressions,
+        channel_posts: item.channel_posts,
+        bot_broadcasts: item.bot_broadcasts,
+        featured_marketplace_days: item.featured_marketplace_days,
+        priority_support: item.priority_support,
+        estimated_reach: item.estimated_reach,
+        estimated_cpm: item.estimated_cpm,
+        package_price: item.package_price,
+      })),
       premium_options: premiumOptions,
       admin_approval_required: true,
       message: "Enterprise deals require admin approval before activation.",
     });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Failed to load enterprise options" }, { status: getAuthErrorStatus(error) });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Failed to load enterprise options";
+    return NextResponse.json({ error: message }, { status: getAuthErrorStatus(error) });
   }
 }

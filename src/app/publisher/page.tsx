@@ -32,6 +32,7 @@ import BotDetailsScreen from "@/components/publisher/BotDetailsScreen";
 import AddBotScreen from "@/components/publisher/AddBotScreen";
 import MiniAppDetailsScreen from "@/components/publisher/MiniAppDetailsScreen";
 import Toast from "@/components/ui/Toast";
+import { publicChannelUrl } from "@/lib/telegramChannelInput";
 
 type PublisherStats = {
   balance_locked?: string | number;
@@ -56,6 +57,11 @@ type PublisherStats = {
     name: string;
     username?: string;
     status?: string;
+    created_at?: string;
+    posts_per_day?: number | string | null;
+    audience_continents?: string | null;
+    categories?: string | null;
+    channel_type?: string | null;
   }>;
 };
 
@@ -182,7 +188,23 @@ export default function PublisherDashboard() {
 
       <AnimatePresence>
         {viewingChannel && (
-          <ChannelDetailsScreen channel={viewingChannel} onClose={() => setViewingChannel(null)} />
+          <ChannelDetailsScreen
+            channel={viewingChannel}
+            onClose={() => setViewingChannel(null)}
+            onEdit={() => { setViewingChannel(null); setEditingChannel(viewingChannel); }}
+            onToggleStatus={() => {
+              handleToggleStatus({
+                type: "channel",
+                id: Number(viewingChannel.id),
+                name: viewingChannel.title,
+                username: viewingChannel.username ?? undefined,
+                status: viewingChannel.status,
+              });
+              setViewingChannel(null);
+            }}
+            canToggleStatus={viewingChannel.status === "active" || canReactivate(viewingChannel.status)}
+            isResuming={canReactivate(viewingChannel.status)}
+          />
         )}
       </AnimatePresence>
 
@@ -334,7 +356,7 @@ export default function PublisherDashboard() {
           <div className="lg:col-span-2 space-y-6">
             <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
               <div className="flex items-center justify-between mb-6">
-                <h3 className="text-lg font-bold text-slate-900">Recent Monetized</h3>
+                <h3 className="text-lg font-bold text-slate-900">Recent Activity</h3>
                 <Link href="/publisher/monetize" className="text-sm text-blue-600 font-semibold hover:underline flex items-center gap-1">
                   View all <ArrowRight size={14} />
                 </Link>
@@ -357,7 +379,9 @@ export default function PublisherDashboard() {
                       ? { icon: <Bot size={20} />, bg: "bg-violet-100", color: "text-violet-600", label: "Bot" }
                       : { icon: <Smartphone size={20} />, bg: "bg-emerald-100", color: "text-emerald-600", label: "Mini App" };
                     const isProcessing = processingId === menuKey;
-                    const canToggle = item.status !== "pending" && item.status !== "deleted";
+                    const canToggle = item.type === "channel"
+                      ? item.status === "active" || canReactivate(item.status || "")
+                      : item.status !== "pending" && item.status !== "deleted";
                     const shouldResume = item.type === "miniapp"
                       ? item.status === "paused"
                       : canReactivate(item.status ?? "");
@@ -365,7 +389,17 @@ export default function PublisherDashboard() {
                     const viewItem = () => {
                       setOpenMenu(null);
                       if (item.type === "channel") {
-                        setViewingChannel({ id: item.id, title: item.name, username: item.username, status: item.status });
+                        setViewingChannel({
+                          id: item.id,
+                          title: item.name,
+                          username: item.username,
+                          status: item.status,
+                          created_at: item.created_at,
+                          posts_per_day: item.posts_per_day,
+                          audience_continents: item.audience_continents,
+                          categories: item.categories,
+                          channel_type: item.channel_type,
+                        });
                         return;
                       }
                       if (item.type === "bot") {
@@ -374,7 +408,10 @@ export default function PublisherDashboard() {
                           bot_name: item.name,
                           bot_username: item.username,
                           status: item.status || "pending",
-                          created_at: new Date().toISOString(),
+                          created_at: item.created_at || new Date().toISOString(),
+                          posts_per_day: item.posts_per_day,
+                          continents: item.audience_continents,
+                          categories: item.categories,
                         });
                         return;
                       }
@@ -390,7 +427,17 @@ export default function PublisherDashboard() {
                     const editItem = () => {
                       setOpenMenu(null);
                       if (item.type === "channel") {
-                        setEditingChannel({ id: item.id, title: item.name, username: item.username, status: item.status });
+                        setEditingChannel({
+                          id: item.id,
+                          title: item.name,
+                          username: item.username,
+                          status: item.status,
+                          created_at: item.created_at,
+                          posts_per_day: item.posts_per_day,
+                          audience_continents: item.audience_continents,
+                          categories: item.categories,
+                          channel_type: item.channel_type,
+                        });
                         return;
                       }
                       if (item.type === "bot") {
@@ -399,7 +446,10 @@ export default function PublisherDashboard() {
                           bot_name: item.name,
                           bot_username: item.username,
                           status: item.status || "pending",
-                          created_at: new Date().toISOString(),
+                          created_at: item.created_at || new Date().toISOString(),
+                          posts_per_day: item.posts_per_day,
+                          continents: item.audience_continents,
+                          categories: item.categories,
                         });
                         return;
                       }
@@ -415,7 +465,11 @@ export default function PublisherDashboard() {
                           <div>
                             <p className="text-sm font-bold text-slate-900">{item.name}</p>
                             <p className="text-xs text-slate-500">
-                              {iconConfig.label} · @{item.username} ·{" "}
+                              {iconConfig.label} · {item.type === "channel" && publicChannelUrl(item.username) ? (
+                                <a href={publicChannelUrl(item.username)!} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} className="text-[#0c9de8] hover:underline">
+                                  @{item.username}
+                                </a>
+                              ) : <>@{item.username}</>} ·{" "}
                               <span className={item.status === "active" || item.status === "approved" ? "text-emerald-500 font-semibold" : ""}>
                                 {item.status}
                               </span>

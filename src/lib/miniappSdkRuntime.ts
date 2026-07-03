@@ -588,7 +588,7 @@ async function confirmImpression(input: MediationRequestInput, selectedNetwork: 
       revenue_source: input.gross_revenue ? "client_supplied" : "pending_postback_or_import",
       revenue_note: "Client-confirmed external impressions can record gross_revenue = 0; reporting revenue remains zero until real network postback/import is implemented.",
       impressions: 1,
-    }),
+    }), signal: AbortSignal.timeout(12000),
   });
 
   const data = await response.json().catch(() => ({}));
@@ -615,7 +615,7 @@ async function confirmInternalImpression(input: MediationRequestInput, requestId
       watch_duration_seconds: quality?.watch_duration_seconds ?? 1.5,
       completed: Boolean(quality?.completed),
       abandonment_reason: quality?.abandonment_reason,
-    }),
+    }), signal: AbortSignal.timeout(12000),
   });
 
   const data = await response.json().catch(() => ({}));
@@ -792,7 +792,7 @@ export async function requestMiniAppAd(input: MediationRequestInput): Promise<Mi
       telegram_user_id: input.telegram_user_id,
       country: input.country,
       ad_format: adFormat,
-    }),
+    }), signal: AbortSignal.timeout(12000),
   });
 
   const mediation = await mediationResponse.json().catch(() => ({}));
@@ -880,7 +880,7 @@ export async function requestMiniAppAd(input: MediationRequestInput): Promise<Mi
     }
 
     const configResponse = await fetch(`/api/miniapp/mediation/config?miniapp_id=${input.miniapp_id}&network_name=${encodeURIComponent(selectedNetwork)}`, {
-      headers: { "x-telegram-init-data": input.initData },
+      headers: { "x-telegram-init-data": input.initData }, signal: AbortSignal.timeout(12000),
     });
     const configData = await configResponse.json().catch(() => ({}));
     if (!configResponse.ok || !configData.networks?.[0]) {
@@ -966,7 +966,7 @@ async function requestFallback(
       failed_network: decision.selected_network,
       error_code: errorCode,
       error_message: errorMessage,
-    }),
+    }), signal: AbortSignal.timeout(12000),
   });
 
   const data = await response.json().catch(() => ({}));

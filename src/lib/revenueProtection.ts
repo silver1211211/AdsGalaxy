@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy protection query payloads are not schema-generated */
 import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
 
@@ -148,14 +149,12 @@ async function getFinancialTotals(start: Date, end: Date) {
   const params = [start, end];
   const [[classic]]: any = await pool.query(
     `SELECT
-       COALESCE(SUM(advertiser_paid), 0) as spend,
-       COALESCE(SUM(publisher_reward), 0) as publisher_earnings
-     FROM (
-       SELECT advertiser_paid, publisher_reward, created_at FROM ad_settlements
-       UNION ALL
-       SELECT advertiser_paid, publisher_reward, created_at FROM ad_settlements_views
-     ) s
-     WHERE s.created_at >= ? AND s.created_at < ?`,
+       COALESCE(SUM(advertiser_debit), 0) as spend,
+       COALESCE(SUM(publisher_distribution), 0) as publisher_earnings,
+       COALESCE(SUM(platform_revenue), 0) as platform_revenue,
+       COALESCE(SUM(reserve_amount), 0) as reserve_revenue
+     FROM channel_settlement_ledger
+     WHERE created_at >= ? AND created_at < ?`,
     params
   );
   const [[miniapp]]: any = await pool.query(
@@ -170,8 +169,8 @@ async function getFinancialTotals(start: Date, end: Date) {
   );
   const spend = toNumber(classic?.spend) + toNumber(miniapp?.spend);
   const publisherEarnings = toNumber(classic?.publisher_earnings) + toNumber(miniapp?.publisher_earnings);
-  const reserveRevenue = toNumber(miniapp?.reserve_revenue);
-  const platformRevenue = Math.max(spend - publisherEarnings - reserveRevenue, 0) + toNumber(miniapp?.platform_revenue);
+  const reserveRevenue = toNumber(classic?.reserve_revenue) + toNumber(miniapp?.reserve_revenue);
+  const platformRevenue = toNumber(classic?.platform_revenue) + toNumber(miniapp?.platform_revenue);
   const netProfit = spend - publisherEarnings - reserveRevenue;
   return {
     campaign_spend: spend,
@@ -252,7 +251,10 @@ export async function recordPayoutSafetyCheck(input: {
   const delta =
     Math.abs(input.publisherShare - input.expectedPublisherShare)
     + Math.abs((input.platformShare || 0) - input.expectedPlatformShare)
-    + Math.abs((input.reserveShare || 0) - input.expectedReserveShare);
+    + Math.abs((input.reserveShare || 0) - input.expectedReserveShare)
+    + Math.abs(input.advertiserPaid - (
+      input.publisherShare + (input.platformShare || 0) + (input.reserveShare || 0)
+    ));
   const status = delta > 0.000001 ? "blocked" : "passed";
   const reason = status === "blocked" ? "Settlement split does not match configured revenue protection rules" : null;
 
@@ -421,12 +423,8 @@ async function detectCampaignBurn(settings: SettingMap, autoPause: boolean) {
       COALESCE(sp.publisher_earnings, 0) as publisher_earnings
     FROM campaigns c
     LEFT JOIN (
-      SELECT campaign_id, SUM(advertiser_paid) as spend, SUM(publisher_reward) as publisher_earnings
-      FROM (
-        SELECT campaign_id, advertiser_paid, publisher_reward FROM ad_settlements
-        UNION ALL
-        SELECT campaign_id, advertiser_paid, publisher_reward FROM ad_settlements_views
-      ) x GROUP BY campaign_id
+      SELECT campaign_id, SUM(advertiser_debit) as spend, SUM(publisher_distribution) as publisher_earnings
+      FROM channel_settlement_ledger GROUP BY campaign_id
     ) sp ON sp.campaign_id = c.id
     WHERE c.status IN ('active', 'paused', 'budget_exhausted')
     ORDER BY spend DESC
@@ -569,7 +567,11 @@ export async function applyRevenueProtectionOverride(input: {
       );
     } else if (input.entityType === "miniapp_rewarded") {
       await pool.query(
-        "UPDATE miniapp_rewarded_campaigns SET status = 'approved', revenue_protection_status = 'normal', revenue_protection_reason = NULL, revenue_protection_paused_at = NULL WHERE id = ? AND remaining_budget > 0",
+        `UPDATE miniapp_rewarded_campaigns c
+         JOIN users u ON u.id = c.advertiser_id
+         SET c.status = 'approved', c.revenue_protection_status = 'normal',
+             c.revenue_protection_reason = NULL, c.revenue_protection_paused_at = NULL
+         WHERE c.id = ? AND u.ad_balance >= (c.advertiser_cpm_bid / 1000)`,
         [input.entityId]
       );
     } else if (input.entityType === "publisher" || input.entityType === "advertiser" || input.entityType === "user") {

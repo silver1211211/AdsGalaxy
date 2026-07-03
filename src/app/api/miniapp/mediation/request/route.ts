@@ -56,11 +56,19 @@ export async function POST(request: Request) {
     }
 
     const initData = request.headers.get("x-telegram-init-data");
-    if (initData) {
-      const authenticatedUser = await getAuthenticatedUser(initData);
-      if (String(authenticatedUser.telegram_id) !== telegramUserId) {
-        return NextResponse.json({ error: "telegram_user_id does not match authenticated user" }, { status: 403 });
-      }
+    if (!initData) {
+      return NextResponse.json({ error: "Unauthorized: initData required" }, { status: 401 });
+    }
+    const authenticatedUser = await getAuthenticatedUser(initData);
+    if (String(authenticatedUser.telegram_id) !== telegramUserId) {
+      return NextResponse.json({ error: "telegram_user_id does not match authenticated user" }, { status: 403 });
+    }
+    const [[rateRow]] = await pool.query<Array<RowDataPacket & { count: number }>>(
+      "SELECT COUNT(*) AS count FROM miniapp_mediation_requests WHERE telegram_user_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)",
+      [telegramUserId]
+    );
+    if (Number(rateRow?.count || 0) >= 30) {
+      return NextResponse.json({ error: "Too many ad requests. Try again shortly.", error_code: "RATE_LIMITED" }, { status: 429 });
     }
 
     const [miniapps] = await pool.query<MiniAppRow[]>(

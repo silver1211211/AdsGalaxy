@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useId, useMemo, useState } from "react";
 
 type QueueItem = {
   id: string;
@@ -28,7 +28,9 @@ export function PopupQueueProvider({ children }: { children: React.ReactNode }) 
   }, []);
 
   const unregister = useCallback((id: string) => {
-    setQueue((current) => current.filter((item) => item.id !== id));
+    setQueue((current) => current.some((item) => item.id === id)
+      ? current.filter((item) => item.id !== id)
+      : current);
   }, []);
 
   const value = useMemo<PopupQueueContextValue>(() => ({
@@ -46,31 +48,25 @@ export function PopupQueueProvider({ children }: { children: React.ReactNode }) 
 
 export function usePopupQueue(isOpen: boolean, dedupeKey: string) {
   const queue = useContext(PopupQueueContext);
-  const idRef = useRef(`popup-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`);
-  const registeredRef = useRef(false);
+  const register = queue?.register;
+  const unregister = queue?.unregister;
+  const activeId = queue?.activeId ?? null;
+  const reactId = useId();
+  const popupId = `popup-${reactId}`;
 
   useEffect(() => {
-    if (!queue) return;
+    if (!register || !unregister) return;
 
-    if (isOpen && !registeredRef.current) {
-      registeredRef.current = true;
-      queue.register({ id: idRef.current, dedupeKey });
+    if (!isOpen) {
+      unregister(popupId);
+      return;
     }
 
-    if (!isOpen && registeredRef.current) {
-      queue.unregister(idRef.current);
-      registeredRef.current = false;
-    }
-  }, [dedupeKey, isOpen, queue]);
-
-  useEffect(() => {
+    register({ id: popupId, dedupeKey });
     return () => {
-      if (queue && registeredRef.current) {
-        queue.unregister(idRef.current);
-        registeredRef.current = false;
-      }
+      unregister(popupId);
     };
-  }, [queue]);
+  }, [dedupeKey, isOpen, popupId, register, unregister]);
 
-  return !queue || (registeredRef.current && queue.activeId === idRef.current);
+  return !queue || (isOpen && activeId === popupId);
 }

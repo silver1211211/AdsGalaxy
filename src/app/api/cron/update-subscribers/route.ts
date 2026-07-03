@@ -75,7 +75,7 @@ export async function GET(_req: NextRequest) {
       JOIN users u ON c.user_id = u.id
       WHERE c.is_deleted = FALSE
         AND c.status = 'active'
-        AND COALESCE(c.health_status, 'active') = 'active'
+        AND COALESCE(c.health_status, 'healthy') IN ('healthy','warning')
         ${updateWindowCondition}
       ORDER BY ${updateOrder}
       LIMIT 5

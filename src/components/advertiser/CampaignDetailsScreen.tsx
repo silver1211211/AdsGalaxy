@@ -2,8 +2,12 @@
 
 import React, { useEffect } from "react";
 import { motion } from "framer-motion";
-import { X, ExternalLink, Globe, DollarSign, Target, TrendingUp, Calendar, Type, AlertTriangle } from "lucide-react";
+import { X, ExternalLink, Globe, DollarSign, Target, TrendingUp, Calendar, AlertTriangle, PieChart, PlayCircle, Rocket } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { apiFetch } from "@/lib/api";
+import { Eye, MousePointer2, Send, Bot } from "lucide-react";
+import EmptyState from "@/components/ui/EmptyState";
+import { SkeletonBlock } from "@/components/ui/Skeleton";
 
 interface Campaign {
   id: number;
@@ -34,7 +38,7 @@ interface Campaign {
   total_spent?: number;
   posts?: any[];
   broadcast_stats?: any[];
-  chart_data?: any[];
+  chart_data?: Array<{ date: string; count: number }>;
   traffic_quality_rating?: string;
   inventory_quality_rating?: string;
 }
@@ -43,9 +47,6 @@ interface CampaignDetailsScreenProps {
   campaign: Campaign;
   onClose: () => void;
 }
-
-import { apiFetch } from "@/lib/api";
-import { Loader2, PlayCircle, Eye, MousePointer2, Send, Bot } from "lucide-react";
 
 function targetingList(value: unknown) {
   if (Array.isArray(value)) return value.length > 0 ? value.join(", ") : "All";
@@ -79,6 +80,90 @@ function shortDate(value: unknown) {
   return new Date(String(value)).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 }
 
+function formatMoney(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `$${number.toFixed(2)}` : "—";
+}
+
+function computeCtr(campaign: Campaign) {
+  const clicks = Number(campaign.total_clicks || 0);
+  const views = Number(campaign.total_views || 0);
+  if (views <= 0) return null;
+  return (clicks / views) * 100;
+}
+
+function computeCpc(campaign: Campaign) {
+  if (campaign.type !== "clicks") return null;
+  const cpm = Number(campaign.cpm || 0);
+  if (!Number.isFinite(cpm) || cpm <= 0) return null;
+  return cpm / 1000;
+}
+
+function computeProgress(campaign: Campaign) {
+  if (campaign.type !== "broadcast") return null;
+  const remaining = Number(campaign.budget || 0);
+  const spent = Number(campaign.total_spent || 0);
+  const original = remaining + spent;
+  if (original <= 0) return null;
+  return Math.min(100, (spent / original) * 100);
+}
+
+function StatCard({ icon: Icon, label, value, tone = "slate" }: {
+  icon: React.ElementType; label: string; value: React.ReactNode;
+  tone?: "slate" | "blue" | "emerald" | "indigo";
+}) {
+  const toneClasses = {
+    slate: "bg-slate-50 border-slate-100 text-slate-400",
+    blue: "bg-[#0c9de8]/5 border-[#0c9de8]/10 text-[#0c9de8]",
+    emerald: "bg-emerald-50 border-emerald-100 text-emerald-600",
+    indigo: "bg-indigo-50 border-indigo-100 text-indigo-400",
+  }[tone];
+  return (
+    <div className={cn("space-y-1 rounded-3xl border p-4", toneClasses)}>
+      <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest">
+        <Icon size={10} /> {label}
+      </p>
+      <p className="text-lg font-black text-slate-900">{value}</p>
+    </div>
+  );
+}
+
+function MiniBarChart({ data, color, label }: { data: Array<{ date: string; count: number }>; color: string; label: string }) {
+  if (!data || data.length === 0) {
+    return (
+      <EmptyState
+        icon={PieChart}
+        title="No recent activity"
+        message="This chart will fill in once daily activity is recorded."
+        variant="compact"
+      />
+    );
+  }
+  const max = Math.max(1, ...data.map((point) => Number(point.count) || 0));
+  return (
+    <div className="rounded-2xl border border-slate-100 bg-slate-50/60 p-4">
+      <p className="mb-3 text-[10px] font-bold uppercase tracking-widest text-slate-400">{label}</p>
+      <div className="flex h-24 items-end gap-1.5">
+        {data.map((point, index) => {
+          const value = Number(point.count) || 0;
+          const heightPct = Math.max(6, (value / max) * 100);
+          return (
+            <div key={index} className="flex h-full flex-1 flex-col items-center justify-end gap-1.5">
+              <span className="text-[9px] font-black text-slate-500">{value}</span>
+              <div className="flex w-full flex-1 items-end">
+                <div className="w-full rounded-t-md" style={{ height: `${heightPct}%`, backgroundColor: color }} />
+              </div>
+              <span className="text-[8px] font-bold text-slate-400">
+                {new Date(point.date).toLocaleDateString(undefined, { month: "numeric", day: "numeric" })}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function CampaignDetailsScreen({ campaign: initialCampaign, onClose }: CampaignDetailsScreenProps) {
   const [campaign, setCampaign] = React.useState<Campaign>(initialCampaign);
   const [isLoading, setIsLoading] = React.useState(true);
@@ -110,6 +195,10 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
   }, [onClose]);
 
   const continents = JSON.parse(campaign.continents || "[]");
+  const ctr = computeCtr(campaign);
+  const cpc = computeCpc(campaign);
+  const progress = computeProgress(campaign);
+  const spentDisplay = campaign.type === "broadcast" ? formatMoney(campaign.total_spent) : "—";
 
   return (
     <motion.div
@@ -141,83 +230,92 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-6 space-y-8">
+        {/* Budget Overview */}
+        <div className="space-y-4">
+          <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">Budget Overview</h3>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <StatCard icon={DollarSign} label="Remaining Budget" value={`$${campaign.budget}`} />
+            <StatCard icon={DollarSign} label="Spent" value={spentDisplay} tone="emerald" />
+            <StatCard icon={TrendingUp} label="CPM" value={`$${campaign.cpm}`} tone="blue" />
+            <StatCard icon={TrendingUp} label="CPC" value={cpc !== null ? `$${cpc.toFixed(4)}` : "—"} tone="indigo" />
+          </div>
+          <div className="rounded-2xl border border-slate-100 bg-slate-50/60 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Progress</p>
+              <p className="text-xs font-black text-slate-700">{progress !== null ? `${progress.toFixed(0)}% spent` : "Not enough data yet"}</p>
+            </div>
+            <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-200">
+              <div
+                className={cn("h-full rounded-full transition-all", progress !== null ? "bg-[#0c9de8]" : "bg-slate-300")}
+                style={{ width: `${progress ?? 0}%` }}
+              />
+            </div>
+          </div>
+        </div>
+
         {/* Stats Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4">
-          <div className="p-4 bg-slate-50 rounded-3xl border border-slate-100 space-y-1">
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
-              <DollarSign size={10} /> Budget
-            </p>
-            <p className="text-lg font-black text-slate-900">${campaign.budget}</p>
+        <div className="space-y-4">
+          <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">Performance</h3>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-6">
+            {campaign.type === 'broadcast' ? (
+              <StatCard
+                icon={Send}
+                label="Total Sent"
+                tone="blue"
+                value={isLoading ? <SkeletonBlock className="h-6 w-10" /> : campaign.total_deliveries || 0}
+              />
+            ) : (
+              <>
+                <StatCard
+                  icon={Eye}
+                  label="Views"
+                  tone="indigo"
+                  value={isLoading ? <SkeletonBlock className="h-6 w-10" /> : campaign.total_views || 0}
+                />
+                <StatCard
+                  icon={MousePointer2}
+                  label="Clicks"
+                  tone="blue"
+                  value={isLoading ? <SkeletonBlock className="h-6 w-10" /> : campaign.total_clicks || 0}
+                />
+                <StatCard
+                  icon={TrendingUp}
+                  label="CTR"
+                  value={isLoading ? <SkeletonBlock className="h-6 w-10" /> : (ctr !== null ? `${ctr.toFixed(2)}%` : "—")}
+                />
+              </>
+            )}
+            <StatCard icon={Target} label="Goal" value={<span className="uppercase">{campaign.type}</span>} />
+            <StatCard icon={AlertTriangle} label="Traffic Quality" value={<span className="text-sm">{campaign.traffic_quality_rating || "Good"}</span>} />
+            <StatCard icon={AlertTriangle} label="Inventory Quality" value={<span className="text-sm">{campaign.inventory_quality_rating || "Good"}</span>} />
           </div>
-          <div className="p-4 bg-slate-50 rounded-3xl border border-slate-100 space-y-1">
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
-              <TrendingUp size={10} /> CPM
-            </p>
-            <p className="text-lg font-black text-slate-900">${campaign.cpm}</p>
+        </div>
+
+        {/* Schedule */}
+        <div className="space-y-4">
+          <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">Schedule</h3>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <StatCard icon={Calendar} label="Created" value={<span className="text-sm">{new Date(campaign.created_at).toLocaleDateString()}</span>} />
+            <StatCard icon={Calendar} label="Start Date" value={<span className="text-sm">{campaign.start_at ? new Date(campaign.start_at).toLocaleDateString() : "Immediate"}</span>} />
+            <StatCard icon={Calendar} label="End Date" value={<span className="text-sm">{campaign.end_at ? new Date(campaign.end_at).toLocaleDateString() : "No end date"}</span>} />
+            <StatCard icon={Rocket} label="Est. Completion" value={<span className="text-sm">Not enough data yet</span>} />
           </div>
-          {campaign.type === 'broadcast' ? (
-            <>
-              <div className="p-4 bg-[#0c9de8]/5 rounded-3xl border border-[#0c9de8]/10 space-y-1">
-                <p className="text-[10px] font-bold text-[#0c9de8] uppercase tracking-widest flex items-center gap-1.5">
-                  <Send size={10} /> Total Sent
-                </p>
-                <p className="text-lg font-black text-slate-900">
-                  {isLoading ? <Loader2 className="animate-spin" size={16} /> : campaign.total_deliveries || 0}
-                </p>
-              </div>
-              <div className="p-4 bg-emerald-50 rounded-3xl border border-emerald-100 space-y-1">
-                <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest flex items-center gap-1.5">
-                  <DollarSign size={10} /> Total Spent
-                </p>
-                <p className="text-lg font-black text-slate-900">
-                  {isLoading ? <Loader2 className="animate-spin" size={16} /> : `$${parseFloat(campaign.total_spent as any || "0").toFixed(4)}`}
-                </p>
-              </div>
-            </>
+        </div>
+
+        {/* Recent Activity Chart */}
+        <div className="space-y-4">
+          <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">
+            {campaign.type === "broadcast" ? "Daily Deliveries (7 Days)" : "Daily Clicks (7 Days)"}
+          </h3>
+          {isLoading ? (
+            <SkeletonBlock className="h-32 w-full" />
           ) : (
-            <>
-              <div className="p-4 bg-[#0c9de8]/5 rounded-3xl border border-[#0c9de8]/10 space-y-1">
-                <p className="text-[10px] font-bold text-[#0c9de8] uppercase tracking-widest flex items-center gap-1.5">
-                  <MousePointer2 size={10} /> Clicks
-                </p>
-                <p className="text-lg font-black text-slate-900">
-                  {isLoading ? <Loader2 className="animate-spin" size={16} /> : campaign.total_clicks || 0}
-                </p>
-              </div>
-              <div className="p-4 bg-indigo-50 rounded-3xl border border-indigo-100 space-y-1">
-                <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest flex items-center gap-1.5">
-                  <Eye size={10} /> Views
-                </p>
-                <p className="text-lg font-black text-slate-900">
-                  {isLoading ? <Loader2 className="animate-spin" size={16} /> : campaign.total_views || 0}
-                </p>
-              </div>
-            </>
+            <MiniBarChart
+              data={campaign.chart_data || []}
+              color="#0c9de8"
+              label={campaign.type === "broadcast" ? "Deliveries per day" : "Clicks per day"}
+            />
           )}
-          <div className="p-4 bg-slate-50 rounded-3xl border border-slate-100 space-y-1">
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
-              <Target size={10} /> Goal
-            </p>
-            <p className="text-lg font-black text-slate-900 uppercase">{campaign.type}</p>
-          </div>
-          <div className="p-4 bg-slate-50 rounded-3xl border border-slate-100 space-y-1">
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
-              <AlertTriangle size={10} /> Traffic Quality
-            </p>
-            <p className="text-sm font-black text-slate-900">{campaign.traffic_quality_rating || "Good"}</p>
-          </div>
-          <div className="p-4 bg-slate-50 rounded-3xl border border-slate-100 space-y-1">
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
-              <AlertTriangle size={10} /> Inventory Quality
-            </p>
-            <p className="text-sm font-black text-slate-900">{campaign.inventory_quality_rating || "Good"}</p>
-          </div>
-          <div className="p-4 bg-slate-50 rounded-3xl border border-slate-100 space-y-1">
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
-              <Calendar size={10} /> Created
-            </p>
-            <p className="text-sm font-black text-slate-900 truncate">{new Date(campaign.created_at).toLocaleDateString()}</p>
-          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
@@ -256,9 +354,10 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
 
             <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-200">
               {isLoading ? (
-                <div className="flex flex-col items-center justify-center py-12 gap-4">
-                  <Loader2 className="animate-spin text-[#0c9de8]" size={32} />
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Loading performance data...</p>
+                <div className="space-y-3">
+                  <SkeletonBlock className="h-20 w-full" />
+                  <SkeletonBlock className="h-20 w-full" />
+                  <SkeletonBlock className="h-20 w-full" />
                 </div>
               ) : campaign.type === 'broadcast' ? (
                 campaign.broadcast_stats && campaign.broadcast_stats.length > 0 ? (
@@ -297,10 +396,7 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
                     </div>
                   ))
                 ) : (
-                  <div className="text-center py-12 bg-slate-50 rounded-3xl border border-dashed border-slate-200">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">No broadcasts yet</p>
-                    <p className="text-[8px] font-bold text-slate-300 uppercase mt-1 tracking-wider">Campaign waiting for next distribution cycle</p>
-                  </div>
+                  <EmptyState icon={Send} title="No broadcasts yet" message="Campaign waiting for its next distribution cycle." variant="compact" />
                 )
               ) : campaign.posts && campaign.posts.length > 0 ? (
                 campaign.posts.map((post: any) => (
@@ -361,10 +457,7 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
                   </div>
                 ))
               ) : (
-                <div className="text-center py-12 bg-slate-50 rounded-3xl border border-dashed border-slate-200">
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">No posts yet</p>
-                  <p className="text-[8px] font-bold text-slate-300 uppercase mt-1 tracking-wider">Campaign waiting for next distribution cycle</p>
-                </div>
+                <EmptyState icon={PlayCircle} title="No posts yet" message="Campaign waiting for its next distribution cycle." variant="compact" />
               )}
             </div>
 

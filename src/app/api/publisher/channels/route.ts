@@ -49,6 +49,15 @@ async function tableExists(tableName: string) {
   return rows.length > 0;
 }
 
+async function columnExists(tableName: string, columnName: string) {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1`,
+    [tableName, columnName]
+  );
+  return rows.length > 0;
+}
+
 async function telegram(token: string, method: string, body: Record<string, unknown>) {
   try {
     const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
@@ -80,10 +89,11 @@ function privateInviteError(code: string) {
   return messageByCode[code] || "Unable to verify private channel.";
 }
 
-function withManualTrackingUsernames(rows: any[]) {
+function withManualTrackingUsernames(rows: Array<RowDataPacket & Record<string, unknown>>) {
   const manualUsernames = getTrackingAccountUsernames();
   return rows.map((row) => {
-    const { private_invite_link_encrypted, ...safeRow } = row;
+    const safeRow = { ...row };
+    delete safeRow.private_invite_link_encrypted;
     if (row.channel_type === "private" && row.tracking_account_status === "pending_manual") {
       return { ...safeRow, tracking_manual_usernames: manualUsernames };
     }
@@ -137,13 +147,19 @@ export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
-    const [hasCampaignClicks, hasAdSettlements, hasAdSettlementsViews, hasCampaignPosts] = await Promise.all([
+    const [hasCampaignClicks, hasAdSettlements, hasAdSettlementsViews, hasCampaignPosts, hasCampaignPostViews,
+      hasClickReward, hasClickChannelId, hasViewReward, hasViewChannelId] = await Promise.all([
       tableExists("campaign_clicks"),
       tableExists("ad_settlements"),
       tableExists("ad_settlements_views"),
       tableExists("campaign_posts"),
+      columnExists("campaign_posts", "views"),
+      columnExists("ad_settlements", "publisher_reward"),
+      columnExists("ad_settlements", "channel_id"),
+      columnExists("ad_settlements_views", "publisher_reward"),
+      columnExists("ad_settlements_views", "channel_id"),
     ]);
-    const totalImpressionsExpr = hasCampaignPosts
+    const totalImpressionsExpr = hasCampaignPosts && hasCampaignPostViews
       ? "COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.channel_id = c.id), 0)"
       : "0";
     const totalClicksExpr = hasCampaignClicks && hasCampaignPosts
@@ -154,16 +170,37 @@ export async function GET(request: Request) {
           WHERE cp.channel_id = c.id
         ), 0)`
       : "0";
-    const clickRevenueExpr = hasAdSettlements
+    const clickRevenueExpr = hasAdSettlements && hasClickReward && hasClickChannelId
       ? "COALESCE((SELECT SUM(s.publisher_reward) FROM ad_settlements s WHERE s.channel_id = c.id), 0)"
       : "0";
-    const viewRevenueExpr = hasAdSettlementsViews
-      ? "COALESCE((SELECT SUM(sv.publisher_reward) FROM ad_settlements_views sv WHERE sv.channel_id = c.id), 0)"
+    const viewRevenueExpr = hasAdSettlementsViews && hasViewReward && (hasViewChannelId || hasCampaignPosts)
+      ? hasViewChannelId
+        ? "COALESCE((SELECT SUM(sv.publisher_reward) FROM ad_settlements_views sv WHERE sv.channel_id = c.id), 0)"
+        : "COALESCE((SELECT SUM(sv.publisher_reward) FROM ad_settlements_views sv JOIN campaign_posts cpv ON cpv.id = sv.post_id WHERE cpv.channel_id = c.id), 0)"
       : "0";
 
-    const [rows]: any = await pool.query(
+    const [rows] = await pool.query<Array<RowDataPacket & Record<string, unknown>>>(
       `SELECT
-        c.*,
+        c.id,
+        c.chat_id,
+        c.username,
+        c.channel_type,
+        c.view_tracking_status,
+        c.tracking_account_status,
+        c.tracking_account,
+        c.title,
+        c.subscriber_count,
+        c.posts_per_day,
+        c.posting_times,
+        c.audience_continents,
+        c.categories,
+        c.status,
+        c.paused_reason,
+        c.suggested_fix,
+        c.failure_reason,
+        c.marketplace_visible,
+        c.created_at,
+        c.updated_at,
         ${totalImpressionsExpr} as total_impressions,
         ${totalClicksExpr} as total_clicks,
         (${clickRevenueExpr} + ${viewRevenueExpr}) as total_revenue

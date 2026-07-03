@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy production-control payloads are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
@@ -202,7 +203,16 @@ export async function PATCH(request: Request) {
       } else if (target === "bots") {
         await pool.query(`UPDATE bots SET status = ?, paused_reason = ?, suggested_fix = ?, health_status = ? WHERE is_deleted = FALSE${selectedSql}`, [status, status === "paused" ? reason || "Paused by admin." : null, status === "paused" ? "Paused by platform operations." : null, status === "paused" ? "paused" : "active", ...params]);
       } else if (target === "miniapps") {
-        await pool.query(`UPDATE miniapps SET status = ? WHERE is_deleted = FALSE${selectedSql}`, [mode === "resume" ? "approved" : "paused", ...params]);
+        await pool.query(
+          `UPDATE miniapps
+           SET status = CASE
+             WHEN ? = 'resume' AND admin_approved_at IS NOT NULL THEN 'approved'
+             WHEN ? = 'resume' THEN 'awaiting'
+             ELSE 'paused'
+           END
+           WHERE is_deleted = FALSE${selectedSql}`,
+          [mode, mode, ...params]
+        );
       } else if (target === "campaigns") {
         await pool.query(`UPDATE campaigns SET status = ?, pause_reason = ? WHERE status != 'deleted'${selectedSql}`, [status, status === "paused" ? reason || "admin_paused" : null, ...params]);
       } else {

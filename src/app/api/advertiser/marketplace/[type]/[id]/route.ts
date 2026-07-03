@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { getMarketplaceProfile, listMarketplaceInventory, normalizeMarketplaceType, recordMarketplaceEvent } from "@/lib/publisherMarketplace";
+import { publicAdvertiserInventory } from "@/lib/advertiserResponsePrivacy";
 
 export async function GET(request: Request, context: { params: Promise<{ type: string; id: string }> }) {
   try {
@@ -35,10 +36,11 @@ export async function GET(request: Request, context: { params: Promise<{ type: s
     }, user.id);
 
     return NextResponse.json({
-      profile,
-      recommended: recommended.filter((item) => !(item.type === type && item.id === id)).slice(0, 5),
+      profile: publicAdvertiserInventory(profile),
+      recommended: recommended.filter((item) => !(item.type === type && item.id === id)).slice(0, 5).map(publicAdvertiserInventory),
     });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Failed to load inventory profile" }, { status: getAuthErrorStatus(error) });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Failed to load inventory profile";
+    return NextResponse.json({ error: message }, { status: getAuthErrorStatus(error) });
   }
 }

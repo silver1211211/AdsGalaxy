@@ -9,6 +9,7 @@ import {
   getDeliveryOptimizationSettings
 } from "@/lib/inventoryOptimization";
 import { qualityScoreForWatchTier, watchDurationQualityTier, type WatchQualityTier } from "@/lib/internalAdCompletionQuality";
+import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 
 export const INTERNAL_NETWORK_NAME = "AdsGalaxyInternal";
 
@@ -26,6 +27,8 @@ type CampaignRow = RowDataPacket & {
   landing_url: string;
   remaining_budget: string | number;
   budget: string | number;
+  total_spend: string | number;
+  impressions: string | number;
   admin_cpm: string | number;
   advertiser_cpm_bid: string | number;
   cpm_mode: string | null;
@@ -47,12 +50,17 @@ type MiniAppInventoryRow = RowDataPacket & {
   inventory_override: string;
 };
 
+type ExistingImpressionRow = RowDataPacket & {
+  advertiser_cpm: string | number;
+  cost: string | number;
+  publisher_revenue: string | number;
+  ads_galaxy_revenue: string | number;
+  reserve_revenue: string | number;
+  publisher_cpm: string | number;
+};
+
 function toNumber(value: unknown) {
   return Number.parseFloat(String(value ?? 0)) || 0;
-}
-
-function todayDate() {
-  return new Date().toISOString().slice(0, 10);
 }
 
 function normalizeCountryList(value: string | null) {
@@ -126,7 +134,7 @@ export async function selectInternalRewardedCampaign(input: {
   const [campaigns] = await input.conn.query<CampaignRow[]>(`
     SELECT
       c.id, c.advertiser_id, c.campaign_name, c.title, c.description, c.cta_text, c.title_color, c.body_color, c.categories, c.image_url, c.landing_url, c.budget,
-      remaining_budget, admin_cpm, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm,
+      remaining_budget, total_spend, impressions, admin_cpm, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm,
       campaign_budget_mode, target_countries, countries, start_at,
       end_at, daily_budget_limit, frequency_cap_per_user, c.quality_score,
       COALESCE(u.advertiser_trust_level, 'new') as advertiser_trust_level
@@ -134,8 +142,7 @@ export async function selectInternalRewardedCampaign(input: {
     JOIN users u ON c.advertiser_id = u.id
     WHERE c.status = 'approved'
       AND COALESCE(u.advertiser_trust_level, 'new') != 'restricted'
-      AND (c.remaining_budget > 0 OR c.campaign_budget_mode = 'unlimited')
-      AND c.admin_cpm > 0
+      AND c.advertiser_cpm_bid > 0
       AND (c.start_at IS NULL OR c.start_at <= NOW())
       AND (c.end_at IS NULL OR c.end_at >= NOW())
     ORDER BY c.created_at ASC, c.id ASC
@@ -147,22 +154,28 @@ export async function selectInternalRewardedCampaign(input: {
     const bTrust = trustMultipliers[normalizeAdvertiserTrustLevel(b.advertiser_trust_level)] || 1;
     const aAdvertiser = calculateAdvertiserPerformanceScore({ trustLevel: a.advertiser_trust_level, campaignQuality: a.quality_score, spend: a.budget, approvedCampaigns: 1 });
     const bAdvertiser = calculateAdvertiserPerformanceScore({ trustLevel: b.advertiser_trust_level, campaignQuality: b.quality_score, spend: b.budget, approvedCampaigns: 1 });
-    const aPriority = calculateCampaignPriorityScore({ advertiserTrustMultiplier: aTrust, campaignQuality: a.quality_score, cpmBid: a.admin_cpm, advertiserPerformance: aAdvertiser, historicalPerformance: 50 });
-    const bPriority = calculateCampaignPriorityScore({ advertiserTrustMultiplier: bTrust, campaignQuality: b.quality_score, cpmBid: b.admin_cpm, advertiserPerformance: bAdvertiser, historicalPerformance: 50 });
+    const aPriority = calculateCampaignPriorityScore({ advertiserTrustMultiplier: aTrust, campaignQuality: a.quality_score, cpmBid: a.advertiser_cpm_bid, advertiserPerformance: aAdvertiser, historicalPerformance: 50 });
+    const bPriority = calculateCampaignPriorityScore({ advertiserTrustMultiplier: bTrust, campaignQuality: b.quality_score, cpmBid: b.advertiser_cpm_bid, advertiserPerformance: bAdvertiser, historicalPerformance: 50 });
     const inventoryScore = toNumber(inventoryRow?.inventory_score || 50);
     const aMatch = 1 - Math.abs(aPriority - inventoryScore) / 100;
     const bMatch = 1 - Math.abs(bPriority - inventoryScore) / 100;
     const modeWeight = deliverySettings.mode === "performance" ? 1.35 : deliverySettings.mode === "growth" ? 0.9 : 1;
-    const aScore = toNumber(a.admin_cpm) * aTrust * qualityMultiplier(a.quality_score) * (aPriority / 50) * (0.8 + aMatch * 0.4) * modeWeight;
-    const bScore = toNumber(b.admin_cpm) * bTrust * qualityMultiplier(b.quality_score) * (bPriority / 50) * (0.8 + bMatch * 0.4) * modeWeight;
+    const aScore = toNumber(a.advertiser_cpm_bid) * aTrust * qualityMultiplier(a.quality_score) * (aPriority / 50) * (0.8 + aMatch * 0.4) * modeWeight;
+    const bScore = toNumber(b.advertiser_cpm_bid) * bTrust * qualityMultiplier(b.quality_score) * (bPriority / 50) * (0.8 + bMatch * 0.4) * modeWeight;
     return bScore - aScore;
   });
 
   const country = input.country?.toUpperCase() || null;
   let skipReason = "no_internal_campaign";
   let campaign: CampaignRow | undefined;
+  const [[miniappRow]] = await input.conn.query<RowDataPacket[]>("SELECT miniapp_username FROM miniapps WHERE id = ? LIMIT 1", [input.miniappId]);
+  const miniappExclusions = await loadCampaignExclusions(input.conn, "miniapp", campaigns.map((item) => Number(item.id)), "miniapp");
 
   for (const row of campaigns) {
+    if (campaignExcludesIdentifier(miniappExclusions, Number(row.id), miniappRow?.miniapp_username)) {
+      skipReason = "advertiser_excluded_miniapp";
+      continue;
+    }
     if (dateIsAfterNow(row.start_at)) {
       skipReason = "targeting_schedule_not_started";
       continue;
@@ -179,22 +192,19 @@ export async function selectInternalRewardedCampaign(input: {
       continue;
     }
 
-    const cpm = toNumber(row.admin_cpm);
-    const cost = cpm / 1000;
-    if (row.campaign_budget_mode !== "unlimited" && toNumber(row.remaining_budget) < cost) {
-      skipReason = "insufficient_internal_budget";
-      continue;
-    }
-
-    if (row.campaign_budget_mode === "unlimited") {
-      const [[balanceRow]] = await input.conn.query<RowDataPacket[]>(
-        "SELECT ad_balance FROM users WHERE id = ?",
-        [row.advertiser_id]
+    const cpm = toNumber(row.advertiser_cpm_bid);
+    const cost = Number((cpm / 1000).toFixed(8));
+    const [[balanceRow]] = await input.conn.query<RowDataPacket[]>(
+      "SELECT ad_balance FROM users WHERE id = ?",
+      [row.advertiser_id]
+    );
+    if (toNumber(balanceRow?.ad_balance) < cost) {
+      await input.conn.query(
+        "UPDATE miniapp_rewarded_campaigns SET status = 'paused', pause_reason = 'insufficient_balance' WHERE id = ? AND status = 'approved'",
+        [row.id]
       );
-      if (toNumber(balanceRow?.ad_balance) < cost) {
-        skipReason = "insufficient_advertiser_balance";
-        continue;
-      }
+      skipReason = "insufficient_advertiser_balance";
+      continue;
     }
 
     if (input.telegramUserId) {
@@ -275,8 +285,8 @@ export async function selectInternalRewardedCampaign(input: {
 
   if (!campaign) return { campaign: null, skip_reason: skipReason };
 
-  const cpm = toNumber(campaign.admin_cpm);
-  const cost = cpm / 1000;
+  const cpm = toNumber(campaign.advertiser_cpm_bid);
+  const cost = Number((cpm / 1000).toFixed(8));
 
   return {
     campaign: {
@@ -310,7 +320,7 @@ export async function recordInternalAdImpression(input: {
   completionStatus?: string;
 }) {
   const [campaignRows] = await input.conn.query<CampaignRow[]>(
-    `SELECT id, advertiser_id, remaining_budget, admin_cpm, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm, campaign_budget_mode
+    `SELECT id, advertiser_id, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm
      FROM miniapp_rewarded_campaigns
      WHERE id = ? AND status = 'approved'
      FOR UPDATE`,
@@ -322,15 +332,36 @@ export async function recordInternalAdImpression(input: {
   }
 
   const campaign = campaignRows[0];
-  const cpm = toNumber(campaign.admin_cpm);
-  const cost = cpm / 1000;
+  const [existingRows] = await input.conn.query<ExistingImpressionRow[]>(
+    `SELECT advertiser_cpm, cost, publisher_revenue, ads_galaxy_revenue, reserve_revenue, publisher_cpm
+     FROM miniapp_internal_ad_impressions WHERE request_id = ? FOR UPDATE`,
+    [input.requestId]
+  );
+  if (existingRows.length > 0) {
+    const existing = existingRows[0];
+    return {
+      duplicate: true,
+      insufficient_balance: false,
+      cpm: toNumber(existing.advertiser_cpm),
+      cost: toNumber(existing.cost),
+      ads_galaxy_fee: toNumber(existing.ads_galaxy_revenue),
+      reserve_revenue: toNumber(existing.reserve_revenue),
+      publisher_revenue: toNumber(existing.publisher_revenue),
+      publisher_cpm: toNumber(existing.publisher_cpm),
+    };
+  }
 
-  if (cost <= 0 || (campaign.campaign_budget_mode !== "unlimited" && toNumber(campaign.remaining_budget) < cost)) {
-    await input.conn.query(
-      "UPDATE miniapp_rewarded_campaigns SET status = 'completed', remaining_budget = GREATEST(remaining_budget, 0) WHERE id = ?",
-      [input.campaignId]
-    );
-    throw new Error("Internal campaign budget exhausted");
+  const [[billingMiniapp]] = await input.conn.query<RowDataPacket[]>("SELECT miniapp_username FROM miniapps WHERE id = ? LIMIT 1", [input.miniappId]);
+  const billingExclusions = await loadCampaignExclusions(input.conn, "miniapp", [Number(campaign.id)], "miniapp");
+  if (campaignExcludesIdentifier(billingExclusions, Number(campaign.id), billingMiniapp?.miniapp_username)) {
+    throw new Error("Internal campaign is excluded from this Mini App");
+  }
+
+  const cpm = toNumber(campaign.advertiser_cpm_bid);
+  const cost = Number((cpm / 1000).toFixed(8));
+
+  if (cost <= 0) {
+    throw new Error("Internal campaign CPM is invalid");
   }
 
   const payout = await calculateMiniAppPublisherPayout({
@@ -354,17 +385,29 @@ export async function recordInternalAdImpression(input: {
     completion_quality_score: completionQualityScore,
   };
 
-  const [insertResult] = await input.conn.query<ResultSetHeader>(
-    `INSERT IGNORE INTO miniapp_internal_ad_impressions
+  const [balanceResult] = await input.conn.query<ResultSetHeader>(
+    "UPDATE users SET ad_balance = ad_balance - ? WHERE id = ? AND ad_balance >= ?",
+    [cost, campaign.advertiser_id, cost]
+  );
+  if (balanceResult.affectedRows !== 1) {
+    await input.conn.query(
+      "UPDATE miniapp_rewarded_campaigns SET status = 'paused', pause_reason = 'insufficient_balance' WHERE id = ?",
+      [input.campaignId]
+    );
+    return { duplicate: false, insufficient_balance: true, cpm, cost };
+  }
+
+  await input.conn.query<ResultSetHeader>(
+    `INSERT INTO miniapp_internal_ad_impressions
       (
         campaign_id, miniapp_id, request_id, telegram_user_id, country,
-        advertiser_cpm, cpm, publisher_cpm, cost, publisher_revenue,
+        advertiser_cpm, cpm, publisher_cpm, cost, advertiser_debit, publisher_revenue,
         ads_galaxy_revenue, reserve_revenue, quality_factor,
         repeat_penalty_factor, quality_metadata, cpm_mode,
         watch_duration_seconds, completion_status, completion_quality_tier,
         completion_quality_score
       )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.campaignId,
       input.miniappId,
@@ -374,6 +417,7 @@ export async function recordInternalAdImpression(input: {
       payout.advertiser_cpm,
       cpm,
       payout.publisher_cpm,
+      cost,
       cost,
       payout.publisher_revenue,
       payout.ads_galaxy_revenue,
@@ -389,47 +433,32 @@ export async function recordInternalAdImpression(input: {
     ]
   );
 
-  if (insertResult.affectedRows !== 1) {
-    return { duplicate: true, cpm, cost };
-  }
-
-  if (campaign.campaign_budget_mode === "unlimited") {
-    const [balanceResult] = await input.conn.query<ResultSetHeader>(
-      "UPDATE users SET ad_balance = ad_balance - ? WHERE id = ? AND ad_balance >= ?",
-      [cost, campaign.advertiser_id, cost]
-    );
-    if (balanceResult.affectedRows !== 1) {
-      await input.conn.query(
-        "UPDATE miniapp_rewarded_campaigns SET status = 'paused' WHERE id = ?",
-        [input.campaignId]
-      );
-      throw new Error("Advertiser balance exhausted");
-    }
-
-    await input.conn.query(
-      "UPDATE miniapp_rewarded_campaigns SET budget = budget + ? WHERE id = ?",
-      [cost, input.campaignId]
-    );
-  } else {
-    await input.conn.query(
-      `UPDATE miniapp_rewarded_campaigns
-       SET remaining_budget = GREATEST(remaining_budget - ?, 0),
-         status = CASE WHEN GREATEST(remaining_budget - ?, 0) <= 0 THEN 'completed' ELSE status END
-       WHERE id = ?`,
-      [cost, cost, input.campaignId]
-    );
-  }
+  await input.conn.query(
+    `UPDATE miniapp_rewarded_campaigns
+     SET total_spend = total_spend + ?, impressions = impressions + 1,
+         remaining_budget = 0, campaign_budget_mode = 'pay_as_you_go', pause_reason = NULL
+     WHERE id = ?`,
+    [cost, input.campaignId]
+  );
+  await input.conn.query(
+    "INSERT INTO advertiser_transactions (user_id, amount, type, description) VALUES (?, ?, 'debit', ?)",
+    [campaign.advertiser_id, cost, `Mini App impression ${input.requestId}`]
+  );
 
   const adsGalaxyFee = payout.ads_galaxy_revenue;
   const publisherRevenue = payout.publisher_revenue;
-  const statDate = todayDate();
+  const [dateRows] = await input.conn.query<Array<RowDataPacket & { stat_date: string }>>(
+    "SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS stat_date"
+  );
+  const statDate = String(dateRows[0].stat_date);
   const grossCpm = cpm;
   const netCpm = payout.publisher_cpm;
 
   await input.conn.query(
     `INSERT INTO miniapp_daily_stats
-      (miniapp_id, network_name, date, impressions, gross_revenue, ads_galaxy_fee, reserve_revenue, publisher_revenue, gross_cpm, net_cpm)
-     VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+      (miniapp_id, network_name, date, impressions, gross_revenue, ads_galaxy_fee, reserve_revenue, publisher_revenue, gross_cpm, net_cpm,
+       revenue_validation_status, revenue_validation_reason, revenue_validation_metadata, revenue_validated_at, revenue_review_status)
+     VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'passed', NULL, ?, NOW(), 'not_required')
      ON DUPLICATE KEY UPDATE
       impressions = impressions + 1,
       gross_revenue = gross_revenue + VALUES(gross_revenue),
@@ -437,8 +466,14 @@ export async function recordInternalAdImpression(input: {
       reserve_revenue = reserve_revenue + VALUES(reserve_revenue),
       publisher_revenue = publisher_revenue + VALUES(publisher_revenue),
       gross_cpm = (gross_revenue / impressions) * 1000,
-      net_cpm = (publisher_revenue / impressions) * 1000`,
-    [input.miniappId, INTERNAL_NETWORK_NAME, statDate, cost, adsGalaxyFee, payout.reserve_revenue, publisherRevenue, grossCpm, netCpm]
+      net_cpm = (publisher_revenue / impressions) * 1000,
+      revenue_validation_status = 'passed',
+      revenue_validation_reason = NULL,
+      revenue_validation_metadata = VALUES(revenue_validation_metadata),
+      revenue_validated_at = NOW(),
+      revenue_review_status = 'not_required'`,
+    [input.miniappId, INTERNAL_NETWORK_NAME, statDate, cost, adsGalaxyFee, payout.reserve_revenue, publisherRevenue, grossCpm, netCpm,
+      JSON.stringify({ source: "server_internal_impression_ledger", request_id: input.requestId })]
   );
 
   if (input.country) {
@@ -452,6 +487,7 @@ export async function recordInternalAdImpression(input: {
 
   return {
     duplicate: false,
+    insufficient_balance: false,
     cpm,
     cost,
     ads_galaxy_fee: adsGalaxyFee,

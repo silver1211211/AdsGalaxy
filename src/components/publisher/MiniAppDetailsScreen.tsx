@@ -1,13 +1,14 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import {
-  Smartphone, CheckCircle2, Clock, XCircle, PauseCircle,
+  CheckCircle2, Clock, XCircle, PauseCircle,
   Hash, Code2, Copy, ChevronDown, ExternalLink, ChevronLeft,
-  Edit3, Play, Pause,
+  Edit3, Play, Pause, Info,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import MiniAppAnalyticsDashboard from "@/components/publisher/MiniAppAnalyticsDashboard";
 
 const appOrigin = (
   process.env.NEXT_PUBLIC_APP_URL
@@ -32,6 +33,9 @@ interface MiniAppDetailsScreenProps {
     status: string;
     total_impressions?: number | string | null;
     total_revenue?: number | string | null;
+    total_requests?: number | string | null;
+    fill_rate?: number | string | null;
+    average_cpm?: number | string | null;
     bot_id?: number | string | null;
     webapp_url?: string | null;
     miniapp_url?: string | null;
@@ -120,6 +124,7 @@ export default function MiniAppDetailsScreen({
   miniapp, onClose, onEdit, onToggleStatus, canToggleStatus, isResuming,
 }: MiniAppDetailsScreenProps) {
   const [showIntegrationCode, setShowIntegrationCode] = useState(false);
+  const [showGeneralInfo, setShowGeneralInfo] = useState(false);
   const [copiedCode, setCopiedCode] = useState<CopiedCode>(null);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -164,10 +169,6 @@ export default function MiniAppDetailsScreen({
   const canUseIntegrationCode = isValidMiniappId && ["active", "approved"].includes(String(miniapp.status));
   const headerCode = `<script src="${sdkOrigin}/sdk.js?id=${miniappId}"></script>`;
   const bodyCode = `<button onclick="window.showAdsGalaxy({ miniappId: ${miniappId} })">\n  Watch Ad\n</button>`;
-  const formattedRevenue = Number(miniapp.total_revenue || 0).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 6,
-  });
 
   return (
     <motion.div
@@ -175,13 +176,13 @@ export default function MiniAppDetailsScreen({
       animate={{ x: 0 }}
       exit={{ x: "100%" }}
       transition={{ type: "spring", damping: 25, stiffness: 200 }}
-      className="fixed top-16 left-0 right-0 bottom-0 z-[55] flex flex-col bg-[#f8f9fb]"
+      className="fixed top-16 left-0 right-0 bottom-0 z-[55] flex flex-col bg-[#f8f9fb] dark:bg-slate-950"
     >
       {/* ── Top bar ── */}
-      <div className="flex shrink-0 items-center gap-3 border-b border-slate-100 bg-white px-4 py-3.5">
+      <div className="relative z-10 flex shrink-0 items-center gap-3 border-b border-slate-100 bg-white px-4 py-3.5 shadow-sm">
         <button
           onClick={onClose}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 active:scale-95"
         >
           <ChevronLeft size={18} />
         </button>
@@ -190,11 +191,11 @@ export default function MiniAppDetailsScreen({
             {miniapp.miniapp_name}
           </p>
           {miniapp.miniapp_username && (
-            <p className="text-[11px] font-medium text-emerald-600">@{miniapp.miniapp_username}</p>
+            <p className="text-[11px] font-semibold text-emerald-600">@{miniapp.miniapp_username}</p>
           )}
         </div>
         <span className={cn(
-          "inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold",
+          "inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold shadow-sm ring-1 ring-inset ring-black/[0.03]",
           statusInfo.bg, statusInfo.color,
         )}>
           <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", statusInfo.dot)} />
@@ -205,210 +206,200 @@ export default function MiniAppDetailsScreen({
       <div className="flex-1 overflow-y-auto">
         <div className="space-y-3 p-4 pb-8">
 
-          {/* ── Asset Overview ── */}
-          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
-            <div className="flex items-center gap-4 p-5">
-              <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-emerald-50">
-                <Smartphone size={28} className="text-emerald-500" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-lg font-black text-slate-900">{miniapp.miniapp_name}</p>
-                {miniapp.miniapp_username && (
-                  <p className="mt-0.5 text-sm font-bold text-emerald-600">@{miniapp.miniapp_username}</p>
-                )}
-                <p className="mt-1 text-xs font-semibold text-slate-400">
-                  Mini App #{miniappId || "—"}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* ── Status & Approval ── */}
-          <div className={cn("overflow-hidden rounded-2xl border p-4", statusInfo.bg, statusInfo.border)}>
-            <div className="flex items-start gap-3">
-              <span className={cn("mt-0.5 shrink-0", statusInfo.color)}>
-                <statusInfo.Icon size={18} />
-              </span>
-              <div className="flex-1 min-w-0">
-                <p className={cn("text-sm font-black", statusInfo.color)}>{statusInfo.label}</p>
-                <p className={cn("mt-0.5 text-xs font-medium leading-relaxed opacity-80", statusInfo.color)}>
-                  {statusInfo.message}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* ── Statistics ── */}
-          <div className="grid grid-cols-2 gap-3">
-            <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
-              <p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-blue-600">Impressions</p>
-              <p className="text-2xl font-black text-blue-700">
-                {Number(miniapp.total_impressions || 0).toLocaleString()}
-              </p>
-            </div>
-            <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
-              <p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-emerald-600">Revenue</p>
-              <p className="truncate text-xl font-black text-emerald-700" title={`$${formattedRevenue}`}>
-                ${formattedRevenue}
-              </p>
-            </div>
-          </div>
-
-          {/* ── Mini App ID ── */}
-          <div className="overflow-hidden rounded-2xl border border-blue-100 bg-blue-50">
-            <div className="flex items-center justify-between gap-3 p-4">
-              <div className="min-w-0">
-                <div className="mb-1 flex items-center gap-1.5 text-blue-600">
-                  <Hash size={12} />
-                  <span className="text-[10px] font-black uppercase tracking-widest">Mini App ID</span>
-                </div>
-                <p className="font-mono text-2xl font-black text-blue-800">
-                  {isValidMiniappId ? miniappId : "—"}
-                </p>
-                <p className="mt-0.5 text-[11px] font-medium text-blue-600">
-                  Use this ID in your integration code.
-                </p>
-              </div>
-              <button
-                type="button"
-                disabled={!isValidMiniappId}
-                onClick={() => copyCode("id", String(miniappId))}
-                aria-label="Copy Mini App ID"
-                className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-xl border border-blue-200 bg-white px-3 py-2 text-[11px] font-black text-blue-700 shadow-sm transition active:scale-95 disabled:opacity-50"
-              >
-                {copiedCode === "id" ? <CheckCircle2 size={14} className="text-emerald-500" /> : <Copy size={14} />}
-                {copiedCode === "id" ? "Copied" : "Copy"}
-              </button>
-            </div>
-          </div>
-
-          {/* ── General Information ── */}
-          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
-            <div className="border-b border-slate-100 px-4 py-3">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">General Information</p>
-            </div>
-            <div className="divide-y divide-slate-50">
-              <div className="flex items-center justify-between px-4 py-3.5">
-                <span className="text-xs font-semibold text-slate-400">Bot ID</span>
-                <span className="font-mono text-sm font-bold text-slate-900">{miniapp.bot_id || "—"}</span>
-              </div>
-              {miniapp.webapp_url && (
-                <div className="flex items-start justify-between gap-3 px-4 py-3.5">
-                  <span className="shrink-0 text-xs font-semibold text-slate-400">Web App URL</span>
-                  <span className="min-w-0 break-all text-right text-sm font-bold text-slate-900">{miniapp.webapp_url}</span>
-                </div>
-              )}
-              {miniapp.miniapp_url && (
-                <div className="flex items-start justify-between gap-3 px-4 py-3.5">
-                  <span className="shrink-0 text-xs font-semibold text-slate-400">Mini App URL</span>
-                  <span className="min-w-0 break-all text-right text-sm font-bold text-slate-900">{miniapp.miniapp_url}</span>
-                </div>
-              )}
-              <div className="flex items-center justify-between px-4 py-3.5">
-                <span className="text-xs font-semibold text-slate-400">Registered</span>
-                <span className="text-sm font-bold text-slate-900">
-                  {new Date(miniapp.created_at).toLocaleDateString()}
-                </span>
-              </div>
-            </div>
-          </div>
+          {/* ── Daily Performance ── */}
+          {isValidMiniappId && <MiniAppAnalyticsDashboard miniappId={miniappId} />}
 
           {/* ── Integration ── */}
-          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
+          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm transition-shadow duration-200 hover:shadow-md">
             <button
               type="button"
               onClick={() => setShowIntegrationCode(v => !v)}
               aria-expanded={showIntegrationCode}
               className="flex w-full items-center gap-3 px-4 py-4 text-left transition hover:bg-slate-50 active:bg-slate-100"
             >
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-blue-600">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-[#0c9de8] ring-1 ring-inset ring-blue-100">
                 <Code2 size={18} />
               </span>
               <span className="min-w-0 flex-1">
                 <span className="block text-sm font-black text-slate-900">Integration Code</span>
-                <span className="block text-[11px] font-medium text-slate-500">Header and ad trigger snippets</span>
+                <span className="block text-[11px] font-semibold text-slate-500">Mini App ID, header, and ad trigger snippets</span>
               </span>
               <ChevronDown
                 size={18}
-                className={cn("shrink-0 text-slate-400 transition-transform", showIntegrationCode && "rotate-180")}
+                className={cn("shrink-0 text-slate-400 transition-transform duration-200", showIntegrationCode && "rotate-180")}
               />
             </button>
 
-            {showIntegrationCode && (
-              <div className="space-y-3 border-t border-slate-100 p-4">
-                {canUseIntegrationCode ? (
-                  <>
-                    <p className="text-xs leading-5 text-slate-600">
-                      Copy the header code into your Mini App &lt;head&gt;, then place the body code where users should trigger an ad.
-                    </p>
-                    <IntegrationCodeBlock
-                      title="Header Code"
-                      code={headerCode}
-                      copyLabel="Copy Header"
-                      copied={copiedCode === "header"}
-                      onCopy={() => copyCode("header", headerCode)}
-                    />
-                    <IntegrationCodeBlock
-                      title="Body Code"
-                      code={bodyCode}
-                      copyLabel="Copy Body"
-                      copied={copiedCode === "body"}
-                      onCopy={() => copyCode("body", bodyCode)}
-                    />
-                  </>
-                ) : (
-                  <div className="rounded-2xl border border-amber-100 bg-amber-50 px-4 py-4 text-sm font-bold text-amber-700">
-                    Integration code becomes available after your Mini App is approved.
-                  </div>
-                )}
-                <button
-                  type="button"
-                  onClick={() => openExternalUrl(documentationUrl)}
-                  className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs font-black text-blue-700 transition active:scale-[0.98]"
+            <AnimatePresence initial={false}>
+              {showIntegrationCode && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.22, ease: "easeInOut" }}
+                  className="overflow-hidden"
                 >
-                  <ExternalLink size={14} />
-                  View Full Documentation
-                </button>
-              </div>
-            )}
+                  <div className="space-y-3 border-t border-slate-100 p-4">
+                    <div className="overflow-hidden rounded-2xl border border-blue-100 bg-blue-50">
+                      <div className="flex items-center justify-between gap-3 p-4">
+                        <div className="min-w-0">
+                          <div className="mb-1 flex items-center gap-1.5 text-[#0c9de8]">
+                            <Hash size={12} />
+                            <span className="text-[10px] font-black uppercase tracking-widest">Mini App ID</span>
+                          </div>
+                          <p className="font-mono text-2xl font-black text-[#0c9de8]">
+                            {isValidMiniappId ? miniappId : "—"}
+                          </p>
+                          <p className="mt-0.5 text-[11px] font-semibold text-[#0c9de8]">
+                            Use this ID in your integration code.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={!isValidMiniappId}
+                          onClick={() => copyCode("id", String(miniappId))}
+                          aria-label="Copy Mini App ID"
+                          className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-xl border border-blue-200 bg-white px-3 py-2 text-[11px] font-black text-[#0c9de8] shadow-sm transition active:scale-95 disabled:opacity-50"
+                        >
+                          {copiedCode === "id" ? <CheckCircle2 size={14} className="text-emerald-500" /> : <Copy size={14} />}
+                          {copiedCode === "id" ? "Copied" : "Copy"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {canUseIntegrationCode ? (
+                      <>
+                        <p className="text-xs font-medium leading-5 text-slate-600">
+                          Copy the header code into your Mini App &lt;head&gt;, then place the body code where users should trigger an ad.
+                        </p>
+                        <IntegrationCodeBlock
+                          title="Header Code"
+                          code={headerCode}
+                          copyLabel="Copy Header"
+                          copied={copiedCode === "header"}
+                          onCopy={() => copyCode("header", headerCode)}
+                        />
+                        <IntegrationCodeBlock
+                          title="Body Code"
+                          code={bodyCode}
+                          copyLabel="Copy Body"
+                          copied={copiedCode === "body"}
+                          onCopy={() => copyCode("body", bodyCode)}
+                        />
+                      </>
+                    ) : (
+                      <div className="rounded-2xl border border-amber-100 bg-amber-50 px-4 py-4 text-sm font-bold text-amber-700">
+                        Integration code becomes available after your Mini App is approved.
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => openExternalUrl(documentationUrl)}
+                      className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs font-black text-[#0c9de8] transition hover:bg-blue-100 active:scale-[0.98]"
+                    >
+                      <ExternalLink size={14} />
+                      View Full Documentation
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* ── General Information ── */}
+          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm transition-shadow duration-200 hover:shadow-md">
+            <button
+              type="button"
+              onClick={() => setShowGeneralInfo(v => !v)}
+              aria-expanded={showGeneralInfo}
+              className="flex w-full items-center gap-3 px-4 py-4 text-left transition hover:bg-slate-50 active:bg-slate-100"
+            >
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-200">
+                <Info size={18} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-black text-slate-900">General Information</span>
+                <span className="block text-[11px] font-semibold text-slate-500">Bot ID, URLs, and registration date</span>
+              </span>
+              <ChevronDown
+                size={18}
+                className={cn("shrink-0 text-slate-400 transition-transform duration-200", showGeneralInfo && "rotate-180")}
+              />
+            </button>
+
+            <AnimatePresence initial={false}>
+              {showGeneralInfo && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.22, ease: "easeInOut" }}
+                  className="overflow-hidden"
+                >
+                  <div className="divide-y divide-slate-50 border-t border-slate-100">
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <span className="text-xs font-semibold text-slate-500">Bot ID</span>
+                      <span className="font-mono text-sm font-bold text-slate-900">{miniapp.bot_id || "—"}</span>
+                    </div>
+                    {miniapp.webapp_url && (
+                      <div className="flex items-start justify-between gap-3 px-4 py-3.5">
+                        <span className="shrink-0 text-xs font-semibold text-slate-500">Web App URL</span>
+                        <span className="min-w-0 break-all text-right text-sm font-bold text-slate-900">{miniapp.webapp_url}</span>
+                      </div>
+                    )}
+                    {miniapp.miniapp_url && (
+                      <div className="flex items-start justify-between gap-3 px-4 py-3.5">
+                        <span className="shrink-0 text-xs font-semibold text-slate-500">Mini App URL</span>
+                        <span className="min-w-0 break-all text-right text-sm font-bold text-slate-900">{miniapp.miniapp_url}</span>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <span className="text-xs font-semibold text-slate-500">Registered</span>
+                      <span className="text-sm font-bold text-slate-900">
+                        {new Date(miniapp.created_at).toLocaleDateString()}
+                      </span>
+                    </div>
+
+                    {onEdit && (
+                      <div className="px-4 py-3.5">
+                        <button
+                          onClick={onEdit}
+                          className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs font-black text-slate-700 transition hover:bg-slate-100 active:scale-[0.98]"
+                        >
+                          <Edit3 size={14} />
+                          Edit Mini App
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
 
           {/* ── Actions ── */}
-          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
+          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm transition-shadow duration-200 hover:shadow-md">
             <div className="border-b border-slate-100 px-4 py-3">
               <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Actions</p>
             </div>
             <div className="space-y-2.5 px-4 py-4">
-              {(onEdit || (onToggleStatus && canToggleStatus)) && (
-                <div className="grid grid-cols-2 gap-2.5">
-                  {onEdit && (
-                    <button
-                      onClick={onEdit}
-                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs font-black text-slate-700 transition hover:bg-slate-100 active:scale-[0.98]"
-                    >
-                      <Edit3 size={14} />
-                      Edit
-                    </button>
+              {onToggleStatus && canToggleStatus && (
+                <button
+                  onClick={onToggleStatus}
+                  className={cn(
+                    "inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-black shadow-sm transition hover:shadow active:scale-[0.98]",
+                    isResuming
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                      : "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
                   )}
-                  {onToggleStatus && canToggleStatus && (
-                    <button
-                      onClick={onToggleStatus}
-                      className={cn(
-                        "inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-black transition active:scale-[0.98]",
-                        isResuming
-                          ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                          : "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
-                      )}
-                    >
-                      {isResuming ? <Play size={14} /> : <Pause size={14} />}
-                      {isResuming ? "Resume" : "Pause"}
-                    </button>
-                  )}
-                </div>
+                >
+                  {isResuming ? <Play size={14} /> : <Pause size={14} />}
+                  {isResuming ? "Resume" : "Pause"}
+                </button>
               )}
               <button
                 onClick={onClose}
-                className="w-full rounded-xl bg-slate-900 py-3 text-sm font-black text-white transition-colors hover:bg-slate-800 active:scale-[0.98]"
+                className="w-full rounded-xl bg-slate-900 py-3 text-sm font-black text-white shadow-md shadow-slate-900/10 transition-all hover:bg-slate-800 hover:shadow-lg active:scale-[0.98]"
               >
                 Close
               </button>

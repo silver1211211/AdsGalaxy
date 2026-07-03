@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { checkAdminAuth, getAuthenticatedAdmin } from "@/lib/adminAuth";
+import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 
 type ColumnRow = RowDataPacket & {
@@ -218,10 +218,8 @@ export async function GET(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  const admin = await getAuthenticatedAdmin();
-  if (!admin) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { admin, response } = await requireAdminPermission("dangerous");
+  if (response) return response;
 
   const { id, action, refund, reason } = await request.json();
   if (!id) return NextResponse.json({ error: "Withdrawal ID required" }, { status: 400 });
@@ -273,13 +271,13 @@ export async function PATCH(request: Request) {
       await conn.query("UPDATE withdrawals SET status = 'success', refunded = 0, paid_out = 1, paid_at = COALESCE(paid_at, NOW()) WHERE id = ?", [id]);
       await conn.commit();
       await recordAdminActionAudit({
-        adminId: admin.id,
+        adminId: admin?.id,
         action: "withdrawal_approve",
         entityType: "withdrawal",
         entityId: id,
         reason: reason || "approved",
         metadata: {
-          admin_username: admin.username,
+          admin_username: admin?.username,
           withdrawal_id: Number(id),
           user_id: withdrawal.user_id,
           action: "approve",
@@ -310,13 +308,13 @@ export async function PATCH(request: Request) {
 
       await conn.commit();
       await recordAdminActionAudit({
-        adminId: admin.id,
+        adminId: admin?.id,
         action: "withdrawal_reject",
         entityType: "withdrawal",
         entityId: id,
         reason: reason || "rejected",
         metadata: {
-          admin_username: admin.username,
+          admin_username: admin?.username,
           withdrawal_id: Number(id),
           user_id: withdrawal.user_id,
           action: "reject",
@@ -339,13 +337,13 @@ export async function PATCH(request: Request) {
 
       await conn.commit();
       await recordAdminActionAudit({
-        adminId: admin.id,
+        adminId: admin?.id,
         action: "withdrawal_ban_user",
         entityType: "withdrawal",
         entityId: id,
         reason: reason || "Withdrawal fraud review",
         metadata: {
-          admin_username: admin.username,
+          admin_username: admin?.username,
           withdrawal_id: Number(id),
           user_id: withdrawal.user_id,
           action: "ban_user",

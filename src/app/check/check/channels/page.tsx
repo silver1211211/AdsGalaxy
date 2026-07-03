@@ -77,7 +77,7 @@ async function getChannels(page: number) {
       ? "c.subscribers"
       : "NULL";
   const healthFilter = columns.has("health_status")
-    ? "AND COALESCE(c.health_status, 'active') = 'active'"
+    ? "AND COALESCE(c.health_status, 'healthy') IN ('healthy','warning')"
     : "";
   const channelTypeExpr = columns.has("channel_type") ? "c.channel_type" : "'public'";
   const privateInviteExpr = columns.has("private_invite_link_encrypted") ? "c.private_invite_link_encrypted" : "NULL";

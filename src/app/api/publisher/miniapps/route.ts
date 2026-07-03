@@ -38,22 +38,26 @@ export async function GET(request: Request) {
         created_at,
         updated_at,
         marketplace_visible,
-        COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id), 0) as mediation_request_count,
+        COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id AND mr.parent_request_id IS NULL), 0) as mediation_request_count,
         COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id AND mr.impression_confirmed = 1), 0) as confirmed_impression_count,
-        COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id), 0) as total_requests,
+        COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id AND mr.parent_request_id IS NULL), 0) as total_requests,
         COALESCE((SELECT SUM(ds.impressions) FROM miniapp_daily_stats ds WHERE ds.miniapp_id = miniapps.id), 0) as total_impressions,
         COALESCE((SELECT SUM(ds.publisher_revenue) FROM miniapp_daily_stats ds WHERE ds.miniapp_id = miniapps.id), 0) as total_revenue,
+        CASE WHEN COALESCE((SELECT SUM(ds.impressions) FROM miniapp_daily_stats ds WHERE ds.miniapp_id = miniapps.id), 0) > 0
+          THEN COALESCE((SELECT SUM(ds.publisher_revenue) FROM miniapp_daily_stats ds WHERE ds.miniapp_id = miniapps.id), 0)
+            / (SELECT SUM(ds.impressions) FROM miniapp_daily_stats ds WHERE ds.miniapp_id = miniapps.id) * 1000
+          ELSE 0 END as average_cpm,
         NULLIF(GREATEST(
           COALESCE((SELECT MAX(mr.created_at) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id), '1970-01-01 00:00:00'),
           COALESCE((SELECT MAX(ds.updated_at) FROM miniapp_daily_stats ds WHERE ds.miniapp_id = miniapps.id), '1970-01-01 00:00:00'),
           COALESCE((SELECT MAX(iai.created_at) FROM miniapp_internal_ad_impressions iai WHERE iai.miniapp_id = miniapps.id), '1970-01-01 00:00:00')
         ), '1970-01-01 00:00:00') as last_activity_at,
-        COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id AND mr.final_result = 'no_fill'), 0) as no_fill_count,
+        COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id AND mr.parent_request_id IS NULL AND mr.final_result = 'no_fill'), 0) as no_fill_count,
         CASE
-          WHEN COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id), 0) > 0
+          WHEN COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id AND mr.parent_request_id IS NULL), 0) > 0
             THEN (
               COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id AND mr.impression_confirmed = 1), 0)
-              / COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id), 1)
+              / COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = miniapps.id AND mr.parent_request_id IS NULL), 1)
             ) * 100
           ELSE 0
         END as fill_rate
@@ -93,7 +97,8 @@ export async function POST(request: Request) {
     if (existing.length > 0) {
       await pool.query(
         `UPDATE miniapps
-         SET miniapp_name = ?, bot_id = ?, webapp_url = ?, miniapp_url = ?, status = 'pending', is_deleted = FALSE
+         SET miniapp_name = ?, bot_id = ?, webapp_url = ?, miniapp_url = ?, status = 'pending',
+             admin_approved_at = NULL, admin_approved_by = NULL, is_deleted = FALSE
          WHERE id = ? AND user_id = ?`,
         [input.miniapp_name, input.bot_id, input.webapp_url, input.miniapp_url, existing[0].id, user.id]
       );

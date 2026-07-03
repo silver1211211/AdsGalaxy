@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy authenticated request errors are normalized below */
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
@@ -21,8 +22,10 @@ type RequestRow = RowDataPacket & {
   request_id: string;
   internal_campaign_id: number | null;
   impression_confirmed: number | boolean;
+  final_result: string | null;
   status: string;
   is_deleted: number | boolean;
+  created_at: Date | string;
 };
 
 export function OPTIONS() {
@@ -85,6 +88,8 @@ export async function POST(request: Request) {
         mr.request_id,
         mr.internal_campaign_id,
         mr.impression_confirmed,
+        mr.final_result,
+        mr.created_at,
         m.status,
         m.is_deleted
       FROM miniapp_mediation_requests mr
@@ -127,6 +132,24 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Mini App not found" }, { status: 404 });
     }
 
+    if (mediationRequest.final_result === "insufficient_balance") {
+      await conn.commit();
+      return NextResponse.json({
+        success: false,
+        duplicate: true,
+        idempotent: true,
+        error: "Advertiser balance is insufficient for the next impression",
+        error_code: "INSUFFICIENT_BALANCE",
+        request_id: requestId,
+      }, { status: 402 });
+    }
+
+    const elapsedSeconds = (Date.now() - new Date(mediationRequest.created_at).getTime()) / 1000;
+    if (completed && elapsedSeconds < 14) {
+      await conn.rollback();
+      return NextResponse.json({ error: "Ad completion was reported too early" }, { status: 409 });
+    }
+
     if (Boolean(mediationRequest.impression_confirmed)) {
       const quality = await recordInternalAdCompletionEvent({
         conn,
@@ -166,6 +189,20 @@ export async function POST(request: Request) {
       completionQualityTier,
       completionStatus: completed ? "completed" : "impression_recorded",
     });
+
+    if (result.insufficient_balance) {
+      await conn.query(
+        "UPDATE miniapp_mediation_requests SET final_result = 'insufficient_balance' WHERE id = ?",
+        [mediationRequest.id]
+      );
+      await conn.commit();
+      return NextResponse.json({
+        success: false,
+        error: "Advertiser balance is insufficient for the next impression",
+        error_code: "INSUFFICIENT_BALANCE",
+        request_id: requestId,
+      }, { status: 402 });
+    }
 
     await conn.query(
       "UPDATE miniapp_mediation_requests SET impression_confirmed = 1, impression_confirmed_at = NOW(), final_result = 'impression_confirmed' WHERE id = ?",

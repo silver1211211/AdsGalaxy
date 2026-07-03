@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
-import { ensureStoredBotWebhookUrl } from "@/lib/botWebhook";
+import { ensureBotIntegration, isBotEncryptionError, loadBotToken, publisherBotEncryptionErrorMessage, regenerateBotIntegration, resolveBotIntegrationStatus } from "@/lib/botIntegration";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
 export const dynamic = "force-dynamic";
@@ -12,29 +12,23 @@ type PublisherBotDetailsRow = RowDataPacket & {
   bot_name: string;
   bot_username: string | null;
   bot_token: string;
+  bot_token_encrypted: string | null;
   status: string;
   created_at: string;
-  webhook_last_update_at: string | null;
-  webhook_url: string | null;
+  integration_installed_at: string | null;
+  integration_last_received_at: string | null;
+  integration_last_user_id: string | null;
+  integration_last_error_at: string | null;
+  integration_last_error: string | null;
   subscriber_count: number;
   active_count: number;
+  integration_user_count: number;
+  manually_imported_count: number;
+  pending_verification_count: number;
+  blocked_count: number;
 };
 
-type BotStatusRow = RowDataPacket & { status: string; bot_token: string };
-
-function normalizeWebhookUrl(value: unknown) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  try {
-    const url = new URL(raw);
-    url.hash = "";
-    url.search = "";
-    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
-    return url.toString().replace(/\/$/, "");
-  } catch {
-    return raw.replace(/\/+$/, "");
-  }
-}
+type BotStatusRow = RowDataPacket & { status: string; bot_token: string; bot_token_encrypted: string | null };
 
 export async function GET(
   request: Request,
@@ -50,12 +44,20 @@ export async function GET(
         b.bot_name,
         b.bot_username,
         b.bot_token,
+        b.bot_token_encrypted,
         b.status,
         b.created_at,
-        b.webhook_url,
-        b.webhook_last_update_at,
+        b.integration_installed_at,
+        b.integration_last_received_at,
+        b.integration_last_user_id,
+        b.integration_last_error_at,
+        b.integration_last_error,
         (SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id) as subscriber_count,
         (SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.is_active = TRUE AND bu.status = 'active') as active_count
+        ,(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.integration_first_seen_at IS NOT NULL) as integration_user_count
+        ,(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.source <> 'integration') as manually_imported_count
+        ,(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.status = 'pending_verification') as pending_verification_count
+        ,(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND (bu.is_active=FALSE OR bu.status IN ('inactive','blocked_bot','user_not_found','chat_not_found','unreachable'))) as blocked_count
        FROM bots b
        WHERE b.id = ? AND b.user_id = ? AND b.is_deleted = FALSE
        LIMIT 1`,
@@ -66,39 +68,17 @@ export async function GET(
       return NextResponse.json({ error: "Bot not found" }, { status: 404 });
     }
 
-    const webhookUrl = await ensureStoredBotWebhookUrl(
-      pool,
-      new URL(request.url).origin,
-      bot.id,
-      bot.bot_token
+    const integrationUrl = await ensureBotIntegration(pool, new URL(request.url).origin, bot.id);
+    const integrationStatus = resolveBotIntegrationStatus({ botStatus: bot.status, registrationCount: bot.active_count, pendingVerificationCount: bot.pending_verification_count,
+      installedAt: bot.integration_installed_at, lastReceivedAt: bot.integration_last_received_at, lastErrorAt: bot.integration_last_error_at });
+    const [eventRows] = await pool.query<RowDataPacket[]>(
+      `SELECT event_type, telegram_user_id, username, message,
+         CASE WHEN event_type = 'error' THEN message ELSE NULL END AS error,
+         CASE WHEN event_type IN ('user', 'duplicate', 'test') THEN 'success' ELSE event_type END AS result,
+         received_at
+       FROM bot_integration_events WHERE bot_id = ? ORDER BY id DESC LIMIT 10`,
+      [bot.id]
     );
-    let telegramWebhookUrl = "";
-    let webhookCheckError: string | null = null;
-    if (webhookUrl) {
-      try {
-        const response = await fetch(`https://api.telegram.org/bot${bot.bot_token.trim()}/getWebhookInfo`, {
-          signal: AbortSignal.timeout(5000),
-          cache: "no-store",
-        });
-        const data = await response.json().catch(() => ({}));
-        telegramWebhookUrl = String(data.result?.url || "").trim();
-        if (!data.ok) webhookCheckError = String(data.description || `Telegram HTTP ${response.status}`);
-      } catch (error: unknown) {
-        webhookCheckError = error instanceof Error ? error.message : "Telegram webhook check failed";
-      }
-    }
-
-    const webhookUrlsMatch = Boolean(
-      webhookUrl
-      && telegramWebhookUrl
-      && normalizeWebhookUrl(telegramWebhookUrl) === normalizeWebhookUrl(webhookUrl)
-    );
-    const webhookConfigured = webhookUrlsMatch;
-    const webhookStatus = webhookConfigured
-      ? bot.webhook_last_update_at
-        ? "receiving_users"
-        : "configured"
-      : "not_configured";
 
     return NextResponse.json({
       id: bot.id,
@@ -109,16 +89,28 @@ export async function GET(
       created_at: bot.created_at,
       subscriber_count: Number(bot.subscriber_count || 0),
       active_count: Number(bot.active_count || 0),
-      webhook_url: webhookUrl,
-      telegram_webhook_url: telegramWebhookUrl || null,
-      webhook_configured: webhookConfigured,
-      webhook_status: webhookStatus,
-      webhook_last_update_at: bot.webhook_last_update_at,
-      webhook_check_error: webhookCheckError,
+      integration_user_count: Number(bot.integration_user_count || 0),
+      manually_imported_count: Number(bot.manually_imported_count || 0),
+      verified_reachable_count: Number(bot.active_count || 0),
+      blocked_unreachable_count: Number(bot.blocked_count || 0),
+      pending_verification_count: Number(bot.pending_verification_count || 0),
+      integration_url: integrationUrl,
+      integration_secret_masked: `••••••••••••${integrationUrl.slice(-6)}`,
+      integration_status: integrationStatus,
+      integration_installed_at: bot.integration_installed_at,
+      integration_last_received_at: bot.integration_last_received_at,
+      integration_last_user_id: bot.integration_last_user_id,
+      integration_last_error_at: bot.integration_last_error_at,
+      integration_last_error: bot.integration_last_error,
+      integration_events: eventRows,
     }, {
       headers: { "Cache-Control": "private, no-store, max-age=0" },
     });
   } catch (error: unknown) {
+    if (isBotEncryptionError(error)) {
+      console.error("GET Bot Details encryption/configuration failure", { code: error.code });
+      return NextResponse.json({ error: publisherBotEncryptionErrorMessage() }, { status: 503 });
+    }
     console.error("GET Bot Details Error:", error instanceof Error ? error.message : "unknown");
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to fetch bot details" },
@@ -139,6 +131,16 @@ export async function PATCH(
     const body = await request.json().catch(() => ({}));
     const { posts_per_day, continents, categories, action } = body;
 
+    if (action === "regenerate_integration_secret") {
+      const [ownedBots] = await pool.query<RowDataPacket[]>(
+        "SELECT id FROM bots WHERE id = ? AND user_id = ? AND is_deleted = FALSE LIMIT 1",
+        [id, user.id]
+      );
+      if (!ownedBots[0]) return NextResponse.json({ error: "Bot not found" }, { status: 404 });
+      const integrationUrl = await regenerateBotIntegration(pool, new URL(request.url).origin, id);
+      return NextResponse.json({ success: true, integration_url: integrationUrl });
+    }
+
     if (action === "set_marketplace_visibility") {
       const visible = body.visible ? 1 : 0;
       const [result] = await pool.query<ResultSetHeader>(
@@ -154,7 +156,7 @@ export async function PATCH(
     // Handle status toggle
     if (action === "toggle_status") {
       const [rows] = await pool.query<BotStatusRow[]>(
-        "SELECT status, bot_token FROM bots WHERE id = ? AND user_id = ? AND is_deleted = FALSE",
+        "SELECT status, bot_token, bot_token_encrypted FROM bots WHERE id = ? AND user_id = ? AND is_deleted = FALSE",
         [id, user.id]
       );
 
@@ -171,11 +173,11 @@ export async function PATCH(
       if (newStatus === "active") {
         const activation = await reactivateBotAfterHealthCheck(
           id,
-          rows[0].bot_token,
+          await loadBotToken(pool, { ...rows[0], id }),
           pool,
           new URL(request.url).origin
         );
-        return NextResponse.json({ success: true, status: "active", webhook_url: activation.webhookUrl });
+        return NextResponse.json({ success: true, status: "active", integration_url: activation.integrationUrl });
       }
 
       await pool.query(
@@ -205,6 +207,10 @@ export async function PATCH(
 
     return NextResponse.json({ error: "No update fields provided" }, { status: 400 });
   } catch (error: unknown) {
+    if (isBotEncryptionError(error)) {
+      console.error("PATCH Bot encryption/configuration failure", { code: error.code });
+      return NextResponse.json({ error: publisherBotEncryptionErrorMessage() }, { status: 503 });
+    }
     console.error("PATCH Bot Error:", error);
     return NextResponse.json({ error: error instanceof Error ? error.message : "Failed to update bot" }, { status: getAuthErrorStatus(error) });
   }

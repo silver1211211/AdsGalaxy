@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { checkAdminAuth } from "@/lib/adminAuth";
+import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { adminResumeCampaign, recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { recordAutomationAudit } from "@/lib/approvalAutomation";
 import { sendTelegramMessage } from "@/lib/telegram";
@@ -93,9 +93,8 @@ export async function GET(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { admin, response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const { id, action } = await request.json();
@@ -109,6 +108,7 @@ export async function PATCH(request: Request) {
       await pool.query("UPDATE campaigns SET status = 'rejected' WHERE id = ?", [id]);
       await safeNotify(campaign?.telegram_id, `❌ Your campaign "${campaign.name}" was rejected after review.`);
       await recordAutomationAudit({ actorType: "admin", action: "manual_campaign_reject", entityType: "campaign", entityId: id, decision: "reject", reason: "admin_manual_review" });
+      await recordAdminActionAudit({ adminId: admin?.id, action: "campaign_reject", entityType: "campaign", entityId: id, reason: "admin_manual_review" });
       return NextResponse.json({ success: true });
     }
 
@@ -116,12 +116,14 @@ export async function PATCH(request: Request) {
       await pool.query("UPDATE campaigns SET status = 'active' WHERE id = ?", [id]);
       await safeNotify(campaign?.telegram_id, `✅ Your campaign "${campaign.name}" was approved and is active.`);
       await recordAutomationAudit({ actorType: "admin", action: "manual_campaign_approve", entityType: "campaign", entityId: id, decision: "approve", reason: "admin_manual_review" });
+      await recordAdminActionAudit({ adminId: admin?.id, action: "campaign_approve", entityType: "campaign", entityId: id, reason: "admin_manual_review" });
       return NextResponse.json({ success: true });
     }
 
     if (action === "resume") {
       await adminResumeCampaign(id);
       await recordAdminActionAudit({
+        adminId: admin?.id,
         action: "campaign_resume_override",
         entityType: "campaign",
         entityId: id,

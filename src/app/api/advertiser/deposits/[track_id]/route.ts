@@ -113,7 +113,9 @@ export async function GET(
     await ensureDepositStatusSchema();
 
     const [rows] = await pool.query<DepositRow[]>(
-      "SELECT * FROM deposits WHERE track_id = ? AND user_id = ?",
+      `SELECT id, track_id, order_id, amount, pay_amount, currency, pay_currency,
+         network, address, status, expired_at, created_at
+       FROM deposits WHERE track_id = ? AND user_id = ?`,
       [track_id, user.id]
     );
 

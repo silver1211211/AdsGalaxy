@@ -1,7 +1,8 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy Mini App admin payloads are not schema-generated */
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { getAuthenticatedAdmin } from "@/lib/adminAuth";
+import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { recordAutomationAudit } from "@/lib/approvalAutomation";
 import { sendTelegramMessage } from "@/lib/telegram";
@@ -54,8 +55,8 @@ type OwnerRow = RowDataPacket & {
 };
 
 export async function GET(request: Request) {
-  const admin = await getAuthenticatedAdmin();
-  if (!admin) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { response } = await requireAdminPermission("read");
+  if (response) return response;
 
   const { searchParams } = new URL(request.url);
   const status = searchParams.get("status") || "all";
@@ -96,8 +97,8 @@ export async function GET(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  const admin = await getAuthenticatedAdmin();
-  if (!admin) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { admin, response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const body = await request.json();
@@ -166,7 +167,7 @@ export async function PATCH(request: Request) {
         `UPDATE miniapp_rewarded_campaigns
          SET status = 'approved',
            admin_cpm = ?,
-           advertiser_cpm_bid = CASE WHEN advertiser_cpm_bid > 0 THEN advertiser_cpm_bid ELSE ? END,
+            advertiser_cpm_bid = ?,
            cpm_mode = ?,
            fixed_publisher_cpm = ?,
            required_cpm = ?,
@@ -192,9 +193,16 @@ export async function PATCH(request: Request) {
       if (beforeRows[0].status !== "paused") {
         return NextResponse.json({ error: "Campaign must be paused to resume" }, { status: 400 });
       }
-      const [resumeResult] = await pool.query<any>("UPDATE miniapp_rewarded_campaigns SET status = 'approved' WHERE id = ? AND status = 'paused' AND remaining_budget > 0", [id]);
+      const [resumeResult] = await pool.query<any>(
+        `UPDATE miniapp_rewarded_campaigns c
+         JOIN users u ON u.id = c.advertiser_id
+         SET c.status = 'approved', c.pause_reason = NULL
+         WHERE c.id = ? AND c.status = 'paused'
+           AND u.ad_balance >= (c.advertiser_cpm_bid / 1000)`,
+        [id]
+      );
       if (resumeResult.affectedRows === 0) {
-        return NextResponse.json({ error: "Campaign has no remaining budget — top up before resuming" }, { status: 400 });
+        return NextResponse.json({ error: "Advertiser must top up the ad balance before resuming" }, { status: 400 });
       }
     } else if (action === "update_cpm") {
       if (!Number.isFinite(adminCpm) || Number(adminCpm) <= 0) {
@@ -215,8 +223,8 @@ export async function PATCH(request: Request) {
         }
       }
       await pool.query(
-        "UPDATE miniapp_rewarded_campaigns SET admin_cpm = ?, required_cpm = ?, cpm_mode = ?, fixed_publisher_cpm = ? WHERE id = ?",
-        [adminCpm, categoryCpm.required_cpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, id]
+        "UPDATE miniapp_rewarded_campaigns SET admin_cpm = ?, advertiser_cpm_bid = ?, required_cpm = ?, cpm_mode = ?, fixed_publisher_cpm = ? WHERE id = ?",
+        [adminCpm, adminCpm, categoryCpm.required_cpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, id]
       );
     } else if (action === "edit") {
       const campaign_name = cleanText(body.campaign_name) || beforeRows[0].campaign_name;

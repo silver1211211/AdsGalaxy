@@ -27,7 +27,8 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
     var lastError;
     return apiOrigins.reduce(function(chain,origin){
       return chain.catch(function(){
-        return fetch(origin+path,{method:"POST",headers:headers,body:body,credentials:"omit"}).then(function(res){
+        var controller=new AbortController(),timer=setTimeout(function(){controller.abort();},12000);
+        return fetch(origin+path,{method:"POST",headers:headers,body:body,credentials:"omit",signal:controller.signal}).finally(function(){clearTimeout(timer);}).then(function(res){
           return res.json().catch(function(){return{};}).then(function(data){
             if(!res.ok||data.success===false)throw sdkError(data.message||data.error||"AdsGalaxy request failed",data.error_code||"REQUEST_FAILED");
             return data;

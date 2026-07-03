@@ -24,6 +24,7 @@ import {
 import { createSystemLog, logStatus } from "@/lib/systemLogs";
 import { requireAdServingAllowed, upsertAdminAlert } from "@/lib/productionSafety";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
+import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 
 export const dynamic = 'force-dynamic';
 
@@ -339,7 +340,7 @@ export async function GET(req: NextRequest) {
       SELECT c.*
       FROM channels c
       WHERE c.status = 'active' AND c.is_deleted = FALSE
-      AND COALESCE(c.health_status, 'active') = 'active'
+      AND COALESCE(c.health_status, 'healthy') IN ('healthy','warning')
       AND (
         SELECT COUNT(*) FROM campaign_posts cp
         WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 1 DAY
@@ -396,6 +397,7 @@ export async function GET(req: NextRequest) {
 
     const campaignIds = campaigns.map((campaign: CampaignRow) => campaign.id);
     const channelIds = channels.map((channel: ChannelRow) => channel.id);
+    const channelExclusions = await loadCampaignExclusions(pool, "campaign", campaignIds, "channel");
 
     const [dailyRows]: any = await pool.query(`
       SELECT campaign_id, COUNT(*) as count
@@ -457,6 +459,10 @@ export async function GET(req: NextRequest) {
       await markChannelHealthSuccess(channel.id);
 
       const eligibleCampaigns = (campaigns as CampaignRow[]).filter((campaign) => {
+        if (campaignExcludesIdentifier(channelExclusions, campaign.id, channel.username)) {
+          incrementSkip("advertiser_excluded_channel");
+          return false;
+        }
         if (campaign.user_id === channel.user_id) {
           incrementSkip("same_owner");
           return false;

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { checkAdminAuth } from "@/lib/adminAuth";
+import { requireAdminPermission } from "@/lib/adminAuth";
 import { ALL_CATEGORIES } from "@/lib/campaignCategories";
 import { deleteCampaignPosts, type CampaignPostDeletionSummary } from "@/lib/campaignPostDeletion";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
@@ -15,6 +15,8 @@ import {
   recordBotBroadcastSuccess,
   sendWithRetries,
 } from "@/lib/botLifecycle";
+import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
+import { createSystemLog } from "@/lib/systemLogs";
 
 export const dynamic = "force-dynamic";
 
@@ -54,6 +56,7 @@ type BotRow = RowDataPacket & {
   id: number;
   user_id: number;
   bot_token: string;
+  bot_token_encrypted: string | null;
   categories: string | string[] | null;
   continents: string | string[] | null;
   posts_per_day: number;
@@ -357,9 +360,11 @@ async function deleteAllActivePostsSafely(): Promise<CampaignPostDeletionSummary
     const message = error instanceof Error ? error.message : "Emergency global post deletion failed";
     console.warn("Emergency global post deletion failed", { error: message });
     return {
+      checked: 0,
       total: 0,
       deleted: 0,
       failed: 1,
+      skipped: 0,
       failedIds: [],
       details: [{ id: 0, status: "error", reason: message }],
     };
@@ -379,6 +384,24 @@ async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: Bro
 
   const healthyBots: BotRow[] = [];
   for (const bot of bots) {
+    try {
+      bot.bot_token = await loadBotToken(pool, bot);
+    } catch (error: unknown) {
+      if (!isBotEncryptionError(error)) throw error;
+      console.error("Emergency push bot credential decryption skipped", { bot_id: bot.id, code: error.code });
+      await createSystemLog({
+        logType: "system_error",
+        status: "failed",
+        title: "Emergency push bot credential decryption failed",
+        summary: "Bot was skipped because its encrypted token could not be decrypted. The bot was not paused.",
+        failedCount: 1,
+        skippedCount: 1,
+        failureReasons: { [error.code]: 1 },
+        affectedEntities: [{ bot_id: bot.id }],
+        metadata: { route: "/api/admin/campaigns/[id]/emergency-push", bot_id: bot.id, code: error.code },
+      });
+      continue;
+    }
     const health = await checkBotHealth({ id: bot.id, bot_token: bot.bot_token });
     if (health.ok) healthyBots.push(bot);
   }
@@ -396,7 +419,7 @@ async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: Bro
       FROM bot_users bu
       WHERE bu.bot_id = ?
         AND bu.is_active = TRUE
-        AND bu.status = 'active'
+        AND bu.status IN ('active','pending_verification')
         AND (${chatIdExpression} IS NOT NULL AND ${chatIdExpression} != '')
         AND (bu.last_broadcast_at IS NULL OR bu.last_broadcast_at < NOW() - INTERVAL ? HOUR)
         AND (
@@ -405,7 +428,7 @@ async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: Bro
           WHERE bd.user_id = bu.id
             AND bd.created_at > NOW() - INTERVAL 1 DAY
         ) < ?
-      ORDER BY bu.id ASC
+      ORDER BY CASE WHEN bu.status='active' THEN 0 ELSE 1 END, bu.id ASC
       LIMIT ?
     `, [bot.id, hoursInterval, Math.max(1, Number(bot.posts_per_day) || 1), MAX_EMERGENCY_BROADCAST_USERS + 1 - dispatches.length]);
 
@@ -567,9 +590,8 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("dangerous");
+  if (response) return response;
 
   const { id } = await params;
   const body = await request.json().catch(() => ({})) as Record<string, unknown>;

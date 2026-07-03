@@ -4,6 +4,7 @@ import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { deleteActiveCampaignPosts } from "@/lib/campaignPostDeletion";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
+import { settleCampaignEngagementBeforeDeletion, type CampaignSettlementBeforeDeletionResult } from "@/lib/channelSettlement";
 
 const LIFECYCLE_COLUMNS = ["paused_at", "resume_locked_until", "pause_reason", "completed_at"];
 
@@ -38,7 +39,7 @@ async function deleteCampaignPostsSafely(campaignId: string) {
       campaign_id: campaignId,
       error: message,
     });
-    return { total: 0, deleted: 0, failed: 1, failedIds: [], details: [{ id: 0, status: "error", reason: message }] };
+    return { checked: 0, total: 0, deleted: 0, failed: 1, skipped: 0, failedIds: [], details: [{ id: 0, status: "error", reason: message }] };
   }
 }
 
@@ -68,6 +69,23 @@ export async function POST(
     const columns = await getCampaignColumns();
     let deletion = null;
     let newStatus = oldStatus;
+    let settlement: CampaignSettlementBeforeDeletionResult | null = null;
+
+    if (action === "pause" || action === "delete") {
+      // Settle any already-delivered but not-yet-billed views/clicks before the
+      // campaign's active posts are removed, so the publisher isn't left unpaid
+      // for engagement the advertiser already received. Must run while the
+      // campaign is still whatever status let it accrue delivered posts (the
+      // settlement engine only considers active campaigns; a no-op for already
+      // paused/exhausted campaigns and for broadcast/bot campaigns).
+      settlement = await settleCampaignEngagementBeforeDeletion(Number(id), action === "delete" ? "admin_delete" : "admin_pause");
+      if (!settlement.ok) {
+        return NextResponse.json({
+          error: "Could not settle outstanding engagement for this campaign before the requested action. Please try again in a moment.",
+          settlement,
+        }, { status: 409 });
+      }
+    }
 
     if (action === "pause") {
       deletion = await deleteCampaignPostsSafely(id);
@@ -116,10 +134,11 @@ export async function POST(
         old_status: oldStatus,
         new_status: newStatus,
         deletion,
+        settlement,
       },
     });
 
-    return NextResponse.json({ success: true, status: newStatus, deletion });
+    return NextResponse.json({ success: true, status: newStatus, deletion, settlement });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Internal Server Error";
     console.error("Admin Campaign Action Error:", error);

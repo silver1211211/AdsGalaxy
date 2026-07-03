@@ -1,12 +1,12 @@
 import type { PoolConnection } from "mysql2/promise";
 import pool from "@/lib/db";
 import { createSystemLog, maskEntityId } from "@/lib/systemLogs";
-import { ensureStoredBotWebhookUrl } from "@/lib/botWebhook";
+import { ensureBotIntegration } from "@/lib/botIntegration";
 
 type Db = typeof pool | PoolConnection;
 
 export type BotStatusType = "active" | "paused" | "token_invalid" | "bot_deleted" | "unreachable";
-export type BotUserStatusType = "active" | "inactive" | "blocked_bot" | "user_not_found" | "chat_not_found" | "unreachable";
+export type BotUserStatusType = "active" | "pending_verification" | "inactive" | "blocked_bot" | "user_not_found" | "chat_not_found" | "unreachable";
 
 export type TelegramFailure = {
   status: BotUserStatusType | BotStatusType;
@@ -27,7 +27,7 @@ export function botHealthLogHook(_event: string, _payload: Record<string, unknow
   // Future integration point for System Logs, Bot User Health Logs, and Broadcast Logs.
 }
 
-export function classifyBotUserSendFailure(description?: string): TelegramFailure | null {
+export function classifyBotUserSendFailure(description?: string, errorCode?: number): TelegramFailure | null {
   const text = normalize(description);
   if (!text) return null;
   if (text.includes("blocked by the user") || text.includes("bot was blocked")) {
@@ -42,6 +42,9 @@ export function classifyBotUserSendFailure(description?: string): TelegramFailur
   if (text.includes("forbidden") || text.includes("can't initiate conversation") || text.includes("cannot initiate conversation")) {
     return { status: "unreachable", reason: "Bot cannot initiate conversation with this user.", suggestedFix: "User must open the bot and start it again.", permanent: true };
   }
+  if (errorCode === 404) return { status: "chat_not_found", reason: "Telegram chat was not found.", suggestedFix: "User must start the bot again.", permanent: true };
+  if (errorCode === 403) return { status: "unreachable", reason: "Telegram rejected delivery to this user.", suggestedFix: "User must unblock or restart the bot.", permanent: true };
+  if (errorCode === 400) return { status: "unreachable", reason: text || "Telegram rejected this user or chat ID.", suggestedFix: "Verify the Telegram user ID or wait for the user to start the bot.", permanent: true };
   return null;
 }
 
@@ -176,7 +179,7 @@ export async function reactivateBotAfterHealthCheck(
   db: Db = pool,
   origin = ""
 ) {
-  const webhookUrl = await ensureStoredBotWebhookUrl(db, origin, botId, token);
+  const integrationUrl = await ensureBotIntegration(db, origin, botId);
   const health = await checkBotHealth({ id: botId, bot_token: token }, db);
   if (!health.ok) {
     throw new Error(health.reason || "Bot health check failed");
@@ -194,7 +197,7 @@ export async function reactivateBotAfterHealthCheck(
      WHERE id = ?`,
     [botId]
   );
-  return { ...health, webhookUrl };
+  return { ...health, integrationUrl };
 }
 
 export async function sendWithRetries(send: () => Promise<any>) {
@@ -202,7 +205,7 @@ export async function sendWithRetries(send: () => Promise<any>) {
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     last = await send();
     if (last?.ok) return { ok: true, result: last, attempts: attempt };
-    const permanentUser = classifyBotUserSendFailure(last?.description);
+    const permanentUser = classifyBotUserSendFailure(last?.description, Number(last?.error_code || 0));
     const permanentBot = classifyBotTokenFailure(last?.description);
     if (permanentUser || permanentBot) return { ok: false, result: last, attempts: attempt, failure: permanentUser || permanentBot };
   }

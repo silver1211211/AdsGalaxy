@@ -30,6 +30,7 @@ export async function POST(request: Request) {
   const conn = await pool.getConnection();
   try {
     context = await validateDeveloperApiRequest(request, "reward_validation", "/api/v1/rewarded/verify");
+    if (context.mode === "production") throw Object.assign(new Error("Production reward verification is not enabled; use the Mini App SDK"), { statusCode: 501 });
     const body = await request.json().catch(() => ({}));
     const requestId = clean(body.request_id);
     const externalUserId = clean(body.external_user_id);
@@ -80,6 +81,16 @@ export async function POST(request: Request) {
     if (clean(issued.external_user_id) !== externalUserId) {
       await conn.rollback();
       throw Object.assign(new Error("request_id does not belong to this user"), { statusCode: 403 });
+    }
+    const [completionRows] = await conn.query<RowDataPacket[]>(
+      `SELECT id FROM developer_sandbox_events
+       WHERE application_id = ? AND request_id = ? AND event_type = 'ad_completion' AND external_user_id = ?
+       LIMIT 1 FOR UPDATE`,
+      [context.applicationId, requestId, externalUserId]
+    );
+    if (!completionRows[0] || !completed) {
+      await conn.rollback();
+      throw Object.assign(new Error("A completed ad event is required before reward verification"), { statusCode: 409 });
     }
 
     const payload = {

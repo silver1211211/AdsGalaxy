@@ -54,6 +54,10 @@ export async function POST(request: Request) {
       await conn.rollback();
       return NextResponse.json({ success: false, error_code: "INVALID_INIT_DATA", message: "Ad request does not match this user" }, { status: 403 });
     }
+    if (String(mediationRequest.final_result) !== "selected") {
+      await conn.rollback();
+      return NextResponse.json({ success: false, error_code: "REQUEST_FAILED", message: "Fallback was already processed" }, { status: 409 });
+    }
     if (!isMiniAppNetworkName(String(mediationRequest.selected_network))) {
       await conn.rollback();
       return NextResponse.json({ success: false, error_code: "NO_FILL", message: "No ad available right now." });

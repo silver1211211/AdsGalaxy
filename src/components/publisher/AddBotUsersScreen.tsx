@@ -1,27 +1,32 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { 
   Users, 
   Loader2, 
-  CheckCircle2, 
-  XCircle, 
-  Info, 
-  Copy, 
+  Info,
   ChevronDown, 
   ChevronUp,
   Terminal,
-  AlertCircle
+  ExternalLink
 } from "lucide-react";
-import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
 import { motion, AnimatePresence } from "framer-motion";
 import Toast from "@/components/ui/Toast";
 
 interface AddBotUsersScreenProps {
-  bot: any;
+  bot: { id: number | string; bot_username?: string | null };
   onClose: () => void;
 }
+
+type TelegramWebApp = {
+  BackButton?: {
+    show: () => void;
+    hide: () => void;
+    onClick: (callback: () => void) => void;
+    offClick: (callback: () => void) => void;
+  };
+};
 
 export default function AddBotUsersScreen({ bot, onClose }: AddBotUsersScreenProps) {
   const [userIdsText, setUserIdsText] = useState("");
@@ -31,32 +36,32 @@ export default function AddBotUsersScreen({ bot, onClose }: AddBotUsersScreenPro
   const [stats, setStats] = useState<{ newlyAdded: number; alreadyAdded: number; invalid: number } | null>(null);
   const [totalSubscribers, setTotalSubscribers] = useState<{ total: number; active: number; blocked: number }>({ total: 0, active: 0, blocked: 0 });
 
-  const apiEndpoint = `POST ${window.location.origin}/api/bot/add-user`;
+  const fetchStats = useCallback(async () => {
+    try {
+      const res = await apiFetch(`/api/publisher/bots/${bot.id}/users`);
+      const data = await res.json();
+      if (res.ok) setTotalSubscribers(data);
+    } catch {
+      // Statistics are non-blocking on this screen.
+    }
+  }, [bot.id]);
 
   useEffect(() => {
-    fetchStats();
+    const statsTimer = window.setTimeout(() => void fetchStats(), 0);
     
     // Telegram Back Button
-    const twa = (window as any).Telegram?.WebApp;
+    const twa = (window as Window & { Telegram?: { WebApp?: TelegramWebApp } }).Telegram?.WebApp;
     if (twa?.BackButton) {
       twa.BackButton.show();
       twa.BackButton.onClick(onClose);
       return () => {
+        window.clearTimeout(statsTimer);
         twa.BackButton.offClick(onClose);
         twa.BackButton.hide();
       };
     }
-  }, [onClose]);
-
-  const fetchStats = async () => {
-    try {
-      const res = await apiFetch(`/api/publisher/bots/${bot.id}/users`);
-      const data = await res.json();
-      if (res.ok) {
-        setTotalSubscribers(data);
-      }
-    } catch (e) {}
-  };
+    return () => window.clearTimeout(statsTimer);
+  }, [fetchStats, onClose]);
 
   const handleBulkAdd = async () => {
     if (!userIdsText.trim()) return;
@@ -97,25 +102,16 @@ export default function AddBotUsersScreen({ bot, onClose }: AddBotUsersScreenPro
         message: `Successfully added ${data.newlyAdded} new users.`
       });
       setUserIdsText("");
-      fetchStats();
-    } catch (err: any) {
+      void fetchStats();
+    } catch (err: unknown) {
       setNotification({
         type: "error",
         title: "Bulk Add Failed",
-        message: err.message
+        message: err instanceof Error ? err.message : "Failed to add users"
       });
     } finally {
       setIsLoading(false);
     }
-  };
-
-  const copyApi = () => {
-    navigator.clipboard.writeText(apiEndpoint);
-    setNotification({
-      type: "success",
-      title: "Copied",
-      message: "API Endpoint copied to clipboard."
-    });
   };
 
   return (
@@ -147,7 +143,7 @@ export default function AddBotUsersScreen({ bot, onClose }: AddBotUsersScreenPro
             </div>
           </div>
 
-          {/* Automatic Add API (Collapsed) */}
+          {/* Integration help */}
           <div className="bg-slate-50 rounded-2xl overflow-hidden border border-slate-100">
             <button 
               onClick={() => setShowApi(!showApi)}
@@ -155,7 +151,7 @@ export default function AddBotUsersScreen({ bot, onClose }: AddBotUsersScreenPro
             >
               <div className="flex items-center gap-3">
                 <Terminal size={18} className="text-slate-400" />
-                <span className="text-sm font-black text-slate-700 uppercase tracking-tight">Automatic Add API</span>
+                <span className="text-sm font-black text-slate-700 uppercase tracking-tight">Automatic User Integration</span>
               </div>
               {showApi ? <ChevronUp size={20} className="text-slate-400" /> : <ChevronDown size={20} className="text-slate-400" />}
             </button>
@@ -169,28 +165,26 @@ export default function AddBotUsersScreen({ bot, onClose }: AddBotUsersScreenPro
                   className="px-6 pb-6 pt-2 space-y-4"
                 >
                   <p className="text-[11px] text-slate-500 leading-relaxed font-medium">
-                    <span className="text-slate-900 font-bold">Recommendation:</span> Call this API within your bot's <code className="bg-slate-200 px-1 rounded text-slate-700">/start</code> command handler. This ensures every new user is automatically registered in the database.
+                    Add the bot&apos;s unique AdsGalaxy Integration URL to your existing <code className="bg-slate-200 px-1 rounded text-slate-700">/start</code> handler. Your current webhook, welcome message, commands, and bot logic remain unchanged.
                   </p>
                   <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest bg-slate-100 px-2 py-1 rounded inline-block">
-                    Requires POST JSON body and x-bot-add-user-secret header
+                    Integration URL available in Bot Details
                   </p>
-                  <div className="relative group">
-                    <div className="w-full p-4 bg-slate-900 rounded-2xl text-[10px] font-mono text-indigo-300 break-all pr-12">
-                      {`${apiEndpoint}\n{"bot_token":"<server-side token>","chat_id":"{CHAT_ID}"}`}
-                    </div>
-                    <button 
-                      onClick={copyApi}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 p-2 text-slate-400 hover:text-white transition-colors"
-                    >
-                      <Copy size={16} />
-                    </button>
-                  </div>
-                  <div className="flex items-start gap-2 p-3 bg-amber-50 rounded-xl border border-amber-100">
-                    <AlertCircle size={14} className="text-amber-600 shrink-0 mt-0.5" />
-                    <p className="text-[10px] text-amber-700 font-medium leading-relaxed">
-                      Keep your bot token private. Users re-entering your bot will be automatically marked as <b>Active</b> again.
+                  <div className="flex items-start gap-2 p-3 bg-blue-50 rounded-xl border border-blue-100">
+                    <Info size={14} className="text-blue-600 shrink-0 mt-0.5" />
+                    <p className="text-[10px] text-blue-700 font-medium leading-relaxed">
+                      The Integration records users only. AdsGalaxy never receives or replaces your Telegram webhook and never responds to Telegram from this endpoint.
                     </p>
                   </div>
+                  <a
+                    href="/docs/publisher/bots#installation"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-xs font-black text-white"
+                  >
+                    <ExternalLink size={14} />
+                    View Integration Documentation
+                  </a>
                 </motion.div>
               )}
             </AnimatePresence>

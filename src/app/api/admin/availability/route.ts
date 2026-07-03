@@ -70,7 +70,7 @@ export async function GET(request: Request) {
         (SELECT MAX(created_at) FROM campaign_posts cp WHERE cp.channel_id = c.id) as last_post_at
         FROM channels c
         WHERE c.status = 'active' AND c.is_deleted = FALSE
-        AND COALESCE(c.health_status, 'active') = 'active'
+        AND COALESCE(c.health_status, 'healthy') IN ('healthy','warning')
       `, [predictionMinutes]);
 
       const filteredChannels = channels.filter((ch: any) => {

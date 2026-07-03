@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { checkAdminAuth } from "@/lib/adminAuth";
+import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { ADVERTISER_TRUST_LEVELS, normalizeAdvertiserTrustLevel } from "@/lib/advertiserTrust";
+import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 
 type ColumnRow = RowDataPacket & {
   COLUMN_NAME: string;
@@ -134,8 +135,8 @@ export async function GET(request: Request) {
     query += " ORDER BY id DESC LIMIT ? OFFSET ?";
 
     const [rows] = await pool.query(query, [...queryParams, limit, offset]);
-    const [[countRow]]: any = await pool.query(countQuery, countParams);
-    const [[betaRow]]: any = await pool.query(
+    const [[countRow]] = await pool.query<Array<RowDataPacket & { total: number }>>(countQuery, countParams);
+    const [[betaRow]] = await pool.query<Array<RowDataPacket & { count: number }>>(
       columns.has("miniapp_beta_access")
         ? "SELECT COUNT(*) as count FROM users WHERE miniapp_beta_access = 1"
         : "SELECT 0 as count"
@@ -155,9 +156,8 @@ export async function GET(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  if (!(await checkAdminAuth())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { admin, response } = await requireAdminPermission("dangerous");
+  if (response) return response;
 
   const conn = await pool.getConnection();
 
@@ -165,6 +165,21 @@ export async function PATCH(request: Request) {
     const { id, balance_locked, balance_available, ad_balance, action, reason, trust_level } = await request.json();
 
     if (!id) return NextResponse.json({ error: "User ID required" }, { status: 400 });
+
+    const [beforeRows] = await conn.query<RowDataPacket[]>(
+      "SELECT balance_locked, balance_available, ad_balance, status, advertiser_trust_level FROM users WHERE id = ? LIMIT 1",
+      [id]
+    );
+    const before = beforeRows[0];
+    if (!before) return NextResponse.json({ error: "User not found" }, { status: 404 });
+    const audit = (auditAction: string, metadata: Record<string, unknown>) => recordAdminActionAudit({
+      adminId: admin?.id,
+      action: auditAction,
+      entityType: "user",
+      entityId: id,
+      reason: reason || auditAction,
+      metadata,
+    });
 
     await ensureUserBanColumns(conn);
 
@@ -190,6 +205,7 @@ export async function PATCH(request: Request) {
         "UPDATE users SET status = 'banned', is_banned = 1, banned_at = NOW(), ban_reason = ? WHERE id = ?",
         [reason || "Admin ban", id]
       );
+      await audit("publisher_ban", { previous_status: before.status, new_status: "banned" });
       return NextResponse.json({ success: true });
     }
 
@@ -198,6 +214,12 @@ export async function PATCH(request: Request) {
         "UPDATE users SET status = 'active', is_banned = 0, banned_at = NULL, ban_reason = NULL WHERE id = ?",
         [id]
       );
+      await conn.query(
+        `UPDATE channels SET status='active',paused_reason=NULL,auto_paused_at=NULL
+         WHERE user_id=? AND is_deleted=FALSE AND status='paused' AND paused_reason='fraudulent_or_low_quality_traffic'`,
+        [id]
+      );
+      await audit("publisher_unban", { previous_status: before.status, new_status: "active" });
       return NextResponse.json({ success: true });
     }
 
@@ -206,6 +228,7 @@ export async function PATCH(request: Request) {
         "UPDATE users SET miniapp_beta_access = ? WHERE id = ?",
         [action === "enable_miniapp_beta" ? 1 : 0, id]
       );
+      await audit("miniapp_beta_access_change", { enabled: action === "enable_miniapp_beta" });
       return NextResponse.json({ success: true });
     }
 
@@ -222,13 +245,24 @@ export async function PATCH(request: Request) {
         await conn.query("UPDATE campaigns SET status = 'paused' WHERE user_id = ? AND status = 'active'", [id]);
         await conn.query("UPDATE miniapp_rewarded_campaigns SET status = 'paused' WHERE advertiser_id = ? AND status = 'approved'", [id]);
       }
+      await audit("advertiser_trust_change", { previous_level: before.advertiser_trust_level, new_level: level });
       return NextResponse.json({ success: true });
+    }
+
+    const nextBalances = [balance_locked, balance_available, ad_balance].map(Number);
+    if (nextBalances.some((value) => !Number.isFinite(value) || value < 0)) {
+      return NextResponse.json({ error: "Balances must be finite, non-negative numbers" }, { status: 400 });
     }
 
     await conn.query(
       "UPDATE users SET balance_locked = ?, balance_available = ?, ad_balance = ? WHERE id = ?",
-      [balance_locked, balance_available, ad_balance, id]
+      [...nextBalances, id]
     );
+
+    await audit("user_balance_adjustment", {
+      previous: { balance_locked: before.balance_locked, balance_available: before.balance_available, ad_balance: before.ad_balance },
+      next: { balance_locked: nextBalances[0], balance_available: nextBalances[1], ad_balance: nextBalances[2] },
+    });
 
     return NextResponse.json({ success: true });
   } catch (error: unknown) {

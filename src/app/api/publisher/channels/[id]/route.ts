@@ -56,8 +56,12 @@ export async function PATCH(
       }
 
       const currentStatus = rows[0].status;
-      if (currentStatus === "pending") {
-        return NextResponse.json({ error: "Cannot pause a pending channel" }, { status: 400 });
+      const publisherResumableStatuses = ["paused", "bot_removed", "channel_not_found", "permission_missing"];
+      if (currentStatus !== "active" && !publisherResumableStatuses.includes(currentStatus)) {
+        return NextResponse.json(
+          { error: "This channel cannot be activated by the publisher. It must be approved by an admin." },
+          { status: 403 }
+        );
       }
 
       const newStatus = currentStatus === "active" ? "paused" : "active";

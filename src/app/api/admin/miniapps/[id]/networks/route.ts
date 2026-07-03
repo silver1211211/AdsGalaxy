@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { getAuthenticatedAdmin } from "@/lib/adminAuth";
+import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 
 const NETWORKS = ["AdsGram", "Monetag", "RichAds", "AdExium", "GigaPub", "AdsGalaxyInternal"];
@@ -51,10 +51,8 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const admin = await getAuthenticatedAdmin();
-  if (!admin) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { response } = await requireAdminPermission("read");
+  if (response) return response;
 
   try {
     const { id } = await params;
@@ -78,15 +76,14 @@ export async function PUT(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const admin = await getAuthenticatedAdmin();
-  if (!admin) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const { admin, response } = await requireAdminPermission("operate");
+  if (response) return response;
 
   try {
     const { id } = await params;
-    const body = await request.json() as { networks?: unknown };
+    const body = await request.json() as { networks?: unknown; approval_enabled?: unknown };
     const submittedNetworks: SubmittedNetwork[] = Array.isArray(body.networks) ? body.networks : [];
+    const approvalEnabled = body.approval_enabled === true;
 
     const [miniapps] = await pool.query<MiniAppRow[]>(
       "SELECT id, status FROM miniapps WHERE id = ? AND is_deleted = FALSE",
@@ -122,32 +119,43 @@ export async function PUT(
     const newState = await getNetworkState(id);
     const configuredNetworkCount = newState.filter((network) => network.enabled).length;
     const enabledNetworkCount = newState.filter((network) => network.enabled).length;
+    const approvableNetworkCount = newState.filter((network) =>
+      network.enabled && (network.network_name === "AdsGalaxyInternal" || Boolean(network.network_placement_id.trim()))
+    ).length;
     const currentStatus = String(miniapps[0].status || "");
-    const newStatus = currentStatus === "paused" || currentStatus === "rejected"
-      ? currentStatus
-      : configuredNetworkCount > 0
-        ? "approved"
-        : currentStatus === "pending"
-          ? "awaiting"
-          : currentStatus;
+    if (approvalEnabled && approvableNetworkCount < 1) {
+      return NextResponse.json({ error: "Configure at least one enabled ad network before approval" }, { status: 400 });
+    }
 
-    await pool.query(
-      "UPDATE miniapps SET status = ? WHERE id = ? AND status IN ('pending', 'awaiting', 'approved', 'monetized')",
-      [newStatus, id]
-    );
+    const newStatus = approvalEnabled
+      ? currentStatus === "paused" ? "paused" : "approved"
+      : "awaiting";
+    if (approvalEnabled) {
+      await pool.query(
+        "UPDATE miniapps SET status = ?, admin_approved_at = NOW(), admin_approved_by = ? WHERE id = ?",
+        [newStatus, admin!.id, id]
+      );
+    } else {
+      await pool.query(
+        "UPDATE miniapps SET status = 'awaiting', admin_approved_at = NULL, admin_approved_by = NULL WHERE id = ?",
+        [id]
+      );
+    }
 
     await recordAdminActionAudit({
-      adminId: admin.id,
+      adminId: admin!.id,
       action: "update_miniapp_network",
       entityType: "miniapp",
       entityId: id,
       reason: "admin_network_update",
       metadata: {
-        admin_username: admin.username,
+        admin_username: admin!.username,
         miniapp_id: Number(id),
         previous_state: previousState,
         new_state: newState,
+        previous_status: currentStatus,
         status: newStatus,
+        approval_enabled: approvalEnabled,
         configured_network_count: configuredNetworkCount,
         enabled_network_count: enabledNetworkCount,
       },
@@ -157,6 +165,7 @@ export async function PUT(
       success: true,
       networks: newState,
       status: newStatus,
+      approval_enabled: approvalEnabled,
       configured_network_count: configuredNetworkCount,
       enabled_network_count: enabledNetworkCount,
     });

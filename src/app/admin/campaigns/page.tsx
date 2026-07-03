@@ -3,7 +3,9 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Zap } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Zap, Megaphone } from "lucide-react";
+import EmptyState from "@/components/ui/EmptyState";
+import { SkeletonTableRows } from "@/components/ui/Skeleton";
 import Modal from "@/components/ui/Modal";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Toast from "@/components/ui/Toast";
@@ -259,6 +261,8 @@ export default function AdminCampaignsPage() {
     return <span className="font-medium text-slate-900">{continentsText}</span>;
   };
 
+  const isFiltering = search.trim().length > 0 || statusFilter !== "all" || trustFilter !== "all";
+
   return (
     <AdminLayout>
       <Modal isOpen={!!error} onClose={() => setError("")} type="error" title="Error">{error}</Modal>
@@ -439,9 +443,17 @@ export default function AdminCampaignsPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <tr><td colSpan={5} className="p-8 text-center"><Loader2 className="animate-spin text-blue-600 mx-auto" size={20} /></td></tr>
+                <SkeletonTableRows columns={5} rows={6} />
               ) : campaigns.length === 0 ? (
-                <tr><td colSpan={5} className="p-8 text-center text-slate-500">No campaigns found.</td></tr>
+                <tr>
+                  <td colSpan={5} className="p-10">
+                    <EmptyState
+                      icon={isFiltering ? Search : Megaphone}
+                      title={isFiltering ? "No campaigns match your filters" : "No campaigns yet"}
+                      message={isFiltering ? "Try a different search term or filter." : "Advertiser campaigns will appear here once submitted."}
+                    />
+                  </td>
+                </tr>
               ) : (
                 campaigns.map((campaign) => (
                   <tr key={`${campaign.campaign_kind}-${campaign.id}`} className="hover:bg-slate-50 transition-colors">

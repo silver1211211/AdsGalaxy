@@ -100,6 +100,7 @@ const STEPS = ["Ad Creative", "Targeting", "Budget & Launch"];
 
 const emptyForm = {
   campaign_name: "",
+  excluded_inventory: "",
   title: "",
   description: "",
   image_url: "",
@@ -238,8 +239,18 @@ export default function AdvertiserMiniAppRewardedPage() {
       .then(r => r.json())
       .then((c: any) => {
         if (c.error) return;
+        const parseList = (value: unknown) => {
+          if (Array.isArray(value)) return value.map(String).filter(Boolean);
+          try {
+            const parsed = JSON.parse(String(value || "[]"));
+            if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean);
+          } catch { /* legacy comma-separated value */ }
+          return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+        };
         setForm({
+          ...emptyForm,
           campaign_name: c.campaign_name || "",
+          excluded_inventory: Array.isArray(c.excluded_inventory) ? c.excluded_inventory.join("\n") : "",
           title: c.title || "",
           description: c.description || "",
           image_url: c.image_url || "",
@@ -248,10 +259,10 @@ export default function AdvertiserMiniAppRewardedPage() {
           title_color: c.title_color || "",
           body_color: c.body_color || "",
           postback_url: c.postback_url || "",
-          categories: (() => { try { return JSON.parse(c.categories || "[]"); } catch { return []; } })(),
+          categories: parseList(c.categories),
           budget: c.budget ? String(parseFloat(c.budget)) : "",
           advertiser_cpm_bid: c.advertiser_cpm_bid ? String(parseFloat(c.advertiser_cpm_bid)) : "",
-          campaign_budget_mode: c.campaign_budget_mode || "custom",
+          campaign_budget_mode: c.campaign_budget_mode === "unlimited" || Number(c.budget || 0) === 0 ? "unlimited" : "custom",
           daily_budget_mode: c.daily_budget_mode || "custom",
           vpn_policy: c.vpn_policy || "allow_all",
           device_policy: c.device_policy || "all",
@@ -261,8 +272,8 @@ export default function AdvertiserMiniAppRewardedPage() {
           daily_budget_limit: c.daily_budget_limit ? String(c.daily_budget_limit) : "",
           frequency_cap_per_user: c.frequency_cap_per_user ? String(c.frequency_cap_per_user) : "",
         });
-        if (c.countries) setSelectedCountries(String(c.countries).split(",").filter(Boolean));
-        if (c.languages) setSelectedLanguages(String(c.languages).split(",").filter(Boolean));
+        setSelectedCountries(parseList(c.countries));
+        setSelectedLanguages(parseList(c.languages));
         if (c.image_url) setImagePreview(c.image_url);
         const cpm = parseFloat(c.advertiser_cpm_bid || "1.0");
         if (!isNaN(cpm)) setCpmPercent(Math.min(100, Math.max(0, Math.round(((cpm - cpmMin) / (cpmMax - cpmMin)) * 100))));
@@ -871,6 +882,19 @@ export default function AdvertiserMiniAppRewardedPage() {
                     className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-semibold text-slate-900 outline-none focus:border-[#0c9de8] placeholder:font-normal placeholder:text-slate-400"
                   />
                 </div>
+              </div>
+
+              {/* Date range */}
+              <div className="space-y-3">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Exclude Mini Apps <span className="text-slate-300 font-normal">(optional)</span></label>
+                <textarea
+                  rows={4}
+                  value={form.excluded_inventory}
+                  onChange={(event) => setForm((previous) => ({ ...previous, excluded_inventory: event.target.value }))}
+                  placeholder="@exampleapp, exampleapp, or https://t.me/exampleapp"
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 outline-none focus:border-[#0c9de8]"
+                />
+                <p className="text-[10px] font-semibold text-slate-400">One per line or comma-separated. Entries are accepted privately without confirming whether the Mini App exists.</p>
               </div>
 
               {/* Date range */}

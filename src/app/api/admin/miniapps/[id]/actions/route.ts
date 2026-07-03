@@ -10,6 +10,7 @@ type MiniAppState = RowDataPacket & {
   miniapp_name: string;
   miniapp_username: string;
   status: string;
+  admin_approved_at: Date | string | null;
 };
 
 type ConfiguredNetworkCountRow = RowDataPacket & {
@@ -28,6 +29,7 @@ export async function POST(
     const { action } = await request.json();
     const statusMap: Record<string, string> = {
       await: "awaiting",
+      approve: "approved",
       reject: "rejected",
       pause: "paused",
     };
@@ -37,7 +39,7 @@ export async function POST(
     }
 
     const [rows] = await pool.query<MiniAppState[]>(
-      "SELECT id, user_id, miniapp_name, miniapp_username, status FROM miniapps WHERE id = ? AND is_deleted = FALSE",
+      "SELECT id, user_id, miniapp_name, miniapp_username, status, admin_approved_at FROM miniapps WHERE id = ? AND is_deleted = FALSE",
       [id]
     );
 
@@ -46,6 +48,21 @@ export async function POST(
     }
 
     const previousState = rows[0];
+    if (action === "approve") {
+      if (previousState.status !== "awaiting") {
+        return NextResponse.json({ error: "Mini App must be awaiting manual approval" }, { status: 400 });
+      }
+      const [[networkRow]] = await pool.query<ConfiguredNetworkCountRow[]>(
+        `SELECT COUNT(*) as configured_networks
+         FROM miniapp_ad_networks
+         WHERE miniapp_id = ? AND enabled = TRUE
+           AND (network_name = 'AdsGalaxyInternal' OR COALESCE(network_placement_id, '') != '')`,
+        [id]
+      );
+      if (Number(networkRow?.configured_networks || 0) < 1) {
+        return NextResponse.json({ error: "Configure at least one enabled ad network before approval" }, { status: 400 });
+      }
+    }
     if (action === "delete") {
       await pool.query("UPDATE miniapps SET is_deleted = TRUE, status = 'deleted' WHERE id = ?", [id]);
 
@@ -76,10 +93,22 @@ export async function POST(
         "SELECT COUNT(*) as configured_networks FROM miniapp_ad_networks WHERE miniapp_id = ? AND enabled = TRUE AND network_name IN ('AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')",
         [id]
       );
-      newStatus = Number(networkRow?.configured_networks || 0) > 0 ? "approved" : "awaiting";
+      newStatus = previousState.admin_approved_at && Number(networkRow?.configured_networks || 0) > 0 ? "approved" : "awaiting";
     }
 
-    await pool.query("UPDATE miniapps SET status = ? WHERE id = ?", [newStatus, id]);
+    if (action === "approve") {
+      await pool.query(
+        "UPDATE miniapps SET status = 'approved', admin_approved_at = NOW(), admin_approved_by = ? WHERE id = ?",
+        [admin.id, id]
+      );
+    } else if (action === "await") {
+      await pool.query(
+        "UPDATE miniapps SET status = 'awaiting', admin_approved_at = NULL, admin_approved_by = NULL WHERE id = ?",
+        [id]
+      );
+    } else {
+      await pool.query("UPDATE miniapps SET status = ? WHERE id = ?", [newStatus, id]);
+    }
 
     await recordAdminActionAudit({
       adminId: admin.id,

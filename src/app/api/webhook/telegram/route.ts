@@ -1,7 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
+import { timingSafeEqual } from "node:crypto";
+
+function validSecretToken(req: NextRequest) {
+  const expected = process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN?.trim();
+  const supplied = req.headers.get("x-telegram-bot-api-secret-token")?.trim();
+  if (!expected || !supplied) return false;
+
+  const expectedBuffer = Buffer.from(expected);
+  const suppliedBuffer = Buffer.from(supplied);
+  return expectedBuffer.length === suppliedBuffer.length
+    && timingSafeEqual(expectedBuffer, suppliedBuffer);
+}
 
 export async function POST(req: NextRequest) {
+  if (!validSecretToken(req)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
     const update = await req.json();
 

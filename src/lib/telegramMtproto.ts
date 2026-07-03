@@ -298,7 +298,11 @@ export async function joinPrivateInviteWithAccount(
   }
 }
 
-export async function getPrivatePostViews(chatId: string | number, messageId: string | number): Promise<PrivatePostViewResult> {
+export async function getPrivatePostViews(
+  chatId: string | number,
+  messageId: string | number,
+  options: { preferredAccount?: number | null; rotationSeed?: number } = {}
+): Promise<PrivatePostViewResult> {
   const parsedMessageId = Number.parseInt(String(messageId), 10);
   if (!chatId) return { ok: false, code: "missing_chat_id" };
   if (!Number.isFinite(parsedMessageId) || parsedMessageId <= 0) return { ok: false, code: "missing_message_id" };
@@ -306,15 +310,27 @@ export async function getPrivatePostViews(chatId: string | number, messageId: st
   const pool = getMtprotoAccountPool();
   if (!pool.ok) return { ok: false, code: pool.code };
 
-  for (const account of pool.accounts) {
+  const preferredKey = options.preferredAccount ? mtprotoAccountKey(options.preferredAccount) : null;
+  const offset = Math.abs(options.rotationSeed || 0) % pool.accounts.length;
+  const rotated = [...pool.accounts.slice(offset), ...pool.accounts.slice(0, offset)];
+  const accounts = preferredKey
+    ? [...rotated.filter((account) => account.key === preferredKey), ...rotated.filter((account) => account.key !== preferredKey)]
+    : rotated;
+
+  let lastFailure = "all_accounts_failed";
+  for (const account of accounts) {
     try {
-      const views = await getViewsWithAccount(account, pool.apiId, pool.apiHash, chatId, parsedMessageId);
+      const views = await Promise.race([
+        getViewsWithAccount(account, pool.apiId, pool.apiHash, chatId, parsedMessageId),
+        new Promise<number>((_, reject) => setTimeout(() => reject(new Error("verification_timeout")), 10_000)),
+      ]);
       return { ok: true, views, account: account.key };
     } catch (error) {
       const code = safeMtprotoErrorCode(error);
+      lastFailure = code;
       console.error(`Private views MTProto ${account.key} failed: ${code}`);
     }
   }
 
-  return { ok: false, code: "all_accounts_failed" };
+  return { ok: false, code: lastFailure };
 }
