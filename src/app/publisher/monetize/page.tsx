@@ -1,11 +1,12 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, react-hooks/set-state-in-effect, react-hooks/exhaustive-deps -- legacy publisher monetize flow keeps large inline forms and loose API rows */
 
 import React, { useState, useEffect, useRef } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import {
   Plus, Tv, Bot, Smartphone, CheckCircle2, Clock, XCircle, PauseCircle,
   Loader2, Users, X, ChevronLeft, Search, ExternalLink, TrendingUp, MoreVertical,
-  Eye, Pause, Play, FileText, Edit3, Sparkles, ShieldCheck,
+  Eye, Pause, Play, FileText, Edit3, Sparkles, ShieldCheck, Info,
 } from "lucide-react";
 import ChannelDetailsScreen from "@/components/publisher/ChannelDetailsScreen";
 import AddChannelScreen from "@/components/publisher/AddChannelScreen";
@@ -166,6 +167,10 @@ function getMaErrors(maName: string, maUsername: string, maBotId: string, maWebU
     try {
       const p = new URL(maWebUrl.trim());
       if (p.protocol !== "https:" || !p.hostname.includes(".")) return "Must be a valid HTTPS URL";
+      const host = p.hostname.toLowerCase();
+      if (host === "t.me" || host === "telegram.me" || host.endsWith(".t.me") || host.endsWith(".telegram.me")) {
+        return "This must be your website's HTTPS URL from BotFather, not a t.me/telegram.me link";
+      }
       return "";
     } catch { return "Must be a valid HTTPS URL"; }
   })() : "";
@@ -368,7 +373,12 @@ function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBo
         )}
       </div>
       <div className="space-y-1.5">
-        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Bot Web App URL</label>
+        <label className="flex items-center gap-1 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+          Web App URL
+          <span title="The HTTPS website configured as your Mini App in BotFather. This is the URL required by AdsGram and most Telegram Mini App ad networks.">
+            <Info size={12} className="text-slate-300" />
+          </span>
+        </label>
         <div className="relative">
           <input
             type="url"
@@ -398,7 +408,12 @@ function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBo
         )}
       </div>
       <div className="space-y-1.5">
-        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Direct Mini App URL</label>
+        <label className="flex items-center gap-1 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+          Telegram Mini App URL
+          <span title="The Telegram launch link for your Mini App.">
+            <Info size={12} className="text-slate-300" />
+          </span>
+        </label>
         <div className="relative">
           <input
             type="url"
@@ -1867,7 +1882,7 @@ export default function MonetizePage() {
   const total      = channels.length + miniapps.length + bots.length;
   const totalActive = !loading
     ? channels.filter(c => ["active","approved"].includes(c.status)).length
-    + miniapps.filter(m => m.status === "approved").length
+    + miniapps.filter(m => ["approved", "monetized"].includes(m.status)).length
     + bots.filter(b => b.status === "active").length
     : 0;
   const totalPending = !loading

@@ -16,6 +16,8 @@ type CampaignActionRow = RowDataPacket & {
   id: number;
   status: string;
   budget: string | number;
+  cpm: string | number;
+  user_id: number;
 };
 
 async function getCampaignColumns() {
@@ -59,7 +61,7 @@ export async function POST(
       return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
 
-    const [rows] = await pool.query<CampaignActionRow[]>("SELECT id, status, budget FROM campaigns WHERE id = ?", [id]);
+    const [rows] = await pool.query<CampaignActionRow[]>("SELECT id, status, budget, cpm, user_id FROM campaigns WHERE id = ?", [id]);
     if (rows.length === 0) {
       return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
     }
@@ -100,8 +102,21 @@ export async function POST(
     }
 
     if (action === "resume") {
+      // Resuming must not require a locked/reserved campaign budget — only that
+      // the advertiser's own ad_balance can cover at least the next billable
+      // unit at this campaign's CPM rate. Settlement itself is unchanged.
       if (parseFloat(String(campaign.budget || "0")) <= 0) {
-        return NextResponse.json({ error: "Campaign budget is exhausted. Add budget before resuming." }, { status: 400 });
+        const unitPrice = parseFloat(String(campaign.cpm || "0")) / 1000;
+        const [balanceRows] = await pool.query<RowDataPacket[]>(
+          "SELECT ad_balance FROM users WHERE id = ?",
+          [campaign.user_id]
+        );
+        const adBalance = parseFloat(String(balanceRows[0]?.ad_balance ?? "0"));
+        if (!(unitPrice > 0) || adBalance < unitPrice) {
+          return NextResponse.json({
+            error: "Insufficient ad balance to resume this campaign. The advertiser must add funds to cover at least the next billable impression.",
+          }, { status: 400 });
+        }
       }
 
       const updates = ["status = 'active'"];

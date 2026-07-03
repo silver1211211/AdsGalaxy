@@ -15,9 +15,55 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
   var apiOrigins=Array.from(new Set([SCRIPT_ORIGIN,FALLBACK_ORIGIN].filter(Boolean).map(function(v){return String(v).replace(/\\/$/,"");})));
   var sdkLoads={};
   function tg(){return window.Telegram&&window.Telegram.WebApp?window.Telegram.WebApp:null;}
-  function initData(options){return options&&options.initData||tg()&&tg().initData||"";}
-  function userId(options){return options&&options.telegramUserId||options&&options.userId||tg()&&tg().initDataUnsafe&&tg().initDataUnsafe.user&&tg().initDataUnsafe.user.id||"";}
-  function country(options){return options&&options.country||tg()&&tg().initDataUnsafe&&tg().initDataUnsafe.user&&tg().initDataUnsafe.user.language_code||"";}
+  function initData(options){var webApp=tg();return options&&options.initData||webApp&&webApp.initData||"";}
+  function parseInitDataUser(auth){
+    if(!auth)return null;
+    try{var raw=new URLSearchParams(auth).get("user");return raw?JSON.parse(raw):null;}catch(e){return null;}
+  }
+  function telegramUser(options){var webApp=tg(),unsafeUser=webApp&&webApp.initDataUnsafe&&webApp.initDataUnsafe.user;return unsafeUser||parseInitDataUser(initData(options||{}));}
+  function userId(options){var user=telegramUser(options||{});return options&&options.telegramUserId||options&&options.userId||user&&user.id||"";}
+  function country(options){var user=telegramUser(options||{});return options&&options.country||user&&user.language_code||"";}
+  function providerName(provider){
+    return provider==="a"?"AdsGram":provider==="m"?"Monetag":provider==="x"?"AdExium":provider==="r"?"RichAds":provider==="g"?"GigaPub":provider==="i"?"AdsGalaxyInternal":provider||null;
+  }
+  function environmentDetails(provider,error,options){
+    var webApp=tg(),auth=initData(options||{}),user=telegramUser(options||{});
+    var inIframe=false;
+    try{inIframe=window.self!==window.top;}catch(e){inIframe=true;}
+    return {
+      hasTelegramObject:Boolean(window.Telegram),
+      hasWebApp:Boolean(webApp),
+      initDataLength:auth.length,
+      platform:webApp&&webApp.platform||"unknown",
+      userExists:Boolean(user),
+      providerSelected:providerName(provider),
+      providerErrorMessage:error&&error.message||null,
+      sameWindowContext:!inIframe,
+      iframeIsolatedWithoutTelegram:inIframe&&!webApp
+    };
+  }
+  function environmentDebug(provider,error){
+    var details=environmentDetails(provider,error,arguments.length>2?arguments[2]:undefined);
+    console.info("[AdsGalaxy SDK debug]",details);
+    return details;
+  }
+  function prepareTelegram(options){
+    var supplied=options&&options.initData||"",attempts=0;
+    function inspect(){
+      var webApp=tg();
+      if(webApp){try{if(typeof webApp.ready==="function")webApp.ready();}catch(e){console.warn("[AdsGalaxy SDK] Telegram.WebApp.ready() failed",e);}}
+      var auth=supplied||webApp&&webApp.initData||"";
+      if(webApp&&auth){environmentDebug(null,null,options);return Promise.resolve(webApp);}
+      if(attempts++<20)return new Promise(function(resolve){setTimeout(resolve,150);}).then(inspect);
+      var details=environmentDebug(null,null,options);
+      var missing=!details.hasWebApp||!details.initDataLength;
+      return Promise.reject(sdkError(missing?"Please open this inside Telegram.":"Telegram initData is unavailable.","INVALID_INIT_DATA"));
+    }
+    if(!tg()){
+      return loadScript("https://telegram.org/js/telegram-web-app.js",null).catch(function(){return undefined;}).then(inspect);
+    }
+    return inspect();
+  }
   function request(path,payload,options){
     var headers={"Content-Type":"application/json"};
     var auth=initData(options||{});
@@ -105,6 +151,10 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
   }
   function showExternalAd(decision,options){
     var c=decision.config||{},sdk=c.sdk||{},globalName=c.global_name||sdk.global_name;
+    var env=environmentDetails(decision.adapter,null,options);
+    if(!env.hasWebApp||!env.initDataLength){
+      return Promise.reject(sdkError("Telegram.WebApp/initData is unavailable in this window context","INVALID_INIT_DATA"));
+    }
     if(decision.adapter==="g"){
       return loadProjectScript(sdk,c.placement_id,options.timeoutMs).then(function(){
         return timeout(window["show"+"Giga"](),options.timeoutMs||30000);
@@ -114,6 +164,17 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
         throw sdkError(msg,lower.indexOf("timed out")>=0?"TIMEOUT":(lower.indexOf("no fill")>=0||lower.indexOf("no ad")>=0?"NO_FILL":e.code||"AD_UNAVAILABLE"));
       }).then(function(result){
         return request("/api/sdk/miniapp/impression",{request_id:decision.request_id,miniapp_id:Number(options.miniappId),telegram_user_id:String(userId(options)),country:country(options)},options).then(function(){return {request_id:decision.request_id,reward_eligible:true,raw_result:result};});
+      });
+    }
+    if(decision.adapter==="r"){
+      return loadScript(c.script_url||sdk.script_url,globalName).then(function(){
+        if(typeof window.TelegramAdsController!=="function")throw sdkError("RichAds controller unavailable","SDK_UNAVAILABLE");
+        var controller=new window.TelegramAdsController();
+        controller.initialize({pubId:sdk.richads_publisher_id,appId:sdk.richads_app_id});
+        if(typeof controller.triggerInterstitialVideo!=="function")throw sdkError("RichAds Telegram Interstitial Video is unavailable","SDK_UNAVAILABLE");
+        return timeout(controller.triggerInterstitialVideo(),options.timeoutMs||30000);
+      }).then(function(result){
+        return request("/api/sdk/miniapp/impression",{request_id:decision.request_id,miniapp_id:Number(options.miniappId),telegram_user_id:String(userId(options)),country:country(options)},options).then(function(data){return {request_id:decision.request_id,reward_eligible:Boolean(data.reward_eligible),status:data.status,raw_result:result};});
       });
     }
     return loadScript(c.script_url||sdk.script_url,globalName).then(function(){
@@ -130,16 +191,19 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
   function run(options){
     options=options||{};options.miniappId=Number(options.miniappId||options.miniapp_id||DEFAULT_MINIAPP_ID);
     if(!options.miniappId)return Promise.reject(sdkError("AdsGalaxy Mini App ID is required","INVALID_APP"));
-    if(!initData(options))return Promise.reject(sdkError("Open this Mini App inside Telegram to show AdsGalaxy ads","INVALID_INIT_DATA"));
-    var payload={miniapp_id:options.miniappId,telegram_user_id:String(userId(options)),country:country(options),ad_format:options.adFormat||"rewarded"};
     function attempt(decision){
       if(!decision||decision.success===false)throw sdkError(decision&&decision.message||"No ad available right now",decision&&decision.error_code||"NO_FILL");
+      environmentDebug(decision.adapter,null,options);
       return display(decision,options).catch(function(e){
+        environmentDebug(decision.adapter,e,options);
         if(!decision.fallback_available)throw normalizeError(e);
         return request("/api/sdk/miniapp/fallback",{request_id:decision.request_id,error_code:e.code||"NETWORK_ERROR",error_message:e.message||"Ad source failed"},options).then(attempt);
       });
     }
-    var promise=request("/api/sdk/miniapp/request",payload,options).then(attempt).catch(function(error){throw normalizeError(error);});
+    var promise=prepareTelegram(options).then(function(){
+      var payload={miniapp_id:options.miniappId,telegram_user_id:String(userId(options)),country:country(options),ad_format:options.adFormat||"rewarded"};
+      return request("/api/sdk/miniapp/request",payload,options);
+    }).then(attempt).catch(function(error){environmentDebug(null,error,options);throw normalizeError(error);});
     promise.then(function(result){if(typeof options.onSuccess==="function")options.onSuccess(result);},function(error){if(typeof options.onError==="function")options.onError(error);});
     return promise;
   }
@@ -150,7 +214,7 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
     if(onError)options.onError=onError;
     return run(options);
   };
-  window.AdsGalaxy={show:window.showAdsGalaxy,version:"13F"};
+  window.AdsGalaxy={show:window.showAdsGalaxy,debugEnvironment:environmentDebug,version:"14T"};
 })();`;
 }
 

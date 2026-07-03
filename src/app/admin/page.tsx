@@ -123,12 +123,23 @@ export default function AdminDashboard() {
         <div>
           <SectionHeader title="Network Reach" icon={Activity} />
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            <StatCard title="Total Subscribers" value={stats.channels.totalSubscribers.toLocaleString()} icon={Users} bgClass="bg-blue-100" textClass="text-blue-600" subtitle="Across all active channels" />
-            <StatCard title="Monetized Bots" value={stats.bots.total} icon={Bot} bgClass="bg-purple-100" textClass="text-purple-600" subtitle="Active in network" />
-            <StatCard title="Active Bot Users" value={stats.bots.activeUsers.toLocaleString()} icon={ShieldCheck} bgClass="bg-emerald-100" textClass="text-emerald-600" subtitle="Users receiving ads" />
+            <StatCard title="Total Subscribers" value={stats.channels.totalSubscribers.toLocaleString()} icon={Users} bgClass="bg-blue-100" textClass="text-blue-600" subtitle="Across all non-deleted channels" />
+            <StatCard title="Monetized Bots" value={stats.bots.total} icon={Bot} bgClass="bg-purple-100" textClass="text-purple-600" subtitle="Lifecycle active" secondaryLabel="Delivery Eligible" secondaryValue={(stats.bots.deliveryEligible || 0).toLocaleString()} />
+            <StatCard title="Active Bot Users" value={stats.bots.activeUsers.toLocaleString()} icon={ShieldCheck} bgClass="bg-emerald-100" textClass="text-emerald-600" subtitle="Active users on active bots" secondaryLabel="Delivery Eligible" secondaryValue={(stats.bots.deliveryEligibleUsers || 0).toLocaleString()} />
             <StatCard title="Total Bot Users" value={stats.bots.totalUsers.toLocaleString()} icon={Activity} bgClass="bg-indigo-100" textClass="text-indigo-600" subtitle="All users across bots" />
             <StatCard title="Active Miniapps" value={(stats.miniapps?.active || 0).toLocaleString()} icon={Smartphone} bgClass="bg-amber-100" textClass="text-amber-600" subtitle="Approved and monetizing" />
             <StatCard title="Impressions Displayed Today" value={(stats.miniapps?.impressionsToday || 0).toLocaleString()} icon={Eye} bgClass="bg-red-100" textClass="text-red-600" secondaryLabel="Displayed Yesterday" secondaryValue={(stats.miniapps?.impressionsYesterday || 0).toLocaleString()} />
+          </div>
+          <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <h3 className="mb-3 text-sm font-bold text-slate-900">Audience by country</h3>
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              {(stats.channels.audienceByCountry || []).map((row: any) => (
+                <div key={row.country} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
+                  <span className="font-semibold text-slate-600">{row.country === "UNASSIGNED" ? "Unassigned" : row.country}</span>
+                  <span className="font-black text-slate-900">{Number(row.audience).toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -213,12 +224,16 @@ export default function AdminDashboard() {
                 <span className="text-lg font-black">{stats.channels.approved}</span>
               </div>
               <div className="flex justify-between items-center">
+                <span className="text-sm font-semibold flex items-center gap-2 text-blue-600"><Activity size={16}/> Delivery Eligible</span>
+                <span className="text-lg font-black">{stats.channels.deliveryEligible}</span>
+              </div>
+              <div className="flex justify-between items-center">
                 <span className="text-sm font-semibold flex items-center gap-2 text-red-600"><XCircle size={16}/> Rejected</span>
                 <span className="text-lg font-black">{stats.channels.rejected}</span>
               </div>
               <div className="flex justify-between items-center pt-4 border-t border-slate-100">
                 <span className="text-sm font-semibold text-slate-500">Aggregate Reach</span>
-                <span className="text-sm font-black text-slate-900">{stats.channels.totalSubscribers.toLocaleString()} subs</span>
+                <span className="text-sm font-black text-slate-900">{Number(stats.channels.approvedSubscribers || 0).toLocaleString()} subs</span>
               </div>
             </div>
           </div>

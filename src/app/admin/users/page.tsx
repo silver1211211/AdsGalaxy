@@ -20,8 +20,9 @@ type UserRow = {
   is_banned?: boolean | number;
   banned_at?: string | null;
   ban_reason?: string | null;
-  miniapp_beta_access?: boolean | number;
   advertiser_trust_level?: string;
+  publisher_trust_score?: string | number;
+  publisher_risk_score?: string | number;
   advertiser_trust_note?: string | null;
   advertiser_total_campaigns?: string | number;
   advertiser_approved_campaigns?: string | number;
@@ -74,7 +75,6 @@ export default function AdminUsersPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [trustFilter, setTrustFilter] = useState("all");
   const [error, setError] = useState("");
-  const [miniappBetaUsersCount, setMiniappBetaUsersCount] = useState(0);
 
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<UserRow | null>(null);
@@ -90,7 +90,6 @@ export default function AdminUsersPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to fetch users");
       setUsers(data.users || []);
-      setMiniappBetaUsersCount(Number(data.miniapp_beta_users_count || 0));
       setTotalPages(data.totalPages || 1);
     } catch (err: unknown) {
       setError(errorMessage(err, "Failed to fetch users"));
@@ -176,28 +175,6 @@ export default function AdminUsersPage() {
     }
   };
 
-  const toggleMiniAppBeta = async (user: UserRow) => {
-    setIsUpdating(true);
-    try {
-      const enabled = Number(user.miniapp_beta_access || 0) === 1;
-      const res = await fetch("/api/admin/users", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: user.id,
-          action: enabled ? "disable_miniapp_beta" : "enable_miniapp_beta",
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Failed to update Mini App beta access");
-      await fetchUsers(page, searchQuery);
-    } catch (err: unknown) {
-      setError(errorMessage(err, "Failed to update Mini App beta access"));
-    } finally {
-      setIsUpdating(false);
-    }
-  };
-
   const setAdvertiserTrust = async (user: UserRow, level: string) => {
     setIsUpdating(true);
     try {
@@ -247,18 +224,6 @@ export default function AdminUsersPage() {
             <Ban size={14} /> Ban User
           </button>
         )}
-        <button
-          onClick={() => toggleMiniAppBeta(user)}
-          disabled={isUpdating}
-          className={`inline-flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs font-semibold ${
-            Number(user.miniapp_beta_access || 0) === 1
-              ? "border-blue-100 bg-blue-50 text-blue-700 hover:bg-blue-100"
-              : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-          } disabled:opacity-50`}
-          title="Mini App Beta Access"
-        >
-          Mini Apps {Number(user.miniapp_beta_access || 0) === 1 ? "On" : "Off"}
-        </button>
         <select
           value={user.advertiser_trust_level || "new"}
           onChange={(event) => setAdvertiserTrust(user, event.target.value)}
@@ -337,7 +302,7 @@ export default function AdminUsersPage() {
         <div className="flex flex-col gap-3 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-sm font-semibold text-slate-900">Users Directory</h2>
-            <p className="text-xs text-slate-500">Manage balances, bans, and Mini App access. Beta users: {miniappBetaUsersCount}</p>
+            <p className="text-xs text-slate-500">Manage balances, account status, and trust.</p>
           </div>
           <form onSubmit={handleSearch} className="relative w-full sm:max-w-xs">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
@@ -374,7 +339,7 @@ export default function AdminUsersPage() {
                 <th className="px-4 py-3 text-right font-medium">Ad Balance</th>
                 <th className="px-4 py-3 font-medium">Status</th>
                 <th className="px-4 py-3 font-medium">Advertiser Trust</th>
-                <th className="px-4 py-3 font-medium">Mini Apps</th>
+                <th className="px-4 py-3 font-medium">Publisher Trust</th>
                 <th className="px-4 py-3 text-right font-medium">Actions</th>
               </tr>
             </thead>
@@ -403,9 +368,8 @@ export default function AdminUsersPage() {
                     <div className="text-xs text-red-500">{user.advertiser_rejected_campaigns || 0} rejected</div>
                   </td>
                   <td className="px-4 py-3">
-                    <span className={`rounded-full border px-2 py-0.5 text-[11px] font-bold ${Number(user.miniapp_beta_access || 0) === 1 ? "border-blue-200 bg-blue-50 text-blue-700" : "border-slate-200 bg-slate-50 text-slate-500"}`}>
-                      {Number(user.miniapp_beta_access || 0) === 1 ? "Beta" : "No Access"}
-                    </span>
+                    <div className="font-semibold text-slate-900">{Number(user.publisher_trust_score ?? 60).toFixed(1)}</div>
+                    <div className="text-xs text-slate-500">Risk {Number(user.publisher_risk_score ?? 0).toFixed(1)}</div>
                   </td>
                   <td className="px-4 py-3 text-right"><ActionButtons user={user} /></td>
                 </tr>
@@ -438,8 +402,8 @@ export default function AdminUsersPage() {
                 <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Locked</div><div className="font-semibold text-slate-900">{money(user.balance_locked)}</div></div>
                 <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Available</div><div className="font-semibold text-slate-900">{money(user.balance_available)}</div></div>
                 <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Ads</div><div className="font-semibold text-slate-900">{money(user.ad_balance)}</div></div>
-                <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Mini Apps</div><div className="font-semibold text-slate-900">{Number(user.miniapp_beta_access || 0) === 1 ? "Beta" : "Off"}</div></div>
-                <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Trust</div><div className="font-semibold capitalize text-slate-900">{user.advertiser_trust_level || "new"}</div></div>
+                <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Publisher trust</div><div className="font-semibold text-slate-900">{Number(user.publisher_trust_score ?? 60).toFixed(1)}</div></div>
+                <div className="rounded-md bg-slate-50 p-2"><div className="font-bold uppercase text-slate-400">Advertiser trust</div><div className="font-semibold capitalize text-slate-900">{user.advertiser_trust_level || "new"}</div></div>
               </div>
               <div className="mt-3"><ActionButtons user={user} /></div>
             </div>

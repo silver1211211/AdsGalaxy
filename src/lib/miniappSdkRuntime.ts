@@ -1,6 +1,6 @@
 "use client";
 
-import type { MiniAppAdFormat, MiniAppNetworkName, MiniAppSdkErrorCode } from "@/lib/miniappNetworkAdapters";
+import { RICHADS_PRODUCTION_PLACEMENT, type MiniAppAdFormat, type MiniAppNetworkName, type MiniAppSdkErrorCode } from "@/lib/miniappNetworkAdapters";
 
 const ADSGALAXY_BOT_URL = `https://t.me/${process.env.NEXT_PUBLIC_BOT_USERNAME || "Ads_Galaxy_bot"}`;
 
@@ -17,6 +17,8 @@ type NetworkClientConfig = {
         backup_script_url?: string | null;
         script_timeout_ms?: number;
         richads_publisher_id?: string;
+        richads_app_id?: string;
+        richads_placement_type?: typeof RICHADS_PRODUCTION_PLACEMENT;
         id?: number;
         title?: string;
         description?: string;
@@ -73,6 +75,8 @@ export type MiniAppSdkResult = {
   error_code?: MiniAppSdkErrorCode;
   error_message?: string;
   raw_result?: unknown;
+  reward_eligible?: boolean;
+  status?: string;
 };
 
 type AdapterRequest = {
@@ -121,8 +125,6 @@ declare global {
     TelegramAdsController?: new () => {
       initialize: (config: { pubId: string; appId: string; debug?: boolean }) => void;
       triggerInterstitialVideo: () => Promise<unknown>;
-      triggerInterstitialBanner: () => Promise<unknown>;
-      triggerNativeNotification: () => Promise<unknown>;
     };
     showGiga?: () => Promise<unknown>;
   }
@@ -417,6 +419,12 @@ const richAdsAdapter: RuntimeAdapter = {
     if (!config.client_config?.sdk?.richads_publisher_id) {
       return errorResult("RichAds", "INVALID_CONFIG", "RichAds publisher ID is missing from server config");
     }
+    if (!config.client_config?.sdk?.richads_app_id) {
+      return errorResult("RichAds", "INVALID_CONFIG", "RichAds App ID is missing from server config");
+    }
+    if (config.client_config?.sdk?.richads_placement_type !== RICHADS_PRODUCTION_PLACEMENT) {
+      return errorResult("RichAds", "INVALID_CONFIG", "RichAds placement must be Telegram Interstitial Video");
+    }
 
     return { success: true, network: "RichAds" };
   },
@@ -444,11 +452,12 @@ const richAdsAdapter: RuntimeAdapter = {
     if (!loaded.success) return loaded;
 
     try {
+      // Current production placement: RichAds Telegram Interstitial Video only.
+      // Future RichAds formats must receive separate explicit adapter methods.
       const controller = new window.TelegramAdsController!();
       controller.initialize({
         pubId: config.client_config!.sdk!.richads_publisher_id!,
-        appId: config.network_placement_id,
-        debug: false,
+        appId: config.client_config!.sdk!.richads_app_id!,
       });
       const result = await timeout(controller.triggerInterstitialVideo(), timeout_ms || 30000);
       return successResult("RichAds", request_id, result);
@@ -456,22 +465,8 @@ const richAdsAdapter: RuntimeAdapter = {
       return errorResult("RichAds", error?.message?.includes("timed out") ? "TIMEOUT" : "AD_UNAVAILABLE", error?.message || "RichAds video ad was not available");
     }
   },
-  async requestInterstitialAd({ config, request_id, timeout_ms }) {
-    const loaded = await this.loadSdk(config, timeout_ms);
-    if (!loaded.success) return loaded;
-
-    try {
-      const controller = new window.TelegramAdsController!();
-      controller.initialize({
-        pubId: config.client_config!.sdk!.richads_publisher_id!,
-        appId: config.network_placement_id,
-        debug: false,
-      });
-      const result = await timeout(controller.triggerInterstitialBanner(), timeout_ms || 30000);
-      return successResult("RichAds", request_id, result);
-    } catch (error: any) {
-      return errorResult("RichAds", error?.message?.includes("timed out") ? "TIMEOUT" : "AD_UNAVAILABLE", error?.message || "RichAds interstitial ad was not available");
-    }
+  async requestInterstitialAd() {
+    return unsupported("RichAds", "interstitial");
   },
   async requestBannerAd() {
     return unsupported("RichAds", "banner");
@@ -924,8 +919,12 @@ export async function requestMiniAppAd(input: MediationRequestInput): Promise<Mi
     }
 
     try {
-      await confirmImpression(input, selectedNetwork, currentDecision.request_id);
-      return adResult;
+      const confirmation = await confirmImpression(input, selectedNetwork, currentDecision.request_id);
+      return {
+        ...adResult,
+        reward_eligible: Boolean(confirmation?.reward_eligible),
+        status: String(confirmation?.status || "pending_provider_confirmation"),
+      };
     } catch (error: any) {
       return errorResult(selectedNetwork, "IMPRESSION_FAILED", error?.message || "Ad displayed but impression confirmation failed");
     }

@@ -73,8 +73,9 @@ export async function GET(request: Request) {
         : "'active'";
     const bannedAtExpr = columns.has("banned_at") ? "banned_at" : "NULL";
     const banReasonExpr = columns.has("ban_reason") ? "ban_reason" : "NULL";
-    const betaAccessExpr = columns.has("miniapp_beta_access") ? "miniapp_beta_access" : "0";
     const trustExpr = columns.has("advertiser_trust_level") ? "advertiser_trust_level" : "'new'";
+    const publisherTrustExpr = columns.has("publisher_trust_score") ? "publisher_trust_score" : "60";
+    const publisherRiskExpr = columns.has("publisher_risk_score") ? "publisher_risk_score" : "0";
     const trustUpdatedExpr = columns.has("advertiser_trust_updated_at") ? "advertiser_trust_updated_at" : "NULL";
     const trustNoteExpr = columns.has("advertiser_trust_note") ? "advertiser_trust_note" : "NULL";
 
@@ -84,8 +85,9 @@ export async function GET(request: Request) {
         CASE WHEN ${statusExpr} = 'banned' THEN 1 ELSE 0 END as is_banned,
         ${bannedAtExpr} as banned_at,
         ${banReasonExpr} as ban_reason,
-        ${betaAccessExpr} as miniapp_beta_access,
         ${trustExpr} as advertiser_trust_level,
+        ${publisherTrustExpr} as publisher_trust_score,
+        ${publisherRiskExpr} as publisher_risk_score,
         ${trustUpdatedExpr} as advertiser_trust_updated_at,
         ${trustNoteExpr} as advertiser_trust_note,
         (
@@ -136,15 +138,8 @@ export async function GET(request: Request) {
 
     const [rows] = await pool.query(query, [...queryParams, limit, offset]);
     const [[countRow]] = await pool.query<Array<RowDataPacket & { total: number }>>(countQuery, countParams);
-    const [[betaRow]] = await pool.query<Array<RowDataPacket & { count: number }>>(
-      columns.has("miniapp_beta_access")
-        ? "SELECT COUNT(*) as count FROM users WHERE miniapp_beta_access = 1"
-        : "SELECT 0 as count"
-    );
-
     return NextResponse.json({
       users: rows,
-      miniapp_beta_users_count: betaRow.count || 0,
       total: countRow.total,
       page,
       totalPages: Math.ceil(countRow.total / limit),
@@ -183,11 +178,6 @@ export async function PATCH(request: Request) {
 
     await ensureUserBanColumns(conn);
 
-    if (!(await columnExists(conn, "users", "miniapp_beta_access"))) {
-      await conn.query("ALTER TABLE users ADD COLUMN miniapp_beta_access TINYINT(1) NOT NULL DEFAULT 1");
-      await conn.query("UPDATE users SET miniapp_beta_access = 1 WHERE miniapp_beta_access <> 1");
-    }
-
     if (!(await columnExists(conn, "users", "advertiser_trust_level"))) {
       await conn.query("ALTER TABLE users ADD COLUMN advertiser_trust_level VARCHAR(20) NOT NULL DEFAULT 'new'");
     }
@@ -220,15 +210,6 @@ export async function PATCH(request: Request) {
         [id]
       );
       await audit("publisher_unban", { previous_status: before.status, new_status: "active" });
-      return NextResponse.json({ success: true });
-    }
-
-    if (action === "enable_miniapp_beta" || action === "disable_miniapp_beta") {
-      await conn.query(
-        "UPDATE users SET miniapp_beta_access = ? WHERE id = ?",
-        [action === "enable_miniapp_beta" ? 1 : 0, id]
-      );
-      await audit("miniapp_beta_access_change", { enabled: action === "enable_miniapp_beta" });
       return NextResponse.json({ success: true });
     }
 

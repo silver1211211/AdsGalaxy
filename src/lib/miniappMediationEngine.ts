@@ -35,6 +35,8 @@ type NetworkRow = RowDataPacket & {
   health_score?: number | null;
   internal_campaign_id?: number | null;
   internal_ad?: Record<string, unknown> | null;
+  richads_publisher_id: string | null;
+  richads_app_id: string | null;
 };
 
 type RequestRow = RowDataPacket & {
@@ -66,6 +68,8 @@ export type MediationDecision = {
   request_id?: string;
   selected_network?: MiniAppNetworkName;
   network_placement_id?: string;
+  richads_publisher_id?: string;
+  richads_app_id?: string;
   internal_ad?: Record<string, unknown> | null;
   enabled_networks: string[];
   candidate_networks: string[];
@@ -93,8 +97,11 @@ function isFuture(value: Date | string | null) {
   return new Date(value).getTime() > Date.now();
 }
 
-function supportsFormat(networkName: MiniAppNetworkName, adFormat: MiniAppAdFormat, networkPlacementId: string) {
-  const config = buildMiniAppNetworkClientConfig(networkName, networkPlacementId);
+function supportsFormat(network: NetworkRow, adFormat: MiniAppAdFormat) {
+  const config = buildMiniAppNetworkClientConfig(network.network_name as MiniAppNetworkName, network.network_placement_id || "", {
+    publisherId: network.richads_publisher_id,
+    appId: network.richads_app_id,
+  });
   if (adFormat === "rewarded") return config.supports_rewarded;
   if (adFormat === "interstitial") return config.supports_interstitial;
   if (adFormat === "banner") return config.supports_banner;
@@ -122,6 +129,8 @@ export async function getMiniappNetworksForMediation(miniappId: number | string,
     SELECT
       mn.network_name,
       mn.network_placement_id,
+      mn.richads_publisher_id,
+      mn.richads_app_id,
       mn.enabled,
       COALESCE(NULLIF(mn.priority_order, 0), FIELD(mn.network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')) as priority_order,
       mh.recent_failures,
@@ -208,7 +217,7 @@ export async function selectMediationNetwork(input: {
       network.internal_ad = internalCampaign.campaign;
     } else {
       try {
-        if (!supportsFormat(network.network_name, input.adFormat, network.network_placement_id || "")) {
+        if (!supportsFormat(network, input.adFormat)) {
           skipped.push({ network_name: network.network_name, reason: "unsupported_ad_format" });
           continue;
         }
@@ -359,6 +368,8 @@ export async function createMediationAttempt(input: {
     request_id: requestId,
     selected_network: decision.selected.network_name as MiniAppNetworkName,
     network_placement_id: decision.selected.network_placement_id || "",
+    richads_publisher_id: decision.selected.network_name === "RichAds" ? decision.selected.richads_publisher_id || "" : undefined,
+    richads_app_id: decision.selected.network_name === "RichAds" ? decision.selected.richads_app_id || "" : undefined,
     internal_ad: decision.selected.internal_ad || null,
     enabled_networks: decision.enabled_networks,
     candidate_networks: decision.candidate_networks,

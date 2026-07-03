@@ -12,12 +12,14 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+/* Intentionally no @media (prefers-color-scheme: dark) override here.
+   AdsGalaxy has no real, tested dark-mode design for its user-facing
+   (publisher/advertiser) screens — every screen is styled with hardcoded
+   light Tailwind classes. Letting `body` flip to a near-black background
+   under a dark OS/Telegram-app preference only caused unpainted gaps
+   (e.g. around full-screen detail overlays) to render black instead of
+   white. Telegram's own WebView chrome color is handled separately via
+   Telegram.WebApp.setBackgroundColor()/setHeaderColor() in telegramWebApp.ts. */
 
 body {
   background: var(--background);

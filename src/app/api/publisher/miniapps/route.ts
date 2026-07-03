@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
-import { assertMiniAppBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
 import { MiniAppSubmissionValidationError, validateMiniAppSubmission } from "@/lib/miniappSubmissionValidation";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
+import { notifyMiniAppSubmitted } from "@/lib/publisherNotifications";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
 type ExistingMiniAppRow = RowDataPacket & {
@@ -19,7 +19,6 @@ export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
-    await assertMiniAppBetaAccess(user);
 
     const [rows] = await pool.query(
       `SELECT
@@ -70,7 +69,7 @@ export async function GET(request: Request) {
     return NextResponse.json(rows);
   } catch (error: unknown) {
     console.error("Publisher Mini Apps GET Error:", error);
-    const status = error instanceof MiniAppBetaAccessError ? 403 : getAuthErrorStatus(error);
+    const status = getAuthErrorStatus(error);
     return NextResponse.json({ error: errorMessage(error, "Failed to fetch Mini Apps") }, { status });
   }
 }
@@ -82,7 +81,6 @@ export async function POST(request: Request) {
 
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
-    await assertMiniAppBetaAccess(user);
     const input = validateMiniAppSubmission(await request.json());
 
     const [existing] = await pool.query<ExistingMiniAppRow[]>(
@@ -103,6 +101,8 @@ export async function POST(request: Request) {
         [input.miniapp_name, input.bot_id, input.webapp_url, input.miniapp_url, existing[0].id, user.id]
       );
 
+      await notifyMiniAppSubmitted(user.telegram_id, existing[0].id, input.miniapp_name);
+
       return NextResponse.json({ success: true, id: existing[0].id });
     }
 
@@ -112,12 +112,12 @@ export async function POST(request: Request) {
       [user.id, input.miniapp_name, input.miniapp_username, input.bot_id, input.webapp_url, input.miniapp_url]
     );
 
+    await notifyMiniAppSubmitted(user.telegram_id, result.insertId, input.miniapp_name);
+
     return NextResponse.json({ success: true, id: result.insertId });
   } catch (error: unknown) {
     console.error("Publisher Mini Apps POST Error:", error);
-    const status = error instanceof MiniAppBetaAccessError
-      ? 403
-      : error instanceof MiniAppSubmissionValidationError
+    const status = error instanceof MiniAppSubmissionValidationError
         ? 400
         : getAuthErrorStatus(error);
     return NextResponse.json({ error: errorMessage(error, "Failed to submit Mini App") }, { status });

@@ -3,6 +3,7 @@ import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
 import { ensureBotIntegration, isBotEncryptionError, loadBotToken, publisherBotEncryptionErrorMessage, regenerateBotIntegration, resolveBotIntegrationStatus } from "@/lib/botIntegration";
+import { notifyBotRemoved } from "@/lib/publisherNotifications";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
 export const dynamic = "force-dynamic";
@@ -30,6 +31,20 @@ type PublisherBotDetailsRow = RowDataPacket & {
 
 type BotStatusRow = RowDataPacket & { status: string; bot_token: string; bot_token_encrypted: string | null };
 
+async function columnExists(tableName: string, columnName: string) {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT 1
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND COLUMN_NAME = ?
+     LIMIT 1`,
+    [tableName, columnName]
+  );
+
+  return rows.length > 0;
+}
+
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -38,6 +53,20 @@ export async function GET(
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
     const { id } = await params;
+    const [hasBotUserSource, hasIntegrationFirstSeen] = await Promise.all([
+      columnExists("bot_users", "source"),
+      columnExists("bot_users", "integration_first_seen_at"),
+    ]);
+    const integrationUserCountExpr = hasIntegrationFirstSeen
+      ? "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.integration_first_seen_at IS NOT NULL)"
+      : hasBotUserSource
+        ? "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.source = 'integration')"
+        : "0";
+    const manuallyImportedCountExpr = hasBotUserSource
+      ? "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.source <> 'integration')"
+      : hasIntegrationFirstSeen
+        ? "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.integration_first_seen_at IS NULL)"
+        : "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id)";
     const [rows] = await pool.query<PublisherBotDetailsRow[]>(
       `SELECT
         b.id,
@@ -54,8 +83,8 @@ export async function GET(
         b.integration_last_error,
         (SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id) as subscriber_count,
         (SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.is_active = TRUE AND bu.status = 'active') as active_count
-        ,(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.integration_first_seen_at IS NOT NULL) as integration_user_count
-        ,(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.source <> 'integration') as manually_imported_count
+        ,${integrationUserCountExpr} as integration_user_count
+        ,${manuallyImportedCountExpr} as manually_imported_count
         ,(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.status = 'pending_verification') as pending_verification_count
         ,(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND (bu.is_active=FALSE OR bu.status IN ('inactive','blocked_bot','user_not_found','chat_not_found','unreachable'))) as blocked_count
        FROM bots b
@@ -225,6 +254,11 @@ export async function DELETE(
     const user = await getAuthenticatedUser(initData);
     const { id } = await params;
 
+    const [botRows] = await pool.query<RowDataPacket[]>(
+      "SELECT bot_username FROM bots WHERE id = ? AND user_id = ?",
+      [id, user.id]
+    );
+
     await pool.query(
       `UPDATE bots
        SET is_deleted = TRUE,
@@ -235,6 +269,10 @@ export async function DELETE(
        WHERE id = ? AND user_id = ?`,
       [id, user.id]
     );
+
+    if (botRows[0]?.bot_username) {
+      await notifyBotRemoved(user.telegram_id, id, botRows[0].bot_username);
+    }
 
     return NextResponse.json({ success: true });
   } catch (error: unknown) {

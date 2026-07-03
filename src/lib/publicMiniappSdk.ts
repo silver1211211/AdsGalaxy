@@ -21,6 +21,8 @@ export function toPublicMediationDecision(decision: {
   request_id?: string;
   selected_network?: MiniAppNetworkName;
   network_placement_id?: string;
+  richads_publisher_id?: string;
+  richads_app_id?: string;
   internal_ad?: Record<string, unknown> | null;
   fallback_available?: boolean;
   ad_format?: string;
@@ -49,7 +51,10 @@ export function toPublicMediationDecision(decision: {
     };
   }
 
-  const config = buildMiniAppNetworkClientConfig(decision.selected_network, decision.network_placement_id || "");
+  const config = buildMiniAppNetworkClientConfig(decision.selected_network, decision.network_placement_id || "", {
+    publisherId: decision.richads_publisher_id,
+    appId: decision.richads_app_id,
+  });
   return {
     success: true,
     request_id: decision.request_id,

@@ -19,6 +19,8 @@ type NetworkRow = RowDataPacket & {
   network_name: string;
   network_placement_id: string | null;
   enabled: number | boolean;
+  richads_publisher_id: string | null;
+  richads_app_id: string | null;
 };
 
 function cleanText(value: unknown) {
@@ -55,7 +57,7 @@ export async function POST(
     }
 
     const [networks] = await pool.query<NetworkRow[]>(
-      `SELECT network_name, network_placement_id, enabled
+      `SELECT network_name, network_placement_id, enabled, richads_publisher_id, richads_app_id
        FROM miniapp_ad_networks
        WHERE miniapp_id = ? AND network_name = ?
        LIMIT 1`,
@@ -73,7 +75,10 @@ export async function POST(
 
     let config;
     try {
-      config = buildMiniAppNetworkClientConfig(networkName as MiniAppNetworkName, networks[0].network_placement_id || "");
+      config = buildMiniAppNetworkClientConfig(networkName as MiniAppNetworkName, networks[0].network_placement_id || "", {
+        publisherId: networks[0].richads_publisher_id,
+        appId: networks[0].richads_app_id,
+      });
     } catch (error: any) {
       return NextResponse.json({
         success: false,

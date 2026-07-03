@@ -48,7 +48,8 @@ interface MiniAppDetailsScreenProps {
   isResuming?: boolean;
 }
 
-type CopiedCode = "id" | "header" | "body" | null;
+type CopiedCode = "id" | "header" | "body" | "bot_url" | "miniapp_url" | "webapp_url" | null;
+type HelpField = "bot_url" | "miniapp_url" | "webapp_url" | null;
 
 type TelegramWebApp = {
   openLink?: (url: string) => void;
@@ -71,6 +72,67 @@ function openExternalUrl(url: string) {
     return;
   }
   window.open(url, "_blank", "noopener,noreferrer");
+}
+
+function miniAppBotUrl(username?: string | null) {
+  const cleaned = String(username || "").trim().replace(/^@/, "");
+  return cleaned ? `https://t.me/${cleaned}` : "";
+}
+
+function UrlInfoRow({
+  label, url, helpText, isHelpOpen, onToggleHelp, copied, onCopy,
+}: {
+  label: string; url: string; helpText: string;
+  isHelpOpen: boolean; onToggleHelp: () => void;
+  copied: boolean; onCopy: () => void;
+}) {
+  return (
+    <div className="px-4 py-3.5">
+      <div className="flex items-start justify-between gap-3">
+        <span className="flex shrink-0 items-center gap-1 pt-0.5 text-xs font-semibold text-slate-500">
+          {label}
+          <button
+            type="button"
+            onClick={onToggleHelp}
+            aria-label={`What is ${label}?`}
+            aria-expanded={isHelpOpen}
+            className={cn(
+              "flex h-4 w-4 shrink-0 items-center justify-center rounded-full transition",
+              isHelpOpen ? "bg-blue-100 text-[#0c9de8]" : "text-slate-300 hover:text-slate-500"
+            )}
+          >
+            <Info size={13} />
+          </button>
+        </span>
+        <div className="flex min-w-0 items-start gap-2">
+          <span className="min-w-0 break-all text-right text-sm font-bold text-slate-900">{url}</span>
+          <button
+            type="button"
+            onClick={onCopy}
+            aria-label={`Copy ${label}`}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500 transition active:scale-95"
+          >
+            {copied ? <CheckCircle2 size={13} className="text-emerald-500" /> : <Copy size={13} />}
+          </button>
+        </div>
+      </div>
+      <AnimatePresence initial={false}>
+        {isHelpOpen && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="overflow-hidden"
+          >
+            <p className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-[11px] font-medium leading-relaxed text-slate-500">
+              {helpText}
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
 }
 
 function IntegrationCodeBlock({
@@ -126,6 +188,8 @@ export default function MiniAppDetailsScreen({
   const [showIntegrationCode, setShowIntegrationCode] = useState(false);
   const [showGeneralInfo, setShowGeneralInfo] = useState(false);
   const [copiedCode, setCopiedCode] = useState<CopiedCode>(null);
+  const [openHelp, setOpenHelp] = useState<HelpField>(null);
+  const botUrl = miniAppBotUrl(miniapp.miniapp_username);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -176,7 +240,7 @@ export default function MiniAppDetailsScreen({
       animate={{ x: 0 }}
       exit={{ x: "100%" }}
       transition={{ type: "spring", damping: 25, stiffness: 200 }}
-      className="fixed top-16 left-0 right-0 bottom-0 z-[55] flex flex-col bg-[#f8f9fb] dark:bg-slate-950"
+      className="fixed top-16 left-0 right-0 bottom-0 z-[55] flex flex-col bg-[#f8f9fb]"
     >
       {/* ── Top bar ── */}
       <div className="relative z-10 flex shrink-0 items-center gap-3 border-b border-slate-100 bg-white px-4 py-3.5 shadow-sm">
@@ -341,17 +405,38 @@ export default function MiniAppDetailsScreen({
                       <span className="text-xs font-semibold text-slate-500">Bot ID</span>
                       <span className="font-mono text-sm font-bold text-slate-900">{miniapp.bot_id || "—"}</span>
                     </div>
-                    {miniapp.webapp_url && (
-                      <div className="flex items-start justify-between gap-3 px-4 py-3.5">
-                        <span className="shrink-0 text-xs font-semibold text-slate-500">Web App URL</span>
-                        <span className="min-w-0 break-all text-right text-sm font-bold text-slate-900">{miniapp.webapp_url}</span>
-                      </div>
+                    {botUrl && (
+                      <UrlInfoRow
+                        label="Bot URL"
+                        url={botUrl}
+                        helpText="The Telegram bot users interact with."
+                        isHelpOpen={openHelp === "bot_url"}
+                        onToggleHelp={() => setOpenHelp(v => (v === "bot_url" ? null : "bot_url"))}
+                        copied={copiedCode === "bot_url"}
+                        onCopy={() => copyCode("bot_url", botUrl)}
+                      />
                     )}
                     {miniapp.miniapp_url && (
-                      <div className="flex items-start justify-between gap-3 px-4 py-3.5">
-                        <span className="shrink-0 text-xs font-semibold text-slate-500">Mini App URL</span>
-                        <span className="min-w-0 break-all text-right text-sm font-bold text-slate-900">{miniapp.miniapp_url}</span>
-                      </div>
+                      <UrlInfoRow
+                        label="Telegram Mini App URL"
+                        url={miniapp.miniapp_url}
+                        helpText="The Telegram launch link for your Mini App."
+                        isHelpOpen={openHelp === "miniapp_url"}
+                        onToggleHelp={() => setOpenHelp(v => (v === "miniapp_url" ? null : "miniapp_url"))}
+                        copied={copiedCode === "miniapp_url"}
+                        onCopy={() => copyCode("miniapp_url", miniapp.miniapp_url as string)}
+                      />
+                    )}
+                    {miniapp.webapp_url && (
+                      <UrlInfoRow
+                        label="Web App URL"
+                        url={miniapp.webapp_url}
+                        helpText="The HTTPS website configured as your Mini App in BotFather. This is the URL required by AdsGram and most Telegram Mini App ad networks."
+                        isHelpOpen={openHelp === "webapp_url"}
+                        onToggleHelp={() => setOpenHelp(v => (v === "webapp_url" ? null : "webapp_url"))}
+                        copied={copiedCode === "webapp_url"}
+                        onCopy={() => copyCode("webapp_url", miniapp.webapp_url as string)}
+                      />
                     )}
                     <div className="flex items-center justify-between px-4 py-3.5">
                       <span className="text-xs font-semibold text-slate-500">Registered</span>

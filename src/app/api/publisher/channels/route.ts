@@ -19,6 +19,7 @@ import {
   type PrivateChannelTokenInspection,
 } from "@/lib/privateChannelVerificationToken";
 import { logPrivateChannelDiagnostic } from "@/lib/privateChannelDiagnostics";
+import { notifyChannelSubmitted } from "@/lib/publisherNotifications";
 
 type SettingRow = RowDataPacket & { value?: string | number | null };
 type ExistingChannelRow = RowDataPacket & { id: number; user_id: number; is_deleted: boolean | number };
@@ -148,7 +149,7 @@ export async function GET(request: Request) {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
     const [hasCampaignClicks, hasAdSettlements, hasAdSettlementsViews, hasCampaignPosts, hasCampaignPostViews,
-      hasClickReward, hasClickChannelId, hasViewReward, hasViewChannelId] = await Promise.all([
+      hasClickReward, hasClickChannelId, hasViewReward, hasViewChannelId, hasUpdatedAt] = await Promise.all([
       tableExists("campaign_clicks"),
       tableExists("ad_settlements"),
       tableExists("ad_settlements_views"),
@@ -158,6 +159,7 @@ export async function GET(request: Request) {
       columnExists("ad_settlements", "channel_id"),
       columnExists("ad_settlements_views", "publisher_reward"),
       columnExists("ad_settlements_views", "channel_id"),
+      columnExists("channels", "updated_at"),
     ]);
     const totalImpressionsExpr = hasCampaignPosts && hasCampaignPostViews
       ? "COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.channel_id = c.id), 0)"
@@ -200,7 +202,7 @@ export async function GET(request: Request) {
         c.failure_reason,
         c.marketplace_visible,
         c.created_at,
-        c.updated_at,
+        ${hasUpdatedAt ? "c.updated_at" : "c.created_at"} as updated_at,
         ${totalImpressionsExpr} as total_impressions,
         ${totalClicksExpr} as total_clicks,
         (${clickRevenueExpr} + ${viewRevenueExpr}) as total_revenue
@@ -485,6 +487,8 @@ export async function POST(request: Request) {
         });
       }
 
+      await notifyChannelSubmitted(user.telegram_id, channel.id, normalizedTitle);
+
       return NextResponse.json({
         success: true,
         id: channel.id,
@@ -561,6 +565,8 @@ export async function POST(request: Request) {
         final_reject_reason: "none",
       });
     }
+
+    await notifyChannelSubmitted(user.telegram_id, result.insertId, normalizedTitle);
 
     return NextResponse.json({ success: true, id: result.insertId });
   } catch (error: unknown) {

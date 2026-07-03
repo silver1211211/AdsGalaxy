@@ -9,7 +9,6 @@ import {
   recordMiniappNetworkFailure,
 } from "@/lib/miniappMediationEngine";
 import { isMiniAppNetworkName, type MiniAppAdFormat } from "@/lib/miniappNetworkAdapters";
-import { assertMiniAppOwnerBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
 import { isMiniappNetworkGloballyDisabled, requireAdServingAllowed } from "@/lib/productionSafety";
 
 function cleanText(value: unknown) {
@@ -78,8 +77,6 @@ export async function POST(request: Request) {
       await conn.rollback();
       return NextResponse.json({ error: "failed_network does not match the selected network" }, { status: 400 });
     }
-
-    await assertMiniAppOwnerBetaAccess(mediationRequest.miniapp_id, conn);
 
     await recordMiniappNetworkFailure({
       conn,
@@ -165,9 +162,7 @@ export async function POST(request: Request) {
     }
 
     const message = error?.message || "Failed to create mediation fallback";
-    const status = error instanceof MiniAppBetaAccessError
-      ? 403
-      : message.startsWith("Unauthorized") || message.startsWith("Invalid initData")
+    const status = message.startsWith("Unauthorized") || message.startsWith("Invalid initData")
         ? 401
         : 400;
     return NextResponse.json({ error: message }, { status });

@@ -67,6 +67,17 @@ function validateBotId(value: unknown) {
   return botId;
 }
 
+const TELEGRAM_LINK_HOSTNAMES = new Set(["t.me", "telegram.me", "www.t.me", "www.telegram.me"]);
+
+function isTelegramLinkHostname(hostname: string) {
+  const host = hostname.toLowerCase();
+  return TELEGRAM_LINK_HOSTNAMES.has(host) || host.endsWith(".t.me") || host.endsWith(".telegram.me");
+}
+
+// The Web App URL is the real HTTPS website configured as the Mini App in
+// BotFather (what AdsGram and other ad networks require) — it must never be
+// a t.me/telegram.me launch link, which belongs in the separate Mini App URL
+// field instead.
 function validateHttpsUrl(value: unknown) {
   const webappUrl = cleanText(value);
   let parsed: URL;
@@ -74,11 +85,15 @@ function validateHttpsUrl(value: unknown) {
   try {
     parsed = new URL(webappUrl);
   } catch {
-    fail("Web App URL must be HTTPS");
+    fail("Web App URL must be a valid HTTPS URL (e.g. https://yourapp.example.com)");
   }
 
   if (parsed.protocol !== "https:" || !parsed.hostname.includes(".")) {
-    fail("Web App URL must be HTTPS");
+    fail("Web App URL must be a valid HTTPS URL (e.g. https://yourapp.example.com)");
+  }
+
+  if (isTelegramLinkHostname(parsed.hostname)) {
+    fail("Web App URL must be the HTTPS website configured in BotFather, not a t.me or telegram.me link");
   }
 
   return parsed.toString();

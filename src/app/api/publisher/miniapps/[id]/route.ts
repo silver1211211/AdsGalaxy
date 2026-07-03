@@ -2,7 +2,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
-import { assertMiniAppBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
 import { MiniAppSubmissionValidationError, validateMiniAppSubmission } from "@/lib/miniappSubmissionValidation";
 
 export async function PATCH(
@@ -12,7 +11,6 @@ export async function PATCH(
   try {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
-    await assertMiniAppBetaAccess(user);
     const { id } = await params;
     const body = await request.json();
 
@@ -75,9 +73,7 @@ export async function PATCH(
     return NextResponse.json({ success: true });
   } catch (error: any) {
     console.error("Publisher Mini Apps PATCH Error:", error);
-    const status = error instanceof MiniAppBetaAccessError
-      ? 403
-      : error instanceof MiniAppSubmissionValidationError
+    const status = error instanceof MiniAppSubmissionValidationError
         ? 400
         : getAuthErrorStatus(error);
     return NextResponse.json({ error: error.message || "Failed to update Mini App" }, { status });
@@ -91,7 +87,6 @@ export async function DELETE(
   try {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
-    await assertMiniAppBetaAccess(user);
     const { id } = await params;
 
     const [rows]: any = await pool.query(
@@ -106,7 +101,7 @@ export async function DELETE(
     return NextResponse.json({ error: "Mini Apps submitted for integration can only be removed by an admin." }, { status: 403 });
   } catch (error: any) {
     console.error("Publisher Mini Apps DELETE Error:", error);
-    const status = error instanceof MiniAppBetaAccessError ? 403 : getAuthErrorStatus(error);
+    const status = getAuthErrorStatus(error);
     return NextResponse.json({ error: error.message || "Failed to process Mini App delete request" }, { status });
   }
 }

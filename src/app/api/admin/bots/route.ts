@@ -10,10 +10,12 @@ type AdminBotRow = RowDataPacket & Record<string, unknown>;
 type CountRow = RowDataPacket & { total: number };
 type BotSummaryRow = RowDataPacket & {
   monetized_bots: number | string | null;
+  delivery_eligible_bots: number | string | null;
   paused_bots: number | string | null;
   failed_bots: number | string | null;
   total_bot_users: number | string | null;
   active_bot_users: number | string | null;
+  delivery_eligible_bot_users: number | string | null;
   inactive_bot_users: number | string | null;
 };
 type BotActionRow = RowDataPacket & {
@@ -109,6 +111,7 @@ export async function GET(request: Request) {
     const blockedCountExpr = hasBotUsers
       ? `(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND (${botUserInactiveCondition}))`
       : "0";
+    const botHealthEligibleExpr = `COALESCE(${healthStatusExpr}, 'active') IN ('active', 'healthy')`;
     const botUsersSummary = hasBotUsers
       ? {
           total: "(SELECT COUNT(*) FROM bot_users)",
@@ -117,7 +120,14 @@ export async function GET(request: Request) {
          JOIN bots active_bots ON active_bots.id = bu.bot_id
          WHERE active_bots.status = 'active'
            AND ${botColumns.has("is_deleted") ? "active_bots.is_deleted = FALSE" : "1=1"}
-           AND COALESCE(${botColumns.has("health_status") ? "active_bots.health_status" : "'active'"}, 'active') = 'active'
+           AND ${botUserColumns.has("is_active") ? "bu.is_active = TRUE" : "1=1"}
+           AND ${botUserColumns.has("status") ? "bu.status = 'active'" : "1=1"})`,
+          deliveryEligible: `(SELECT COUNT(*)
+         FROM bot_users bu
+         JOIN bots active_bots ON active_bots.id = bu.bot_id
+         WHERE active_bots.status = 'active'
+           AND ${botColumns.has("is_deleted") ? "active_bots.is_deleted = FALSE" : "1=1"}
+           AND COALESCE(${botColumns.has("health_status") ? "active_bots.health_status" : "'active'"}, 'active') IN ('active', 'healthy')
            AND ${botUserColumns.has("is_active") ? "bu.is_active = TRUE" : "1=1"}
            AND ${botUserColumns.has("status") ? "bu.status = 'active'" : "1=1"})`,
           inactive: `(SELECT COUNT(*)
@@ -126,10 +136,9 @@ export async function GET(request: Request) {
          WHERE ${botUserColumns.has("is_active") ? "bu.is_active = FALSE" : "0=1"}
             OR ${botUserColumns.has("status") ? "bu.status != 'active'" : "0=1"}
             OR parent_bots.status != 'active'
-            OR COALESCE(${botColumns.has("health_status") ? "parent_bots.health_status" : "'active'"}, 'active') != 'active'
             OR ${botColumns.has("is_deleted") ? "parent_bots.is_deleted = TRUE" : "0=1"})`,
         }
-      : { total: "0", active: "0", inactive: "0" };
+      : { total: "0", active: "0", deliveryEligible: "0", inactive: "0" };
 
     let query = `
       SELECT
@@ -159,7 +168,7 @@ export async function GET(request: Request) {
         u.username AS owner_username,
         u.telegram_id as owner_telegram_id,
         CASE
-          WHEN b.status = 'active' AND COALESCE(${healthStatusExpr}, 'active') = 'active'
+          WHEN b.status = 'active'
             THEN ${activeCountExpr}
           ELSE 0
         END as active_count,
@@ -207,11 +216,13 @@ export async function GET(request: Request) {
     const [countRows] = await pool.query<CountRow[]>(countQuery, queryParams);
     const [summaryRows] = await pool.query<BotSummaryRow[]>(`
       SELECT
-        SUM(CASE WHEN b.status = 'active' AND ${isDeletedExpr} = FALSE AND COALESCE(${healthStatusExpr}, 'active') = 'active' THEN 1 ELSE 0 END) as monetized_bots,
+        SUM(CASE WHEN b.status = 'active' AND ${isDeletedExpr} = FALSE THEN 1 ELSE 0 END) as monetized_bots,
+        SUM(CASE WHEN b.status = 'active' AND ${isDeletedExpr} = FALSE AND ${botHealthEligibleExpr} THEN 1 ELSE 0 END) as delivery_eligible_bots,
         SUM(CASE WHEN b.status IN ('paused', 'token_invalid', 'bot_deleted', 'unreachable') AND ${isDeletedExpr} = FALSE THEN 1 ELSE 0 END) as paused_bots,
         SUM(CASE WHEN b.status IN ('token_invalid', 'bot_deleted', 'unreachable') AND ${isDeletedExpr} = FALSE THEN 1 ELSE 0 END) as failed_bots,
         ${botUsersSummary.total} as total_bot_users,
         ${botUsersSummary.active} as active_bot_users,
+        ${botUsersSummary.deliveryEligible} as delivery_eligible_bot_users,
         ${botUsersSummary.inactive} as inactive_bot_users
       FROM bots b
     `);
@@ -225,10 +236,12 @@ export async function GET(request: Request) {
       totalPages: Math.ceil(countRow.total / limit),
       summary: {
         monetized_bots: Number(summary?.monetized_bots || 0),
+        delivery_eligible_bots: Number(summary?.delivery_eligible_bots || 0),
         paused_bots: Number(summary?.paused_bots || 0),
         failed_bots: Number(summary?.failed_bots || 0),
         total_bot_users: Number(summary?.total_bot_users || 0),
         active_bot_users: Number(summary?.active_bot_users || 0),
+        delivery_eligible_bot_users: Number(summary?.delivery_eligible_bot_users || 0),
         inactive_bot_users: Number(summary?.inactive_bot_users || 0),
       },
     });

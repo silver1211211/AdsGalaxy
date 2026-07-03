@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy publisher stats payloads are not schema-generated */
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import {
@@ -15,6 +16,10 @@ export async function GET(request: Request) {
 
     // Fetch total channels count
     const [channelCountRows]: any = await pool.query(
+      "SELECT COUNT(*) as total FROM channels WHERE user_id = ? AND is_deleted = FALSE AND status = 'active'",
+      [user.id]
+    );
+    const [deliveryEligibleChannelRows]: any = await pool.query(
       "SELECT COUNT(*) as total FROM channels WHERE user_id = ? AND is_deleted = FALSE AND status = 'active' AND COALESCE(health_status, 'healthy') IN ('healthy','warning')",
       [user.id]
     );
@@ -35,24 +40,41 @@ export async function GET(request: Request) {
       [user.id]
     );
 
-    // Fetch last 3 added items across channels, bots, mini apps (any status except deleted,
-    // so newly added items still awaiting admin approval remain visible on the dashboard)
-    const [recentMonetized]: any = await pool.query(
-      `(SELECT 'channel' AS type, id, title AS name, username, status, created_at,
+    // Fetch recent assets per inventory type so a newer bot/mini app cannot crowd
+    // channels out of the publisher dashboard's monetized section.
+    const [recentMonetizedChannels]: any = await pool.query(
+      `SELECT 'channel' AS type, id, title AS name, username, status, created_at,
           posts_per_day, audience_continents, categories, channel_type
-        FROM channels WHERE user_id = ? AND is_deleted = FALSE)
-       UNION ALL
-       (SELECT 'bot' AS type, id, bot_name AS name, bot_username AS username, status, created_at,
-          posts_per_day, continents AS audience_continents, categories, NULL AS channel_type
-        FROM bots WHERE user_id = ? AND is_deleted = FALSE)
-       UNION ALL
-       (SELECT 'miniapp' AS type, id, miniapp_name AS name, miniapp_username AS username,
-          CASE WHEN status = 'awaiting' THEN 'pending' WHEN status = 'monetized' THEN 'approved' ELSE status END AS status,
-          created_at, NULL AS posts_per_day, NULL AS audience_continents, NULL AS categories, NULL AS channel_type
-        FROM miniapps WHERE user_id = ? AND is_deleted = FALSE)
-       ORDER BY created_at DESC LIMIT 3`,
-      [user.id, user.id, user.id]
+       FROM channels
+       WHERE user_id = ? AND is_deleted = FALSE AND status = 'active'
+       ORDER BY created_at DESC
+       LIMIT 3`,
+      [user.id]
     );
+    const [recentMonetizedBots]: any = await pool.query(
+      `SELECT 'bot' AS type, id, bot_name AS name, bot_username AS username, status, created_at,
+          posts_per_day, continents AS audience_continents, categories, NULL AS channel_type
+       FROM bots
+       WHERE user_id = ? AND is_deleted = FALSE AND status = 'active'
+       ORDER BY created_at DESC
+       LIMIT 3`,
+      [user.id]
+    );
+    const [recentMonetizedMiniapps]: any = await pool.query(
+      `SELECT 'miniapp' AS type, id, miniapp_name AS name, miniapp_username AS username,
+          CASE WHEN status = 'monetized' THEN 'approved' ELSE status END AS status,
+          created_at, NULL AS posts_per_day, NULL AS audience_continents, NULL AS categories, NULL AS channel_type
+       FROM miniapps
+       WHERE user_id = ? AND is_deleted = FALSE AND status IN ('approved', 'monetized')
+       ORDER BY created_at DESC
+       LIMIT 3`,
+      [user.id]
+    );
+    const recentMonetized = [
+      ...recentMonetizedChannels,
+      ...recentMonetizedBots,
+      ...recentMonetizedMiniapps,
+    ].sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
     // Fetch referral percentage from settings
     const [settingRows]: any = await pool.query(
@@ -86,6 +108,7 @@ export async function GET(request: Request) {
       balance_available: user.balance_available,
       total_withdrawn: totalWithdrawn,
       total_channels: channelCountRows[0].total,
+      delivery_eligible_channels: deliveryEligibleChannelRows[0].total,
       total_monetized: (channelCountRows[0].total || 0) + (botCountRows[0].total || 0) + (miniappCountRows[0].total || 0),
       recent_channels: recentChannels,
       recent_monetized: recentMonetized,

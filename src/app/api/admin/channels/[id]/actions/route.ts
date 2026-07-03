@@ -9,12 +9,15 @@ import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import { refreshChannelViews } from "@/lib/channelAdminViewRefresh";
 import { settleChannelCampaigns } from "@/lib/channelSettlement";
 import { getPublisherQuality } from "@/lib/publisherQuality";
+import { notifyChannelApproved, notifyChannelRejected, notifyChannelRemoved } from "@/lib/publisherNotifications";
+import { sendChannelWelcomePostIfNeeded } from "@/lib/channelWelcomePost";
 
 type ChannelRow = RowDataPacket & {
   id: number; user_id: number; status: string; is_deleted: number;
   chat_id: string; publisher_trust_score: number | string;
   trust_score_frozen_until: Date | null; under_review: number;
   settlement_excluded_until: Date | null; publisher_status: string; publisher_is_banned: number;
+  title: string; telegram_id: string | number | null;
 };
 
 const DANGEROUS = new Set(["delete", "adjust_trust", "reinstate", "settlement", "exclude_settlement", "include_settlement", "mark_false_positive"]);
@@ -42,8 +45,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
   const [rows] = await pool.query<ChannelRow[]>(
     `SELECT ch.id,ch.user_id,ch.status,ch.is_deleted,ch.chat_id,ch.publisher_trust_score,
-       ch.trust_score_frozen_until,ch.under_review,ch.settlement_excluded_until,
-       u.status publisher_status,u.is_banned publisher_is_banned
+       ch.trust_score_frozen_until,ch.under_review,ch.settlement_excluded_until,ch.title,
+       u.status publisher_status,u.is_banned publisher_is_banned,u.telegram_id
      FROM channels ch JOIN users u ON u.id=ch.user_id WHERE ch.id=? LIMIT 1`, [channelId]
   );
   const channel = rows[0];
@@ -56,15 +59,37 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     await pool.query("UPDATE channels SET status='paused',paused_reason='Paused by admin control center' WHERE id=?", [channelId]);
     newValue = { status: "paused" };
   } else if (action === "resume") {
-    await pool.query("UPDATE channels SET status='active',is_deleted=FALSE,paused_reason=NULL,failure_reason=NULL,reactivated_at=NOW() WHERE id=?", [channelId]);
+    // The status<>'active' guard makes this a compare-and-swap: a retried or
+    // double-submitted request only ever sees affectedRows=0 the second time,
+    // so the approval notification and welcome post never fire twice.
+    const [update] = await pool.query<ResultSetHeader>(
+      "UPDATE channels SET status='active',is_deleted=FALSE,paused_reason=NULL,failure_reason=NULL,reactivated_at=NOW() WHERE id=? AND status<>'active'",
+      [channelId]
+    );
     newValue = { status: "active" };
+    if (update.affectedRows > 0) {
+      await notifyChannelApproved(channel.telegram_id, channelId, channel.title);
+    }
+    await sendChannelWelcomePostIfNeeded(channelId, channel.chat_id);
   } else if (action === "reject") {
-    await pool.query("UPDATE channels SET status='rejected',paused_reason='Rejected by admin control center' WHERE id=?", [channelId]);
+    const [update] = await pool.query<ResultSetHeader>(
+      "UPDATE channels SET status='rejected',paused_reason='Rejected by admin control center' WHERE id=? AND status<>'rejected'",
+      [channelId]
+    );
     newValue = { status: "rejected" };
+    if (update.affectedRows > 0) {
+      await notifyChannelRejected(channel.telegram_id, channelId, channel.title);
+    }
   } else if (action === "delete") {
-    await pool.query("UPDATE channels SET status='deleted',is_deleted=TRUE,paused_reason=? WHERE id=?", [reason, channelId]);
+    const [update] = await pool.query<ResultSetHeader>(
+      "UPDATE channels SET status='deleted',is_deleted=TRUE,paused_reason=? WHERE id=? AND is_deleted=FALSE",
+      [reason, channelId]
+    );
     await clearPrivateTrackingAssignment(channelId, await getChannelPrivacySchema());
     newValue = { status: "deleted", is_deleted: true };
+    if (update.affectedRows > 0) {
+      await notifyChannelRemoved(channel.telegram_id, channelId, channel.title);
+    }
   } else if (action === "mark_review" || action === "clear_review") {
     const underReview = action === "mark_review" ? 1 : 0;
     oldValue = { under_review: Boolean(channel.under_review) };

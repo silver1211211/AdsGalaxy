@@ -11,6 +11,8 @@ type NetworkRow = RowDataPacket & {
   network_placement_id: string | null;
   enabled: number | boolean;
   priority_order: number | null;
+  richads_publisher_id: string | null;
+  richads_app_id: string | null;
 };
 
 type MiniAppRow = RowDataPacket & {
@@ -23,11 +25,13 @@ type SubmittedNetwork = {
   network_placement_id?: unknown;
   enabled?: unknown;
   priority_order?: unknown;
+  richads_publisher_id?: unknown;
+  richads_app_id?: unknown;
 };
 
 async function getNetworkState(miniappId: string) {
   const [rows] = await pool.query<NetworkRow[]>(
-    `SELECT network_name, network_placement_id, enabled, priority_order
+    `SELECT network_name, network_placement_id, enabled, priority_order, richads_publisher_id, richads_app_id
      FROM miniapp_ad_networks
      WHERE miniapp_id = ?
      ORDER BY COALESCE(NULLIF(priority_order, 0), FIELD(network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')),
@@ -43,6 +47,11 @@ async function getNetworkState(miniappId: string) {
       network_placement_id: row?.network_placement_id || "",
       enabled: Boolean(row?.enabled),
       priority_order: Number(row?.priority_order || NETWORKS.indexOf(networkName) + 1),
+      ...(networkName === "RichAds" ? {
+        richads_publisher_id: row?.richads_publisher_id || "",
+        richads_app_id: row?.richads_app_id || row?.network_placement_id || "",
+        integration_status: !row?.enabled ? "Disabled" : !row?.richads_publisher_id ? "Missing Publisher ID" : !(row?.richads_app_id || row?.network_placement_id) ? "Missing App ID" : "Ready",
+      } : {}),
     };
   }).sort((a, b) => a.priority_order - b.priority_order);
 }
@@ -96,6 +105,16 @@ export async function PUT(
 
     const previousState = await getNetworkState(id);
 
+    const submittedRichAds = submittedNetworks.find((item) => item?.network_name === "RichAds");
+    if (Boolean(submittedRichAds?.enabled)) {
+      if (!String(submittedRichAds?.richads_publisher_id || "").trim()) {
+        return NextResponse.json({ error: "RichAds cannot be enabled: Missing Publisher ID" }, { status: 400 });
+      }
+      if (!String(submittedRichAds?.richads_app_id || "").trim()) {
+        return NextResponse.json({ error: "RichAds cannot be enabled: Missing App ID" }, { status: 400 });
+      }
+    }
+
     for (const networkName of NETWORKS) {
       const submitted = submittedNetworks.find((item) => item?.network_name === networkName) || {};
       const placementId = String(submitted.network_placement_id || "").trim();
@@ -104,15 +123,20 @@ export async function PUT(
       const priorityOrder = Number.isInteger(submittedPriority) && submittedPriority > 0
         ? submittedPriority
         : NETWORKS.indexOf(networkName) + 1;
+      const richAdsPublisherId = networkName === "RichAds" ? String(submitted.richads_publisher_id || "").trim() : null;
+      const richAdsAppId = networkName === "RichAds" ? String(submitted.richads_app_id || "").trim() : null;
+      const effectivePlacementId = networkName === "RichAds" ? richAdsAppId : placementId;
 
       await pool.query(
-        `INSERT INTO miniapp_ad_networks (miniapp_id, network_name, network_placement_id, enabled, priority_order)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO miniapp_ad_networks (miniapp_id, network_name, network_placement_id, richads_publisher_id, richads_app_id, enabled, priority_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
           network_placement_id = VALUES(network_placement_id),
+          richads_publisher_id = VALUES(richads_publisher_id),
+          richads_app_id = VALUES(richads_app_id),
           enabled = VALUES(enabled),
           priority_order = VALUES(priority_order)`,
-        [id, networkName, placementId || null, enabled ? 1 : 0, priorityOrder]
+        [id, networkName, effectivePlacementId || null, richAdsPublisherId || null, richAdsAppId || null, enabled ? 1 : 0, priorityOrder]
       );
     }
 

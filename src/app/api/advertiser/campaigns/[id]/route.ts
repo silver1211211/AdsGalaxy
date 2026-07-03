@@ -134,7 +134,7 @@ export async function PATCH(
     const { action } = body;
 
     const [campaignRows]: any = await pool.query(
-      `SELECT id, name, status, budget, pause_reason, resume_locked_until, auto_reactivate
+      `SELECT id, name, status, budget, cpm, pause_reason, resume_locked_until, auto_reactivate
        FROM campaigns WHERE id = ? AND user_id = ?`,
       [id, user.id]
     );
@@ -194,8 +194,24 @@ export async function PATCH(
           }
         }
 
+        // Resuming must not require a locked/reserved campaign budget — only that
+        // the advertiser's own ad_balance can cover at least the next billable
+        // unit (view/click/broadcast send) at this campaign's CPM rate. Settlement
+        // itself is unchanged: if campaigns.budget is genuinely exhausted, the
+        // existing settlement/broadcast exhaustion logic will still apply once
+        // engagement is billed.
         if (parseFloat(campaign.budget || "0") <= 0) {
-          return NextResponse.json({ error: "Campaign budget is exhausted. Add budget before resuming." }, { status: 400 });
+          const unitPrice = parseFloat(campaign.cpm || "0") / 1000;
+          const [balanceRows] = await pool.query<RowDataPacket[]>(
+            "SELECT ad_balance FROM users WHERE id = ?",
+            [user.id]
+          );
+          const adBalance = parseFloat(String(balanceRows[0]?.ad_balance ?? "0"));
+          if (!(unitPrice > 0) || adBalance < unitPrice) {
+            return NextResponse.json({
+              error: "Insufficient ad balance to resume this campaign. Add funds to your ad balance to cover at least the next billable impression.",
+            }, { status: 400 });
+          }
         }
 
         await pool.query(`

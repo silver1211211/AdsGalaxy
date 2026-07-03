@@ -61,11 +61,11 @@ export async function POST(request: Request) {
     }
     if (!isMiniAppNetworkName(mediation.selected_network) || mediation.selected_network === "AdsGalaxyInternal") {
       await conn.rollback();
-      return NextResponse.json({ success: true, duplicate: Boolean(mediation?.impression_confirmed) });
+      return NextResponse.json({ success: true, user_id: telegramUserId, request_id: requestId, reward_eligible: false, status: "not_external_network" });
     }
     if (Boolean(mediation.impression_confirmed)) {
       await conn.commit();
-      return NextResponse.json({ success: true, duplicate: true });
+      return NextResponse.json({ success: true, user_id: telegramUserId, request_id: requestId, reward_eligible: false, status: "pending_provider_confirmation" });
     }
 
     const impressions = 1;
@@ -144,7 +144,7 @@ export async function POST(request: Request) {
     await conn.query("UPDATE miniapp_mediation_requests SET impression_confirmed = 1, impression_confirmed_at = NOW(), final_result = 'displayed' WHERE id = ?", [mediation.id]);
     await recordNetworkSuccess(conn, miniappId, mediation.selected_network);
     await conn.commit();
-    return NextResponse.json({ success: true, request_id: requestId, revenue_validation: validation });
+    return NextResponse.json({ success: true, user_id: telegramUserId, request_id: requestId, reward_eligible: false, status: "pending_provider_confirmation" });
   } catch (error: any) {
     try {
       await conn.rollback();

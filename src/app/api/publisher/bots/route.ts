@@ -4,6 +4,7 @@ import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { botTokenHash, encryptBotToken, ensureBotIntegration, isBotEncryptionError, publisherBotEncryptionErrorMessage, resolveBotIntegrationStatus } from "@/lib/botIntegration";
+import { notifyBotSubmitted } from "@/lib/publisherNotifications";
 
 type ExistingBotRow = RowDataPacket & { id: number; user_id: number; is_deleted: boolean | number };
 
@@ -42,10 +43,12 @@ export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
-    const [hasBroadcastDeliveries, hasWebhookTimestamp, hasBroadcastPublisherReward] = await Promise.all([
+    const [hasBroadcastDeliveries, hasWebhookTimestamp, hasBroadcastPublisherReward, hasBotUserSource, hasIntegrationFirstSeen] = await Promise.all([
       tableExists("broadcast_deliveries"),
       columnExists("bots", "webhook_last_update_at"),
       columnExists("broadcast_deliveries", "publisher_reward"),
+      columnExists("bot_users", "source"),
+      columnExists("bot_users", "integration_first_seen_at"),
     ]);
     const botImpressionsExpr = hasBroadcastDeliveries
       ? "COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id), 0)"
@@ -56,6 +59,16 @@ export async function GET(request: Request) {
     const webhookTimestampExpr = hasWebhookTimestamp
       ? "b.webhook_last_update_at,"
       : "NULL as webhook_last_update_at,";
+    const integrationUserCountExpr = hasBotUserSource
+      ? "(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND source = 'integration')"
+      : hasIntegrationFirstSeen
+        ? "(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND integration_first_seen_at IS NOT NULL)"
+        : "0";
+    const manuallyImportedCountExpr = hasBotUserSource
+      ? "(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND source <> 'integration')"
+      : hasIntegrationFirstSeen
+        ? "(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND integration_first_seen_at IS NULL)"
+        : "(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id)";
 
     const [rows] = await pool.query(
       `SELECT
@@ -87,8 +100,8 @@ export async function GET(request: Request) {
         END as active_count,
         (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND (is_active = FALSE OR status IN ('inactive','blocked_bot','user_not_found','chat_not_found','unreachable'))) as blocked_count,
         (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND status = 'pending_verification') as pending_verification_count,
-        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND source = 'integration') as integration_user_count,
-        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND source <> 'integration') as manually_imported_count,
+        ${integrationUserCountExpr} as integration_user_count,
+        ${manuallyImportedCountExpr} as manually_imported_count,
         ${botImpressionsExpr} as total_impressions,
         ${botRevenueExpr} as total_revenue
        FROM bots b 
@@ -180,6 +193,7 @@ export async function POST(request: Request) {
       );
 
       const integrationUrl = await ensureBotIntegration(pool, new URL(request.url).origin, bot.id);
+      await notifyBotSubmitted(user.telegram_id, bot.id, bot_username);
       return NextResponse.json({ success: true, id: bot.id, bot_id: bot.id, integration_url: integrationUrl, message: "Bot reactivated and updated" });
     }
 
@@ -191,6 +205,7 @@ export async function POST(request: Request) {
     );
 
     const integrationUrl = await ensureBotIntegration(pool, new URL(request.url).origin, result.insertId);
+    await notifyBotSubmitted(user.telegram_id, result.insertId, bot_username);
     return NextResponse.json({ success: true, id: result.insertId, bot_id: result.insertId, integration_url: integrationUrl }, { status: 201 });
   } catch (error: unknown) {
     console.error("API Error:", error);

@@ -5,7 +5,6 @@ import { getAuthenticatedUser } from "@/lib/auth";
 import { recordMiniappAdOpportunity } from "@/lib/miniappMonetagProtection";
 import { createMediationAttempt } from "@/lib/miniappMediationEngine";
 import type { MiniAppAdFormat } from "@/lib/miniappNetworkAdapters";
-import { assertMiniAppOwnerBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
 import { isMiniappNetworkGloballyDisabled, requireAdServingAllowed } from "@/lib/productionSafety";
 
 type MiniAppRow = RowDataPacket & {
@@ -84,8 +83,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Mini App is not approved for mediation" }, { status: 403 });
     }
 
-    await assertMiniAppOwnerBetaAccess(miniappId);
-
     await conn.beginTransaction();
 
     const monetagProtection = await recordMiniappAdOpportunity(miniappId, telegramUserId, conn);
@@ -145,9 +142,7 @@ export async function POST(request: Request) {
     }
 
     const message = error?.message || "Failed to create mediation request";
-    const status = error instanceof MiniAppBetaAccessError
-      ? 403
-      : message.startsWith("Unauthorized") || message.startsWith("Invalid initData")
+    const status = message.startsWith("Unauthorized") || message.startsWith("Invalid initData")
         ? 401
         : 400;
     return NextResponse.json({ error: message }, { status });

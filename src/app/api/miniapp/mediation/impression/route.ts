@@ -4,7 +4,6 @@ import pool from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth";
 import { getMiniAppFeePercent, isMiniAppNetworkName } from "@/lib/miniappStats";
 import { recordNetworkSuccess } from "@/lib/miniappOptimization";
-import { assertMiniAppOwnerBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
 import { validateMiniappRevenue } from "@/lib/miniappRevenueValidation";
 
 type MediationRequestRow = RowDataPacket & {
@@ -135,8 +134,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "telegram_user_id does not match mediation request" }, { status: 403 });
     }
 
-    await assertMiniAppOwnerBetaAccess(miniappId, conn);
-
     if (mediationRequest.selected_network !== networkName) {
       await conn.rollback();
       return NextResponse.json({ error: "network_name does not match selected network" }, { status: 400 });
@@ -156,10 +153,10 @@ export async function POST(request: Request) {
       await conn.commit();
       return NextResponse.json({
         success: true,
-        duplicate: true,
-        idempotent: true,
+        user_id: telegramUserId,
         request_id: requestId,
-        miniapp_id: miniappId,
+        reward_eligible: false,
+        status: "pending_provider_confirmation",
       });
     }
 
@@ -257,18 +254,10 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success: true,
-      duplicate: false,
+      user_id: telegramUserId,
       request_id: requestId,
-      miniapp_id: miniappId,
-      network_name: networkName,
-      impressions,
-      gross_revenue: grossRevenue,
-      ads_galaxy_fee: adsGalaxyFee,
-      publisher_revenue: publisherRevenue,
-      gross_cpm: grossCpm,
-      net_cpm: netCpm,
-      country: statCountry,
-      revenue_validation: validation,
+      reward_eligible: false,
+      status: "pending_provider_confirmation",
     });
   } catch (error: any) {
     try {
@@ -278,9 +267,7 @@ export async function POST(request: Request) {
     }
 
     const message = error?.message || "Failed to confirm Mini App impression";
-    const status = error instanceof MiniAppBetaAccessError
-      ? 403
-      : message.startsWith("Unauthorized") || message.startsWith("Invalid initData")
+    const status = message.startsWith("Unauthorized") || message.startsWith("Invalid initData")
         ? 401
         : 400;
     return NextResponse.json({ error: message }, { status });

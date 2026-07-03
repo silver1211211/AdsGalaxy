@@ -3,6 +3,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
+import { notifyMiniAppApproved, notifyMiniAppRejected, notifyMiniAppRemoved } from "@/lib/publisherNotifications";
 
 type MiniAppState = RowDataPacket & {
   id: number;
@@ -11,6 +12,7 @@ type MiniAppState = RowDataPacket & {
   miniapp_username: string;
   status: string;
   admin_approved_at: Date | string | null;
+  telegram_id: string | number | null;
 };
 
 type ConfiguredNetworkCountRow = RowDataPacket & {
@@ -39,7 +41,9 @@ export async function POST(
     }
 
     const [rows] = await pool.query<MiniAppState[]>(
-      "SELECT id, user_id, miniapp_name, miniapp_username, status, admin_approved_at FROM miniapps WHERE id = ? AND is_deleted = FALSE",
+      `SELECT ma.id, ma.user_id, ma.miniapp_name, ma.miniapp_username, ma.status, ma.admin_approved_at, u.telegram_id
+       FROM miniapps ma JOIN users u ON u.id = ma.user_id
+       WHERE ma.id = ? AND ma.is_deleted = FALSE`,
       [id]
     );
 
@@ -65,6 +69,7 @@ export async function POST(
     }
     if (action === "delete") {
       await pool.query("UPDATE miniapps SET is_deleted = TRUE, status = 'deleted' WHERE id = ?", [id]);
+      await notifyMiniAppRemoved(previousState.telegram_id, id, previousState.miniapp_name);
 
       await recordAdminActionAudit({
         adminId: admin.id,
@@ -108,6 +113,12 @@ export async function POST(
       );
     } else {
       await pool.query("UPDATE miniapps SET status = ? WHERE id = ?", [newStatus, id]);
+    }
+
+    if (action === "reject" && previousState.status !== "rejected") {
+      await notifyMiniAppRejected(previousState.telegram_id, id, previousState.miniapp_name);
+    } else if (newStatus === "approved" && previousState.status !== "approved") {
+      await notifyMiniAppApproved(previousState.telegram_id, id, previousState.miniapp_name);
     }
 
     await recordAdminActionAudit({

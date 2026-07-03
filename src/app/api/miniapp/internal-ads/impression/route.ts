@@ -5,7 +5,6 @@ import pool from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth";
 import { INTERNAL_NETWORK_NAME, recordInternalAdImpression } from "@/lib/miniappInternalAds";
 import { recordNetworkSuccess } from "@/lib/miniappOptimization";
-import { assertMiniAppOwnerBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
 import {
   isCompletionEvent,
   normalizeWatchDuration,
@@ -114,8 +113,6 @@ export async function POST(request: Request) {
       await conn.rollback();
       return NextResponse.json({ error: "telegram_user_id does not match mediation request" }, { status: 403 });
     }
-
-    await assertMiniAppOwnerBetaAccess(miniappId, conn);
 
     if (mediationRequest.selected_network !== INTERNAL_NETWORK_NAME || !mediationRequest.internal_campaign_id) {
       await conn.rollback();
@@ -244,9 +241,7 @@ export async function POST(request: Request) {
     }
 
     const message = error?.message || "Failed to confirm internal ad impression";
-    const status = error instanceof MiniAppBetaAccessError
-      ? 403
-      : message.startsWith("Unauthorized") || message.startsWith("Invalid initData")
+    const status = message.startsWith("Unauthorized") || message.startsWith("Invalid initData")
         ? 401
         : 400;
     return NextResponse.json({ error: message }, { status });

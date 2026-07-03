@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars -- legacy admin channel payloads are not schema-generated */
 import pool from "@/lib/db";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { sendTelegramMessage } from "@/lib/telegram";
@@ -85,11 +86,13 @@ export async function GET(request: Request) {
     const [[countRow]]: any = await pool.query(countQuery, queryParams);
     const [[summary]]: any = await pool.query(`
       SELECT
-        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'healthy') IN ('healthy','warning') THEN 1 ELSE 0 END) as active_channels,
+        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE THEN 1 ELSE 0 END) as active_channels,
+        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'healthy') IN ('healthy','warning') THEN 1 ELSE 0 END) as delivery_eligible_channels,
         SUM(CASE WHEN status IN ('paused', 'bot_removed', 'channel_not_found', 'permission_missing') AND is_deleted = FALSE THEN 1 ELSE 0 END) as paused_channels,
         SUM(CASE WHEN status IN ('bot_removed', 'channel_not_found', 'permission_missing') AND is_deleted = FALSE THEN 1 ELSE 0 END) as failed_channels,
         SUM(CASE WHEN status = 'deleted' OR is_deleted = TRUE THEN 1 ELSE 0 END) as deleted_channels,
-        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'healthy') IN ('healthy','warning') THEN subscriber_count ELSE 0 END) as active_subscribers
+        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE THEN subscriber_count ELSE 0 END) as active_subscribers,
+        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'healthy') IN ('healthy','warning') THEN subscriber_count ELSE 0 END) as delivery_eligible_subscribers
       FROM channels
     `);
 

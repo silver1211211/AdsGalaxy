@@ -7,7 +7,6 @@ import {
   isMiniAppNetworkName,
   type MiniAppNetworkName,
 } from "@/lib/miniappNetworkAdapters";
-import { assertMiniAppOwnerBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
 import { getDisabledMiniappNetworks, requireAdServingAllowed } from "@/lib/productionSafety";
 import { getAuthenticatedUser } from "@/lib/auth";
 
@@ -19,6 +18,8 @@ type MiniAppRow = RowDataPacket & {
 type NetworkRow = RowDataPacket & {
   network_name: string;
   network_placement_id: string | null;
+  richads_publisher_id: string | null;
+  richads_app_id: string | null;
 };
 
 export async function GET(request: Request) {
@@ -54,8 +55,6 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Mini App is not approved for mediation config" }, { status: 403 });
     }
 
-    await assertMiniAppOwnerBetaAccess(miniappId);
-
     const params: Array<number | string | string[]> = [miniappId, [...MINIAPP_NETWORKS]];
     let networkFilter = "";
 
@@ -65,7 +64,7 @@ export async function GET(request: Request) {
     }
 
     const [networkRows] = await pool.query<NetworkRow[]>(`
-      SELECT network_name, network_placement_id
+      SELECT network_name, network_placement_id, richads_publisher_id, richads_app_id
       FROM miniapp_ad_networks
       WHERE miniapp_id = ?
         AND enabled = TRUE
@@ -81,7 +80,10 @@ export async function GET(request: Request) {
       .filter((row) => !globallyDisabledNetworks.has(row.network_name))
       .map((row) => {
         try {
-          return buildMiniAppNetworkClientConfig(row.network_name as MiniAppNetworkName, row.network_placement_id || "");
+          return buildMiniAppNetworkClientConfig(row.network_name as MiniAppNetworkName, row.network_placement_id || "", {
+            publisherId: row.richads_publisher_id,
+            appId: row.richads_app_id,
+          });
         } catch {
           return null;
         }
@@ -98,7 +100,6 @@ export async function GET(request: Request) {
       networks: enabledNetworks,
     });
   } catch (error: any) {
-    const status = error instanceof MiniAppBetaAccessError ? 403 : 500;
-    return NextResponse.json({ error: error.message || "Failed to load Mini App mediation config" }, { status });
+    return NextResponse.json({ error: error.message || "Failed to load Mini App mediation config" }, { status: 500 });
   }
 }

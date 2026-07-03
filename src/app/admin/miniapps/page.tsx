@@ -6,7 +6,7 @@ import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Modal from "@/components/ui/Modal";
-import { BarChart3, Check, ChevronLeft, ChevronRight, Copy, ExternalLink, Link2, Loader2, Pause, Play, Search, Settings2, Smartphone, Trash2, X } from "lucide-react";
+import { BarChart3, Check, ChevronLeft, ChevronRight, Copy, ExternalLink, Info, Link2, Loader2, Pause, Play, Search, Settings2, Smartphone, Trash2, X } from "lucide-react";
 
 type MiniApp = {
   id: number;
@@ -55,6 +55,9 @@ type NetworkConfig = {
   network_placement_id: string;
   enabled: boolean;
   priority_order?: number;
+  richads_publisher_id?: string;
+  richads_app_id?: string;
+  integration_status?: "Ready" | "Missing Publisher ID" | "Missing App ID" | "Disabled";
 };
 
 type MiniAppReport = {
@@ -88,7 +91,7 @@ type PendingAction = {
 const placementLabels: Record<string, string> = {
   Monetag: "Zone ID",
   AdsGram: "Placement ID",
-  RichAds: "Widget ID",
+  RichAds: "App ID",
   AdExium: "Widget ID",
   GigaPub: "Project ID",
   AdsGalaxyInternal: "Internal AdsGalaxy Ads",
@@ -428,13 +431,21 @@ export default function AdminMiniAppsPage() {
             </div>
             <div className="space-y-3 p-6">
               {[
-                { label: "Bot ID", value: String(detailsMiniApp.bot_id || ""), url: false },
-                { label: "Bot URL", value: miniAppBotUrl(detailsMiniApp), url: true },
-                { label: "Mini App URL", value: detailsMiniApp.miniapp_url || "", url: true },
-                { label: "Web App URL", value: detailsMiniApp.webapp_url || "", url: true },
+                { label: "Bot ID", value: String(detailsMiniApp.bot_id || ""), url: false, help: "" },
+                { label: "Bot URL", value: miniAppBotUrl(detailsMiniApp), url: true, help: "The Telegram bot users interact with." },
+                { label: "Telegram Mini App URL", value: detailsMiniApp.miniapp_url || "", url: true, help: "The Telegram launch link for your Mini App." },
+                { label: "Web App URL", value: detailsMiniApp.webapp_url || "", url: true, help: "The HTTPS website configured as your Mini App in BotFather. This is the URL required by AdsGram and most Telegram Mini App ad networks." },
               ].map((item) => (
                 <div key={item.label} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">{item.label}</div>
+                  <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    {item.label}
+                    {item.help && (
+                      <span title={item.help}>
+                        <Info size={12} className="text-slate-400" />
+                      </span>
+                    )}
+                  </div>
+                  {item.help && <p className="mb-1.5 text-[11px] font-medium normal-case tracking-normal text-slate-500">{item.help}</p>}
                   <div className="flex items-center gap-2">
                     <div className="min-w-0 flex-1 break-all font-mono text-xs font-semibold text-slate-800">{item.value || "Not provided"}</div>
                     {item.url && item.value && (
@@ -517,7 +528,7 @@ export default function AdminMiniAppsPage() {
                     </div>
                     <div className="flex items-center gap-3">
                       <span className={`text-xs font-semibold ${network.enabled ? "text-emerald-600" : "text-slate-400"}`}>
-                        {network.enabled ? "Enabled" : "Disabled"}
+                        {network.network_name === "RichAds" ? "Enable RichAds" : network.enabled ? "Enabled" : "Disabled"}
                       </span>
                       <button
                         onClick={() => setNetworks((prev) => prev.map((item, i) => i === index ? { ...item, enabled: !item.enabled } : item))}
@@ -529,15 +540,33 @@ export default function AdminMiniAppsPage() {
                   </div>
                   {network.network_name !== "AdsGalaxyInternal" && (
                     <div className="mt-4 grid grid-cols-3 gap-3">
-                      <div className="col-span-2">
-                        <label className="mb-1.5 block text-xs font-semibold text-slate-600">{placementLabels[network.network_name] || "Placement ID"}</label>
-                        <input
-                          value={network.network_placement_id}
-                          onChange={(e) => setNetworks((prev) => prev.map((item, i) => i === index ? { ...item, network_placement_id: e.target.value } : item))}
-                          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                          placeholder={placementLabels[network.network_name]}
-                        />
-                      </div>
+                      {network.network_name === "RichAds" ? (
+                        <div className="col-span-2 space-y-3 rounded-lg border border-slate-200 bg-white p-3">
+                          <div>
+                            <label className="mb-1.5 block text-xs font-semibold text-slate-600">Publisher ID</label>
+                            <input value={network.richads_publisher_id || ""} onChange={(e) => setNetworks((prev) => prev.map((item, i) => i === index ? { ...item, richads_publisher_id: e.target.value } : item))} className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-500" placeholder="Your RichAds Publisher ID" />
+                            <p className="mt-1 text-[11px] text-slate-400">Your RichAds Publisher ID</p>
+                          </div>
+                          <div>
+                            <label className="mb-1.5 block text-xs font-semibold text-slate-600">App ID</label>
+                            <input value={network.richads_app_id || ""} onChange={(e) => setNetworks((prev) => prev.map((item, i) => i === index ? { ...item, richads_app_id: e.target.value, network_placement_id: e.target.value } : item))} className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-500" placeholder="RichAds App ID" />
+                            <p className="mt-1 text-[11px] text-slate-400">The App ID assigned by RichAds for this Telegram Mini App</p>
+                          </div>
+                          <p className={`text-xs font-bold ${network.enabled && network.richads_publisher_id?.trim() && network.richads_app_id?.trim() ? "text-emerald-600" : "text-amber-600"}`}>
+                            {network.enabled ? !network.richads_publisher_id?.trim() ? "Missing Publisher ID" : !network.richads_app_id?.trim() ? "Missing App ID" : "✓ Ready" : "Disabled"}
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="col-span-2">
+                          <label className="mb-1.5 block text-xs font-semibold text-slate-600">{placementLabels[network.network_name] || "Placement ID"}</label>
+                          <input
+                            value={network.network_placement_id}
+                            onChange={(e) => setNetworks((prev) => prev.map((item, i) => i === index ? { ...item, network_placement_id: e.target.value } : item))}
+                            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                            placeholder={placementLabels[network.network_name]}
+                          />
+                        </div>
+                      )}
                       <div>
                         <label className="mb-1.5 block text-xs font-semibold text-slate-600">Priority</label>
                         <input

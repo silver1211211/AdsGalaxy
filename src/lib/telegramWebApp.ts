@@ -3,6 +3,8 @@ type TelegramWebApp = {
   expand?: () => void;
   initData?: string;
   showAlert?: (message: string) => void;
+  setBackgroundColor?: (color: string) => void;
+  setHeaderColor?: (color: string) => void;
 };
 
 type TelegramWindow = Window & {
@@ -33,6 +35,22 @@ export function safePrepareTelegramWebApp() {
     webApp.expand?.();
   } catch (error) {
     console.warn("Telegram WebApp expand() failed:", error);
+  }
+
+  // Force Telegram's native WebView chrome (header bar and any area outside
+  // the page's own painted content, e.g. overscroll/resize slivers) to white.
+  // Without this, a user with Telegram's own app set to dark mode gets a
+  // black background from Telegram itself, independent of this app's CSS.
+  try {
+    webApp.setBackgroundColor?.("#ffffff");
+  } catch (error) {
+    console.warn("Telegram WebApp setBackgroundColor() failed:", error);
+  }
+
+  try {
+    webApp.setHeaderColor?.("#ffffff");
+  } catch (error) {
+    console.warn("Telegram WebApp setHeaderColor() failed:", error);
   }
 }
 

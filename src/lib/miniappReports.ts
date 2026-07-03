@@ -275,7 +275,7 @@ export async function buildMiniAppAdminBreakdown(miniappId: number | string, sta
   );
 
   const [enabledRows]: any = await pool.query(
-    `SELECT network_name, enabled, network_placement_id
+    `SELECT network_name, enabled, CASE WHEN network_name='RichAds' THEN NULL ELSE network_placement_id END network_placement_id
      FROM miniapp_ad_networks
      WHERE miniapp_id = ?
      ORDER BY FIELD(network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal'), network_name`,

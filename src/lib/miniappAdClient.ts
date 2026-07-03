@@ -7,6 +7,8 @@ import {
 export type MiniAppSelectedNetworkConfig = {
   network_name: string;
   network_placement_id: string;
+  richads_publisher_id?: string;
+  richads_app_id?: string;
 };
 
 export function prepareMiniAppAdClientConfig(config: MiniAppSelectedNetworkConfig) {
@@ -16,7 +18,8 @@ export function prepareMiniAppAdClientConfig(config: MiniAppSelectedNetworkConfi
 
   const normalized = buildMiniAppNetworkClientConfig(
     config.network_name as MiniAppNetworkName,
-    config.network_placement_id
+    config.network_placement_id,
+    { publisherId: config.richads_publisher_id, appId: config.richads_app_id }
   );
 
   return {

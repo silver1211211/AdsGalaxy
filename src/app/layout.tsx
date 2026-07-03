@@ -31,6 +31,11 @@ export default function RootLayout({
     >
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+        {/* Forces a light chrome/status-bar color and tells the rendering
+            engine this page is light-only, so Android WebView's "force dark"
+            (used by Telegram's Android app) does not auto-darken the page. */}
+        <meta name="theme-color" content="#ffffff" />
+        <meta name="color-scheme" content="light" />
         <meta name="adsgalaxy-build" content={appBuildMarker} />
       </head>
       <body className="min-h-full flex flex-col" suppressHydrationWarning>

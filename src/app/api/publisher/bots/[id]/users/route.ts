@@ -12,6 +12,20 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Internal Server Error";
 }
 
+async function columnExists(tableName: string, columnName: string) {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT 1
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND COLUMN_NAME = ?
+     LIMIT 1`,
+    [tableName, columnName]
+  );
+
+  return rows.length > 0;
+}
+
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -26,6 +40,13 @@ export async function GET(
     if (bots.length === 0) {
       return NextResponse.json({ error: "Bot not found" }, { status: 404 });
     }
+    const hasBotUserSource = await columnExists("bot_users", "source");
+    const integrationUsersExpr = hasBotUserSource
+      ? "SUM(CASE WHEN source = 'integration' THEN 1 ELSE 0 END)"
+      : "0";
+    const manuallyImportedExpr = hasBotUserSource
+      ? "SUM(CASE WHEN source <> 'integration' THEN 1 ELSE 0 END)"
+      : "COUNT(*)";
 
     // Get detailed counts
     const [counts] = await pool.query<CountRow[]>(
@@ -33,8 +54,8 @@ export async function GET(
         COUNT(*) as total,
         SUM(CASE WHEN is_active = TRUE AND status = 'active' THEN 1 ELSE 0 END) as active,
         SUM(CASE WHEN is_active = FALSE OR status IN ('inactive','blocked_bot','user_not_found','chat_not_found','unreachable') THEN 1 ELSE 0 END) as blocked,
-        SUM(CASE WHEN source = 'integration' THEN 1 ELSE 0 END) as integration_users,
-        SUM(CASE WHEN source <> 'integration' THEN 1 ELSE 0 END) as manually_imported,
+        ${integrationUsersExpr} as integration_users,
+        ${manuallyImportedExpr} as manually_imported,
         SUM(CASE WHEN status = 'pending_verification' THEN 1 ELSE 0 END) as pending_verification
        FROM bot_users WHERE bot_id = ?`, 
       [botId]
@@ -79,6 +100,7 @@ export async function POST(
     if (bots.length === 0) {
       return NextResponse.json({ error: "Bot not found" }, { status: 404 });
     }
+    const hasBotUserSource = await columnExists("bot_users", "source");
     // Existing users remain untouched, including users registered through /start integration.
     const [existing] = await pool.query<ExistingUserRow[]>(
       "SELECT chat_id FROM bot_users WHERE bot_id = ? AND chat_id IN (?)",
@@ -100,9 +122,16 @@ export async function POST(
 
     let newlyAddedCount = 0;
     for (let i = 0; i < newChatIds.length; i += 1000) {
-      const values = newChatIds.slice(i, i + 1000).map((id) => [botId, id, id, "manual_publisher", true, "pending_verification"]);
+      const values = newChatIds.slice(i, i + 1000).map((id) => (
+        hasBotUserSource
+          ? [botId, id, id, "manual_publisher", true, "pending_verification"]
+          : [botId, id, id, true, "pending_verification"]
+      ));
       const [insert] = await pool.query<import("mysql2/promise").ResultSetHeader>(
-        "INSERT IGNORE INTO bot_users (bot_id, user_id, chat_id, source, is_active, status) VALUES ?", [values]
+        hasBotUserSource
+          ? "INSERT IGNORE INTO bot_users (bot_id, user_id, chat_id, source, is_active, status) VALUES ?"
+          : "INSERT IGNORE INTO bot_users (bot_id, user_id, chat_id, is_active, status) VALUES ?",
+        [values]
       );
       newlyAddedCount += insert.affectedRows;
     }

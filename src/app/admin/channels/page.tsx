@@ -552,9 +552,10 @@ export default function AdminChannelsPage() {
 
       {/* Summary Stats */}
       {summary && (
-        <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-5">
           {[
             ["Active Channels", summary.active_channels, "text-emerald-700"],
+            ["Delivery Eligible", summary.delivery_eligible_channels, "text-blue-700"],
             ["Paused Channels", summary.paused_channels, "text-amber-700"],
             ["Failed Channels", summary.failed_channels, "text-red-700"],
             ["Deleted Channels", summary.deleted_channels, "text-slate-500"],

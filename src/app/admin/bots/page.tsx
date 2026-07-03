@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, react-hooks/static-components -- legacy admin bots page uses inline helpers and loose API rows */
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
@@ -373,10 +374,11 @@ export default function AdminBotsPage() {
       </div>
 
       {/* Summary Stats */}
-      <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-5">
         {[
           ["Monetized Bots", summary?.monetized_bots || 0, "text-slate-900"],
           ["Active Bot Users", summary?.active_bot_users || 0, "text-emerald-700"],
+          ["Delivery Eligible Users", summary?.delivery_eligible_bot_users || 0, "text-blue-700"],
           ["Paused Bots", summary?.paused_bots || 0, "text-amber-700"],
           ["Inactive Bot Users", summary?.inactive_bot_users || 0, "text-red-700"],
         ].map(([label, value, color]) => (

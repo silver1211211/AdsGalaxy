@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAuthenticatedAdmin } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
-import { assertMiniAppOwnerBetaAccess, MiniAppBetaAccessError } from "@/lib/miniappBetaAccess";
 import { recordMiniAppStats } from "@/lib/miniappStats";
 
 function hasInternalAccess(request: Request) {
@@ -20,10 +19,6 @@ export async function POST(request: Request) {
 
   try {
     const body = await request.json();
-    if (!admin) {
-      await assertMiniAppOwnerBetaAccess(Number(body.miniapp_id));
-    }
-
     const result = await recordMiniAppStats({
       miniapp_id: Number(body.miniapp_id),
       network_name: String(body.network_name || ""),
@@ -50,7 +45,6 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: true, stats: result });
   } catch (error: any) {
-    const status = error instanceof MiniAppBetaAccessError ? 403 : 400;
-    return NextResponse.json({ error: error.message || "Failed to record Mini App stats" }, { status });
+    return NextResponse.json({ error: error.message || "Failed to record Mini App stats" }, { status: 400 });
   }
 }

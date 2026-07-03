@@ -5,12 +5,15 @@ import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
 import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
+import { notifyBotApproved, notifyBotRejected, notifyBotRemoved } from "@/lib/publisherNotifications";
 
 type StatusRow = RowDataPacket & {
   id: number;
   status: string;
   bot_token: string;
   bot_token_encrypted: string | null;
+  bot_username: string | null;
+  telegram_id: string | number | null;
 };
 
 async function getBotColumns() {
@@ -61,7 +64,12 @@ export async function POST(
       return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
 
-    const [rows] = await pool.query<StatusRow[]>("SELECT id, status, bot_token, bot_token_encrypted FROM bots WHERE id = ?", [id]);
+    const [rows] = await pool.query<StatusRow[]>(
+      `SELECT b.id, b.status, b.bot_token, b.bot_token_encrypted, b.bot_username, u.telegram_id
+       FROM bots b JOIN users u ON u.id = b.user_id
+       WHERE b.id = ?`,
+      [id]
+    );
     if (rows.length === 0) {
       return NextResponse.json({ error: "Bot not found" }, { status: 404 });
     }
@@ -94,6 +102,17 @@ export async function POST(
       }
     } else {
       await pool.query("UPDATE bots SET status = ? WHERE id = ?", [newStatus, id]);
+    }
+
+    // Gated on the pre-update status so a retried/duplicate action (same
+    // status already in place) never sends a second notification.
+    const botUsername = rows[0].bot_username || "";
+    if (normalizedAction === "activate" && oldStatus !== "active") {
+      await notifyBotApproved(rows[0].telegram_id, id, botUsername);
+    } else if (normalizedAction === "reject" && oldStatus !== "rejected") {
+      await notifyBotRejected(rows[0].telegram_id, id, botUsername);
+    } else if (normalizedAction === "delete" && oldStatus !== "deleted") {
+      await notifyBotRemoved(rows[0].telegram_id, id, botUsername);
     }
 
     await recordAdminActionAudit({

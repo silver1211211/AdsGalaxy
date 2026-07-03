@@ -1,6 +1,7 @@
 export const MINIAPP_NETWORKS = ["AdsGram", "Monetag", "RichAds", "AdExium", "GigaPub", "AdsGalaxyInternal"] as const;
 export type MiniAppNetworkName = typeof MINIAPP_NETWORKS[number];
 export type MiniAppAdFormat = "rewarded" | "banner" | "interstitial";
+export const RICHADS_PRODUCTION_PLACEMENT = "telegram_interstitial_video" as const;
 
 export type MiniAppSdkErrorCode =
   | "SDK_LOAD_FAILED"
@@ -38,6 +39,8 @@ export type MiniAppNetworkAdapter = {
       global_name: string | null;
       placement_id_key: string;
       richads_publisher_id?: string;
+      richads_app_id?: string;
+      richads_placement_type?: typeof RICHADS_PRODUCTION_PLACEMENT;
       backup_script_url?: string | null;
       script_timeout_ms?: number;
     };
@@ -49,7 +52,6 @@ export type MiniAppNetworkAdapter = {
   requestBannerAd: "browser";
 };
 
-const richAdsPublisherId = process.env.RICHADS_PUBLISHER_ID || process.env.NEXT_PUBLIC_RICHADS_PUBLISHER_ID || "";
 const gigaPubPrimaryOrigin = process.env.GIGAPUB_PRIMARY_ORIGIN || process.env.NEXT_PUBLIC_GIGAPUB_PRIMARY_ORIGIN || "https://ad.gigapub.tech";
 const gigaPubBackupOrigin = process.env.GIGAPUB_BACKUP_ORIGIN || process.env.NEXT_PUBLIC_GIGAPUB_BACKUP_ORIGIN || "https://ru-ad.gigapub.tech";
 
@@ -87,11 +89,11 @@ const adapterDefinitions: Record<
   },
   AdExium: {
     network_name: "AdExium",
-    required_id_label: "Widget ID",
+    required_id_label: "App ID",
     supports_rewarded: false,
     supports_banner: false,
     supports_interstitial: true,
-    placement_id_key: "widget_id",
+    placement_id_key: "app_id",
     sdk_script_url: "https://cdn.techtg.space/assets/js/tg-ads-co-widget.min.js",
     sdk_global_name: "AdexiumWidget",
   },
@@ -100,16 +102,15 @@ const adapterDefinitions: Record<
     required_id_label: "Widget ID",
     supports_rewarded: true,
     supports_banner: false,
-    supports_interstitial: true,
+    // Production RichAds traffic is intentionally restricted to Telegram Interstitial Video.
+    // Add future RichAds placements as explicit adapter capabilities; never silently reuse this placement.
+    supports_interstitial: false,
     placement_id_key: "widget_id",
     sdk_script_url: "https://richinfo.co/richpartners/telegram/js/tg-ob.js",
     sdk_global_name: "TelegramAdsController",
     validateConfig: (networkPlacementId) => {
       if (!networkPlacementId.trim()) {
-        return { valid: false, error: "RichAds requires Widget ID" };
-      }
-      if (!richAdsPublisherId.trim()) {
-        return { valid: false, error: "RichAds requires RICHADS_PUBLISHER_ID or NEXT_PUBLIC_RICHADS_PUBLISHER_ID" };
+        return { valid: false, error: "Missing App ID" };
       }
       return { valid: true };
     },
@@ -179,7 +180,6 @@ export function getMiniAppNetworkAdapter(networkName: MiniAppNetworkName) {
         script_url: adapter.sdk_script_url,
         global_name: adapter.sdk_global_name,
         placement_id_key: adapter.placement_id_key,
-        ...(adapter.network_name === "RichAds" && richAdsPublisherId ? { richads_publisher_id: richAdsPublisherId } : {}),
         ...(adapter.network_name === "GigaPub" ? {
           backup_script_url: `${gigaPubBackupOrigin}/script`,
           script_timeout_ms: 15000,
@@ -189,14 +189,15 @@ export function getMiniAppNetworkAdapter(networkName: MiniAppNetworkName) {
   } satisfies MiniAppNetworkAdapter;
 }
 
-export function buildMiniAppNetworkClientConfig(networkName: MiniAppNetworkName, networkPlacementId: string) {
+export function buildMiniAppNetworkClientConfig(networkName: MiniAppNetworkName, networkPlacementId: string, richAds?: { publisherId?: string | null; appId?: string | null }) {
   const adapter = getMiniAppNetworkAdapter(networkName);
-  const normalizedPlacementId = networkPlacementId.trim();
+  const normalizedPlacementId = (networkName === "RichAds" ? richAds?.appId : networkPlacementId)?.trim() || "";
   const validation = adapter.validateConfig(normalizedPlacementId);
 
   if (!validation.valid) {
     throw new Error(validation.error || `${adapter.network_name} configuration is invalid`);
   }
+  if (networkName === "RichAds" && !richAds?.publisherId?.trim()) throw new Error("Missing Publisher ID");
 
   return {
     network_name: adapter.network_name,
@@ -205,6 +206,14 @@ export function buildMiniAppNetworkClientConfig(networkName: MiniAppNetworkName,
     client_config: {
       ...adapter.client_config_shape,
       network_placement_id: normalizedPlacementId,
+      sdk: {
+        ...adapter.client_config_shape.sdk,
+        ...(networkName === "RichAds" ? {
+          richads_publisher_id: richAds!.publisherId!.trim(),
+          richads_app_id: normalizedPlacementId,
+          richads_placement_type: RICHADS_PRODUCTION_PLACEMENT,
+        } : {}),
+      },
     },
     sdk_script_url: adapter.client_config_shape.sdk.script_url,
     sdk_global_name: adapter.client_config_shape.sdk.global_name,

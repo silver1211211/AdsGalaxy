@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
+import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { normalizePostingTimes, normalizePostsPerDay } from "@/lib/postingTimes";
 import { reactivateChannelAfterHealthCheck } from "@/lib/channelLifecycle";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import { clearPrivateTrackingAssignment } from "@/lib/privateChannelTrackingOnboarding";
+import { notifyChannelRemoved } from "@/lib/publisherNotifications";
 
 async function hasPostingTimesColumn() {
   const [rows]: any = await pool.query(`
@@ -140,11 +142,20 @@ export async function DELETE(
     const user = await getAuthenticatedUser(initData);
     const { id } = await params;
 
+    const [titleRows] = await pool.query<RowDataPacket[]>(
+      "SELECT title FROM channels WHERE id = ? AND user_id = ?",
+      [id, user.id]
+    );
+
     await pool.query(
       "UPDATE channels SET is_deleted = TRUE, status = 'deleted', paused_reason = 'Channel removed by publisher.', suggested_fix = NULL WHERE id = ? AND user_id = ?",
       [id, user.id]
     );
     await clearPrivateTrackingAssignment(id, await getChannelPrivacySchema());
+
+    if (titleRows[0]?.title) {
+      await notifyChannelRemoved(user.telegram_id, id, titleRows[0].title);
+    }
 
     return NextResponse.json({ success: true });
   } catch (error: any) {

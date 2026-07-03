@@ -31,8 +31,14 @@ export async function GET() {
 
     const [channelsQuery]: any = await pool.query("SELECT status, COUNT(*) as count FROM channels WHERE is_deleted = FALSE GROUP BY status");
     const channelsStats = channelsQuery.reduce((acc: any, row: any) => ({ ...acc, [row.status]: row.count }), {});
-    const [[activeChannels]]: any = await pool.query(`
-      SELECT COUNT(*) as count
+    const [[approvedChannels]]: any = await pool.query(`
+      SELECT COUNT(*) as count, COALESCE(SUM(subscriber_count), 0) as subscribers
+      FROM channels
+      WHERE is_deleted = FALSE
+        AND status = 'active'
+    `);
+    const [[deliveryEligibleChannels]]: any = await pool.query(`
+      SELECT COUNT(*) as count, COALESCE(SUM(subscriber_count), 0) as subscribers
       FROM channels
       WHERE is_deleted = FALSE
         AND status = 'active'
@@ -49,11 +55,20 @@ export async function GET() {
       SELECT COALESCE(SUM(subscriber_count), 0) as total
       FROM channels
       WHERE is_deleted = FALSE
-        AND status = 'active'
-        AND COALESCE(health_status, 'healthy') IN ('healthy','warning')
+    `);
+    const [audienceByCountry]: any = await pool.query(`
+      SELECT
+        COALESCE(NULLIF(UPPER(TRIM(marketplace_country)), ''), 'UNASSIGNED') as country,
+        COUNT(*) as channels,
+        COALESCE(SUM(COALESCE(subscriber_count, 0)), 0) as audience
+      FROM channels
+      WHERE is_deleted = FALSE
+      GROUP BY COALESCE(NULLIF(UPPER(TRIM(marketplace_country)), ''), 'UNASSIGNED')
+      ORDER BY audience DESC
     `);
     
-    const [[botsTotal]]: any = await pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status = 'active' AND COALESCE(health_status, 'active') = 'active'");
+    const [[botsTotal]]: any = await pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status = 'active'");
+    const [[botsDeliveryEligible]]: any = await pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status = 'active' AND COALESCE(health_status, 'active') IN ('active', 'healthy')");
     const [[botsPaused]]: any = await pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status IN ('paused', 'token_invalid', 'bot_deleted', 'unreachable')");
     const [[botUsersTotal]]: any = await pool.query("SELECT COUNT(*) as count FROM bot_users");
     const [[botUsersActive]]: any = await pool.query(`
@@ -62,7 +77,16 @@ export async function GET() {
       JOIN bots b ON b.id = bu.bot_id
       WHERE b.status = 'active'
         AND b.is_deleted = FALSE
-        AND COALESCE(b.health_status, 'active') = 'active'
+        AND bu.is_active = TRUE
+        AND bu.status = 'active'
+    `);
+    const [[botUsersDeliveryEligible]]: any = await pool.query(`
+      SELECT COUNT(*) as count
+      FROM bot_users bu
+      JOIN bots b ON b.id = bu.bot_id
+      WHERE b.status = 'active'
+        AND b.is_deleted = FALSE
+        AND COALESCE(b.health_status, 'active') IN ('active', 'healthy')
         AND bu.is_active = TRUE
         AND bu.status = 'active'
     `);
@@ -73,7 +97,6 @@ export async function GET() {
       WHERE bu.is_active = FALSE
          OR bu.status != 'active'
          OR b.status != 'active'
-         OR COALESCE(b.health_status, 'active') != 'active'
          OR b.is_deleted = TRUE
     `);
     const [[conversionTotals]]: any = await pool.query(`
@@ -139,17 +162,27 @@ export async function GET() {
       },
       channels: {
         pending: channelsStats.pending || 0,
-        approved: activeChannels.count || 0,
+        approved: approvedChannels.count || 0,
         rejected: channelsStats.rejected || 0,
         paused: (channelsStats.paused || 0) + (channelsStats.bot_removed || 0) + (channelsStats.channel_not_found || 0) + (channelsStats.permission_missing || 0) + (channelsStats.deleted || 0),
         failed: (channelsStats.bot_removed || 0) + (channelsStats.channel_not_found || 0) + (channelsStats.permission_missing || 0),
-        total: activeChannels.count || 0,
-        totalSubscribers: totalSubscribers.total || 0
+        total: approvedChannels.count || 0,
+        approvedSubscribers: Number(approvedChannels.subscribers || 0),
+        deliveryEligible: deliveryEligibleChannels.count || 0,
+        deliveryEligibleSubscribers: Number(deliveryEligibleChannels.subscribers || 0),
+        totalSubscribers: Number(totalSubscribers.total || 0),
+        audienceByCountry: audienceByCountry.map((row: any) => ({
+          country: row.country,
+          channels: Number(row.channels || 0),
+          audience: Number(row.audience || 0),
+        }))
       },
       bots: {
         total: botsTotal.count,
+        deliveryEligible: botsDeliveryEligible.count,
         totalUsers: botUsersTotal.count,
         activeUsers: botUsersActive.count,
+        deliveryEligibleUsers: botUsersDeliveryEligible.count,
         paused: botsPaused.count,
         inactiveUsers: botUsersInactive.count
       },

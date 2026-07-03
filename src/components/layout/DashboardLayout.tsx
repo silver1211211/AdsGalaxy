@@ -61,7 +61,6 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
         }
 
         window.localStorage.setItem("last_dashboard", type);
-        window.localStorage.setItem("ag_miniapp_beta", data.miniapp_beta_access ? "1" : "0");
         setBootState("ready");
       } catch (error) {
         console.error("Dashboard boot failed:", error);

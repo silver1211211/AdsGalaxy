@@ -3,6 +3,8 @@ import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
+import { ensureWithdrawalSubmissionColumns } from "@/lib/schemaGuards";
+import { notifyWithdrawalPaid, notifyWithdrawalRejected } from "@/lib/publisherNotifications";
 
 type ColumnRow = RowDataPacket & {
   COLUMN_NAME: string;
@@ -18,6 +20,8 @@ type WithdrawalRow = RowDataPacket & {
   paid_at?: string | Date | null;
   balance_locked: string | number;
   balance_available: string | number;
+  network?: string | null;
+  telegram_id?: string | number | null;
 };
 
 type CountRow = RowDataPacket & {
@@ -228,6 +232,7 @@ export async function PATCH(request: Request) {
 
   try {
     await ensureWithdrawalActionColumns(conn);
+    await ensureWithdrawalSubmissionColumns(conn);
     if (action === "ban_user") {
       await ensureUserBanColumns(conn);
     }
@@ -235,7 +240,7 @@ export async function PATCH(request: Request) {
     await conn.beginTransaction();
 
     const [wRows] = await conn.query<WithdrawalRow[]>(`
-      SELECT w.id, w.user_id, w.amount, w.status, w.refunded, w.paid_out, u.balance_locked, u.balance_available
+      SELECT w.id, w.user_id, w.amount, w.status, w.refunded, w.paid_out, w.network, u.balance_locked, u.balance_available, u.telegram_id
       FROM withdrawals w
       JOIN users u ON w.user_id = u.id
       WHERE w.id = ?
@@ -270,6 +275,11 @@ export async function PATCH(request: Request) {
 
       await conn.query("UPDATE withdrawals SET status = 'success', refunded = 0, paid_out = 1, paid_at = COALESCE(paid_at, NOW()) WHERE id = ?", [id]);
       await conn.commit();
+      // wasPaidOut was read under FOR UPDATE, so a retried/duplicate approve
+      // call always observes the already-paid row and skips renotifying.
+      if (!wasPaidOut) {
+        await notifyWithdrawalPaid(withdrawal.telegram_id, { withdrawalId: id, amount, network: withdrawal.network });
+      }
       await recordAdminActionAudit({
         adminId: admin?.id,
         action: "withdrawal_approve",
@@ -307,6 +317,14 @@ export async function PATCH(request: Request) {
       );
 
       await conn.commit();
+      if (currentStatus !== "rejected") {
+        await notifyWithdrawalRejected(withdrawal.telegram_id, {
+          withdrawalId: id,
+          amount,
+          reason: reason || null,
+          refunded: wasRefunded || shouldRefund,
+        });
+      }
       await recordAdminActionAudit({
         adminId: admin?.id,
         action: "withdrawal_reject",
