@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy mediation query results are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import {
@@ -33,7 +34,8 @@ export async function POST(request: Request) {
     if (blocked) return blocked;
 
     const body = await request.json().catch(() => ({}));
-    const sdkUser = await requirePublicSdkUser(request);
+    const miniappId = Number(body.miniapp_id);
+    const sdkUser = await requirePublicSdkUser(request, miniappId, clean(body.telegram_user_id));
     const requestId = clean(body.request_id);
     const errorCode = clean(body.error_code) || "NETWORK_ERROR";
     const errorMessage = clean(body.error_message) || "Ad source failed";
@@ -49,6 +51,10 @@ export async function POST(request: Request) {
     if (!mediationRequest) {
       await conn.rollback();
       return NextResponse.json({ success: false, error_code: "REQUEST_FAILED", message: "Ad request not found" }, { status: 404 });
+    }
+    if (Number(mediationRequest.miniapp_id) !== miniappId) {
+      await conn.rollback();
+      return NextResponse.json({ success: false, error_code: "INVALID_APP", message: "Ad request does not belong to this Mini App" }, { status: 403 });
     }
     if (String(mediationRequest.telegram_user_id) !== sdkUser.telegramUserId) {
       await conn.rollback();

@@ -27,6 +27,7 @@ export async function GET(request: Request) {
         m.miniapp_name,
         m.miniapp_username,
         m.bot_id,
+        m.telegram_bot_id,
         m.webapp_url,
         m.miniapp_url,
         m.admin_approved_at,

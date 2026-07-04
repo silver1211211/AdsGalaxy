@@ -46,6 +46,7 @@ scripts/
 scripts/*
 !scripts/generate-mt-session.js
 !scripts/test-private-views.js
+!scripts/verify-miniapp-ed25519.ts
 scratch/
 .telegram-mt-session*
 

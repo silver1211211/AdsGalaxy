@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy mediation errors are not schema-generated */
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
@@ -32,13 +33,10 @@ export async function POST(request: Request) {
   const conn = await pool.getConnection();
   try {
     const body = await request.json().catch(() => ({}));
-    const sdkUser = await requirePublicSdkUser(request);
     const requestId = clean(body.request_id);
     const miniappId = Number(body.miniapp_id);
     const suppliedUserId = clean(body.telegram_user_id);
-    if (suppliedUserId && suppliedUserId !== sdkUser.telegramUserId) {
-      return NextResponse.json({ success: false, error_code: "INVALID_INIT_DATA", message: "telegram_user_id does not match authenticated user" }, { status: 403 });
-    }
+    const sdkUser = await requirePublicSdkUser(request, miniappId, suppliedUserId);
     const telegramUserId = sdkUser.telegramUserId;
     const country = clean(body.country).toUpperCase();
 

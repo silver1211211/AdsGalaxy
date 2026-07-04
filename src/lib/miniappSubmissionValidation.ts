@@ -2,6 +2,7 @@ export type MiniAppSubmissionInput = {
   miniapp_name?: unknown;
   miniapp_username?: unknown;
   bot_id?: unknown;
+  telegram_bot_id?: unknown;
   webapp_url?: unknown;
   miniapp_url?: unknown;
 };
@@ -11,6 +12,7 @@ export type ValidatedMiniAppSubmission = {
   miniapp_username: string;
   miniapp_username_with_at: string;
   bot_id: string;
+  telegram_bot_id: string;
   webapp_url: string;
   miniapp_url: string;
 };
@@ -150,6 +152,7 @@ export function validateMiniAppSubmission(input: MiniAppSubmissionInput): Valida
 
   const username = normalizeBotUsername(input.miniapp_username);
   const botId = validateBotId(input.bot_id);
+  const telegramBotId = validateBotId(input.telegram_bot_id ?? input.bot_id);
   const webappUrl = validateHttpsUrl(input.webapp_url);
   const miniappUrl = validateMiniAppUrl(input.miniapp_url, username.username);
 
@@ -158,6 +161,7 @@ export function validateMiniAppSubmission(input: MiniAppSubmissionInput): Valida
     miniapp_username: username.username,
     miniapp_username_with_at: username.usernameWithAt,
     bot_id: botId,
+    telegram_bot_id: telegramBotId,
     webapp_url: webappUrl,
     miniapp_url: miniappUrl,
   };

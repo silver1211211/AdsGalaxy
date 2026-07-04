@@ -197,7 +197,7 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
       return display(decision,options).catch(function(e){
         environmentDebug(decision.adapter,e,options);
         if(!decision.fallback_available)throw normalizeError(e);
-        return request("/api/sdk/miniapp/fallback",{request_id:decision.request_id,error_code:e.code||"NETWORK_ERROR",error_message:e.message||"Ad source failed"},options).then(attempt);
+        return request("/api/sdk/miniapp/fallback",{request_id:decision.request_id,miniapp_id:Number(options.miniappId),telegram_user_id:String(userId(options)),error_code:e.code||"NETWORK_ERROR",error_message:e.message||"Ad source failed"},options).then(attempt);
       });
     }
     var promise=prepareTelegram(options).then(function(){

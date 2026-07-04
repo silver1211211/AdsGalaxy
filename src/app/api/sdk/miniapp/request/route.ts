@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy mediation query results are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { createMediationAttempt } from "@/lib/miniappMediationEngine";
@@ -35,18 +36,12 @@ export async function POST(request: Request) {
 
     const body = await request.json().catch(() => ({}));
     const miniappId = Number(body.miniapp_id);
-    const sdkUser = await requirePublicSdkUser(request);
     const suppliedUserId = clean(body.telegram_user_id);
-    if (suppliedUserId && suppliedUserId !== sdkUser.telegramUserId) {
-      return NextResponse.json({ success: false, error_code: "INVALID_INIT_DATA", message: "telegram_user_id does not match authenticated user" }, { status: 403 });
-    }
+    const sdkUser = await requirePublicSdkUser(request, miniappId, suppliedUserId);
     const telegramUserId = sdkUser.telegramUserId;
     const adFormat = normalizeAdFormat(body.ad_format);
     const country = normalizeCountry(body.country);
 
-    if (!Number.isInteger(miniappId) || miniappId <= 0) {
-      return NextResponse.json({ success: false, error_code: "INVALID_APP", message: "Valid Mini App ID is required" }, { status: 400 });
-    }
     const [[rateRow]]: any = await pool.query(
       "SELECT COUNT(*) AS count FROM miniapp_mediation_requests WHERE telegram_user_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)",
       [telegramUserId]

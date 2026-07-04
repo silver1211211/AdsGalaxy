@@ -27,6 +27,7 @@ export async function GET(request: Request) {
         miniapp_name,
         miniapp_username,
         bot_id,
+        telegram_bot_id,
         webapp_url,
         miniapp_url,
         CASE
@@ -95,10 +96,10 @@ export async function POST(request: Request) {
     if (existing.length > 0) {
       await pool.query(
         `UPDATE miniapps
-         SET miniapp_name = ?, bot_id = ?, webapp_url = ?, miniapp_url = ?, status = 'pending',
+         SET miniapp_name = ?, bot_id = ?, telegram_bot_id = ?, webapp_url = ?, miniapp_url = ?, status = 'pending',
              admin_approved_at = NULL, admin_approved_by = NULL, is_deleted = FALSE
          WHERE id = ? AND user_id = ?`,
-        [input.miniapp_name, input.bot_id, input.webapp_url, input.miniapp_url, existing[0].id, user.id]
+        [input.miniapp_name, input.bot_id, input.telegram_bot_id, input.webapp_url, input.miniapp_url, existing[0].id, user.id]
       );
 
       await notifyMiniAppSubmitted(user.telegram_id, existing[0].id, input.miniapp_name);
@@ -107,9 +108,9 @@ export async function POST(request: Request) {
     }
 
     const [result] = await pool.query<ResultSetHeader>(
-      `INSERT INTO miniapps (user_id, miniapp_name, miniapp_username, bot_id, webapp_url, miniapp_url, status)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
-      [user.id, input.miniapp_name, input.miniapp_username, input.bot_id, input.webapp_url, input.miniapp_url]
+      `INSERT INTO miniapps (user_id, miniapp_name, miniapp_username, bot_id, telegram_bot_id, webapp_url, miniapp_url, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      [user.id, input.miniapp_name, input.miniapp_username, input.bot_id, input.telegram_bot_id, input.webapp_url, input.miniapp_url]
     );
 
     await notifyMiniAppSubmitted(user.telegram_id, result.insertId, input.miniapp_name);

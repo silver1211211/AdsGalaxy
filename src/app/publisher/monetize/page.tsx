@@ -343,7 +343,7 @@ function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBo
         {errs.username && <p className="text-[11px] font-bold text-red-500 pl-1">{errs.username}</p>}
       </div>
       <div className="space-y-1.5">
-        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Bot ID</label>
+        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Numeric Telegram Bot ID</label>
         <div className="relative">
           <input
             type="text"
@@ -371,6 +371,7 @@ function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBo
         {!errs.botId && botVerify.status === "error" && (
           <p className="text-[11px] font-bold text-amber-500 pl-1">{botVerify.message} — check ID manually</p>
         )}
+        <p className="text-[11px] text-slate-400 pl-1">Get this numeric ID from BotFather or Telegram&apos;s getMe response. Never enter a bot token.</p>
       </div>
       <div className="space-y-1.5">
         <label className="flex items-center gap-1 text-[10px] font-black text-slate-400 uppercase tracking-widest">
@@ -883,6 +884,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
         miniapp_name: maName,
         miniapp_username: maUsername,
         bot_id: maBotId,
+        telegram_bot_id: maBotId,
         webapp_url: maWebUrl,
         miniapp_url: maMaUrl,
       });
@@ -902,6 +904,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
           miniapp_name: maName,
           miniapp_username: maUsername,
           bot_id: maBotId,
+          telegram_bot_id: maBotId,
           webapp_url: maWebUrl,
           miniapp_url: maMaUrl,
         }),
@@ -1825,7 +1828,7 @@ export default function MonetizePage() {
     try {
       const res  = await apiFetch(`/api/publisher/miniapps/${editingMiniApp.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ miniapp_name: maEditName, miniapp_username: maEditUser, bot_id: maEditBotId, webapp_url: maEditWebUrl, miniapp_url: maEditMaUrl }),
+        body: JSON.stringify({ miniapp_name: maEditName, miniapp_username: maEditUser, bot_id: maEditBotId, telegram_bot_id: maEditBotId, webapp_url: maEditWebUrl, miniapp_url: maEditMaUrl }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to update Mini App");
@@ -1843,7 +1846,7 @@ export default function MonetizePage() {
     if (editingMiniApp) {
       setMaEditName(editingMiniApp.miniapp_name || "");
       setMaEditUser(editingMiniApp.miniapp_username || "");
-      setMaEditBotId(String(editingMiniApp.bot_id || ""));
+      setMaEditBotId(String(editingMiniApp.telegram_bot_id || editingMiniApp.bot_id || ""));
       setMaEditWebUrl(editingMiniApp.webapp_url || "");
       setMaEditMaUrl(editingMiniApp.miniapp_url || "");
     }

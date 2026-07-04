@@ -60,10 +60,10 @@ export async function PATCH(
 
     const [result]: any = await pool.query(
       `UPDATE miniapps
-       SET miniapp_name = ?, miniapp_username = ?, bot_id = ?, webapp_url = ?, miniapp_url = ?,
+       SET miniapp_name = ?, miniapp_username = ?, bot_id = ?, telegram_bot_id = ?, webapp_url = ?, miniapp_url = ?,
            status = 'pending', admin_approved_at = NULL, admin_approved_by = NULL
        WHERE id = ? AND user_id = ? AND is_deleted = FALSE`,
-      [input.miniapp_name, input.miniapp_username, input.bot_id, input.webapp_url, input.miniapp_url, id, user.id]
+      [input.miniapp_name, input.miniapp_username, input.bot_id, input.telegram_bot_id, input.webapp_url, input.miniapp_url, id, user.id]
     );
 
     if (result.affectedRows === 0) {

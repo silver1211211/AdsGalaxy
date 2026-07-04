@@ -37,6 +37,7 @@ interface MiniAppDetailsScreenProps {
     fill_rate?: number | string | null;
     average_cpm?: number | string | null;
     bot_id?: number | string | null;
+    telegram_bot_id?: number | string | null;
     webapp_url?: string | null;
     miniapp_url?: string | null;
     created_at: string;
@@ -404,6 +405,10 @@ export default function MiniAppDetailsScreen({
                     <div className="flex items-center justify-between px-4 py-3.5">
                       <span className="text-xs font-semibold text-slate-500">Bot ID</span>
                       <span className="font-mono text-sm font-bold text-slate-900">{miniapp.bot_id || "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <span className="text-xs font-semibold text-slate-500">Telegram auth bot ID</span>
+                      <span className="font-mono text-sm font-bold text-slate-900">{miniapp.telegram_bot_id || "Missing"}</span>
                     </div>
                     {botUrl && (
                       <UrlInfoRow
