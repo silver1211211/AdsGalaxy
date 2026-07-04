@@ -18,9 +18,14 @@ PREPARE add_bot_user_chat_id FROM @add_bot_user_chat_id;
 EXECUTE add_bot_user_chat_id;
 DEALLOCATE PREPARE add_bot_user_chat_id;
 
-UPDATE bot_users
-SET chat_id = user_id
-WHERE (chat_id IS NULL OR chat_id = '') AND user_id IS NOT NULL AND user_id <> '';
+SET @backfill_bot_user_chat_id = IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'bot_users' AND COLUMN_NAME = 'user_id') > 0,
+  'UPDATE bot_users SET chat_id = user_id WHERE (chat_id IS NULL OR chat_id = '''') AND user_id IS NOT NULL AND user_id <> ''''',
+  'SELECT 1'
+);
+PREPARE backfill_bot_user_chat_id FROM @backfill_bot_user_chat_id;
+EXECUTE backfill_bot_user_chat_id;
+DEALLOCATE PREPARE backfill_bot_user_chat_id;
 
 DELETE duplicate_user
 FROM bot_users duplicate_user
