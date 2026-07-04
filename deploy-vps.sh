@@ -86,7 +86,8 @@ for MIG in \
   "20260703_0072_campaign_inventory_exclusions.sql" \
   "20260703_0073_channel_fraud_billing_policy.sql" \
   "20260703_0074_bot_user_reachability_status.sql" \
-  "20260703_0077_publisher_notifications_and_welcome_post.sql"
+  "20260703_0077_publisher_notifications_and_welcome_post.sql" \
+  "20260704_0078_miniapp_telegram_bot_id.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"
