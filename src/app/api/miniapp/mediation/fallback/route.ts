@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser } from "@/lib/auth";
 import {
   createMediationAttempt,
   getMediationRequestForFallback,
@@ -10,6 +9,7 @@ import {
 } from "@/lib/miniappMediationEngine";
 import { isMiniAppNetworkName, type MiniAppAdFormat } from "@/lib/miniappNetworkAdapters";
 import { isMiniappNetworkGloballyDisabled, requireAdServingAllowed } from "@/lib/productionSafety";
+import { requireMiniappTrackingUser } from "@/lib/publicSdkAuth";
 
 function cleanText(value: unknown) {
   return String(value || "").trim();
@@ -58,14 +58,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Mediation request not found" }, { status: 404 });
     }
 
-    const initData = request.headers.get("x-telegram-init-data");
-    if (!initData) {
-      await conn.rollback();
-      return NextResponse.json({ error: "Unauthorized: initData required" }, { status: 401 });
-    }
-
-    const authenticatedUser = await getAuthenticatedUser(initData);
-    if (String(authenticatedUser.telegram_id) !== String(mediationRequest.telegram_user_id)) {
+    const trackingUser = await requireMiniappTrackingUser(
+      request,
+      Number(mediationRequest.miniapp_id),
+      String(mediationRequest.telegram_user_id)
+    );
+    if (trackingUser.telegramUserId !== String(mediationRequest.telegram_user_id)) {
       await conn.rollback();
       return NextResponse.json({ error: "telegram_user_id does not match authenticated user" }, { status: 403 });
     }

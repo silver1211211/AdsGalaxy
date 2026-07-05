@@ -4,6 +4,7 @@ import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
 import { ensureBotIntegration, isBotEncryptionError, loadBotToken, publisherBotEncryptionErrorMessage, regenerateBotIntegration, resolveBotIntegrationStatus } from "@/lib/botIntegration";
 import { notifyBotRemoved } from "@/lib/publisherNotifications";
+import { botUserCountExpressions } from "@/lib/botAudience";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
 export const dynamic = "force-dynamic";
@@ -67,6 +68,7 @@ export async function GET(
       : hasIntegrationFirstSeen
         ? "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.integration_first_seen_at IS NULL)"
         : "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id)";
+    const userCounts = botUserCountExpressions("b");
     const [rows] = await pool.query<PublisherBotDetailsRow[]>(
       `SELECT
         b.id,
@@ -81,12 +83,12 @@ export async function GET(
         b.integration_last_user_id,
         b.integration_last_error_at,
         b.integration_last_error,
-        (SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id) as subscriber_count,
-        (SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.is_active = TRUE AND bu.status = 'active') as active_count
+        ${userCounts.total} as subscriber_count,
+        ${userCounts.active} as active_count
         ,${integrationUserCountExpr} as integration_user_count
         ,${manuallyImportedCountExpr} as manually_imported_count
-        ,(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.status = 'pending_verification') as pending_verification_count
-        ,(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND (bu.is_active=FALSE OR bu.status IN ('inactive','blocked_bot','user_not_found','chat_not_found','unreachable'))) as blocked_count
+        ,${userCounts.pending} as pending_verification_count
+        ,${userCounts.blocked} as blocked_count
        FROM bots b
        WHERE b.id = ? AND b.user_id = ? AND b.is_deleted = FALSE
        LIMIT 1`,
@@ -121,6 +123,8 @@ export async function GET(
       integration_user_count: Number(bot.integration_user_count || 0),
       manually_imported_count: Number(bot.manually_imported_count || 0),
       verified_reachable_count: Number(bot.active_count || 0),
+      verified_count: Number(bot.active_count || 0),
+      reachable_count: Number(bot.active_count || 0),
       blocked_unreachable_count: Number(bot.blocked_count || 0),
       pending_verification_count: Number(bot.pending_verification_count || 0),
       integration_url: integrationUrl,

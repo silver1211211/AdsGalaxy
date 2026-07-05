@@ -39,7 +39,7 @@ type PublisherBot = {
 type IntegrationDetails = {
   integration_url: string | null;
   integration_secret_masked: string | null;
-  integration_status: "installed" | "not_installed" | "imported_pending_verification" | "active" | "error" | "disabled";
+  integration_status: "installed" | "not_installed" | "imported_pending_verification" | "active" | "error" | "disabled" | "rejected";
   integration_installed_at: string | null;
   integration_last_received_at: string | null;
   integration_last_user_id: string | null;
@@ -58,6 +58,7 @@ function normalizeIntegrationStatus(value: unknown): IntegrationStatus {
   if (status === "imported_pending_verification") return "imported_pending_verification";
   if (status === "error") return "error";
   if (status === "disabled") return "disabled";
+  if (status === "rejected") return "rejected";
   return "not_installed";
 }
 
@@ -288,14 +289,18 @@ export default function BotDetailsScreen({
 
   const integrationStatus = normalizeIntegrationStatus(integrationDetails?.integration_status);
   const integrationStatusInfo = {
-    active: { label: "Active", className: "bg-emerald-50 text-emerald-700 border-emerald-100", dot: "bg-emerald-500" },
-    installed: { label: "Installed", className: "bg-blue-50 text-blue-700 border-blue-100", dot: "bg-blue-500" },
-    imported_pending_verification: { label: "Imported · Pending Verification", className: "bg-amber-50 text-amber-700 border-amber-100", dot: "bg-amber-400" },
-    not_installed: { label: "Not Installed", className: "bg-amber-50 text-amber-700 border-amber-100", dot: "bg-amber-400" },
-    error: { label: "Error", className: "bg-red-50 text-red-700 border-red-100", dot: "bg-red-500" },
+    active: { label: "Integrated", className: "bg-emerald-50 text-emerald-700 border-emerald-100", dot: "bg-emerald-500" },
+    installed: { label: "Pending Verification", className: "bg-amber-50 text-amber-700 border-amber-100", dot: "bg-amber-400" },
+    imported_pending_verification: { label: "Pending Verification", className: "bg-amber-50 text-amber-700 border-amber-100", dot: "bg-amber-400" },
+    not_installed: { label: "Not Integrated", className: "bg-amber-50 text-amber-700 border-amber-100", dot: "bg-amber-400" },
+    error: { label: "Integration Error", className: "bg-red-50 text-red-700 border-red-100", dot: "bg-red-500" },
     disabled: { label: "Disabled", className: "bg-slate-100 text-slate-600 border-slate-200", dot: "bg-slate-400" },
+    rejected: { label: "Rejected", className: "bg-red-50 text-red-700 border-red-100", dot: "bg-red-500" },
   } satisfies Record<IntegrationStatus, { label: string; className: string; dot: string }>;
-  const currentIntegrationStatusInfo = integrationStatusInfo[integrationStatus];
+  const currentIntegrationStatusInfo = {
+    ...integrationStatusInfo[integrationStatus],
+    label: integrationStatus === "imported_pending_verification" ? "Pending Verification" : integrationStatusInfo[integrationStatus].label,
+  };
 
   return (
     <motion.div

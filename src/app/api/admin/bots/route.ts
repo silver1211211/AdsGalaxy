@@ -5,6 +5,7 @@ import { sendTelegramMessage } from "@/lib/telegram";
 import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
 import type { RowDataPacket } from "mysql2/promise";
 import { loadBotToken } from "@/lib/botIntegration";
+import { botOperationalCondition, botUserBlockedCondition, botUserBroadcastEligibleCondition, botUserCountExpressions, botUserVerifiedReachableCondition } from "@/lib/botAudience";
 
 type AdminBotRow = RowDataPacket & Record<string, unknown>;
 type CountRow = RowDataPacket & { total: number };
@@ -93,48 +94,25 @@ export async function GET(request: Request) {
     const qualityScoreExpr = col(botColumns, "traffic_quality_score", "60");
     const qualityTierExpr = col(botColumns, "traffic_quality_tier", "'good'");
     const riskLevelExpr = col(botColumns, "traffic_risk_level", "'low'");
-    const botUserActiveCondition = hasBotUsers
-      ? [
-          botUserColumns.has("is_active") ? "is_active = TRUE" : "1=1",
-          botUserColumns.has("status") ? "status = 'active'" : "1=1",
-        ].join(" AND ")
-      : "1=0";
-    const botUserInactiveCondition = hasBotUsers
-      ? [
-          botUserColumns.has("is_active") ? "is_active = FALSE" : "0=1",
-          botUserColumns.has("status") ? "status != 'active'" : "0=1",
-        ].join(" OR ")
-      : "1=0";
-    const activeCountExpr = hasBotUsers
-      ? `(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND ${botUserActiveCondition})`
-      : "0";
-    const blockedCountExpr = hasBotUsers
-      ? `(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND (${botUserInactiveCondition}))`
-      : "0";
-    const botHealthEligibleExpr = `COALESCE(${healthStatusExpr}, 'active') IN ('active', 'healthy')`;
+    void botUserColumns;
+    const countExpr = botUserCountExpressions("b");
+    const activeCountExpr = hasBotUsers ? countExpr.active : "0";
+    const blockedCountExpr = hasBotUsers ? countExpr.blocked : "0";
     const botUsersSummary = hasBotUsers
       ? {
           total: "(SELECT COUNT(*) FROM bot_users)",
           active: `(SELECT COUNT(*)
          FROM bot_users bu
          JOIN bots active_bots ON active_bots.id = bu.bot_id
-         WHERE active_bots.status = 'active'
-           AND ${botColumns.has("is_deleted") ? "active_bots.is_deleted = FALSE" : "1=1"}
-           AND ${botUserColumns.has("is_active") ? "bu.is_active = TRUE" : "1=1"}
-           AND ${botUserColumns.has("status") ? "bu.status = 'active'" : "1=1"})`,
+         WHERE ${botUserVerifiedReachableCondition("bu")})`,
           deliveryEligible: `(SELECT COUNT(*)
          FROM bot_users bu
          JOIN bots active_bots ON active_bots.id = bu.bot_id
-         WHERE active_bots.status = 'active'
-           AND ${botColumns.has("is_deleted") ? "active_bots.is_deleted = FALSE" : "1=1"}
-           AND COALESCE(${botColumns.has("health_status") ? "active_bots.health_status" : "'active'"}, 'active') IN ('active', 'healthy')
-           AND ${botUserColumns.has("is_active") ? "bu.is_active = TRUE" : "1=1"}
-           AND ${botUserColumns.has("status") ? "bu.status = 'active'" : "1=1"})`,
+         WHERE ${botUserBroadcastEligibleCondition("bu", "active_bots")})`,
           inactive: `(SELECT COUNT(*)
          FROM bot_users bu
          JOIN bots parent_bots ON parent_bots.id = bu.bot_id
-         WHERE ${botUserColumns.has("is_active") ? "bu.is_active = FALSE" : "0=1"}
-            OR ${botUserColumns.has("status") ? "bu.status != 'active'" : "0=1"}
+         WHERE (${botUserBlockedCondition("bu")})
             OR parent_bots.status != 'active'
             OR ${botColumns.has("is_deleted") ? "parent_bots.is_deleted = TRUE" : "0=1"})`,
         }
@@ -217,7 +195,7 @@ export async function GET(request: Request) {
     const [summaryRows] = await pool.query<BotSummaryRow[]>(`
       SELECT
         SUM(CASE WHEN b.status = 'active' AND ${isDeletedExpr} = FALSE THEN 1 ELSE 0 END) as monetized_bots,
-        SUM(CASE WHEN b.status = 'active' AND ${isDeletedExpr} = FALSE AND ${botHealthEligibleExpr} THEN 1 ELSE 0 END) as delivery_eligible_bots,
+        SUM(CASE WHEN ${botOperationalCondition("b")} THEN 1 ELSE 0 END) as delivery_eligible_bots,
         SUM(CASE WHEN b.status IN ('paused', 'token_invalid', 'bot_deleted', 'unreachable') AND ${isDeletedExpr} = FALSE THEN 1 ELSE 0 END) as paused_bots,
         SUM(CASE WHEN b.status IN ('token_invalid', 'bot_deleted', 'unreachable') AND ${isDeletedExpr} = FALSE THEN 1 ELSE 0 END) as failed_bots,
         ${botUsersSummary.total} as total_bot_users,

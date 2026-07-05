@@ -46,6 +46,9 @@ interface CampaignRow {
   advertiser_trust_level?: string;
   campaign_priority_score?: number;
   advertiser_performance_score?: number;
+  original_budget?: string | number;
+  pending_liability?: number;
+  available_budget_for_placement?: number;
 }
 
 interface ChannelRow {
@@ -171,6 +174,21 @@ function buildPostMaps(posts: RecentPostRow[], hasDeletedAtColumn: boolean) {
   return { recent24h };
 }
 
+function postingSlotHistory(postingSlotDate: string, postingSlotTime: string) {
+  const recoverySlots = Math.min(12, Math.max(1, Number.parseInt(process.env.CHANNEL_SCHEDULER_RECOVERY_SLOTS || "4", 10) || 4));
+  const slots: string[] = [];
+  const cursor = new Date(`${postingSlotDate}T${postingSlotTime}:00`);
+
+  for (let i = 0; i < recoverySlots; i += 1) {
+    const hours = String(cursor.getHours()).padStart(2, "0");
+    const minutes = String(cursor.getMinutes()).padStart(2, "0");
+    slots.push(`${hours}:${minutes}`);
+    cursor.setMinutes(cursor.getMinutes() - 30);
+  }
+
+  return Array.from(new Set(slots));
+}
+
 async function recordDeliveryEvent(
   enabled: boolean,
   campaignId: number,
@@ -234,6 +252,7 @@ export async function GET(req: NextRequest) {
     const currentSlot = getCurrentPostingSlot();
     const currentSlotTimeForDb = `${currentSlot.postingSlotTime}:00`;
     const currentSlotStart = `${currentSlot.postingSlotDate} ${currentSlotTimeForDb}`;
+    const recoverablePostingSlots = postingSlotHistory(currentSlot.postingSlotDate, currentSlot.postingSlotTime);
     const channelSlotLimit = Math.max(1, parseInt(process.env.CRON_CHANNEL_SLOT_LIMIT || "200"));
     const campaignLimit = Math.max(1, parseInt(process.env.CRON_CAMPAIGN_LIMIT || "200"));
     const distribution = schedulerSchema.hasChannelSchedulerSlot
@@ -246,7 +265,7 @@ export async function GET(req: NextRequest) {
 
     const trustMultipliers = await getAdvertiserTrustMultipliers();
     const deliverySettings = await getDeliveryOptimizationSettings();
-    const [campaigns]: any = await pool.query(`
+    const [campaignRows]: any = await pool.query(`
       SELECT c.*, COALESCE(u.advertiser_trust_level, 'new') as advertiser_trust_level
       FROM campaigns c
       JOIN users u ON c.user_id = u.id
@@ -257,6 +276,64 @@ export async function GET(req: NextRequest) {
       ORDER BY budget DESC
       LIMIT ?
     `, [campaignLimit]);
+    let campaigns = campaignRows as CampaignRow[];
+
+    if (campaigns.length > 0) {
+      const activePostDeleteFilter = schedulerSchema.hasPostDeletedAtColumn ? "AND cp.deleted_at IS NULL" : "";
+      const [liabilityRows]: any = await pool.query(`
+        SELECT
+          c.id AS campaign_id,
+          COALESCE(SUM(
+            CASE
+              WHEN c.type = 'views' THEN GREATEST(COALESCE(cp.views, 0) - COALESCE(cp.settled_views, 0), 0)
+              WHEN c.type = 'clicks' THEN GREATEST((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) - COALESCE(cp.settled_clicks, 0), 0)
+              ELSE 0
+            END * (COALESCE(c.cpm, 0) / 1000)
+          ), 0) AS unsettled_liability,
+          COALESCE(SUM(
+            CASE
+              WHEN cp.status IN ('active','posted','sent','pending_delivery')
+                AND cp.delivery_failed_at IS NULL
+                ${activePostDeleteFilter}
+              THEN COALESCE(c.cpm, 0) / 1000
+              ELSE 0
+            END
+          ), 0) AS active_post_buffer
+        FROM campaigns c
+        LEFT JOIN campaign_posts cp ON cp.campaign_id = c.id
+        WHERE c.id IN (?)
+        GROUP BY c.id
+      `, [campaigns.map((campaign) => campaign.id)]);
+
+      const liabilityByCampaign = new Map<number, { unsettled: number; buffer: number }>(
+        liabilityRows.map((row: any) => [
+          Number(row.campaign_id),
+          {
+            unsettled: Math.max(0, Number(row.unsettled_liability || 0)),
+            buffer: Math.max(0, Number(row.active_post_buffer || 0)),
+          },
+        ])
+      );
+
+      campaigns = campaigns
+        .map((campaign) => {
+          const liability = liabilityByCampaign.get(Number(campaign.id)) || { unsettled: 0, buffer: 0 };
+          const originalBudget = Number(campaign.budget || 0);
+          const pendingLiability = Number((liability.unsettled + liability.buffer).toFixed(8));
+          const availableBudget = Number((originalBudget - pendingLiability).toFixed(8));
+          return {
+            ...campaign,
+            original_budget: campaign.budget,
+            pending_liability: pendingLiability,
+            available_budget_for_placement: availableBudget,
+            budget: availableBudget,
+          };
+        })
+        .filter((campaign) => {
+          const unitPrice = Number(campaign.cpm || 0) / 1000;
+          return Number.isFinite(unitPrice) && unitPrice > 0 && Number(campaign.available_budget_for_placement || 0) >= unitPrice;
+        });
+    }
 
     for (const campaign of campaigns as CampaignRow[]) {
       const trustMultiplier = (trustMultipliers as Record<string, number>)[String(campaign.advertiser_trust_level || "new").toLowerCase()] || 1;
@@ -279,7 +356,7 @@ export async function GET(req: NextRequest) {
 
     const timingConditions = schedulerSchema.hasChannelSchedulerSlot
       ? `
-      AND c.scheduler_slot = ?
+      AND c.scheduler_slot IN (?)
       AND NOT EXISTS (
         SELECT 1 FROM campaign_posts cp
         WHERE cp.channel_id = c.id
@@ -319,7 +396,7 @@ export async function GET(req: NextRequest) {
 
     const timingParams = schedulerSchema.hasChannelSchedulerSlot
       ? [
-          currentSlot.postingSlotTime,
+          recoverablePostingSlots,
           ...(schedulerSchema.hasPostSlotColumns
             ? [currentSlot.postingSlotDate, currentSlotTimeForDb]
             : [currentSlotStart, currentSlotStart])

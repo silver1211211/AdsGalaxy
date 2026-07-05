@@ -78,6 +78,9 @@ export async function getMiniAppPublisherCpmSettings(conn?: PoolConnection): Pro
     SELECT \`key\`, value
     FROM settings
     WHERE \`key\` IN (
+      'global_min_cpm',
+      'global_recommended_cpm',
+      'global_max_cpm',
       'miniapp_internal_min_cpm',
       'miniapp_internal_recommended_cpm',
       'miniapp_internal_max_cpm',
@@ -98,9 +101,9 @@ export async function getMiniAppPublisherCpmSettings(conn?: PoolConnection): Pro
   const maxQuality = clamp(settingNumber(settingsMap, "miniapp_internal_max_quality_factor", DEFAULT_SETTINGS.max_quality_factor), minQuality, 1);
 
   return {
-    min_cpm: Math.max(0, settingNumber(settingsMap, "miniapp_internal_min_cpm", DEFAULT_SETTINGS.min_cpm)),
-    recommended_cpm: Math.max(0, settingNumber(settingsMap, "miniapp_internal_recommended_cpm", DEFAULT_SETTINGS.recommended_cpm)),
-    max_cpm: Math.max(0, settingNumber(settingsMap, "miniapp_internal_max_cpm", DEFAULT_SETTINGS.max_cpm)),
+    min_cpm: Math.max(0, settingNumber(settingsMap, "global_min_cpm", settingNumber(settingsMap, "miniapp_internal_min_cpm", DEFAULT_SETTINGS.min_cpm))),
+    recommended_cpm: Math.max(0, settingNumber(settingsMap, "global_recommended_cpm", settingNumber(settingsMap, "miniapp_internal_recommended_cpm", DEFAULT_SETTINGS.recommended_cpm))),
+    max_cpm: Math.max(0, settingNumber(settingsMap, "global_max_cpm", settingNumber(settingsMap, "miniapp_internal_max_cpm", DEFAULT_SETTINGS.max_cpm))),
     publisher_share_percent: clamp(settingNumber(settingsMap, "miniapp_internal_publisher_share_percent", DEFAULT_SETTINGS.publisher_share_percent), 0, 100),
     ads_galaxy_share_percent: clamp(settingNumber(settingsMap, "miniapp_internal_ads_galaxy_share_percent", DEFAULT_SETTINGS.ads_galaxy_share_percent), 0, 100),
     reserve_percent: clamp(settingNumber(settingsMap, "miniapp_internal_reserve_percent", DEFAULT_SETTINGS.reserve_percent), 0, 100),

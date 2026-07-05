@@ -3,6 +3,29 @@ import pool from "@/lib/db";
 import crypto from "crypto";
 import { appendClickId, recordAdClick } from "@/lib/conversionTracking";
 
+async function recordCampaignClick(input: {
+  campaignId: string;
+  ip: string;
+  userAgent: string;
+  fingerprint: string;
+  isBot: boolean;
+}) {
+  if (input.isBot) return false;
+
+  const [existing]: any = await pool.query(
+    "SELECT id FROM campaign_clicks WHERE campaign_id = ? AND fingerprint = ? AND created_at > NOW() - INTERVAL 1 DAY",
+    [input.campaignId, input.fingerprint]
+  );
+
+  if (existing.length > 0) return false;
+
+  await pool.query(
+    "INSERT INTO campaign_clicks (campaign_id, ip_address, user_agent, fingerprint, is_bot) VALUES (?, ?, ?, ?, ?)",
+    [input.campaignId, input.ip, input.userAgent, input.fingerprint, input.isBot]
+  );
+  return true;
+}
+
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -19,51 +42,32 @@ export async function GET(
     .update(`${ip}-${userAgent}`)
     .digest("hex");
 
+  let campaign: any;
   try {
-    // 1. Get campaign link
     const [rows]: any = await pool.query(
       "SELECT id, user_id, link, image_url, category FROM campaigns WHERE id = ?",
       [campaignId]
     );
-
     if (rows.length === 0) {
       return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
     }
+    campaign = rows[0];
+  } catch (error) {
+    console.error("Click destination resolution failed", { campaign_id: campaignId, error: error instanceof Error ? error.message : "unknown_error" });
+    return NextResponse.redirect(process.env.NEXT_PUBLIC_APP_URL || "/", 302);
+  }
 
-    let targetUrl = rows[0].link;
-
-    // 2. Async Tracking (Don't block the redirect)
-    // We'll wrap this in a self-executing async function or just run it and not await
-    (async () => {
-      try {
-        // Basic Bot Detection
-        const isBot = /bot|spider|crawl|slurp|github-camo|googlebot|bingbot|yandex|baidu/i.test(userAgent);
-        
-        // Deduplication Check (Same campaign, same fingerprint in last 24h)
-        const [existing]: any = await pool.query(
-          "SELECT id FROM campaign_clicks WHERE campaign_id = ? AND fingerprint = ? AND created_at > NOW() - INTERVAL 1 DAY",
-          [campaignId, fingerprint]
-        );
-
-        if (existing.length === 0 && !isBot) {
-          // Record the click
-          await pool.query(
-            "INSERT INTO campaign_clicks (campaign_id, ip_address, user_agent, fingerprint, is_bot) VALUES (?, ?, ?, ?, ?)",
-            [campaignId, ip, userAgent, fingerprint, isBot]
-          );
-        }
-      } catch (err) {
-        console.error("Click Processing Background Error:", err);
-      }
-    })();
-
-    if (!/bot|spider|crawl|slurp|github-camo|googlebot|bingbot|yandex|baidu/i.test(userAgent)) {
+  let targetUrl = campaign.link;
+  try {
+    const isBot = /bot|spider|crawl|slurp|github-camo|googlebot|bingbot|yandex|baidu/i.test(userAgent);
+    const clickRecorded = await recordCampaignClick({ campaignId, ip, userAgent, fingerprint, isBot });
+    if (clickRecorded) {
       const clickId = await recordAdClick({
         campaignType: "campaign",
-        campaignId: Number(rows[0].id),
-        advertiserId: Number(rows[0].user_id),
-        creativeId: rows[0].image_url || null,
-        category: rows[0].category || null,
+        campaignId: Number(campaign.id),
+        advertiserId: Number(campaign.user_id),
+        creativeId: campaign.image_url || null,
+        category: campaign.category || null,
         inventoryType: "direct",
         ipAddress: ip,
         userAgent,
@@ -71,11 +75,8 @@ export async function GET(
       });
       targetUrl = appendClickId(targetUrl, clickId);
     }
-
-    // 3. Immediate Redirect
-    return NextResponse.redirect(targetUrl, 302);
   } catch (error) {
-    console.error("Click Tracking Error:", error);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    console.error("Click tracking failed; redirect preserved", { campaign_id: campaignId, error: error instanceof Error ? error.message : "unknown_error" });
   }
+  return NextResponse.redirect(targetUrl, 302);
 }

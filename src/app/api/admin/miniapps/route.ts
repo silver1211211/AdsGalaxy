@@ -4,6 +4,8 @@ import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { getMiniAppGlobalRevenueSummary } from "@/lib/miniappRevenueEngine";
 import { getMiniAppNetworkHealthScores } from "@/lib/miniappOptimization";
+import { getMiniAppAggregateStatsByIds } from "@/lib/miniappReports";
+import { getMiniAppRevenueOptimizerReport } from "@/lib/miniappRevenueOptimizer";
 
 export async function GET(request: Request) {
   const { response } = await requireAdminPermission("read");
@@ -121,10 +123,12 @@ export async function GET(request: Request) {
 
     const [rows]: any = await pool.query(query, [...queryParams, limit, offset]);
     const [[countRow]]: any = await pool.query(countQuery, queryParams);
+    const statsById = await getMiniAppAggregateStatsByIds(rows.map((row: any) => row.id));
 
     const miniapps = await Promise.all(rows.map(async (row: any) => {
+      const stats = statsById.get(Number(row.id));
       const [health, flagResult, lockResult] = await Promise.all([
-        getMiniAppNetworkHealthScores(row.id).catch(() => []),
+        getMiniAppNetworkHealthScores(row.id, undefined, { enriched: true }).catch(() => []),
         (pool.query(
           "SELECT COUNT(*) as suspicious_flags FROM miniapp_optimization_flags WHERE miniapp_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)",
           [row.id]
@@ -136,23 +140,28 @@ export async function GET(request: Request) {
       ]);
       const [flagRows] = flagResult;
       const [lockRows] = lockResult;
-      const requestCount = Number(row.mediation_request_count || 0);
-      const impressions = (health as any[]).reduce((sum, item) => sum + Number(item.impressions || 0), 0);
+      const requestCount = Number(stats?.total_requests ?? row.mediation_request_count ?? 0);
+      const impressions = Number(stats?.total_impressions ?? row.total_impressions ?? 0);
       return {
         ...row,
+        ...stats,
         network_health: health,
-        fill_rate: requestCount > 0 ? impressions / requestCount * 100 : 0,
+        fill_rate: stats?.fill_rate ?? (requestCount > 0 ? impressions / requestCount * 100 : 0),
         request_to_impression_ratio: impressions > 0 ? requestCount / impressions : requestCount,
         suspicious_flag_count: Number((flagRows as any)[0]?.suspicious_flags || 0),
         monetag_lock_count: Number((lockRows as any)[0]?.monetag_lock_count || 0),
       };
     }));
 
-    const revenueSummary = await getMiniAppGlobalRevenueSummary().catch(() => null);
+    const [revenueSummary, optimizerReport] = await Promise.all([
+      getMiniAppGlobalRevenueSummary().catch(() => null),
+      getMiniAppRevenueOptimizerReport(10).catch(() => null),
+    ]);
 
     return NextResponse.json({
       miniapps,
       revenue_summary: revenueSummary,
+      optimizer_report: optimizerReport,
       total: countRow.total,
       page,
       totalPages: Math.ceil(countRow.total / limit),

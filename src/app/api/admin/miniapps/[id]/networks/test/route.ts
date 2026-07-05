@@ -9,6 +9,7 @@ import {
   type MiniAppNetworkName,
 } from "@/lib/miniappNetworkAdapters";
 import { canShowMonetag } from "@/lib/miniappMonetagProtection";
+import { getDisabledMiniappNetworks, isMonetagTestModeEnabled } from "@/lib/productionSafety";
 
 type MiniAppRow = RowDataPacket & {
   id: number;
@@ -25,6 +26,41 @@ type NetworkRow = RowDataPacket & {
 
 function cleanText(value: unknown) {
   return String(value || "").trim();
+}
+
+function diagnosticResponse(input: {
+  success: boolean;
+  network: string;
+  status: string;
+  error_code?: string;
+  error_message?: string;
+  checks?: Array<Record<string, unknown>>;
+  extra?: Record<string, unknown>;
+}) {
+  return NextResponse.json({
+    success: input.success,
+    network: input.network,
+    status: input.status,
+    status_label: input.status,
+    error_code: input.error_code,
+    error_message: input.error_message,
+    checks: input.checks || [],
+    live_ad_requested: false,
+    impression_recorded: false,
+    ...(input.extra || {}),
+  });
+}
+
+function hasRequiredPlacement(networkName: MiniAppNetworkName, network: NetworkRow) {
+  if (networkName === "AdsGalaxyInternal") return true;
+  if (networkName === "RichAds") {
+    return Boolean(cleanText(network.richads_publisher_id) && cleanText(network.richads_app_id || network.network_placement_id));
+  }
+  return Boolean(cleanText(network.network_placement_id));
+}
+
+function requiresBrowserSdkScript(networkName: MiniAppNetworkName) {
+  return networkName !== "Monetag" && networkName !== "AdsGalaxyInternal";
 }
 
 export async function POST(
@@ -52,60 +88,124 @@ export async function POST(
       return NextResponse.json({ error: "Mini App not found" }, { status: 404 });
     }
 
-    if (!["awaiting", "approved", "monetized"].includes(miniapps[0].status)) {
-      return NextResponse.json({ error: "Mini App must be awaiting approval before adapter testing" }, { status: 400 });
-    }
-
-    const [networks] = await pool.query<NetworkRow[]>(
-      `SELECT network_name, network_placement_id, enabled, richads_publisher_id, richads_app_id
-       FROM miniapp_ad_networks
-       WHERE miniapp_id = ? AND network_name = ?
-       LIMIT 1`,
-      [id, networkName]
-    );
-
-    if (networks.length === 0 || !Boolean(networks[0].enabled)) {
-      return NextResponse.json({
+    if (!["approved", "monetized"].includes(miniapps[0].status)) {
+      return diagnosticResponse({
         success: false,
         network: networkName,
+        status: "Waiting Approval",
+        error_code: "WAITING_APPROVAL",
+        error_message: "Mini App must be approved or monetized before this network can serve.",
+      });
+    }
+
+    const [allNetworks] = await pool.query<NetworkRow[]>(
+      `SELECT network_name, network_placement_id, enabled, richads_publisher_id, richads_app_id
+       FROM miniapp_ad_networks
+       WHERE miniapp_id = ?`,
+      [id]
+    );
+    const network = allNetworks.find((row) => row.network_name === networkName);
+    const globallyDisabledNetworks = await getDisabledMiniappNetworks();
+    const enabledNetworks = allNetworks
+      .filter((row) => Boolean(row.enabled) && !globallyDisabledNetworks.has(row.network_name))
+      .map((row) => row.network_name);
+
+    if (!network || !Boolean(network.enabled) || globallyDisabledNetworks.has(networkName)) {
+      return diagnosticResponse({
+        success: false,
+        network: networkName,
+        status: "Disabled",
         error_code: "NETWORK_DISABLED",
         error_message: "Network is disabled or not configured for this Mini App",
-      }, { status: 400 });
+        checks: [
+          { name: "miniapp_network_enabled", passed: Boolean(network?.enabled) },
+          { name: "global_network_enabled", passed: !globallyDisabledNetworks.has(networkName) },
+        ],
+      });
+    }
+
+    if (!hasRequiredPlacement(networkName, network)) {
+      return diagnosticResponse({
+        success: false,
+        network: networkName,
+        status: "Missing Placement",
+        error_code: "MISSING_PLACEMENT",
+        error_message: "Network placement configuration is incomplete.",
+      });
     }
 
     let config;
     try {
-      config = buildMiniAppNetworkClientConfig(networkName as MiniAppNetworkName, networks[0].network_placement_id || "", {
-        publisherId: networks[0].richads_publisher_id,
-        appId: networks[0].richads_app_id,
+      config = buildMiniAppNetworkClientConfig(networkName, network.network_placement_id || "", {
+        publisherId: network.richads_publisher_id,
+        appId: network.richads_app_id,
       });
     } catch (error: any) {
-      return NextResponse.json({
+      return diagnosticResponse({
         success: false,
         network: networkName,
+        status: "Configuration Error",
         error_code: "INVALID_CONFIG",
         error_message: error?.message || "Network configuration is invalid",
-      }, { status: 400 });
+      });
     }
 
-    const monetagProtection = networkName === "Monetag"
-      ? await canShowMonetag(id, "admin_test")
-      : null;
+    if (requiresBrowserSdkScript(networkName) && !config.sdk_script_url) {
+      return diagnosticResponse({
+        success: false,
+        network: networkName,
+        status: "SDK Missing",
+        error_code: "SDK_MISSING",
+        error_message: "Network SDK script is not configured.",
+      });
+    }
 
-    return NextResponse.json({
+    let monetagProtection = null;
+    if (networkName === "Monetag") {
+      const monetagOnlyEnabled = enabledNetworks.length === 1 && enabledNetworks[0] === "Monetag";
+      const monetagTestMode = await isMonetagTestModeEnabled();
+      monetagProtection = monetagOnlyEnabled && monetagTestMode
+        ? { allowed: true, reason: "test_mode" }
+        : await canShowMonetag(id, "admin_test");
+      if ((monetagOnlyEnabled && !monetagTestMode) || !monetagProtection.allowed) {
+        return diagnosticResponse({
+          success: false,
+          network: networkName,
+          status: "Protection Active",
+          error_code: "PROTECTION_ACTIVE",
+          error_message: monetagOnlyEnabled && !monetagTestMode
+            ? "Monetag is the only enabled network. Enable Monetag Test Mode before serving it in this state."
+            : "Monetag frequency protection is active.",
+          extra: {
+            monetag_protection: monetagProtection,
+            monetag_test_mode_enabled: monetagTestMode,
+          },
+        });
+      }
+    }
+
+    return diagnosticResponse({
       success: true,
       network: networkName,
-      adapter_initialization: {
-        sdk_script_url: config.sdk_script_url,
-        sdk_global_name: config.sdk_global_name,
-        supports_rewarded: config.supports_rewarded,
-        supports_interstitial: config.supports_interstitial,
-        supports_banner: config.supports_banner,
-        required_id_label: config.required_id_label,
+      status: "Test Successful",
+      checks: [
+        { name: "miniapp_approved", passed: true },
+        { name: "network_enabled", passed: true },
+        { name: "placement_configured", passed: true },
+        { name: "sdk_available", passed: !requiresBrowserSdkScript(networkName) || Boolean(config.sdk_script_url) },
+      ],
+      extra: {
+        readiness: "Ready",
+        adapter_initialization: {
+          sdk_available: !requiresBrowserSdkScript(networkName) || Boolean(config.sdk_script_url),
+          sdk_runtime: networkName === "Monetag" ? "package" : networkName === "AdsGalaxyInternal" ? "internal" : "browser_script",
+          supports_rewarded: config.supports_rewarded,
+          supports_interstitial: config.supports_interstitial,
+          supports_banner: config.supports_banner,
+          required_id_label: config.required_id_label,
+        },
+        monetag_protection: monetagProtection,
       },
-      monetag_protection: monetagProtection,
-      live_ad_requested: false,
-      impression_recorded: false,
     });
   } catch (error: unknown) {
     console.error("Admin Mini App Network Test Error:", error);

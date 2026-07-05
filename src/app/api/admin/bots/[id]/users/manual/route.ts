@@ -51,7 +51,7 @@ async function storeUser(connection: PoolConnection, columns: Set<string>, botId
   if (columns.has("first_seen_at")) { names.push("first_seen_at"); placeholders.push("NOW()"); }
   if (columns.has("last_seen_at")) { names.push("last_seen_at"); placeholders.push("NOW()"); }
   addValue("source", "manual_admin");
-  addValue("is_active", true);
+  addValue("is_active", false);
   addValue("status", "pending_verification");
   await connection.query(`INSERT INTO bot_users (${names.join(", ")}) VALUES (${placeholders.join(", ")})`, insertValues);
   return "added" as const;

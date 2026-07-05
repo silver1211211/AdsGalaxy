@@ -1,5 +1,4 @@
 import type { PoolConnection } from "mysql2/promise";
-import pool from "@/lib/db";
 import { getMiniAppPublisherCpmSettings } from "@/lib/miniappPublisherCpmEngine";
 
 export const MINIAPP_ALL_CATEGORIES = "All Categories";
@@ -34,10 +33,6 @@ const CATEGORY_KEYS: Record<MiniAppCreativeCategory, string> = {
   Other: "miniapp_category_cpm_adjustment_other",
 };
 
-function toNumber(value: unknown) {
-  return Number.parseFloat(String(value ?? 0)) || 0;
-}
-
 export function normalizeMiniAppCategories(value: unknown): MiniAppCreativeCategory[] {
   const raw = Array.isArray(value)
     ? value
@@ -63,26 +58,20 @@ export function displayMiniAppCategories(categories: unknown) {
 }
 
 export async function getMiniAppCategoryCpmAdjustments(conn?: PoolConnection) {
-  const db = conn || pool;
-  const [rows]: any = await db.query(
-    "SELECT `key`, value FROM settings WHERE `key` IN (?)",
-    [Object.values(CATEGORY_KEYS)]
-  );
-  const map = new Map<string, number>(rows.map((row: any) => [String(row.key), toNumber(row.value)]));
+  void conn;
   return Object.fromEntries(
-    MINIAPP_CREATIVE_CATEGORIES.map((category) => [category, Math.max(0, map.get(CATEGORY_KEYS[category]) || 0)])
+    MINIAPP_CREATIVE_CATEGORIES.map((category) => [category, 0])
   ) as Record<MiniAppCreativeCategory, number>;
 }
 
 export async function requiredMiniAppCategoryCpm(categories: MiniAppCreativeCategory[], conn?: PoolConnection) {
   const settings = await getMiniAppPublisherCpmSettings(conn);
   const adjustments = await getMiniAppCategoryCpmAdjustments(conn);
-  const selected = categories.length > 0 ? categories : [];
-  const adjustment = selected.length > 0 ? Math.max(...selected.map((category) => adjustments[category] || 0)) : 0;
+  void categories;
   return {
     base_min_cpm: settings.min_cpm,
-    category_adjustment: adjustment,
-    required_cpm: settings.min_cpm + adjustment,
+    category_adjustment: 0,
+    required_cpm: settings.min_cpm,
     adjustments,
   };
 }

@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/set-state-in-effect, @next/next/no-img-element -- legacy admin campaign page */
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
@@ -139,7 +140,6 @@ export default function AdminMiniAppRewardedPage() {
   const [cpms, setCpms] = useState<Record<number, string>>({});
   const [cpmModes, setCpmModes] = useState<Record<number, string>>({});
   const [fixedCpms, setFixedCpms] = useState<Record<number, string>>({});
-  const [categoryAdjustments, setCategoryAdjustments] = useState<Record<string, number>>({});
   const [moderationNotes, setModerationNotes] = useState<Record<number, string>>({});
   const [message, setMessage] = useState("");
   const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
@@ -154,7 +154,6 @@ export default function AdminMiniAppRewardedPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to load campaigns");
       setCampaigns(data.campaigns || []);
-      setCategoryAdjustments(data.category_adjustments || {});
     } catch (error: any) {
       setMessage(error.message);
     } finally {
@@ -186,23 +185,6 @@ export default function AdminMiniAppRewardedPage() {
       if (!res.ok) throw new Error(data.error || "Action failed");
       setMessage("Campaign updated.");
       await fetchCampaigns();
-    } catch (error: any) {
-      setMessage(error.message);
-    }
-  };
-
-  const updateCategoryAdjustment = async (category: string, value: string) => {
-    try {
-      const numeric = Number(value);
-      const res = await fetch("/api/admin/miniapp-rewarded-campaigns", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "update_category_adjustment", category, value: numeric }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Failed to update category adjustment");
-      setCategoryAdjustments(data.category_adjustments || {});
-      setMessage("Category adjustment updated.");
     } catch (error: any) {
       setMessage(error.message);
     }
@@ -280,28 +262,6 @@ export default function AdminMiniAppRewardedPage() {
             {message}
           </span>
         )}
-      </div>
-
-      {/* Category CPM Adjustments */}
-      <div className="mb-6 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-        <div className="border-b border-slate-200 px-5 py-4">
-          <h2 className="text-sm font-semibold text-slate-900">Category CPM Adjustments</h2>
-          <p className="mt-0.5 text-xs text-slate-500">Override CPM multipliers per creative category</p>
-        </div>
-        <div className="p-5">
-          <div className="grid gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-            {MINIAPP_CREATIVE_CATEGORIES.map((category) => (
-              <div key={category} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                <div className="mb-1.5 text-xs font-semibold text-slate-700">{category}</div>
-                <input
-                  defaultValue={Number(categoryAdjustments[category] || 0).toFixed(2)}
-                  onBlur={(e) => updateCategoryAdjustment(category, e.target.value)}
-                  className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                />
-              </div>
-            ))}
-          </div>
-        </div>
       </div>
 
       {/* Campaigns Table */}

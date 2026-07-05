@@ -12,8 +12,9 @@ export async function POST(request: Request) {
     const formData = await request.formData();
     const file = formData.get("image");
 
-    if (!(file instanceof File) || !file.type.startsWith("image/")) {
-      return NextResponse.json({ error: "Please upload a valid image file (JPG, PNG, or GIF)" }, { status: 400 });
+    const supportedTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
+    if (!(file instanceof File) || !supportedTypes.has(file.type)) {
+      return NextResponse.json({ error: "Please upload a valid image file (PNG, JPG, or WEBP)" }, { status: 400 });
     }
 
     if (file.size > 1 * 1024 * 1024) {

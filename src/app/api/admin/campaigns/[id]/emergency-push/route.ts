@@ -17,6 +17,7 @@ import {
 } from "@/lib/botLifecycle";
 import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
 import { createSystemLog } from "@/lib/systemLogs";
+import { botUserBroadcastEligibleCondition } from "@/lib/botAudience";
 
 export const dynamic = "force-dynamic";
 
@@ -173,7 +174,7 @@ async function getBroadcastSchema(): Promise<BroadcastSchema> {
     WHERE TABLE_SCHEMA = DATABASE()
       AND (
         (TABLE_NAME = 'bot_users' AND COLUMN_NAME = 'chat_id')
-        OR (TABLE_NAME = 'broadcast_deliveries' AND COLUMN_NAME IN ('status', 'cost', 'publisher_reward'))
+        OR (TABLE_NAME = 'broadcast_deliveries' AND COLUMN_NAME IN ('status', 'cost', 'publisher_reward', 'retry_count', 'last_success_at', 'last_failure_at', 'failure_reason', 'telegram_error'))
       )
   `);
 
@@ -414,13 +415,12 @@ async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: Bro
 
     const hoursInterval = 24 / Math.max(1, Number(bot.posts_per_day) || 1);
     const chatIdExpression = schema.hasBotUserChatId ? "bu.chat_id" : "bu.user_id";
-    const [users] = await pool.query<BroadcastUserRow[]>(`
-      SELECT bu.id, ${chatIdExpression} as chat_id
-      FROM bot_users bu
-      WHERE bu.bot_id = ?
-        AND bu.is_active = TRUE
-        AND bu.status IN ('active','pending_verification')
-        AND (${chatIdExpression} IS NOT NULL AND ${chatIdExpression} != '')
+      const [users] = await pool.query<BroadcastUserRow[]>(`
+        SELECT bu.id, ${chatIdExpression} as chat_id
+        FROM bot_users bu
+        JOIN bots b ON b.id = bu.bot_id
+        WHERE bu.bot_id = ?
+        AND ${botUserBroadcastEligibleCondition("bu", "b")}
         AND (bu.last_broadcast_at IS NULL OR bu.last_broadcast_at < NOW() - INTERVAL ? HOUR)
         AND (
           SELECT COUNT(*)

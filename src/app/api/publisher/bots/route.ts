@@ -5,6 +5,7 @@ import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { botTokenHash, encryptBotToken, ensureBotIntegration, isBotEncryptionError, publisherBotEncryptionErrorMessage, resolveBotIntegrationStatus } from "@/lib/botIntegration";
 import { notifyBotSubmitted } from "@/lib/publisherNotifications";
+import { botUserCountExpressions } from "@/lib/botAudience";
 
 type ExistingBotRow = RowDataPacket & { id: number; user_id: number; is_deleted: boolean | number };
 
@@ -70,6 +71,7 @@ export async function GET(request: Request) {
         ? "(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND integration_first_seen_at IS NULL)"
         : "(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id)";
 
+    const userCounts = botUserCountExpressions("b");
     const [rows] = await pool.query(
       `SELECT
         b.id,
@@ -92,14 +94,13 @@ export async function GET(request: Request) {
         b.categories,
         b.continents,
         b.marketplace_visible,
-        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id) as subscriber_count,
-        CASE
-          WHEN b.status = 'active' AND COALESCE(b.health_status, 'active') = 'active'
-            THEN (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND is_active = TRUE AND status = 'active')
-          ELSE 0
-        END as active_count,
-        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND (is_active = FALSE OR status IN ('inactive','blocked_bot','user_not_found','chat_not_found','unreachable'))) as blocked_count,
-        (SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND status = 'pending_verification') as pending_verification_count,
+        ${userCounts.total} as subscriber_count,
+        ${userCounts.active} as active_count,
+        ${userCounts.blocked} as blocked_count,
+        ${userCounts.pending} as pending_verification_count,
+        ${userCounts.verified} as verified_count,
+        ${userCounts.reachable} as reachable_count,
+        ${userCounts.deliveryEligible} as delivery_eligible_count,
         ${integrationUserCountExpr} as integration_user_count,
         ${manuallyImportedCountExpr} as manually_imported_count,
         ${botImpressionsExpr} as total_impressions,

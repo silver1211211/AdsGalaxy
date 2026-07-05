@@ -14,6 +14,9 @@ const PUBLIC_SETTING_KEYS = [
   "recommended_cpm_views",
   "recommended_cpm_clicks",
   "recommended_cpm_broadcast",
+  "global_min_cpm",
+  "global_recommended_cpm",
+  "global_max_cpm",
   "miniapp_internal_min_cpm",
   "miniapp_internal_recommended_cpm",
   "miniapp_internal_max_cpm",
@@ -29,6 +32,14 @@ export async function GET() {
       acc[row.key] = row.value;
       return acc;
     }, {});
+    if (settings.global_min_cpm) settings.miniapp_internal_min_cpm = settings.global_min_cpm;
+    if (settings.global_recommended_cpm) {
+      settings.miniapp_internal_recommended_cpm = settings.global_recommended_cpm;
+      settings.recommended_cpm_views = settings.global_recommended_cpm;
+      settings.recommended_cpm_clicks = settings.global_recommended_cpm;
+      settings.recommended_cpm_broadcast = settings.global_recommended_cpm;
+    }
+    if (settings.global_max_cpm) settings.miniapp_internal_max_cpm = settings.global_max_cpm;
 
     return NextResponse.json(settings);
   } catch (error: unknown) {

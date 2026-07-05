@@ -86,8 +86,13 @@ for MIG in \
   "20260703_0072_campaign_inventory_exclusions.sql" \
   "20260703_0073_channel_fraud_billing_policy.sql" \
   "20260703_0074_bot_user_reachability_status.sql" \
+  "20260703_0074_publisher_monetize_schema_compat.sql" \
+  "20260703_0075_richads_telegram_configuration.sql" \
+  "20260703_0076_remove_miniapp_beta_access.sql" \
   "20260703_0077_publisher_notifications_and_welcome_post.sql" \
-  "20260704_0078_miniapp_telegram_bot_id.sql"
+  "20260704_0078_miniapp_telegram_bot_id.sql" \
+  "20260705_0079_bot_monetization_integrity.sql" \
+  "20260705_0080_miniapp_revenue_optimizer.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"
@@ -124,7 +129,7 @@ else
     $0 == begin { managed=1; next }
     $0 == end { managed=0; next }
     !managed
-  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|referral-sprint)([[:space:]?]|$)' || true)
+  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|referral-sprint)([[:space:]?]|$)' || true)
 
   {
     printf '%s\n' "$CLEAN_CRONTAB"
@@ -142,6 +147,7 @@ else
     echo "25 */6 * * * $CRON_BASE/update-subscribers >/dev/null 2>&1"
     echo "12 * * * * $CRON_BASE/traffic-quality >/dev/null 2>&1"
     echo "35 2 * * * $CRON_BASE/inventory-optimization >/dev/null 2>&1"
+    echo "42 * * * * $CRON_BASE/miniapp-revenue-optimizer >/dev/null 2>&1"
     echo "45 3 * * * $CRON_BASE/system-logs-cleanup >/dev/null 2>&1"
     echo "*/15 * * * * $CRON_BASE/developer-webhooks >/dev/null 2>&1"
     echo "*/5 * * * * $CRON_BASE/delete-expired-posts >/dev/null 2>&1"

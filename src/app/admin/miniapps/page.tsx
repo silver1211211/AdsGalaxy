@@ -79,6 +79,28 @@ type MiniAppReport = {
 };
 
 type RevenueSummary = Record<string, number>;
+type OptimizerReport = {
+  latest_run?: {
+    recommended_cpm?: string | number;
+    applied_recommended_cpm?: string | number;
+    previous_recommended_cpm?: string | number;
+    reason?: string | null;
+    created_at?: string | null;
+    manual_override?: string | number | boolean;
+  } | null;
+  settings?: Record<string, string>;
+  network_rankings?: Array<{
+    miniapp_name?: string;
+    miniapp_username?: string;
+    network_name: string;
+    score: number;
+    rank_position: number;
+    applied_priority: number;
+    health_score: number;
+    effective_network_cpm: number;
+    effective_publisher_cpm: number;
+  }>;
+};
 
 type PendingAction = {
   miniapp: MiniApp;
@@ -174,6 +196,7 @@ export default function AdminMiniAppsPage() {
   const [reportEnd, setReportEnd] = useState("");
   const [reportDateSearch, setReportDateSearch] = useState("");
   const [revenueSummary, setRevenueSummary] = useState<RevenueSummary | null>(null);
+  const [optimizerReport, setOptimizerReport] = useState<OptimizerReport | null>(null);
 
   const fetchMiniApps = async (p: number, s: string, q: string, n: string) => {
     setLoading(true);
@@ -183,6 +206,7 @@ export default function AdminMiniAppsPage() {
       if (!res.ok) throw new Error(data.error || "Failed to fetch Mini Apps");
       setMiniapps(data.miniapps || []);
       setRevenueSummary(data.revenue_summary || null);
+      setOptimizerReport(data.optimizer_report || null);
       setTotalPages(data.totalPages || 1);
     } catch (err: any) {
       setError(err.message || "Failed to fetch Mini Apps");
@@ -879,6 +903,68 @@ export default function AdminMiniAppsPage() {
               <div className="mt-2 text-lg font-black text-slate-900">{value}</div>
             </div>
           ))}
+        </div>
+      )}
+
+      {optimizerReport && (
+        <div className="mb-6 overflow-hidden rounded-xl border border-indigo-100 bg-white shadow-sm">
+          <div className="border-b border-indigo-50 px-5 py-4">
+            <h2 className="text-sm font-semibold text-slate-900">Hourly Revenue Optimizer</h2>
+            <p className="mt-0.5 text-xs text-slate-500">
+              Last run {formatDate(optimizerReport.latest_run?.created_at)} · Reason {optimizerReport.latest_run?.reason || "No run yet"}
+            </p>
+          </div>
+          <div className="grid gap-3 p-5 lg:grid-cols-[280px_1fr]">
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div className="rounded-xl bg-indigo-50 p-3">
+                <div className="font-bold uppercase tracking-widest text-indigo-400">Recommended</div>
+                <div className="mt-1 text-lg font-black text-slate-900">{money(optimizerReport.latest_run?.recommended_cpm || optimizerReport.settings?.global_recommended_cpm_optimizer_value)}</div>
+              </div>
+              <div className="rounded-xl bg-slate-50 p-3">
+                <div className="font-bold uppercase tracking-widest text-slate-400">Applied</div>
+                <div className="mt-1 text-lg font-black text-slate-900">{money(optimizerReport.latest_run?.applied_recommended_cpm || optimizerReport.settings?.global_recommended_cpm)}</div>
+              </div>
+              <div className="rounded-xl bg-slate-50 p-3">
+                <div className="font-bold uppercase tracking-widest text-slate-400">Minimum</div>
+                <div className="mt-1 text-base font-black text-slate-900">{money(optimizerReport.settings?.global_min_cpm)}</div>
+              </div>
+              <div className="rounded-xl bg-slate-50 p-3">
+                <div className="font-bold uppercase tracking-widest text-slate-400">Maximum</div>
+                <div className="mt-1 text-base font-black text-slate-900">{money(optimizerReport.settings?.global_max_cpm)}</div>
+              </div>
+              <div className="col-span-2 rounded-xl bg-slate-50 p-3">
+                <div className="font-bold uppercase tracking-widest text-slate-400">Manual Override</div>
+                <div className="mt-1 font-black text-slate-900">{Number(optimizerReport.settings?.global_recommended_cpm_manual_override || 0) ? "Enabled" : "Off"}</div>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] text-left text-xs">
+                <thead className="bg-slate-50 text-slate-500">
+                  <tr>
+                    {["Mini App", "Network", "Score", "Priority", "Health", "Network CPM", "Publisher CPM"].map((item) => (
+                      <th key={item} className="px-3 py-2 font-semibold">{item}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(optimizerReport.network_rankings || []).slice(0, 10).map((row, index) => (
+                    <tr key={`${row.miniapp_username}-${row.network_name}-${index}`}>
+                      <td className="px-3 py-2 font-semibold text-slate-900">{row.miniapp_name || row.miniapp_username || "Mini App"}</td>
+                      <td className="px-3 py-2 text-slate-700">{row.network_name}</td>
+                      <td className="px-3 py-2 text-slate-700">{numberValue(row.score)}</td>
+                      <td className="px-3 py-2 text-slate-700">#{row.applied_priority}</td>
+                      <td className="px-3 py-2 text-slate-700">{numberValue(row.health_score)}</td>
+                      <td className="px-3 py-2 text-slate-700">{money(row.effective_network_cpm)}</td>
+                      <td className="px-3 py-2 text-slate-700">{money(row.effective_publisher_cpm)}</td>
+                    </tr>
+                  ))}
+                  {(!optimizerReport.network_rankings || optimizerReport.network_rankings.length === 0) && (
+                    <tr><td colSpan={7} className="px-3 py-6 text-center text-slate-500">No optimizer rankings yet.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       )}
 

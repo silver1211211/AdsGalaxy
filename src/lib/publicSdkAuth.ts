@@ -1,5 +1,6 @@
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { getAuthenticatedUser } from "@/lib/auth";
 import { assertTelegramSdkUserMatches, TelegramSdkAuthError, verifyTelegramThirdPartyInitData } from "@/lib/telegramThirdPartyInitData";
 
 export type PublicSdkUser = {
@@ -61,6 +62,24 @@ export async function requirePublicSdkUser(request: Request, miniappId: number, 
   } catch (error) {
     if (error instanceof TelegramSdkAuthError || (error instanceof Error && "code" in error)) throw error;
     throw sdkError("INVALID_INIT_DATA", "Telegram initData signature verification failed", 401);
+  }
+}
+
+export async function requireMiniappTrackingUser(request: Request, miniappId: number, suppliedUserId?: string): Promise<PublicSdkUser> {
+  try {
+    return await requirePublicSdkUser(request, miniappId, suppliedUserId);
+  } catch (sdkAuthError) {
+    const initData = request.headers.get("x-telegram-init-data");
+    if (!initData) throw sdkAuthError;
+
+    try {
+      const user = await getAuthenticatedUser(initData);
+      const telegramUserId = String(user.telegram_id || "");
+      assertTelegramSdkUserMatches(suppliedUserId || "", telegramUserId);
+      return { telegramUserId, rawUser: {} as PublicSdkUser["rawUser"] };
+    } catch {
+      throw sdkAuthError;
+    }
   }
 }
 

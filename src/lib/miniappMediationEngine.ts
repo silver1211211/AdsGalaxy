@@ -14,7 +14,7 @@ import {
   getMiniAppNetworkHealthScores,
   getMiniAppOptimizationSettings,
 } from "@/lib/miniappOptimization";
-import { isMiniappNetworkGloballyDisabled } from "@/lib/productionSafety";
+import { getDisabledMiniappNetworks, isMonetagTestModeEnabled } from "@/lib/productionSafety";
 
 const FALLBACK_ERROR_CODES = new Set([
   "SDK_LOAD_FAILED",
@@ -37,6 +37,7 @@ type NetworkRow = RowDataPacket & {
   internal_ad?: Record<string, unknown> | null;
   richads_publisher_id: string | null;
   richads_app_id: string | null;
+  monetag_test_mode_override?: boolean;
 };
 
 type RequestRow = RowDataPacket & {
@@ -155,13 +156,18 @@ export async function selectMediationNetwork(input: {
   alreadyAttempted?: string[];
 }) {
   const networks = await getMiniappNetworksForMediation(input.miniappId, input.conn);
-  const scoreRows = await getMiniAppNetworkHealthScores(input.miniappId, input.conn).catch(() => []);
+  const globallyDisabledNetworks = await getDisabledMiniappNetworks(input.conn);
+  const monetagTestModeEnabled = await isMonetagTestModeEnabled(input.conn);
+  const scoreRows = await getMiniAppNetworkHealthScores(input.miniappId, input.conn, { enriched: false }).catch(() => []);
   const scoreMap = new Map(scoreRows.map((row) => [row.network_name, row.health_score]));
   const [[miniapp]] = await input.conn.query<MiniAppEligibilityRow[]>(
     "SELECT status, traffic_quality_score, traffic_risk_level, inventory_override FROM miniapps WHERE id = ? FOR UPDATE",
     [input.miniappId]
   );
-  const enabledNetworkNames = networks.filter((network) => Boolean(network.enabled)).map((network) => network.network_name);
+  const enabledNetworkNames = networks
+    .filter((network) => Boolean(network.enabled) && !globallyDisabledNetworks.has(network.network_name))
+    .map((network) => network.network_name);
+  const monetagIsOnlyEnabledNetwork = enabledNetworkNames.length === 1 && enabledNetworkNames[0] === "Monetag";
   const attempted = new Set((input.alreadyAttempted || []).filter(Boolean));
   const skipped: SkippedNetwork[] = [];
   const candidatePool: NetworkRow[] = [];
@@ -179,7 +185,7 @@ export async function selectMediationNetwork(input: {
       continue;
     }
 
-    if (await isMiniappNetworkGloballyDisabled(network.network_name, input.conn)) {
+    if (globallyDisabledNetworks.has(network.network_name)) {
       skipped.push({ network_name: network.network_name, reason: "globally_disabled" });
       continue;
     }
@@ -190,11 +196,18 @@ export async function selectMediationNetwork(input: {
     }
 
     if (network.network_name === "Monetag") {
-      const monetagState = await canShowMonetag(input.miniappId, input.telegramUserId, input.conn);
+      if (monetagIsOnlyEnabledNetwork && !monetagTestModeEnabled) {
+        skipped.push({ network_name: "Monetag", reason: "monetag_only_protection_active" });
+        continue;
+      }
+      const monetagState = monetagIsOnlyEnabledNetwork && monetagTestModeEnabled
+        ? { allowed: true, reason: "test_mode" }
+        : await canShowMonetag(input.miniappId, input.telegramUserId, input.conn);
       if (!monetagState.allowed) {
         skipped.push({ network_name: "Monetag", reason: `protected_${monetagState.reason}` });
         continue;
       }
+      network.monetag_test_mode_override = monetagState.reason === "test_mode";
     }
 
     if (network.network_name === INTERNAL_NETWORK_NAME) {
@@ -252,7 +265,7 @@ export async function selectMediationNetwork(input: {
 
   const rankedCandidates = rankCandidatePool(candidatePool);
   const selected = rankedCandidates[0];
-  if (selected?.network_name === "Monetag") {
+  if (selected?.network_name === "Monetag" && !selected.monetag_test_mode_override) {
     await recordMonetagShown(input.miniappId, input.telegramUserId, input.conn);
   }
 

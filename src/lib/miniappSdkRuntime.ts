@@ -687,24 +687,69 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
       }
     };
 
+    const displayTitle = String(ad.title || "").trim().slice(0, 40);
+    const displayDescription = String(ad.description || "").trim().slice(0, 120);
+    const displayCta = String(ad.cta_text || "Learn More").trim().slice(0, 40) || "Learn More";
     const overlay = document.createElement("div");
-    overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(2,6,23,.94);display:flex;align-items:center;justify-content:center;padding:14px;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;";
+    overlay.className = "agx-rewarded-overlay";
+    const style = document.createElement("style");
+    style.textContent = `
+      .agx-rewarded-overlay{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:calc(max(6vh,env(safe-area-inset-top)) + 12px) max(16px,env(safe-area-inset-right)) calc(max(6vh,env(safe-area-inset-bottom)) + 12px) max(16px,env(safe-area-inset-left));font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 50% 0%,rgba(96,165,250,.18),transparent 32%),rgba(2,6,23,.82);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);animation:agxRewardedFade .18s ease-out}
+      .agx-rewarded-card{position:relative;width:min(420px,100%);max-height:calc(100dvh - max(12vh,96px));overflow:auto;border-radius:32px;padding:16px;color:#f8fafc;background:linear-gradient(180deg,rgba(15,23,42,.96),rgba(2,6,23,.98));border:1px solid rgba(255,255,255,.14);box-shadow:0 32px 90px rgba(0,0,0,.48),0 14px 44px rgba(37,99,235,.18);text-align:left;animation:agxRewardedPop .24s cubic-bezier(.2,.8,.2,1);overscroll-behavior:contain}
+      .agx-rewarded-top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+      .agx-rewarded-brand{min-width:0;color:#94a3b8;font-size:12px;font-weight:800;letter-spacing:.01em;white-space:nowrap}
+      .agx-rewarded-brand a{color:#e0e7ff;text-decoration:none}
+      .agx-rewarded-brand a:focus-visible,.agx-rewarded-cta:focus-visible,.agx-rewarded-close:focus-visible{outline:3px solid rgba(96,165,250,.55);outline-offset:3px}
+      .agx-rewarded-actions{display:flex;align-items:center;gap:10px;flex-shrink:0}
+      .agx-rewarded-timer{min-width:48px;height:36px;padding:0 12px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.14);color:#fff;font-size:13px;font-weight:950;font-variant-numeric:tabular-nums;box-shadow:inset 0 1px 0 rgba(255,255,255,.1);transition:transform .18s ease,background .18s ease}
+      .agx-rewarded-close{width:44px;height:44px;border-radius:999px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.1);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:24px;line-height:1;font-weight:500;box-shadow:0 12px 30px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.14);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);cursor:pointer;transition:transform .16s ease,opacity .16s ease,background .16s ease}
+      .agx-rewarded-close:disabled{opacity:.48;cursor:not-allowed}
+      .agx-rewarded-close:not(:disabled):hover{transform:translateY(-1px) scale(1.03);background:rgba(255,255,255,.16)}
+      .agx-rewarded-hero{display:block;width:100%;aspect-ratio:4/5;max-height:min(56dvh,520px);object-fit:cover;background:#0f172a;border-radius:26px;box-shadow:0 18px 52px rgba(0,0,0,.34);cursor:pointer}
+      .agx-rewarded-body{padding:18px 4px 2px;text-align:center}
+      .agx-rewarded-title{margin:0 auto 8px;max-width:100%;font-size:21px;line-height:1.18;font-weight:950;letter-spacing:-.025em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff}
+      .agx-rewarded-desc{margin:0 auto 18px;max-width:340px;color:#cbd5e1;font-size:14px;line-height:1.45;font-weight:650;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+      .agx-rewarded-cta{width:100%;min-height:50px;border:0;border-radius:18px;background:linear-gradient(135deg,#7c3aed 0%,#2563eb 48%,#06b6d4 100%);color:#fff;font-size:15px;font-weight:950;letter-spacing:-.01em;padding:14px 18px;cursor:pointer;box-shadow:0 16px 34px rgba(37,99,235,.34);transition:transform .16s ease,filter .16s ease}
+      .agx-rewarded-cta:hover{transform:translateY(-1px);filter:saturate(1.08)}
+      .agx-rewarded-cta:active{transform:translateY(0) scale(.99)}
+      @keyframes agxRewardedFade{from{opacity:0}to{opacity:1}}
+      @keyframes agxRewardedPop{from{opacity:0;transform:translate3d(0,10px,0) scale(.975)}to{opacity:1;transform:translate3d(0,0,0) scale(1)}}
+      @media (prefers-color-scheme:light){.agx-rewarded-overlay{background:radial-gradient(circle at 50% 0%,rgba(59,130,246,.15),transparent 34%),rgba(248,250,252,.72)}.agx-rewarded-card{background:linear-gradient(180deg,rgba(255,255,255,.98),rgba(248,250,252,.98));border-color:rgba(15,23,42,.08);box-shadow:0 32px 90px rgba(15,23,42,.18),0 12px 40px rgba(37,99,235,.12);color:#0f172a}.agx-rewarded-brand{color:#64748b}.agx-rewarded-brand a{color:#334155}.agx-rewarded-timer,.agx-rewarded-close{background:rgba(15,23,42,.06);border-color:rgba(15,23,42,.08);color:#0f172a;box-shadow:0 10px 24px rgba(15,23,42,.08),inset 0 1px 0 rgba(255,255,255,.7)}.agx-rewarded-title{color:#0f172a}.agx-rewarded-desc{color:#475569}.agx-rewarded-hero{background:#e2e8f0}}
+      @media (orientation:landscape) and (max-height:560px){.agx-rewarded-overlay{align-items:center;padding:calc(env(safe-area-inset-top) + 10px) max(16px,env(safe-area-inset-right)) calc(env(safe-area-inset-bottom) + 10px) max(16px,env(safe-area-inset-left))}.agx-rewarded-card{width:min(640px,100%);max-height:calc(100dvh - 20px);border-radius:24px}.agx-rewarded-hero{max-height:42dvh}.agx-rewarded-body{padding-top:12px}.agx-rewarded-desc{margin-bottom:12px}}
+      @media (max-width:360px){.agx-rewarded-card{border-radius:26px;padding:12px}.agx-rewarded-hero{border-radius:22px}.agx-rewarded-title{font-size:19px}.agx-rewarded-desc{font-size:13px}.agx-rewarded-close{width:42px;height:42px}}
+    `;
     const panel = document.createElement("div");
-    panel.style.cssText = "position:relative;width:min(448px,100%);max-height:calc(100vh - 28px);overflow-y:auto;background:#111821;border-radius:18px;box-shadow:0 24px 90px rgba(59,130,246,.22);border:1px solid rgba(148,163,184,.12);padding:16px 12px 14px;color:#fff;";
+    panel.className = "agx-rewarded-card";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    panel.setAttribute("aria-label", "Sponsored rewarded ad");
     const header = document.createElement("div");
-    header.textContent = "Ads";
-    header.style.cssText = "height:34px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:900;color:#fff;letter-spacing:0;";
+    header.className = "agx-rewarded-top";
+    const brandAttribution = document.createElement("div");
+    brandAttribution.className = "agx-rewarded-brand";
+    brandAttribution.innerHTML = `Sponsored &middot; <a href="${ADSGALAXY_BOT_URL}" target="_blank" rel="noopener noreferrer">AdsGalaxy</a>`;
+    const actions = document.createElement("div");
+    actions.className = "agx-rewarded-actions";
+    const countdown = document.createElement("div");
+    countdown.className = "agx-rewarded-timer";
+    countdown.textContent = "15s";
     const close = document.createElement("button");
-    close.textContent = "X";
+    close.type = "button";
+    close.textContent = "×";
     close.setAttribute("aria-label", "Close ad");
-    close.style.cssText = "display:none;position:absolute;right:16px;top:14px;z-index:2;width:32px;height:32px;border:0;background:transparent;color:#fff;font-size:28px;line-height:28px;font-weight:300;cursor:pointer;";
-    panel.append(header, close);
+    close.disabled = true;
+    close.className = "agx-rewarded-close";
+    actions.append(countdown, close);
+    header.append(brandAttribution, actions);
+    panel.appendChild(header);
 
     if (ad.image_url) {
       const image = document.createElement("img");
       image.src = ad.image_url;
-      image.alt = ad.title;
-      image.style.cssText = "display:block;width:100%;aspect-ratio:1/1;max-height:360px;object-fit:cover;background:#e0f2fe;border-radius:8px;margin-top:4px;";
+      image.alt = displayTitle;
+      image.loading = "eager";
+      image.decoding = "async";
+      image.className = "agx-rewarded-hero";
       image.onclick = () => {
         openTrackedLanding();
       };
@@ -712,16 +757,21 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
     }
 
     const body = document.createElement("div");
-    body.style.cssText = "padding:18px 10px 0;text-align:center;";
+    body.className = "agx-rewarded-body";
     const title = document.createElement("div");
-    title.textContent = ad.title;
-    title.style.cssText = `font-size:17px;font-weight:900;color:${ad.title_color || "#646cff"};margin-bottom:8px;letter-spacing:0;`;
+    title.textContent = displayTitle;
+    title.className = "agx-rewarded-title";
+    if (ad.title_color) title.style.color = ad.title_color;
     const description = document.createElement("div");
-    description.textContent = ad.description;
-    description.style.cssText = `font-size:14px;line-height:1.45;color:${ad.body_color || "#a7adbc"};margin:0 auto 18px;max-width:330px;`;
+    description.textContent = displayDescription;
+    description.className = "agx-rewarded-desc";
+    if (ad.body_color) description.style.color = ad.body_color;
     const cta = document.createElement("button");
     cta.textContent = `${ad.cta_text || "Learn More"}  ↗`;
     cta.style.cssText = "width:100%;border:0;border-radius:9px;background:#4f46ff;color:#fff;font-size:16px;font-weight:900;padding:14px 12px;cursor:pointer;box-shadow:0 10px 22px rgba(79,70,255,.25);";
+    cta.type = "button";
+    cta.textContent = displayCta;
+    cta.className = "agx-rewarded-cta";
     cta.onclick = () => openTrackedLanding();
     const attribution = document.createElement("a");
     attribution.href = ADSGALAXY_BOT_URL;
@@ -734,15 +784,16 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
     const countdownLabel = document.createElement("div");
     countdownLabel.innerHTML = `<span style="display:inline-flex;width:24px;height:24px;border:2px solid #8791a5;border-radius:999px;align-items:center;justify-content:center;margin-right:9px;font-size:12px;color:#8791a5;">◷</span><span>Skip in <strong>15s</strong></span>`;
     countdownLabel.style.cssText = "display:flex;align-items:center;color:#9aa3b5;font-size:15px;font-weight:800;";
-    const countdown = document.createElement("div");
-    countdown.textContent = "15";
-    countdown.style.cssText = "display:flex;align-items:center;justify-content:center;width:52px;height:52px;border:4px solid #5956ff;border-radius:999px;color:#fff;font-size:18px;font-weight:900;background:#1b2230;";
+    const legacyCountdown = document.createElement("div");
+    legacyCountdown.textContent = "15";
+    legacyCountdown.style.cssText = "display:none;";
     const helper = document.createElement("div");
-    helper.textContent = "You can skip this ad after the countdown to claim your reward.";
+    helper.textContent = "";
     helper.style.cssText = "padding-top:10px;color:#747b8d;font-size:12px;font-weight:700;line-height:1.35;";
-    countdownBox.append(countdownLabel, countdown);
-    body.append(title, description, cta, attribution, countdownBox, helper);
+    countdownBox.append(countdownLabel, legacyCountdown);
+    body.append(title, description, cta);
     panel.appendChild(body);
+    overlay.appendChild(style);
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
 
@@ -753,10 +804,11 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
     }, 1500);
     const countdownTimer = window.setInterval(() => {
       const remaining = Math.max(0, Math.ceil(maxSeconds - elapsedSeconds()));
-      countdown.textContent = String(remaining);
+      countdown.textContent = `${remaining}s`;
       countdownLabel.innerHTML = `<span style="display:inline-flex;width:24px;height:24px;border:2px solid #8791a5;border-radius:999px;align-items:center;justify-content:center;margin-right:9px;font-size:12px;color:#8791a5;">◷</span><span>Skip in <strong>${remaining}s</strong></span>`;
       if (remaining <= 0) {
-        close.style.display = "block";
+        close.disabled = false;
+        close.setAttribute("aria-label", "Close ad and continue");
         window.clearInterval(countdownTimer);
       } else if (impressionSent && remaining % 5 === 0) {
         sendQualityEvent({ event_type: "watch_update", watch_duration_seconds: elapsedSeconds() });

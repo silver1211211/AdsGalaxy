@@ -16,7 +16,16 @@ const DATE_MODE_OPTIONS: Array<{ mode: DateMode; label: string }> = [
   { mode: "30d", label: "Last 30 Days" },
 ];
 
-type DailyRow = { date: string; impressions: number; publisher_revenue: number; net_cpm: number; fill_rate: number | null };
+type DailyRow = {
+  date: string;
+  impressions: number;
+  clicks: number;
+  ctr: number;
+  cpc: number;
+  publisher_revenue: number;
+  net_cpm: number;
+  fill_rate: number | null;
+};
 
 type MiniAppReport = {
   summary: {
@@ -24,6 +33,9 @@ type MiniAppReport = {
     yesterday_impressions: number;
     today_revenue: number;
     total_impressions: number;
+    total_clicks: number;
+    ctr: number;
+    cpc: number;
     total_earnings: number;
     average_cpm: number;
   };
@@ -224,10 +236,10 @@ export default function MiniAppAnalyticsDashboard({ miniappId }: MiniAppAnalytic
                       <tr key={row.date} className="transition-colors duration-150 odd:bg-white even:bg-slate-50/60 hover:bg-emerald-50/50">
                         <td className="whitespace-nowrap px-3 py-2.5 font-bold text-slate-700">{formatFullDate(row.date)}</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatNumber(row.impressions)}</td>
-                        <td className="px-3 py-2.5 text-center text-slate-300">—</td>
+                        <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatNumber(row.clicks || 0)}</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatMoney(row.net_cpm)}</td>
-                        <td className="px-3 py-2.5 text-center text-slate-300">—</td>
-                        <td className="px-3 py-2.5 text-center text-slate-300">—</td>
+                        <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatMoney(row.cpc || 0)}</td>
+                        <td className="px-3 py-2.5 text-center font-bold text-slate-900">{(row.ctr || 0).toFixed(1)}%</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">
                           {row.fill_rate === null ? <span className="text-slate-300">—</span> : `${row.fill_rate.toFixed(1)}%`}
                         </td>

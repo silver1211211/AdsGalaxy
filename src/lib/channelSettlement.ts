@@ -96,6 +96,7 @@ export type ChannelSettlementResult = {
 };
 
 const MAX_POSTS_PER_RUN = Math.min(500, Math.max(1, Number.parseInt(process.env.CHANNEL_SETTLEMENT_BATCH_SIZE || "200", 10) || 200));
+const MAX_SETTLEMENT_BATCHES_PER_RUN = Math.max(1, Number.parseInt(process.env.CHANNEL_SETTLEMENT_MAX_BATCHES || "50", 10) || 50);
 
 function amount(value: number) {
   return Number(Math.max(0, value).toFixed(8));
@@ -151,6 +152,22 @@ async function lockedPost(connection: PoolConnection, postId: number) {
   return rows[0] || null;
 }
 
+async function countOutstandingCampaignEngagement(campaignId: number) {
+  const [rows] = await pool.query<Array<RowDataPacket & { outstanding_count: number }>>(
+    `SELECT COUNT(*) AS outstanding_count
+     FROM campaign_posts cp
+     JOIN campaigns c ON c.id = cp.campaign_id
+     WHERE cp.campaign_id = ?
+       AND cp.delivery_confirmed_at IS NOT NULL
+       AND cp.delivery_failed_at IS NULL
+       AND cp.deleted_at IS NULL
+       AND ((c.type = 'views' AND COALESCE(cp.views, 0) > COALESCE(cp.settled_views, 0))
+         OR (c.type = 'clicks' AND (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) > COALESCE(cp.settled_clicks, 0)))`,
+    [campaignId]
+  );
+  return Number(rows[0]?.outstanding_count || 0);
+}
+
 export async function settleChannelCampaigns(options: { channelId?: number; campaignId?: number; skipGlobalMaintenance?: boolean } = {}): Promise<ChannelSettlementResult> {
   await ensureClassicSettlementColumns();
   const payoutPolicy = await channelPayoutPolicy();
@@ -177,10 +194,18 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
     } catch (error) {
       fraudBilling = { error: error instanceof Error ? error.message : "channel_fraud_billing_failed" };
       console.error("Pre-settlement channel fraud billing failed", fraudBilling);
-      throw new Error("channel_fraud_billing_precheck_failed");
     }
   }
-  const [candidates] = await pool.query<CandidateRow[]>(
+
+  const details: ChannelSettlementDetail[] = [];
+  const exhausted = new Map<number, { name: string; telegramId: string | number }>();
+  const qualityByChannel = new Map<number, PublisherQualityMetrics>();
+  let failedPosts = 0;
+  let totalCandidates = 0;
+  let batchCount = 0;
+  let lastCandidatePostId = 0;
+
+  const fetchCandidates = () => pool.query<CandidateRow[]>(
     `SELECT cp.id AS post_id
      FROM campaign_posts cp
      JOIN campaigns c ON c.id = cp.campaign_id
@@ -195,192 +220,204 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
        AND cp.delivery_confirmed_at IS NOT NULL
        AND cp.delivery_failed_at IS NULL
        AND cp.deleted_at IS NULL
+       AND cp.id > ?
        AND (? IS NULL OR cp.channel_id = ?)
        AND (? IS NULL OR cp.campaign_id = ?)
        AND ((c.type = 'views' AND COALESCE(cp.views, 0) > COALESCE(cp.settled_views, 0))
          OR (c.type = 'clicks' AND (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) > COALESCE(cp.settled_clicks, 0)))
      ORDER BY cp.id ASC LIMIT ${MAX_POSTS_PER_RUN}`,
-    [options.channelId || null, options.channelId || null, options.campaignId || null, options.campaignId || null]
+    [lastCandidatePostId, options.channelId || null, options.channelId || null, options.campaignId || null, options.campaignId || null]
   );
 
-  const details: ChannelSettlementDetail[] = [];
-  const exhausted = new Map<number, { name: string; telegramId: string | number }>();
-  const qualityByChannel = new Map<number, PublisherQualityMetrics>();
-  let failedPosts = 0;
+  while (batchCount < MAX_SETTLEMENT_BATCHES_PER_RUN) {
+    const [candidates] = await fetchCandidates();
+    if (candidates.length === 0) break;
+    batchCount += 1;
+    totalCandidates += candidates.length;
+    lastCandidatePostId = Number(candidates[candidates.length - 1].post_id || lastCandidatePostId);
 
-  for (const candidate of candidates) {
-    const connection = await pool.getConnection();
-    try {
-      await connection.beginTransaction();
-      const post = await lockedPost(connection, candidate.post_id);
-      if (!post || post.campaign_status !== "active" || post.channel_status !== "active"
-        || Number(post.publisher_is_banned) === 1 || post.publisher_status === "banned"
-        || (post.settlement_excluded_until && new Date(post.settlement_excluded_until).getTime() > Date.now())) {
-        await connection.rollback();
-        continue;
-      }
+    for (const candidate of candidates) {
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        const post = await lockedPost(connection, candidate.post_id);
+        if (!post || post.campaign_status !== "active" || post.channel_status !== "active"
+          || Number(post.publisher_is_banned) === 1 || post.publisher_status === "banned"
+          || (post.settlement_excluded_until && new Date(post.settlement_excluded_until).getTime() > Date.now())) {
+          await connection.rollback();
+          continue;
+        }
 
-      const kind: SettlementKind = post.campaign_type === "clicks" ? "click" : "view";
-      const oldViews = Number(post.settled_views || 0);
-      const totalViews = Number(post.views || 0);
-      const oldClicks = Number(post.settled_clicks || 0);
-      const totalClicks = Number(post.current_clicks || 0);
-      const dueUnits = kind === "view" ? totalViews - oldViews : totalClicks - oldClicks;
-      const unitPrice = Number(post.price_per_thousand || 0) / 1000;
-      const currentBudget = Number(post.budget || 0);
+        const kind: SettlementKind = post.campaign_type === "clicks" ? "click" : "view";
+        const oldViews = Number(post.settled_views || 0);
+        const totalViews = Number(post.views || 0);
+        const oldClicks = Number(post.settled_clicks || 0);
+        const totalClicks = Number(post.current_clicks || 0);
+        const dueUnits = kind === "view" ? totalViews - oldViews : totalClicks - oldClicks;
+        const unitPrice = Number(post.price_per_thousand || 0) / 1000;
+        const currentBudget = Number(post.budget || 0);
 
-      if (dueUnits <= 0) {
-        await connection.rollback();
-        continue;
-      }
-      if (!Number.isFinite(unitPrice) || unitPrice <= 0 || currentBudget <= 0) {
-        await markCampaignBudgetExhausted(post.campaign_id, connection);
+        if (dueUnits <= 0) {
+          await connection.rollback();
+          continue;
+        }
+        if (!Number.isFinite(unitPrice) || unitPrice <= 0 || currentBudget <= 0) {
+          await markCampaignBudgetExhausted(post.campaign_id, connection);
+          await connection.commit();
+          exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
+          continue;
+        }
+
+        const affordableUnits = Math.max(0, Math.floor((currentBudget + 1e-10) / unitPrice));
+        const settledUnits = Math.min(dueUnits, affordableUnits);
+        if (settledUnits <= 0) {
+          await markCampaignBudgetExhausted(post.campaign_id, connection);
+          await connection.commit();
+          exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
+          continue;
+        }
+
+        const debit = amount(settledUnits * unitPrice);
+        const split = calculateChannelPayoutSplit(debit, payoutPolicy);
+        let quality = qualityByChannel.get(post.channel_id);
+        if (!quality) {
+          quality = await getPublisherQuality(post.channel_id, connection);
+          qualityByChannel.set(post.channel_id, quality);
+        }
+        const publisherCredit = amount(split.publisherCredit * quality.qualityWeight);
+        const qualityHoldback = amount(split.publisherCredit - publisherCredit);
+        const reserve = amount(debit - split.platformRevenue - publisherCredit);
+        const platform = split.platformRevenue;
+        const effectivePublisherCpm = kind === "view" && settledUnits > 0 ? amount((publisherCredit / settledUnits) * 1000) : 0;
+        const effectivePublisherCpc = kind === "click" && settledUnits > 0 ? amount(publisherCredit / settledUnits) : 0;
+        const settledThrough = (kind === "view" ? oldViews : oldClicks) + settledUnits;
+        const remaining = amount(currentBudget - debit);
+        const isExhausted = settledUnits < dueUnits || remaining < unitPrice || remaining <= 0;
+
+        const safety = await recordPayoutSafetyCheck({
+          settlementType: kind,
+          campaignId: post.campaign_id,
+          publisherId: post.publisher_id,
+          advertiserPaid: debit,
+          publisherShare: publisherCredit,
+          platformShare: platform,
+          reserveShare: reserve,
+          expectedPublisherShare: amount(
+            debit * (1 - payoutPolicy.platformMarginPercent / 100)
+            * (1 - payoutPolicy.safetyReservePercent / 100)
+            * quality.qualityWeight
+          ),
+          expectedPlatformShare: amount(debit * (payoutPolicy.platformMarginPercent / 100)),
+          expectedReserveShare: amount(debit -
+            amount(debit * (payoutPolicy.platformMarginPercent / 100)) -
+            amount(debit * (1 - payoutPolicy.platformMarginPercent / 100)
+              * (1 - payoutPolicy.safetyReservePercent / 100) * quality.qualityWeight)),
+          metadata: { post_id: post.post_id, units: settledUnits, settled_through: settledThrough },
+        });
+        if (safety.status !== "passed") {
+          await connection.rollback();
+          failedPosts += 1;
+          continue;
+        }
+
+        const [campaignUpdate] = await connection.query(
+          `UPDATE campaigns SET budget = ?, channel_spend = channel_spend + ?,
+             channel_publisher_earnings = channel_publisher_earnings + ?,
+             channel_platform_revenue = channel_platform_revenue + ?,
+             channel_reserve_amount = channel_reserve_amount + ?
+           WHERE id = ? AND status = 'active'`,
+          [remaining, debit, publisherCredit, platform, reserve, post.campaign_id]
+        );
+        if (!("affectedRows" in campaignUpdate) || campaignUpdate.affectedRows !== 1) throw new Error("campaign_debit_failed");
+
+        if (!(await creditUserLockedBalance(connection, post.publisher_id, publisherCredit))) throw new Error("publisher_credit_failed");
+
+        const settlementTable = kind === "view" ? "ad_settlements_views" : "ad_settlements";
+        const metricColumn = kind === "view" ? "views_count" : "clicks_count";
+        await connection.query(
+          `INSERT INTO ${settlementTable}
+            (post_id, campaign_id, advertiser_id, channel_id, publisher_id, ${metricColumn}, advertiser_paid,
+             publisher_reward, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'locked')`,
+          [post.post_id, post.campaign_id, post.advertiser_id, post.channel_id, post.publisher_id,
+            settledUnits, debit, publisherCredit]
+        );
+
+        await connection.query(
+          `INSERT INTO channel_settlement_ledger
+            (settlement_type, campaign_id, post_id, channel_id, publisher_id, old_settled_count, new_units,
+             settled_through, advertiser_debit, platform_margin_percent, publisher_pool_before_reserve,
+             safety_reserve_percent, publisher_distribution_pool, publisher_quality_score,
+             publisher_quality_weight, quality_holdback,
+             publisher_credit, publisher_distribution, effective_publisher_cpm, effective_publisher_cpc,
+             platform_revenue, reserve_amount,
+             remaining_budget, exhausted)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [kind, post.campaign_id, post.post_id, post.channel_id, post.publisher_id,
+            kind === "view" ? oldViews : oldClicks, settledUnits, settledThrough, debit,
+            payoutPolicy.platformMarginPercent, split.publisherPoolBeforeReserve, payoutPolicy.safetyReservePercent,
+            split.publisherCredit, quality.qualityScore, quality.qualityWeight, qualityHoldback,
+            publisherCredit, publisherCredit, effectivePublisherCpm, effectivePublisherCpc,
+            platform, reserve, isExhausted ? 0 : remaining, isExhausted]
+        );
+
+        const settledColumn = kind === "view" ? "settled_views" : "settled_clicks";
+        await connection.query(
+          `UPDATE campaign_posts SET ${settledColumn} = ?, spend = spend + ?,
+             publisher_earnings = publisher_earnings + ?, platform_revenue = platform_revenue + ?,
+             reserve_amount = reserve_amount + ? WHERE id = ?`,
+          [settledThrough, debit, publisherCredit, platform, reserve, post.post_id]
+        );
+        await connection.query("UPDATE channels SET last_successful_settlement_at=NOW() WHERE id=?", [post.channel_id]);
+
+        if (isExhausted) {
+          await markCampaignBudgetExhausted(post.campaign_id, connection);
+          exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
+        }
         await connection.commit();
-        exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
-        continue;
-      }
 
-      const affordableUnits = Math.max(0, Math.floor((currentBudget + 1e-10) / unitPrice));
-      const settledUnits = Math.min(dueUnits, affordableUnits);
-      if (settledUnits <= 0) {
-        await markCampaignBudgetExhausted(post.campaign_id, connection);
-        await connection.commit();
-        exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
-        continue;
-      }
-
-      const debit = amount(settledUnits * unitPrice);
-      const split = calculateChannelPayoutSplit(debit, payoutPolicy);
-      let quality = qualityByChannel.get(post.channel_id);
-      if (!quality) {
-        quality = await getPublisherQuality(post.channel_id, connection);
-        qualityByChannel.set(post.channel_id, quality);
-      }
-      const publisherCredit = amount(split.publisherCredit * quality.qualityWeight);
-      const qualityHoldback = amount(split.publisherCredit - publisherCredit);
-      const reserve = amount(debit - split.platformRevenue - publisherCredit);
-      const platform = split.platformRevenue;
-      const effectivePublisherCpm = kind === "view" && settledUnits > 0 ? amount((publisherCredit / settledUnits) * 1000) : 0;
-      const effectivePublisherCpc = kind === "click" && settledUnits > 0 ? amount(publisherCredit / settledUnits) : 0;
-      const settledThrough = (kind === "view" ? oldViews : oldClicks) + settledUnits;
-      const remaining = amount(currentBudget - debit);
-      const isExhausted = settledUnits < dueUnits || remaining < unitPrice || remaining <= 0;
-
-      const safety = await recordPayoutSafetyCheck({
-        settlementType: kind,
-        campaignId: post.campaign_id,
-        publisherId: post.publisher_id,
-        advertiserPaid: debit,
-        publisherShare: publisherCredit,
-        platformShare: platform,
-        reserveShare: reserve,
-        expectedPublisherShare: amount(
-          debit * (1 - payoutPolicy.platformMarginPercent / 100)
-          * (1 - payoutPolicy.safetyReservePercent / 100)
-          * quality.qualityWeight
-        ),
-        expectedPlatformShare: amount(debit * (payoutPolicy.platformMarginPercent / 100)),
-        expectedReserveShare: amount(debit -
-          amount(debit * (payoutPolicy.platformMarginPercent / 100)) -
-          amount(debit * (1 - payoutPolicy.platformMarginPercent / 100)
-            * (1 - payoutPolicy.safetyReservePercent / 100) * quality.qualityWeight)),
-        metadata: { post_id: post.post_id, units: settledUnits, settled_through: settledThrough },
-      });
-      if (safety.status !== "passed") {
-        await connection.rollback();
+        const detail: ChannelSettlementDetail = {
+          campaign_id: post.campaign_id, post_id: post.post_id, type: kind,
+          old_settled_views: oldViews, new_views: kind === "view" ? settledUnits : 0,
+          old_settled_clicks: oldClicks, new_clicks: kind === "click" ? settledUnits : 0,
+          amount_debited: debit, publisher_credited: publisherCredit, platform_revenue: platform,
+          publisher_distribution: publisherCredit,
+          reserve_amount: reserve, publisher_pool_before_reserve: split.publisherPoolBeforeReserve,
+          platform_margin_percent: payoutPolicy.platformMarginPercent,
+          safety_reserve_percent: payoutPolicy.safetyReservePercent,
+          publisher_distribution_pool: split.publisherCredit,
+          publisher_quality_score: quality.qualityScore,
+          publisher_quality_weight: quality.qualityWeight,
+          quality_holdback: qualityHoldback,
+          effective_publisher_cpm: effectivePublisherCpm,
+          effective_publisher_cpc: effectivePublisherCpc,
+          remaining_budget: isExhausted ? 0 : remaining, exhausted: isExhausted,
+        };
+        details.push(detail);
+        console.info("Channel campaign settlement", detail);
+      } catch (error) {
+        await connection.rollback().catch(() => undefined);
         failedPosts += 1;
-        continue;
+        console.error("Channel campaign settlement failed", {
+          post_id: candidate.post_id,
+          error: error instanceof Error ? error.message : "unknown_error",
+        });
+      } finally {
+        connection.release();
       }
-
-      const [campaignUpdate] = await connection.query(
-        `UPDATE campaigns SET budget = ?, channel_spend = channel_spend + ?,
-           channel_publisher_earnings = channel_publisher_earnings + ?,
-           channel_platform_revenue = channel_platform_revenue + ?,
-           channel_reserve_amount = channel_reserve_amount + ?
-         WHERE id = ? AND status = 'active'`,
-        [remaining, debit, publisherCredit, platform, reserve, post.campaign_id]
-      );
-      if (!("affectedRows" in campaignUpdate) || campaignUpdate.affectedRows !== 1) throw new Error("campaign_debit_failed");
-
-      if (!(await creditUserLockedBalance(connection, post.publisher_id, publisherCredit))) throw new Error("publisher_credit_failed");
-
-      const settlementTable = kind === "view" ? "ad_settlements_views" : "ad_settlements";
-      const metricColumn = kind === "view" ? "views_count" : "clicks_count";
-      await connection.query(
-        `INSERT INTO ${settlementTable}
-          (post_id, campaign_id, advertiser_id, channel_id, publisher_id, ${metricColumn}, advertiser_paid,
-           publisher_reward, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'locked')`,
-        [post.post_id, post.campaign_id, post.advertiser_id, post.channel_id, post.publisher_id,
-          settledUnits, debit, publisherCredit]
-      );
-
-      await connection.query(
-        `INSERT INTO channel_settlement_ledger
-          (settlement_type, campaign_id, post_id, channel_id, publisher_id, old_settled_count, new_units,
-           settled_through, advertiser_debit, platform_margin_percent, publisher_pool_before_reserve,
-           safety_reserve_percent, publisher_distribution_pool, publisher_quality_score,
-           publisher_quality_weight, quality_holdback,
-           publisher_credit, publisher_distribution, effective_publisher_cpm, effective_publisher_cpc,
-           platform_revenue, reserve_amount,
-           remaining_budget, exhausted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [kind, post.campaign_id, post.post_id, post.channel_id, post.publisher_id,
-          kind === "view" ? oldViews : oldClicks, settledUnits, settledThrough, debit,
-          payoutPolicy.platformMarginPercent, split.publisherPoolBeforeReserve, payoutPolicy.safetyReservePercent,
-          split.publisherCredit, quality.qualityScore, quality.qualityWeight, qualityHoldback,
-          publisherCredit, publisherCredit, effectivePublisherCpm, effectivePublisherCpc,
-          platform, reserve, isExhausted ? 0 : remaining, isExhausted]
-      );
-
-      const settledColumn = kind === "view" ? "settled_views" : "settled_clicks";
-      await connection.query(
-        `UPDATE campaign_posts SET ${settledColumn} = ?, spend = spend + ?,
-           publisher_earnings = publisher_earnings + ?, platform_revenue = platform_revenue + ?,
-           reserve_amount = reserve_amount + ? WHERE id = ?`,
-        [settledThrough, debit, publisherCredit, platform, reserve, post.post_id]
-      );
-      await connection.query("UPDATE channels SET last_successful_settlement_at=NOW() WHERE id=?", [post.channel_id]);
-
-      if (isExhausted) {
-        await markCampaignBudgetExhausted(post.campaign_id, connection);
-        exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
-      }
-      await connection.commit();
-
-      const detail: ChannelSettlementDetail = {
-        campaign_id: post.campaign_id, post_id: post.post_id, type: kind,
-        old_settled_views: oldViews, new_views: kind === "view" ? settledUnits : 0,
-        old_settled_clicks: oldClicks, new_clicks: kind === "click" ? settledUnits : 0,
-        amount_debited: debit, publisher_credited: publisherCredit, platform_revenue: platform,
-        publisher_distribution: publisherCredit,
-        reserve_amount: reserve, publisher_pool_before_reserve: split.publisherPoolBeforeReserve,
-        platform_margin_percent: payoutPolicy.platformMarginPercent,
-        safety_reserve_percent: payoutPolicy.safetyReservePercent,
-        publisher_distribution_pool: split.publisherCredit,
-        publisher_quality_score: quality.qualityScore,
-        publisher_quality_weight: quality.qualityWeight,
-        quality_holdback: qualityHoldback,
-        effective_publisher_cpm: effectivePublisherCpm,
-        effective_publisher_cpc: effectivePublisherCpc,
-        remaining_budget: isExhausted ? 0 : remaining, exhausted: isExhausted,
-      };
-      details.push(detail);
-      console.info("Channel campaign settlement", detail);
-    } catch (error) {
-      await connection.rollback().catch(() => undefined);
-      failedPosts += 1;
-      console.error("Channel campaign settlement failed", {
-        post_id: candidate.post_id,
-        error: error instanceof Error ? error.message : "unknown_error",
-      });
-    } finally {
-      connection.release();
     }
   }
 
   const deletions: Record<number, CampaignPostDeletionSummary> = {};
   for (const [campaignId, campaign] of exhausted) {
+    const outstandingEngagement = await countOutstandingCampaignEngagement(campaignId);
+    if (outstandingEngagement > 0) {
+      console.warn("Skipping exhausted campaign post deletion because unsettled engagement remains", {
+        campaign_id: campaignId,
+        outstanding_posts: outstandingEngagement,
+      });
+      continue;
+    }
     deletions[campaignId] = await deleteActiveCampaignPosts(campaignId);
     await sendTelegramMessage(campaign.telegramId, `Campaign Budget Exhausted\n\nYour campaign "${campaign.name}" has exhausted its budget and its active channel posts were removed.`);
   }
@@ -409,7 +446,7 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
   }
 
   return {
-    candidates: candidates.length,
+    candidates: totalCandidates,
     settledPosts: details.length,
     failedPosts,
     advertiserDebited: amount(details.reduce((sum, item) => sum + item.amount_debited, 0)),

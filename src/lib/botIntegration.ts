@@ -40,11 +40,38 @@ function clean(value: unknown) {
   return String(value || "").trim();
 }
 
-function encryptionKey() {
+export function validateBotIntegrationEncryptionConfig() {
   const secret = clean(process.env.BOT_INTEGRATION_ENCRYPTION_KEY);
   if (!secret) {
     throw new BotEncryptionError("encryption_config_error", "BOT_INTEGRATION_ENCRYPTION_KEY is not configured");
   }
+  if (secret.length < 32) {
+    throw new BotEncryptionError("encryption_config_error", "BOT_INTEGRATION_ENCRYPTION_KEY must be at least 32 characters or encode 32 bytes");
+  }
+  if (/^[a-f0-9]+$/i.test(secret) && secret.length !== 64) {
+    throw new BotEncryptionError("encryption_config_error", "BOT_INTEGRATION_ENCRYPTION_KEY hex value must be exactly 64 characters");
+  }
+  if (/^(?:base64|base64url):/i.test(secret)) {
+    const [, encoding, value] = secret.match(/^(base64|base64url):(.+)$/i) || [];
+    try {
+      const decoded = Buffer.from(value || "", encoding?.toLowerCase() === "base64url" ? "base64url" : "base64");
+      if (decoded.length !== 32) {
+        throw new BotEncryptionError("encryption_config_error", "BOT_INTEGRATION_ENCRYPTION_KEY encoded value must decode to exactly 32 bytes");
+      }
+    } catch (error: unknown) {
+      if (isBotEncryptionError(error)) throw error;
+      throw new BotEncryptionError("encryption_config_error", "BOT_INTEGRATION_ENCRYPTION_KEY is not valid base64/base64url", { cause: error });
+    }
+  }
+  return { ok: true as const, diagnostic: "BOT_INTEGRATION_ENCRYPTION_KEY is configured and syntactically valid" };
+}
+
+function encryptionKey() {
+  validateBotIntegrationEncryptionConfig();
+  const secret = clean(process.env.BOT_INTEGRATION_ENCRYPTION_KEY);
+  if (/^[a-f0-9]{64}$/i.test(secret)) return Buffer.from(secret, "hex");
+  const base64Match = secret.match(/^(base64|base64url):(.+)$/i);
+  if (base64Match) return Buffer.from(base64Match[2], base64Match[1].toLowerCase() === "base64url" ? "base64url" : "base64");
   return crypto.createHash("sha256").update(secret).digest();
 }
 
@@ -216,7 +243,7 @@ export function assertBotIntegrationSecretReadable(encrypted: unknown, storedHas
   return secret;
 }
 
-export type BotIntegrationStatus = "not_installed" | "installed" | "imported_pending_verification" | "active" | "error" | "disabled";
+export type BotIntegrationStatus = "not_installed" | "installed" | "imported_pending_verification" | "active" | "error" | "disabled" | "rejected";
 
 export function resolveBotIntegrationStatus(input: {
   botStatus: unknown;
@@ -226,7 +253,9 @@ export function resolveBotIntegrationStatus(input: {
   lastReceivedAt: unknown;
   lastErrorAt: unknown;
 }): BotIntegrationStatus {
-  const disabled = ["paused", "rejected", "deleted", "token_invalid", "bot_deleted", "unreachable"].includes(clean(input.botStatus).toLowerCase());
+  const botStatus = clean(input.botStatus).toLowerCase();
+  if (botStatus === "rejected") return "rejected";
+  const disabled = ["paused", "deleted", "token_invalid", "bot_deleted", "unreachable"].includes(botStatus);
   if (disabled) return "disabled";
   const lastReceived = input.lastReceivedAt ? new Date(String(input.lastReceivedAt)).getTime() : 0;
   const lastError = input.lastErrorAt ? new Date(String(input.lastErrorAt)).getTime() : 0;

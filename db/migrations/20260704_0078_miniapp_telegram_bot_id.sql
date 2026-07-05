@@ -1,8 +1,12 @@
 -- Bind each publisher Mini App to the numeric Telegram bot ID used for
 -- Telegram third-party Ed25519 initData validation.
 
-ALTER TABLE miniapps
-  ADD COLUMN IF NOT EXISTS telegram_bot_id DECIMAL(20, 0) UNSIGNED NULL AFTER bot_id;
+SET @telegram_bot_id_sql = IF(
+  EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='miniapps' AND COLUMN_NAME='telegram_bot_id'),
+  'SELECT 1',
+  'ALTER TABLE miniapps ADD COLUMN telegram_bot_id DECIMAL(20, 0) UNSIGNED NULL AFTER bot_id'
+);
+PREPARE telegram_bot_id_stmt FROM @telegram_bot_id_sql; EXECUTE telegram_bot_id_stmt; DEALLOCATE PREPARE telegram_bot_id_stmt;
 
 -- Existing onboarding already constrained bot_id to digits. Backfill only
 -- values that are safe numeric Telegram IDs; keep the legacy column intact.

@@ -1,6 +1,7 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { MINIAPP_NETWORKS, type MiniAppNetworkName } from "@/lib/miniappNetworkAdapters";
+import { getDisabledMiniappNetworks } from "@/lib/productionSafety";
 
 export type MiniAppOptimizationSettings = {
   internal_ads_max_share_percent: number;
@@ -25,6 +26,28 @@ type ScoreRow = RowDataPacket & {
   timeouts: number;
   sdk_load_failures: number;
   revenue: number;
+  clicks: number;
+  completed: number;
+  last_success_at: Date | string | null;
+  last_failure_at: Date | string | null;
+  temporarily_disabled_until: Date | string | null;
+};
+
+type NetworkHealthScoreOptions = {
+  enriched?: boolean;
+};
+
+type NetworkHealthAggregate = {
+  network_name: MiniAppNetworkName;
+  requests: number;
+  impressions: number;
+  failures: number;
+  no_fills: number;
+  timeouts: number;
+  sdk_load_failures: number;
+  revenue: number;
+  clicks: number;
+  completed: number;
   last_success_at: Date | string | null;
   last_failure_at: Date | string | null;
   temporarily_disabled_until: Date | string | null;
@@ -99,8 +122,9 @@ export function calculateHealthScore(input: {
   ));
 }
 
-export async function getMiniAppNetworkHealthScores(miniappId: number | string, conn?: PoolConnection) {
+export async function getMiniAppNetworkHealthScores(miniappId: number | string, conn?: PoolConnection, options: NetworkHealthScoreOptions = {}) {
   const db = executor(conn);
+  const globallyDisabledNetworks = await getDisabledMiniappNetworks(db);
   const [rows] = await db.query<ScoreRow[]>(`
     SELECT
       network_name,
@@ -111,6 +135,8 @@ export async function getMiniAppNetworkHealthScores(miniappId: number | string, 
       0 as timeouts,
       0 as sdk_load_failures,
       0 as revenue,
+      0 as clicks,
+      SUM(CASE WHEN final_result IN ('completed', 'impression_confirmed', 'displayed') THEN 1 ELSE 0 END) as completed,
       MAX(CASE WHEN impression_confirmed = 1 THEN impression_confirmed_at ELSE NULL END) as last_success_at,
       NULL as last_failure_at,
       NULL as temporarily_disabled_until
@@ -138,9 +164,30 @@ export async function getMiniAppNetworkHealthScores(miniappId: number | string, 
     "SELECT network_name, temporarily_disabled_until FROM miniapp_network_health WHERE miniapp_id = ?",
     [miniappId]
   );
+  const [revenueRows, clickRows] = options.enriched
+    ? await Promise.all([
+      db.query<RowDataPacket[]>(`
+        SELECT network_name, COALESCE(SUM(gross_revenue), 0) as revenue
+        FROM miniapp_daily_stats
+        WHERE miniapp_id = ?
+          AND date >= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+        GROUP BY network_name
+      `, [miniappId]).then(([queryRows]) => queryRows),
+      db.query<RowDataPacket[]>(`
+        SELECT mr.selected_network as network_name, COUNT(ac.id) as clicks
+        FROM ad_click_attribution ac
+        JOIN miniapp_mediation_requests mr ON mr.request_id = ac.request_id
+        WHERE mr.miniapp_id = ?
+          AND ac.campaign_type = 'miniapp'
+          AND ac.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+        GROUP BY mr.selected_network
+      `, [miniappId]).then(([queryRows]) => queryRows),
+    ])
+    : [[], []] as RowDataPacket[][];
 
-  const byNetwork = new Map<string, any>();
+  const byNetwork = new Map<string, NetworkHealthAggregate>();
   for (const network of MINIAPP_NETWORKS) {
+    if (globallyDisabledNetworks.has(network)) continue;
     byNetwork.set(network, {
       network_name: network,
       requests: 0,
@@ -150,20 +197,40 @@ export async function getMiniAppNetworkHealthScores(miniappId: number | string, 
       timeouts: 0,
       sdk_load_failures: 0,
       revenue: 0,
+      clicks: 0,
+      completed: 0,
       last_success_at: null,
       last_failure_at: null,
       temporarily_disabled_until: null,
     });
   }
 
+  const mergeNetwork = (networkName: unknown, patch: Partial<NetworkHealthAggregate>) => {
+    const key = String(networkName || "") as MiniAppNetworkName;
+    const existing = byNetwork.get(key);
+    if (!existing) return;
+    byNetwork.set(key, { ...existing, ...patch, network_name: key });
+  };
+
   for (const row of rows) {
-    byNetwork.set(row.network_name, { ...byNetwork.get(row.network_name), ...row });
+    mergeNetwork(row.network_name, row);
   }
   for (const row of failureRows) {
-    byNetwork.set(row.network_name, { ...byNetwork.get(row.network_name), ...row });
+    mergeNetwork(row.network_name, {
+      failures: row.failures,
+      timeouts: row.timeouts,
+      sdk_load_failures: row.sdk_load_failures,
+      last_failure_at: row.last_failure_at,
+    });
   }
   for (const row of healthRows) {
-    byNetwork.set(row.network_name, { ...byNetwork.get(row.network_name), temporarily_disabled_until: row.temporarily_disabled_until });
+    mergeNetwork(row.network_name, { temporarily_disabled_until: row.temporarily_disabled_until });
+  }
+  for (const row of revenueRows) {
+    mergeNetwork(row.network_name, { revenue: row.revenue });
+  }
+  for (const row of clickRows) {
+    mergeNetwork(row.network_name, { clicks: row.clicks });
   }
 
   return Array.from(byNetwork.values()).map((row) => {
@@ -177,15 +244,25 @@ export async function getMiniAppNetworkHealthScores(miniappId: number | string, 
       temporarilyDisabled: isFuture(row.temporarily_disabled_until),
     });
 
+    const requests = toNumber(row.requests);
+    const impressions = toNumber(row.impressions);
+    const revenue = toNumber(row.revenue);
+    const completed = toNumber(row.completed);
     return {
       network_name: row.network_name as MiniAppNetworkName,
       health_score: score,
-      requests: toNumber(row.requests),
-      impressions: toNumber(row.impressions),
+      requests,
+      filled: impressions,
+      impressions,
       failures: toNumber(row.failures),
       no_fills: toNumber(row.no_fills),
+      fill_rate: requests > 0 ? (impressions / requests) * 100 : 0,
       timeouts: toNumber(row.timeouts),
       sdk_load_failures: toNumber(row.sdk_load_failures),
+      clicks: toNumber(row.clicks),
+      revenue,
+      average_cpm: impressions > 0 ? (revenue / impressions) * 1000 : 0,
+      completion_rate: impressions > 0 ? (completed / impressions) * 100 : 0,
       last_success_at: row.last_success_at || null,
       last_failure_at: row.last_failure_at || null,
       temporarily_disabled_until: row.temporarily_disabled_until || null,

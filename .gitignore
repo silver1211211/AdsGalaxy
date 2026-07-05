@@ -49,6 +49,9 @@ scripts/*
 !scripts/verify-miniapp-ed25519.ts
 scratch/
 .telegram-mt-session*
+tsconfig.tsbuildinfo
+diagnosis.json
+/tmp/
 
 # AI-related
 .gemini/

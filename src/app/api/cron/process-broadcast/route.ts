@@ -25,6 +25,7 @@ import { processBoundedQueue } from "@/lib/concurrency";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
 import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
+import { botUserBroadcastEligibleCondition } from "@/lib/botAudience";
 
 export const dynamic = 'force-dynamic';
 
@@ -54,6 +55,149 @@ function normalizeFailureReason(value?: string) {
   if (text.includes("paused")) return "bot_paused";
   if (text.includes("error")) return "system_error";
   return "unknown_error";
+}
+
+async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: any; cost: number }) {
+  if (!Number.isFinite(input.cost) || input.cost <= 0) {
+    return { ok: false as const, reason: "invalid_campaign_cost" };
+  }
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [campaignRows]: any = await conn.query(
+      "SELECT budget, status, daily_budget_limit FROM campaigns WHERE id = ? FOR UPDATE",
+      [input.campaign.id]
+    );
+    const lockedCampaign = campaignRows[0];
+    if (!lockedCampaign || lockedCampaign.status !== "active" || Number(lockedCampaign.budget || 0) < input.cost) {
+      await conn.rollback();
+      return { ok: false as const, reason: "campaign_budget_exhausted" };
+    }
+
+    if (Number(lockedCampaign.daily_budget_limit || 0) > 0) {
+      const [[dailySpendRow]]: any = await conn.query(
+        "SELECT COALESCE(SUM(cost), 0) as spend FROM broadcast_deliveries WHERE campaign_id = ? AND created_at >= CURDATE() AND status IN ('pending', 'sent')",
+        [input.campaign.id]
+      );
+      if (Number(dailySpendRow?.spend || 0) + input.cost > Number(lockedCampaign.daily_budget_limit)) {
+        await conn.rollback();
+        return { ok: false as const, reason: "daily_budget_limit" };
+      }
+    }
+
+    const [budgetResult]: any = await conn.query(
+      "UPDATE campaigns SET budget = budget - ? WHERE id = ? AND budget >= ? AND status = 'active'",
+      [input.cost, input.campaign.id, input.cost]
+    );
+    if (budgetResult.affectedRows !== 1) {
+      await conn.rollback();
+      return { ok: false as const, reason: "campaign_budget_race" };
+    }
+
+    const [deliveryResult]: any = await conn.query(
+      `INSERT INTO broadcast_deliveries
+        (campaign_id, bot_id, user_id, chat_id, cost, publisher_reward, status, retry_count)
+       VALUES (?, ?, ?, ?, ?, 0, 'pending', 0)`,
+      [input.campaign.id, input.bot.id, input.user.id, input.user.chat_id, input.cost]
+    );
+    const [[updatedCampaign]]: any = await conn.query("SELECT budget FROM campaigns WHERE id = ?", [input.campaign.id]);
+    await conn.commit();
+    return {
+      ok: true as const,
+      deliveryId: Number(deliveryResult.insertId),
+      remainingBudget: Number(updatedCampaign?.budget || 0),
+    };
+  } catch (error) {
+    await conn.rollback().catch(() => undefined);
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function finalizeBroadcastDelivery(input: {
+  deliveryId: number;
+  campaign: any;
+  bot: any;
+  user: any;
+  reward: number;
+  attempts: number;
+}) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [[delivery]]: any = await conn.query(
+      "SELECT status FROM broadcast_deliveries WHERE id = ? FOR UPDATE",
+      [input.deliveryId]
+    );
+    if (!delivery) throw new Error("broadcast_reservation_missing");
+    if (delivery.status === "sent") {
+      await conn.commit();
+      return { idempotent: true };
+    }
+    if (delivery.status !== "pending") throw new Error("broadcast_reservation_not_pending");
+
+    if (!(await creditUserAvailableBalance(conn, input.bot.user_id, input.reward))) {
+      throw new Error("publisher_credit_failed");
+    }
+    const [deliveryUpdate]: any = await conn.query(
+      `UPDATE broadcast_deliveries
+       SET publisher_reward = ?, status = 'sent', retry_count = ?, last_success_at = NOW(),
+           failure_reason = NULL, telegram_error = NULL
+       WHERE id = ? AND status = 'pending'`,
+      [input.reward, input.attempts, input.deliveryId]
+    );
+    if (deliveryUpdate.affectedRows !== 1) throw new Error("broadcast_finalize_race");
+    await conn.query("UPDATE bot_users SET last_broadcast_at = NOW() WHERE id = ?", [input.user.id]);
+    await markBotUserDeliverySuccess(input.user.id, conn);
+    await recordBotBroadcastSuccess(input.bot.id, conn);
+    await conn.commit();
+    return { idempotent: false };
+  } catch (error) {
+    await conn.rollback().catch(() => undefined);
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function refundBroadcastReservation(input: {
+  deliveryId: number;
+  campaignId: number;
+  failureReason: string;
+  telegramError: string;
+  attempts: number;
+}) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [[delivery]]: any = await conn.query(
+      "SELECT status, cost FROM broadcast_deliveries WHERE id = ? FOR UPDATE",
+      [input.deliveryId]
+    );
+    if (!delivery || delivery.status !== "pending") {
+      await conn.commit();
+      return { refunded: false, idempotent: true };
+    }
+    const reservedCost = Number(delivery.cost || 0);
+    const [refundResult]: any = await conn.query("UPDATE campaigns SET budget = budget + ? WHERE id = ?", [reservedCost, input.campaignId]);
+    if (refundResult.affectedRows !== 1) throw new Error("broadcast_refund_campaign_missing");
+    const [deliveryUpdate]: any = await conn.query(
+      `UPDATE broadcast_deliveries
+       SET cost = 0, publisher_reward = 0, status = 'failed', failure_reason = ?, telegram_error = ?,
+           retry_count = ?, last_failure_at = NOW()
+       WHERE id = ? AND status = 'pending'`,
+      [input.failureReason, input.telegramError.slice(0, 500), input.attempts, input.deliveryId]
+    );
+    if (deliveryUpdate.affectedRows !== 1) throw new Error("broadcast_refund_race");
+    await conn.commit();
+    return { refunded: true, idempotent: false };
+  } catch (error) {
+    await conn.rollback().catch(() => undefined);
+    throw error;
+  } finally {
+    conn.release();
+  }
 }
 
 export async function GET(req: NextRequest) {
@@ -230,8 +374,9 @@ export async function GET(req: NextRequest) {
         const [users]: any = await pool.query(`
           SELECT bu.* 
           FROM bot_users bu
-          WHERE bu.bot_id = ? AND bu.is_active = TRUE
-          AND bu.status IN ('active','pending_verification')
+          JOIN bots delivery_bot ON delivery_bot.id = bu.bot_id
+          WHERE bu.bot_id = ?
+          AND ${botUserBroadcastEligibleCondition("bu", "delivery_bot")}
           AND (bu.last_broadcast_at IS NULL OR bu.last_broadcast_at < NOW() - INTERVAL ? HOUR)
           AND (
             SELECT COUNT(*) FROM broadcast_deliveries bd 
@@ -300,114 +445,46 @@ export async function GET(req: NextRequest) {
           ]]
         };
 
-        // We use the bot's token to send the message
-        const sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, campaign.message_text, {
-          photo: campaign.image_url,
-          parse_mode: parseMode,
-          reply_markup: replyMarkup,
-          token: bot.bot_token
-        }));
+        const cost = parseFloat(campaign.cpm) / 1000;
+        const reward = cost * rewardPercentage;
+        const reservation = await reserveBroadcastDelivery({ campaign, bot, user, cost });
+        if (!reservation.ok) {
+          return {
+            status: 'skipped', user: user.id, campaign_id: campaign.id, campaign_name: campaign.name,
+            error: reservation.reason === "daily_budget_limit" ? "Daily budget limit reached" : "Campaign budget exhausted",
+            failure_reason: reservation.reason,
+          };
+        }
+
+        let sendResult;
+        try {
+          sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, campaign.message_text, {
+            photo: campaign.image_url,
+            parse_mode: parseMode,
+            reply_markup: replyMarkup,
+            token: bot.bot_token
+          }));
+        } catch (sendError) {
+          const message = sendError instanceof Error ? sendError.message : "Telegram send failed";
+          await refundBroadcastReservation({
+            deliveryId: reservation.deliveryId, campaignId: campaign.id,
+            failureReason: normalizeFailureReason(message), telegramError: message, attempts: 1,
+          });
+          throw sendError;
+        }
         const res = sendResult.result;
 
         if (sendResult.ok && res && res.ok) {
-          const cost = parseFloat(campaign.cpm) / 1000;
-          const reward = cost * rewardPercentage;
+          await finalizeBroadcastDelivery({
+            deliveryId: reservation.deliveryId, campaign, bot, user, reward, attempts: sendResult.attempts || 1,
+          });
+          const remainingBudget = reservation.remainingBudget;
+          const budgetExhausted = remainingBudget <= 0;
+          if (budgetExhausted) {
+            await markCampaignBudgetExhausted(campaign.id);
+          }
 
-          // Transactional updates
-          const conn = await pool.getConnection();
-          try {
-            await conn.beginTransaction();
-
-            const [campaignRows]: any = await conn.query(
-              "SELECT budget, status FROM campaigns WHERE id = ? FOR UPDATE",
-              [campaign.id]
-            );
-            const lockedCampaign = campaignRows[0];
-            if (!lockedCampaign || lockedCampaign.status !== "active" || Number(lockedCampaign.budget || 0) < cost) {
-              await conn.rollback();
-              return {
-                status: 'skipped',
-                user: user.id,
-                campaign_id: campaign.id,
-                campaign_name: campaign.name,
-                error: "Campaign budget exhausted",
-                failure_reason: "campaign_budget_exhausted",
-              };
-            }
-
-            if (Number(campaign.daily_budget_limit || 0) > 0) {
-              const [[dailySpendRow]]: any = await conn.query(
-                "SELECT COALESCE(SUM(cost), 0) as spend FROM broadcast_deliveries WHERE campaign_id = ? AND created_at >= CURDATE()",
-                [campaign.id]
-              );
-              if (Number(dailySpendRow?.spend || 0) + cost > Number(campaign.daily_budget_limit)) {
-                await conn.rollback();
-                return {
-                  status: 'skipped',
-                  user: user.id,
-                  campaign_id: campaign.id,
-                  campaign_name: campaign.name,
-                  error: "Daily budget limit reached",
-                  failure_reason: "daily_budget_limit",
-                };
-              }
-            }
-
-            const [budgetResult]: any = await conn.query(
-              "UPDATE campaigns SET budget = budget - ? WHERE id = ? AND budget >= ? AND status = 'active'",
-              [cost, campaign.id, cost]
-            );
-            if (budgetResult.affectedRows !== 1) {
-              await conn.rollback();
-              return {
-                status: 'skipped',
-                user: user.id,
-                campaign_id: campaign.id,
-                campaign_name: campaign.name,
-                error: "Campaign budget changed concurrently",
-                failure_reason: "campaign_budget_race",
-              };
-            }
-            
-            // 2. Add reward to publisher
-            const creditedPublisher = await creditUserAvailableBalance(conn, bot.user_id, reward);
-            if (!creditedPublisher) {
-              await conn.rollback();
-              return {
-                status: 'skipped',
-                user: user.id,
-                campaign_id: campaign.id,
-                campaign_name: campaign.name,
-                error: "Publisher credit skipped",
-                failure_reason: "publisher_credit_skipped",
-              };
-            }
-            
-            // 3. Record delivery
-            await conn.query(`
-              INSERT INTO broadcast_deliveries (campaign_id, bot_id, user_id, chat_id, cost, publisher_reward)
-              VALUES (?, ?, ?, ?, ?, ?)
-            `, [campaign.id, bot.id, user.id, user.chat_id, cost, reward]);
-            
-            // 4. Update last_broadcast_at
-            await conn.query("UPDATE bot_users SET last_broadcast_at = NOW() WHERE id = ?", [user.id]);
-            await markBotUserDeliverySuccess(user.id, conn);
-            await recordBotBroadcastSuccess(bot.id, conn);
-
-            // 5. Check if budget is exhausted
-            const [updatedCampaign]: any = await conn.query("SELECT budget, status FROM campaigns WHERE id = ?", [campaign.id]);
-            const remainingBudget = parseFloat(updatedCampaign[0]?.budget || "0");
-            
-            let budgetExhausted = false;
-            if (remainingBudget <= 0 && updatedCampaign[0]?.status === 'active') {
-              await markCampaignBudgetExhausted(campaign.id, conn);
-              budgetExhausted = true;
-            }
-            
-            await conn.commit();
-
-            // 6. Notify advertiser if budget exhausted
-            if (budgetExhausted) {
+          if (budgetExhausted) {
               try {
                 const [advertiser]: any = await pool.query("SELECT chat_id FROM users WHERE id = ?", [campaign.user_id]);
                 if (advertiser[0]?.chat_id) {
@@ -418,23 +495,20 @@ export async function GET(req: NextRequest) {
               } catch (notifyErr) {
                 console.error("Failed to notify advertiser:", notifyErr);
               }
-            }
-
-            return { 
-              status: 'success', 
-              user: user.id, 
-              campaign_id: campaign.id,
-              campaign_name: campaign.name,
-              cost: cost,
-              remaining_budget: remainingBudget
-            };
-          } catch (e) {
-            await conn.rollback();
-            throw e;
-          } finally {
-            conn.release();
           }
+
+          return {
+            status: 'success', user: user.id, campaign_id: campaign.id, campaign_name: campaign.name,
+            cost, remaining_budget: remainingBudget,
+          };
         }
+
+        const failureMessage = String(res?.description || sendResult.failure?.reason || "Unknown error");
+        await refundBroadcastReservation({
+          deliveryId: reservation.deliveryId, campaignId: campaign.id,
+          failureReason: normalizeFailureReason(failureMessage), telegramError: failureMessage,
+          attempts: sendResult.attempts || 1,
+        });
         if (!res?.ok) {
           let botFailure = null;
           if (sendResult.failure) {

@@ -2,6 +2,8 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
+import { getGlobalBotAudienceStats } from "@/lib/botAudience";
+import { getMiniAppPlatformStats } from "@/lib/miniappReports";
 
 export async function GET() {
   if (!(await checkAdminAuth())) {
@@ -70,35 +72,7 @@ export async function GET() {
     const [[botsTotal]]: any = await pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status = 'active'");
     const [[botsDeliveryEligible]]: any = await pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status = 'active' AND COALESCE(health_status, 'active') IN ('active', 'healthy')");
     const [[botsPaused]]: any = await pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status IN ('paused', 'token_invalid', 'bot_deleted', 'unreachable')");
-    const [[botUsersTotal]]: any = await pool.query("SELECT COUNT(*) as count FROM bot_users");
-    const [[botUsersActive]]: any = await pool.query(`
-      SELECT COUNT(*) as count
-      FROM bot_users bu
-      JOIN bots b ON b.id = bu.bot_id
-      WHERE b.status = 'active'
-        AND b.is_deleted = FALSE
-        AND bu.is_active = TRUE
-        AND bu.status = 'active'
-    `);
-    const [[botUsersDeliveryEligible]]: any = await pool.query(`
-      SELECT COUNT(*) as count
-      FROM bot_users bu
-      JOIN bots b ON b.id = bu.bot_id
-      WHERE b.status = 'active'
-        AND b.is_deleted = FALSE
-        AND COALESCE(b.health_status, 'active') IN ('active', 'healthy')
-        AND bu.is_active = TRUE
-        AND bu.status = 'active'
-    `);
-    const [[botUsersInactive]]: any = await pool.query(`
-      SELECT COUNT(*) as count
-      FROM bot_users bu
-      JOIN bots b ON b.id = bu.bot_id
-      WHERE bu.is_active = FALSE
-         OR bu.status != 'active'
-         OR b.status != 'active'
-         OR b.is_deleted = TRUE
-    `);
+    const botAudienceStats = await getGlobalBotAudienceStats();
     const [[conversionTotals]]: any = await pool.query(`
       SELECT
         COUNT(*) as conversions,
@@ -140,6 +114,40 @@ export async function GET() {
     const [[impressionsYesterday]]: any = await pool.query(
       "SELECT COALESCE(SUM(impressions), 0) as count FROM miniapp_daily_stats WHERE date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)"
     );
+    const miniappStats = await getMiniAppPlatformStats();
+    const [[channelPlatformStats]]: any = await pool.query(`
+      SELECT
+        COALESCE(SUM(views), 0) as impressions,
+        COALESCE(SUM(clicks), 0) as clicks,
+        COALESCE(SUM(spend), 0) as revenue,
+        COALESCE(SUM(earnings), 0) as publisher_earnings,
+        COALESCE(SUM(platform_revenue), 0) as platform_earnings,
+        COALESCE(SUM(reserve_amount), 0) as reserve
+      FROM channel_daily_stats
+    `);
+    const [[botPlatformStats]]: any = await pool.query(`
+      SELECT
+        COUNT(*) as impressions,
+        COALESCE(SUM(cost), 0) as revenue,
+        COALESCE(SUM(publisher_reward), 0) as publisher_earnings,
+        GREATEST(COALESCE(SUM(cost), 0) - COALESCE(SUM(publisher_reward), 0), 0) as platform_earnings
+      FROM broadcast_deliveries
+      WHERE status = 'sent'
+    `);
+    const platformRevenue = Number(channelPlatformStats?.revenue || 0)
+      + Number(botPlatformStats?.revenue || 0)
+      + Number(miniappStats.lifetime.gross_revenue || 0);
+    const publisherEarnings = Number(channelPlatformStats?.publisher_earnings || 0)
+      + Number(botPlatformStats?.publisher_earnings || 0)
+      + Number(miniappStats.lifetime.publisher_revenue || 0);
+    const platformEarnings = Number(channelPlatformStats?.platform_earnings || 0)
+      + Number(botPlatformStats?.platform_earnings || 0)
+      + Number(miniappStats.lifetime.ads_galaxy_revenue || 0);
+    const reserve = Number(channelPlatformStats?.reserve || 0) + Number(miniappStats.lifetime.reserve_revenue || 0);
+    const platformImpressions = Number(channelPlatformStats?.impressions || 0)
+      + Number(botPlatformStats?.impressions || 0)
+      + Number(miniappStats.lifetime.total_impressions || 0);
+    const platformClicks = Number(channelPlatformStats?.clicks || 0) + Number(miniappStats.lifetime.total_clicks || 0);
 
     return NextResponse.json({
       users: {
@@ -180,16 +188,26 @@ export async function GET() {
       bots: {
         total: botsTotal.count,
         deliveryEligible: botsDeliveryEligible.count,
-        totalUsers: botUsersTotal.count,
-        activeUsers: botUsersActive.count,
-        deliveryEligibleUsers: botUsersDeliveryEligible.count,
+        totalUsers: botAudienceStats.total_users,
+        activeUsers: botAudienceStats.active_users,
+        deliveryEligibleUsers: botAudienceStats.delivery_eligible_users,
         paused: botsPaused.count,
-        inactiveUsers: botUsersInactive.count
+        inactiveUsers: botAudienceStats.inactive_users
       },
       miniapps: {
         active: miniappsActive.count || 0,
         impressionsToday: impressionsToday.count || 0,
-        impressionsYesterday: impressionsYesterday.count || 0
+        impressionsYesterday: impressionsYesterday.count || 0,
+        today: miniappStats.today,
+        yesterday: miniappStats.yesterday,
+        lifetime: miniappStats.lifetime,
+        total_impressions: miniappStats.lifetime.total_impressions,
+        total_revenue: miniappStats.lifetime.total_revenue,
+        gross_revenue: miniappStats.lifetime.gross_revenue,
+        ads_galaxy_revenue: miniappStats.lifetime.ads_galaxy_revenue,
+        reserve_revenue: miniappStats.lifetime.reserve_revenue,
+        publisher_revenue: miniappStats.lifetime.publisher_revenue,
+        fill_rate: miniappStats.lifetime.fill_rate
       },
       withdrawals: {
         pending: withdrawalsStats.pending || 0,
@@ -199,7 +217,24 @@ export async function GET() {
       },
       financials: {
         totalDeposits: depositsPaid.total || 0,
-        totalWithdrawals: withdrawalsPaid.total || 0
+        totalWithdrawals: withdrawalsPaid.total || 0,
+        revenue: platformRevenue,
+        publisherEarnings,
+        platformEarnings,
+        reserve
+      },
+      platform_totals: {
+        revenue: platformRevenue,
+        publisher_earnings: publisherEarnings,
+        platform_earnings: platformEarnings,
+        reserve,
+        impressions: platformImpressions,
+        views: platformImpressions,
+        clicks: platformClicks,
+        ctr: platformImpressions > 0 ? (platformClicks / platformImpressions) * 100 : 0,
+        cpm: platformImpressions > 0 ? (platformRevenue / platformImpressions) * 1000 : 0,
+        cpc: platformClicks > 0 ? platformRevenue / platformClicks : 0,
+        fill_rate: miniappStats.lifetime.fill_rate
       },
       conversions: {
         total: conversionTotals.conversions || 0,
@@ -210,7 +245,7 @@ export async function GET() {
         top_categories: topConversionCategories,
         top_inventory: topConversionInventory
       }
-    });
+    }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
   } catch (error: any) {
     console.error("Admin Dashboard API Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });

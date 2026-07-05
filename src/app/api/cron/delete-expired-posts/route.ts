@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { deleteCampaignPosts, getConfiguredPostLifetimeHours, markStalePendingDeliveryPosts } from "@/lib/campaignPostDeletion";
+import { settleChannelCampaigns } from "@/lib/channelSettlement";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 
 export const dynamic = "force-dynamic";
@@ -16,6 +17,15 @@ export async function GET(request: Request) {
     const pendingRecovery = await markStalePendingDeliveryPosts(
       Number.parseInt(process.env.PENDING_DELIVERY_TIMEOUT_MINUTES || "10", 10)
     );
+    const settlement = await settleChannelCampaigns({ skipGlobalMaintenance: true });
+    if (settlement.failedPosts > 0) {
+      return NextResponse.json({
+        success: false,
+        message: "expired_post_settlement_failed",
+        settlement,
+        pending_recovery: pendingRecovery,
+      }, { status: 409 });
+    }
     const lifetimeHours = await getConfiguredPostLifetimeHours();
     const summary = await deleteCampaignPosts({
       olderThan24Hours: true,
@@ -39,6 +49,7 @@ export async function GET(request: Request) {
       skipped: summary.skipped,
       failed_ids: summary.failedIds,
       pending_recovery: pendingRecovery,
+      settlement,
       details: summary.details,
     });
   } catch (error) {

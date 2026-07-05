@@ -8,7 +8,7 @@ import {
   type MiniAppNetworkName,
 } from "@/lib/miniappNetworkAdapters";
 import { getDisabledMiniappNetworks, requireAdServingAllowed } from "@/lib/productionSafety";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { requireMiniappTrackingUser } from "@/lib/publicSdkAuth";
 
 type MiniAppRow = RowDataPacket & {
   id: number;
@@ -26,9 +26,6 @@ export async function GET(request: Request) {
   try {
     const blocked = await requireAdServingAllowed();
     if (blocked) return blocked;
-    const initData = request.headers.get("x-telegram-init-data");
-    if (!initData) return NextResponse.json({ error: "Unauthorized: initData required" }, { status: 401 });
-    await getAuthenticatedUser(initData);
 
     const { searchParams } = new URL(request.url);
     const miniappId = Number(searchParams.get("miniapp_id"));
@@ -37,6 +34,8 @@ export async function GET(request: Request) {
     if (!Number.isInteger(miniappId) || miniappId <= 0) {
       return NextResponse.json({ error: "Valid miniapp_id is required" }, { status: 400 });
     }
+
+    await requireMiniappTrackingUser(request, miniappId);
 
     if (requestedNetwork && !isMiniAppNetworkName(requestedNetwork)) {
       return NextResponse.json({ error: "Invalid network_name" }, { status: 400 });

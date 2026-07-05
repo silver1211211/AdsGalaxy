@@ -4,6 +4,7 @@ import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { MiniAppSubmissionValidationError, validateMiniAppSubmission } from "@/lib/miniappSubmissionValidation";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import { notifyMiniAppSubmitted } from "@/lib/publisherNotifications";
+import { getMiniAppAggregateStatsByIds } from "@/lib/miniappReports";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
 type ExistingMiniAppRow = RowDataPacket & {
@@ -20,7 +21,7 @@ export async function GET(request: Request) {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
 
-    const [rows] = await pool.query(
+    const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT
         id,
         user_id,
@@ -67,7 +68,11 @@ export async function GET(request: Request) {
       [user.id]
     );
 
-    return NextResponse.json(rows);
+    const statsById = await getMiniAppAggregateStatsByIds(rows.map((row) => row.id));
+    return NextResponse.json(rows.map((row) => ({
+      ...row,
+      ...(statsById.get(Number(row.id)) || {}),
+    })));
   } catch (error: unknown) {
     console.error("Publisher Mini Apps GET Error:", error);
     const status = getAuthErrorStatus(error);

@@ -8,6 +8,7 @@ import { validatePostbackUrl } from "@/lib/conversionTracking";
 import { normalizeMarketplaceType, publicSelectionMetadata, recordMarketplaceEvent, validateDirectPlacementTargets } from "@/lib/publisherMarketplace";
 import { evaluateCampaignAutomation } from "@/lib/approvalAutomation";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
+import { columnExists } from "@/lib/schemaGuards";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 
@@ -244,6 +245,38 @@ export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
+    const hasCampaignPostViews = await columnExists(pool, "campaign_posts", "views");
+    const hasBroadcastDeliveryCost = await columnExists(pool, "broadcast_deliveries", "cost");
+    const hasClickSettlementAdvertiserPaid = await columnExists(pool, "ad_settlements", "advertiser_paid");
+    const hasViewSettlementAdvertiserPaid = await columnExists(pool, "ad_settlements_views", "advertiser_paid");
+    const hasViewSettlementCampaignId = await columnExists(pool, "ad_settlements_views", "campaign_id");
+    const campaignPostImpressionsExpr = hasCampaignPostViews
+      ? "COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.campaign_id = c.id), 0)"
+      : "COALESCE((SELECT COUNT(*) FROM campaign_posts cp WHERE cp.campaign_id = c.id), 0)";
+    const campaignPostTodayImpressionsExpr = hasCampaignPostViews
+      ? "COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.campaign_id = c.id AND cp.created_at >= CURDATE()), 0)"
+      : "COALESCE((SELECT COUNT(*) FROM campaign_posts cp WHERE cp.campaign_id = c.id AND cp.created_at >= CURDATE()), 0)";
+    const campaignPostYesterdayImpressionsExpr = hasCampaignPostViews
+      ? "COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.campaign_id = c.id AND cp.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND cp.created_at < CURDATE()), 0)"
+      : "COALESCE((SELECT COUNT(*) FROM campaign_posts cp WHERE cp.campaign_id = c.id AND cp.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND cp.created_at < CURDATE()), 0)";
+    const broadcastSpendExpr = hasBroadcastDeliveryCost
+      ? "COALESCE((SELECT SUM(bd.cost) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)"
+      : "0";
+    const broadcastTodaySpendExpr = hasBroadcastDeliveryCost
+      ? "COALESCE((SELECT SUM(bd.cost) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.created_at >= CURDATE()), 0)"
+      : "0";
+    const clickSettlementSpendExpr = hasClickSettlementAdvertiserPaid
+      ? "COALESCE((SELECT SUM(s.advertiser_paid) FROM ad_settlements s WHERE s.campaign_id = c.id), 0)"
+      : "0";
+    const viewSettlementSpendExpr = hasViewSettlementAdvertiserPaid && hasViewSettlementCampaignId
+      ? "COALESCE((SELECT SUM(sv.advertiser_paid) FROM ad_settlements_views sv WHERE sv.campaign_id = c.id), 0)"
+      : "0";
+    const clickSettlementTodaySpendExpr = hasClickSettlementAdvertiserPaid
+      ? "COALESCE((SELECT SUM(s.advertiser_paid) FROM ad_settlements s WHERE s.campaign_id = c.id AND s.created_at >= CURDATE()), 0)"
+      : "0";
+    const viewSettlementTodaySpendExpr = hasViewSettlementAdvertiserPaid && hasViewSettlementCampaignId
+      ? "COALESCE((SELECT SUM(sv.advertiser_paid) FROM ad_settlements_views sv WHERE sv.campaign_id = c.id AND sv.created_at >= CURDATE()), 0)"
+      : "0";
 
     const [rows]: any = await pool.query(
       `SELECT id, name, parse_mode, message_text, image_url, link, postback_url, button_text,
@@ -252,12 +285,98 @@ export async function GET(request: Request) {
          frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
          direct_inventory_metadata, status, paused_at, resume_locked_until,
          completed_at, budget_exhausted_at, pause_reason, auto_reactivate,
-         created_at, updated_at
-       FROM campaigns WHERE user_id = ? ORDER BY created_at DESC`,
+         created_at, updated_at,
+         budget as remaining_budget,
+         CASE
+           WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)
+           ELSE ${campaignPostImpressionsExpr}
+         END as impressions,
+         CASE
+           WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.created_at >= CURDATE()), 0)
+           ELSE ${campaignPostTodayImpressionsExpr}
+         END as today_impressions,
+         CASE
+           WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND bd.created_at < CURDATE()), 0)
+           ELSE ${campaignPostYesterdayImpressionsExpr}
+         END as yesterday_impressions,
+         CASE
+           WHEN type = 'broadcast' THEN 0
+           ELSE COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0)
+         END as clicks,
+         CASE
+           WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
+           ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr})
+         END as spend,
+         CASE
+           WHEN type = 'broadcast' THEN ${broadcastTodaySpendExpr}
+           ELSE (${clickSettlementTodaySpendExpr} + ${viewSettlementTodaySpendExpr})
+         END as today_spend,
+         CASE
+           WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(DISTINCT bd.bot_id) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)
+           ELSE COALESCE((SELECT COUNT(DISTINCT cp.channel_id) FROM campaign_posts cp WHERE cp.campaign_id = c.id), 0)
+         END as active_publishers,
+         CASE
+           WHEN type = 'broadcast' THEN 0
+           ELSE COALESCE((SELECT COUNT(DISTINCT cp.channel_id) FROM campaign_posts cp WHERE cp.campaign_id = c.id), 0)
+         END as active_channels,
+         CASE
+           WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(DISTINCT bd.bot_id) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)
+           ELSE 0
+         END as active_bots,
+         CASE
+           WHEN (
+             CASE WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)
+             ELSE ${campaignPostImpressionsExpr} END
+           ) > 0
+           THEN (
+             CASE WHEN type = 'broadcast' THEN 0
+             ELSE COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0) END
+           ) / (
+             CASE WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 1)
+             ELSE ${campaignPostImpressionsExpr} END
+           ) * 100
+           ELSE 0
+         END as ctr,
+         CASE
+           WHEN (
+             CASE WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)
+             ELSE ${campaignPostImpressionsExpr} END
+           ) > 0
+           THEN (
+             CASE WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
+             ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) END
+           ) / (
+             CASE WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 1)
+             ELSE ${campaignPostImpressionsExpr} END
+           ) * 1000
+           ELSE 0
+         END as average_cpm,
+         CASE
+           WHEN type != 'broadcast' AND COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0) > 0
+           THEN (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) / COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 1)
+           ELSE 0
+         END as average_cpc,
+         CASE
+           WHEN (
+             CASE WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
+             ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) END
+             + COALESCE(c.budget, 0)
+           ) > 0
+           THEN (
+             CASE WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
+             ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) END
+           ) / (
+             CASE WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
+             ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) END
+             + COALESCE(c.budget, 0)
+           ) * 100
+           ELSE 0
+         END as completion_percent
+       FROM campaigns c WHERE c.user_id = ? ORDER BY c.created_at DESC`,
       [user.id]
     );
 
-    return NextResponse.json(rows);
+    return NextResponse.json(rows, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
   } catch (error: any) {
     console.error("Fetch Campaigns Error:", error);
     return NextResponse.json({ error: error.message || "Failed to fetch campaigns" }, { status: getAuthErrorStatus(error) });

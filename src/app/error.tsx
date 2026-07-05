@@ -1,26 +1,25 @@
 "use client";
 
 import { useEffect } from "react";
-import AppBootState from "@/components/shared/AppBootState";
+import ErrorExperience from "@/components/shared/ErrorExperience";
 
-export default function Error({
+export default function ErrorPage({
   error,
-  reset,
+  unstable_retry,
 }: {
   error: Error & { digest?: string };
-  reset: () => void;
+  unstable_retry: () => void;
 }) {
   useEffect(() => {
-    console.error("App route error:", error);
+    console.error("Page rendering failed", { digest: error.digest, message: error.message });
   }, [error]);
 
   return (
-    <AppBootState
-      mode="error"
-      title="Unable to load AdsGalaxy"
-      message="We couldn't start the Mini App. Please reload and try again."
-      detail="If this continues, contact support."
-      onAction={reset}
+    <ErrorExperience
+      code="500"
+      title="Something went off course"
+      message="AdsGalaxy hit an unexpected problem while loading this page. You can try again or return to the homepage."
+      onRetry={unstable_retry}
     />
   );
 }

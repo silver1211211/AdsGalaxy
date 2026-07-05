@@ -16,6 +16,7 @@ export const MINIAPP_NETWORK_SETTING_KEYS: Record<string, string> = {
 
 const DEFAULT_MAINTENANCE_MESSAGE =
   "AdsGalaxy is in maintenance mode. You can view data, but new actions are temporarily paused.";
+export const MONETAG_TEST_MODE_SETTING_KEY = "network_monetag_test_mode_enabled";
 
 function enabled(value: unknown, fallback = false) {
   if (value === undefined || value === null || value === "") return fallback;
@@ -104,6 +105,11 @@ export async function getDisabledMiniappNetworks(db: Db = pool) {
 export async function isMiniappNetworkGloballyDisabled(networkName?: string | null, db: Db = pool) {
   if (!networkName) return false;
   return (await getDisabledMiniappNetworks(db)).has(networkName);
+}
+
+export async function isMonetagTestModeEnabled(db: Db = pool) {
+  const settings = await getSettingsMap([MONETAG_TEST_MODE_SETTING_KEY], db);
+  return enabled(settings.get(MONETAG_TEST_MODE_SETTING_KEY));
 }
 
 export async function upsertAdminAlert(input: {

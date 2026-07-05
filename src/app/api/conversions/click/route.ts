@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth";
 import { appendClickId, recordAdClick } from "@/lib/conversionTracking";
+import { requireMiniappTrackingUser } from "@/lib/publicSdkAuth";
 
 export function OPTIONS() {
   return new Response(null, { status: 204 });
@@ -30,11 +31,10 @@ export async function POST(request: Request) {
     const userAgent = request.headers.get("user-agent") || "unknown";
 
     if (campaignType === "miniapp") {
-      if (!initData) return NextResponse.json({ error: "Unauthorized: initData required" }, { status: 401 });
-      const authenticatedUser = await getAuthenticatedUser(initData);
       if (!requestId || !Number.isInteger(miniappId) || miniappId <= 0) {
         return NextResponse.json({ error: "request_id and miniapp_id are required" }, { status: 400 });
       }
+      const trackingUser = await requireMiniappTrackingUser(request, miniappId);
       const [requestRows]: any = await pool.query(
         `SELECT miniapp_id, telegram_user_id, internal_campaign_id
          FROM miniapp_mediation_requests WHERE request_id = ? LIMIT 1`,
@@ -44,7 +44,7 @@ export async function POST(request: Request) {
       if (!adRequest
         || Number(adRequest.miniapp_id) !== miniappId
         || Number(adRequest.internal_campaign_id) !== campaignId
-        || String(adRequest.telegram_user_id) !== String(authenticatedUser.telegram_id)) {
+        || String(adRequest.telegram_user_id) !== trackingUser.telegramUserId) {
         return NextResponse.json({ error: "Click does not match the issued ad request" }, { status: 403 });
       }
       const [rows]: any = await pool.query(

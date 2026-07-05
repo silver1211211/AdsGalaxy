@@ -97,6 +97,10 @@ const OS_OPTIONS = [
 ];
 
 const STEPS = ["Ad Creative", "Targeting", "Budget & Launch"];
+const REWARDED_IMAGE_MAX_BYTES = 1 * 1024 * 1024;
+const REWARDED_IMAGE_RATIO = 4 / 5;
+const REWARDED_IMAGE_RATIO_TOLERANCE = 0.01;
+const REWARDED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
 
 const emptyForm = {
   campaign_name: "",
@@ -318,8 +322,8 @@ export default function AdvertiserMiniAppRewardedPage() {
   };
 
   const handleImageFile = async (file: File) => {
-    if (!file.type.startsWith("image/")) {
-      setImageError("This file is not an image. Please choose a JPG, PNG, or similar image file.");
+    if (!REWARDED_IMAGE_TYPES.includes(file.type)) {
+      setImageError("Unsupported format. Upload a PNG, JPG, or WEBP image.");
       return;
     }
 
@@ -331,19 +335,23 @@ export default function AdvertiserMiniAppRewardedPage() {
     setForm(p => ({ ...p, image_url: "" }));
 
     // Size check
-    if (file.size > 1 * 1024 * 1024) {
+    if (file.size > REWARDED_IMAGE_MAX_BYTES) {
       setImageError("Image is too large. Maximum allowed size is 1 MB.");
       return;
     }
 
-    // Dimension + square check
+    // Dimension + 4:5 portrait check
     const dimensionError = await new Promise<string>((resolve) => {
       const img = new window.Image();
       img.onload = () => {
         const { naturalWidth: w, naturalHeight: h } = img;
-        if (w !== h) { resolve(`Image must be square (1:1). Yours is ${w}×${h}px.`); return; }
-        if (w < 240 || w > 1024) { resolve(`Dimensions must be 240–1024px. Yours is ${w}×${h}px.`); return; }
+        const ratio = w / h;
+        if (Math.abs(ratio - REWARDED_IMAGE_RATIO) > REWARDED_IMAGE_RATIO_TOLERANCE) {
+          resolve(`Image must use a 4:5 portrait ratio. Recommended: 1080×1350px. Yours is ${w}×${h}px.`);
+          return;
+        }
         resolve("");
+        return;
       };
       img.onerror = () => resolve("Could not read image dimensions.");
       img.src = previewUrl;
@@ -568,7 +576,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="image/png,image/jpeg,image/webp"
                     className="hidden"
                     onChange={e => { const f = e.target.files?.[0]; if (f) handleImageFile(f); }}
                   />
@@ -578,7 +586,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                         "relative rounded-2xl overflow-hidden border",
                         imageError ? "border-red-300" : "border-slate-200"
                       )}>
-                        <img src={imagePreview} alt="Ad preview" className="w-full h-44 object-cover" />
+                        <img src={imagePreview} alt="Ad preview" className="mx-auto aspect-[4/5] max-h-80 w-full object-cover" />
                         {imageUploading && (
                           <div className="absolute inset-0 bg-white/60 flex items-center justify-center gap-2">
                             <Loader2 size={20} className="animate-spin text-[#0c9de8]" />
@@ -625,14 +633,15 @@ export default function AdvertiserMiniAppRewardedPage() {
                       <ImageIcon size={28} className="text-slate-300" />
                       <div className="text-center">
                         <p className="text-xs font-black text-slate-600">Tap to choose image</p>
-                        <p className="text-[10px] font-medium text-slate-400 mt-0.5">Any image format · max 1 MB</p>
+                        <p className="text-[10px] font-medium text-slate-400 mt-0.5">1080×1350 recommended · 4:5 · PNG/JPG/WEBP · max 1 MB</p>
+                        <p className="text-[10px] font-medium text-slate-400 mt-0.5">PNG/JPG/WEBP only · immediate validation before upload</p>
                       </div>
                     </button>
                   )}
                   <div className="flex items-start gap-2 rounded-2xl border border-blue-100 bg-blue-50 px-3 py-2.5">
                     <AlertCircle size={13} className="text-blue-500 shrink-0 mt-0.5" />
                     <p className="text-[11px] font-semibold text-blue-700 leading-relaxed">
-                      Image must be <span className="font-black">square (1:1)</span>. Max file size: <span className="font-black">1 MB</span>. Supported dimensions: <span className="font-black">240px – 1024px</span>.
+                      Recommended image: <span className="font-black">1080×1350</span>. Aspect ratio: <span className="font-black">4:5 portrait only</span>. Maximum: <span className="font-black">1 MB</span>. Supported: <span className="font-black">PNG, JPG, WEBP</span>.
                     </p>
                   </div>
                 </div>

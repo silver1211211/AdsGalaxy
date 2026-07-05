@@ -2,9 +2,9 @@
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { getAuthenticatedUser } from "@/lib/auth";
 import { INTERNAL_NETWORK_NAME, recordInternalAdImpression } from "@/lib/miniappInternalAds";
 import { recordNetworkSuccess } from "@/lib/miniappOptimization";
+import { requireMiniappTrackingUser } from "@/lib/publicSdkAuth";
 import {
   isCompletionEvent,
   normalizeWatchDuration,
@@ -65,13 +65,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "telegram_user_id is required" }, { status: 400 });
     }
 
-    const initData = request.headers.get("x-telegram-init-data");
-    if (!initData) {
-      return NextResponse.json({ error: "Unauthorized: initData required" }, { status: 401 });
-    }
-
-    const authenticatedUser = await getAuthenticatedUser(initData);
-    if (String(authenticatedUser.telegram_id) !== telegramUserId) {
+    const trackingUser = await requireMiniappTrackingUser(request, miniappId, telegramUserId);
+    if (trackingUser.telegramUserId !== telegramUserId) {
       return NextResponse.json({ error: "telegram_user_id does not match authenticated user" }, { status: 403 });
     }
 

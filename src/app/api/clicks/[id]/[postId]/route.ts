@@ -32,11 +32,11 @@ async function recordLegacyCampaignClick(input: {
   userAgent: string;
   fingerprint: string;
   isBot: boolean;
-}) {
-  if (input.isBot) return;
+}): Promise<boolean> {
+  if (input.isBot) return false;
 
   const columns = await getCampaignClickColumns();
-  if (!columns.has("campaign_id")) return;
+  if (!columns.has("campaign_id")) return false;
 
   if (columns.has("post_id") && columns.has("fingerprint")) {
     const [existing] = await pool.query<RowDataPacket[]>(
@@ -44,14 +44,14 @@ async function recordLegacyCampaignClick(input: {
       [input.postId, input.fingerprint]
     );
 
-    if (existing.length > 0) return;
+    if (existing.length > 0) return false;
   } else if (columns.has("fingerprint")) {
     const [existing] = await pool.query<RowDataPacket[]>(
       "SELECT id FROM campaign_clicks WHERE campaign_id = ? AND fingerprint = ? AND created_at > NOW() - INTERVAL 1 DAY",
       [input.campaignId, input.fingerprint]
     );
 
-    if (existing.length > 0) return;
+    if (existing.length > 0) return false;
   }
 
   const insertColumns = ["campaign_id"];
@@ -83,6 +83,7 @@ async function recordLegacyCampaignClick(input: {
     `INSERT INTO campaign_clicks (${insertColumns.join(", ")}) VALUES (${placeholders})`,
     insertParams
   );
+  return true;
 }
 
 export async function GET(
@@ -105,8 +106,9 @@ export async function GET(
     .update(`${ip}-${userAgent}`)
     .digest("hex");
 
+  let campaignPost: CampaignPostRow | null = null;
+  let targetUrl: string;
   try {
-    // 2. Verify campaign exists AND the post belongs to this campaign
     const [rows] = await pool.query<CampaignPostRow[]>(
       `SELECT c.id, c.user_id, c.link, c.image_url, c.category, cp.id as post_id, cp.channel_id
        FROM campaigns c 
@@ -115,45 +117,51 @@ export async function GET(
       [campaignId, postId]
     );
 
-    if (rows.length === 0) {
-      // If no match found, redirect to a safe fallback or original link if possible
-      // But don't record the click
+    if (rows.length > 0) {
+      campaignPost = rows[0];
+      targetUrl = rows[0].link;
+    } else {
       const [campOnly] = await pool.query<Array<RowDataPacket & { link: string }>>("SELECT link FROM campaigns WHERE id = ?", [campaignId]);
       if (campOnly.length > 0) {
         return NextResponse.redirect(campOnly[0].link, 302);
       }
       return NextResponse.redirect(process.env.NEXT_PUBLIC_APP_URL || "/", 302);
     }
+  } catch (error) {
+    console.error("Click destination resolution failed", { campaign_id: campaignId, post_id: postId, error: error instanceof Error ? error.message : "unknown_error" });
+    try {
+      const [campaignRows] = await pool.query<Array<RowDataPacket & { link: string }>>("SELECT link FROM campaigns WHERE id = ?", [campaignId]);
+      if (campaignRows[0]?.link) return NextResponse.redirect(campaignRows[0].link, 302);
+    } catch (fallbackError) {
+      console.error("Click destination fallback failed", { campaign_id: campaignId, error: fallbackError instanceof Error ? fallbackError.message : "unknown_error" });
+    }
+    return redirectToFallback();
+  }
 
-    let targetUrl = rows[0].link;
-
-    // Persist the settlement source record before redirecting. An unawaited write
-    // can be terminated by serverless runtimes and silently lose valid clicks.
+  try {
     const isBot = /bot|spider|crawl|slurp|github-camo|googlebot|bingbot|yandex|baidu/i.test(userAgent);
-    await recordLegacyCampaignClick({ campaignId, postId, ip, userAgent, fingerprint, isBot });
+    const clickRecorded = await recordLegacyCampaignClick({ campaignId, postId, ip, userAgent, fingerprint, isBot });
 
-    if (!isBot) {
+    if (clickRecorded && campaignPost) {
       const clickId = await recordAdClick({
         campaignType: "campaign",
-        campaignId: Number(rows[0].id),
-        advertiserId: Number(rows[0].user_id),
-        creativeId: rows[0].image_url || null,
-        category: rows[0].category || null,
+        campaignId: Number(campaignPost.id),
+        advertiserId: Number(campaignPost.user_id),
+        creativeId: campaignPost.image_url || null,
+        category: campaignPost.category || null,
         inventoryType: "channel",
-        inventoryId: Number(rows[0].channel_id || 0) || null,
-        postId: Number(rows[0].post_id),
+        inventoryId: Number(campaignPost.channel_id || 0) || null,
+        postId: Number(campaignPost.post_id),
         ipAddress: ip,
         userAgent,
         fingerprint,
       });
       targetUrl = appendClickId(targetUrl, clickId);
     }
-
-    return NextResponse.redirect(targetUrl, 302);
   } catch (error) {
-    console.error("Click Tracking Error:", error);
-    return NextResponse.redirect(process.env.NEXT_PUBLIC_APP_URL || "/", 302);
+    console.error("Click tracking failed; redirect preserved", { campaign_id: campaignId, post_id: postId, error: error instanceof Error ? error.message : "unknown_error" });
   }
+  return NextResponse.redirect(targetUrl, 302);
 }
 
 function redirectToFallback() {

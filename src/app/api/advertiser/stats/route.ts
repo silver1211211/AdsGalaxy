@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy advertiser aggregate payloads are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
@@ -66,24 +67,36 @@ export async function GET(request: Request) {
 
     // 2. Calculate Locked Balance (Sum of budgets of pending, active, and paused campaigns)
     const [lockedResult]: any = await pool.query(
-      "SELECT SUM(budget) as locked FROM campaigns WHERE user_id = ? AND status IN ('pending', 'active', 'paused')",
+      "SELECT COALESCE(SUM(budget), 0) as locked FROM campaigns WHERE user_id = ? AND status IN ('pending', 'active', 'paused')",
       [user.id]
     );
-    const lockedBalance = parseFloat(lockedResult[0]?.locked || "0");
+    const [miniappLockedResult]: any = await pool.query(
+      "SELECT COALESCE(SUM(remaining_budget), 0) as locked FROM miniapp_rewarded_campaigns WHERE advertiser_id = ? AND status IN ('pending', 'approved', 'active', 'paused') AND campaign_budget_mode <> 'pay_as_you_go'",
+      [user.id]
+    );
+    const lockedBalance = parseFloat(lockedResult[0]?.locked || "0") + parseFloat(miniappLockedResult[0]?.locked || "0");
 
     // 3. Get Active Ads count
     const [activeResult]: any = await pool.query(
       "SELECT COUNT(*) as active_count FROM campaigns WHERE user_id = ? AND status = 'active'",
       [user.id]
     );
-    const activeAds = activeResult[0]?.active_count || 0;
+    const [miniappActiveResult]: any = await pool.query(
+      "SELECT COUNT(*) as active_count FROM miniapp_rewarded_campaigns WHERE advertiser_id = ? AND status IN ('approved', 'active')",
+      [user.id]
+    );
+    const activeAds = Number(activeResult[0]?.active_count || 0) + Number(miniappActiveResult[0]?.active_count || 0);
 
     // 4. Get Total Campaigns count
     const [totalResult]: any = await pool.query(
       "SELECT COUNT(*) as total_count FROM campaigns WHERE user_id = ?",
       [user.id]
     );
-    const totalCampaigns = totalResult[0]?.total_count || 0;
+    const [miniappTotalResult]: any = await pool.query(
+      "SELECT COUNT(*) as total_count FROM miniapp_rewarded_campaigns WHERE advertiser_id = ?",
+      [user.id]
+    );
+    const totalCampaigns = Number(totalResult[0]?.total_count || 0) + Number(miniappTotalResult[0]?.total_count || 0);
 
     // 5. Get Recent Campaigns (channel/bot campaigns + Mini App campaigns, merged into one list)
     const [channelAndBotCampaigns]: any = await pool.query(
@@ -110,6 +123,10 @@ export async function GET(request: Request) {
           ELSE ${campaignPostYesterdayImpressionsExpr}
         END as yesterday_impressions,
         CASE
+          WHEN c.type = 'broadcast' THEN 0
+          ELSE COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0)
+        END as clicks,
+        CASE
           WHEN c.type = 'broadcast' THEN ${broadcastSpendExpr}
           ELSE (
             ${clickSettlementSpendExpr}
@@ -123,6 +140,39 @@ export async function GET(request: Request) {
             + ${viewSettlementTodaySpendExpr}
           )
         END as today_spend,
+        CASE
+          WHEN (
+            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)
+            ELSE ${campaignPostImpressionsExpr} END
+          ) > 0
+          THEN (
+            CASE WHEN c.type = 'broadcast' THEN 0
+            ELSE COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0) END
+          ) / (
+            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 1)
+            ELSE ${campaignPostImpressionsExpr} END
+          ) * 100
+          ELSE 0
+        END as ctr,
+        CASE
+          WHEN (
+            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)
+            ELSE ${campaignPostImpressionsExpr} END
+          ) > 0
+          THEN (
+            CASE WHEN c.type = 'broadcast' THEN ${broadcastSpendExpr}
+            ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) END
+          ) / (
+            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 1)
+            ELSE ${campaignPostImpressionsExpr} END
+          ) * 1000
+          ELSE 0
+        END as average_cpm,
+        CASE
+          WHEN c.type != 'broadcast' AND COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0) > 0
+          THEN (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) / COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 1)
+          ELSE 0
+        END as average_cpc,
         CASE
           WHEN c.type = 'broadcast' THEN (SELECT MAX(bd.created_at) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id)
           ELSE (SELECT MAX(cp.created_at) FROM campaign_posts cp WHERE cp.campaign_id = c.id)
@@ -148,8 +198,21 @@ export async function GET(request: Request) {
         COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as impressions,
         COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= CURDATE()), 0) as today_impressions,
         COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND i.created_at < CURDATE()), 0) as yesterday_impressions,
+        COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0) as clicks,
         COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as spend,
         COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= CURDATE()), 0) as today_spend,
+        CASE WHEN COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) > 0
+          THEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0)
+            / COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 1) * 100
+          ELSE 0 END as ctr,
+        CASE WHEN COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) > 0
+          THEN COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0)
+            / COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 1) * 1000
+          ELSE 0 END as average_cpm,
+        CASE WHEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0) > 0
+          THEN COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0)
+            / COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 1)
+          ELSE 0 END as average_cpc,
         (SELECT MAX(i.created_at) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id) as last_displayed_at
        FROM miniapp_rewarded_campaigns c
        WHERE c.advertiser_id = ?
@@ -182,12 +245,12 @@ export async function GET(request: Request) {
     );
     const totalViews = viewsResult[0]?.total_views || 0;
 
-    // Get total investment from successful deposits
-    const [spentResult]: any = await pool.query(
+    // Deposits are account funding, not campaign spend. Keep them separate from live debits.
+    const [depositResult]: any = await pool.query(
       "SELECT SUM(amount) as total FROM deposits WHERE user_id = ? AND status = 'paid'",
       [user.id]
     );
-    const totalSpent = parseFloat(spentResult[0]?.total || "0");
+    const totalDeposited = parseFloat(depositResult[0]?.total || "0");
     // Get total miniapp impressions for this advertiser
     const [miniappImpressionsResult]: any = await pool.query(
       `SELECT COUNT(i.id) as total
@@ -197,6 +260,22 @@ export async function GET(request: Request) {
       [user.id]
     );
     const miniappImpressions = Number(miniappImpressionsResult[0]?.total || 0);
+    const [miniappClicksResult]: any = await pool.query(
+      `SELECT COUNT(*) as total
+       FROM ad_click_attribution ac
+       JOIN miniapp_rewarded_campaigns mrc ON ac.campaign_type = 'miniapp' AND ac.campaign_id = mrc.id
+       WHERE mrc.advertiser_id = ?`,
+      [user.id]
+    );
+    const miniappClicks = Number(miniappClicksResult[0]?.total || 0);
+    const [broadcastViewsResult]: any = await pool.query(
+      `SELECT COUNT(*) as total_views
+       FROM broadcast_deliveries bd
+       JOIN campaigns c ON bd.campaign_id = c.id
+       WHERE c.user_id = ?`,
+      [user.id]
+    );
+    const broadcastViews = Number(broadcastViewsResult[0]?.total_views || 0);
 
     const conversionSummary = await advertiserConversionSummary(user.id);
     const conversions = Number(conversionSummary.conversions || 0);
@@ -219,9 +298,10 @@ export async function GET(request: Request) {
       ad_balance_locked: lockedBalance,
       active_ads: activeAds,
       total_campaigns: totalCampaigns,
-      total_views: totalViews,
-      total_clicks: totalClicks,
-      total_spent: totalSpent,
+      total_views: Number(totalViews || 0) + broadcastViews + miniappImpressions,
+      total_clicks: Number(totalClicks || 0) + miniappClicks,
+      total_spent: adSpend,
+      total_deposited: totalDeposited,
       tracked_clicks: trackedClicks,
       conversions,
       conversion_rate: trackedClicks > 0 ? conversions / trackedClicks : 0,
@@ -229,7 +309,7 @@ export async function GET(request: Request) {
       conversion_value: conversionValue,
       miniapp_impressions: miniappImpressions,
       recent_campaigns: recentCampaigns
-    });
+    }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
 
   } catch (error: any) {
     console.error("Stats API Error:", error);

@@ -1,5 +1,6 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { botUserBlockedCondition, botUserVerifiedReachableCondition } from "@/lib/botAudience";
 import { publicQualityRating, riskLevel } from "@/lib/trafficQuality";
 import { getInternalAdCompletionAnalytics } from "@/lib/internalAdCompletionQuality";
 
@@ -361,8 +362,8 @@ export async function calculateInventoryMetrics(entityType: InventoryEntityType,
       COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)), 0) as impressions_7d,
       COALESCE((SELECT SUM(bd.publisher_reward) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)), 0) as revenue_7d,
       COALESCE((SELECT COUNT(DISTINCT DATE(bd.created_at)) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)), 0) as active_days_7d,
-      COALESCE((SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.is_active = TRUE AND bu.status = 'active'), 0) as active_users,
-      COALESCE((SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND (bu.is_active = FALSE OR bu.status != 'active')), 0) as blocked_users
+      COALESCE((SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND ${botUserVerifiedReachableCondition("bu")}), 0) as active_users,
+      COALESCE((SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND (${botUserBlockedCondition("bu")})), 0) as blocked_users
     FROM bots b
     WHERE b.id = ?
   `, [entityId]);

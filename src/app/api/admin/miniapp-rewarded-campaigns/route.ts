@@ -8,12 +8,8 @@ import { recordAutomationAudit } from "@/lib/approvalAutomation";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { getMiniAppPublisherCpmSettings, maxPublisherCpm, normalizeMiniAppCpmMode, validateAdvertiserCpmBid } from "@/lib/miniappPublisherCpmEngine";
 import {
-  MINIAPP_CREATIVE_CATEGORIES,
-  categorySettingKey,
-  getMiniAppCategoryCpmAdjustments,
   normalizeMiniAppCategories,
   requiredMiniAppCategoryCpm,
-  type MiniAppCreativeCategory,
 } from "@/lib/miniappCreativeCategories";
 
 function cleanText(value: unknown) {
@@ -92,8 +88,7 @@ export async function GET(request: Request) {
     params
   );
 
-  const categoryAdjustments = await getMiniAppCategoryCpmAdjustments();
-  return NextResponse.json({ campaigns: rows, category_adjustments: categoryAdjustments });
+  return NextResponse.json({ campaigns: rows, cpm_configuration: "global" });
 }
 
 export async function PATCH(request: Request) {
@@ -108,27 +103,6 @@ export async function PATCH(request: Request) {
     const adminCpm = body.admin_cpm === undefined ? null : Number(body.admin_cpm);
     const cpmMode = normalizeMiniAppCpmMode(body.cpm_mode);
     const fixedPublisherCpm = body.fixed_publisher_cpm === undefined || body.fixed_publisher_cpm === "" ? null : Number(body.fixed_publisher_cpm);
-
-    if (action === "update_category_adjustment") {
-      const category = MINIAPP_CREATIVE_CATEGORIES.find((item) => item === cleanText(body.category)) as MiniAppCreativeCategory | undefined;
-      const value = Number(body.value);
-      if (!category || !Number.isFinite(value) || value < 0) {
-        return NextResponse.json({ error: "Valid category and non-negative adjustment are required" }, { status: 400 });
-      }
-      await pool.query(
-        "INSERT INTO settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)",
-        [categorySettingKey(category), value.toFixed(2)]
-      );
-      await recordAdminActionAudit({
-        adminId: admin.id,
-        action: "miniapp_category_adjustment_update",
-        entityType: "setting",
-        entityId: 0,
-        reason: "admin_update_category_cpm_adjustment",
-        metadata: { admin_username: admin.username, category, value },
-      });
-      return NextResponse.json({ success: true, category_adjustments: await getMiniAppCategoryCpmAdjustments() });
-    }
 
     if (!Number.isInteger(id) || id <= 0) {
       return NextResponse.json({ error: "Valid campaign id is required" }, { status: 400 });
@@ -153,7 +127,7 @@ export async function PATCH(request: Request) {
       validateAdvertiserCpmBid(approvalCpm, cpmSettings);
       const categoryCpm = await requiredMiniAppCategoryCpm(selectedCategories);
       if (approvalCpm < categoryCpm.required_cpm) {
-        return NextResponse.json({ error: `Admin CPM must be at least $${categoryCpm.required_cpm.toFixed(2)} for the selected categories` }, { status: 400 });
+        return NextResponse.json({ error: `Admin CPM must be at least the global minimum CPM of $${categoryCpm.required_cpm.toFixed(2)}` }, { status: 400 });
       }
       if (cpmMode === "fixed") {
         if (!Number.isFinite(fixedPublisherCpm) || Number(fixedPublisherCpm) <= 0) {
@@ -212,7 +186,7 @@ export async function PATCH(request: Request) {
       validateAdvertiserCpmBid(Number(adminCpm), cpmSettings);
       const categoryCpm = await requiredMiniAppCategoryCpm(selectedCategories);
       if (Number(adminCpm) < categoryCpm.required_cpm) {
-        return NextResponse.json({ error: `Admin CPM must be at least $${categoryCpm.required_cpm.toFixed(2)} for the selected categories` }, { status: 400 });
+        return NextResponse.json({ error: `Admin CPM must be at least the global minimum CPM of $${categoryCpm.required_cpm.toFixed(2)}` }, { status: 400 });
       }
       if (cpmMode === "fixed") {
         if (!Number.isFinite(fixedPublisherCpm) || Number(fixedPublisherCpm) <= 0) {

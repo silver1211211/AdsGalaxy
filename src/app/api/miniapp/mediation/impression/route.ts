@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { getAuthenticatedUser } from "@/lib/auth";
 import { getMiniAppFeePercent, isMiniAppNetworkName } from "@/lib/miniappStats";
 import { recordNetworkSuccess } from "@/lib/miniappOptimization";
 import { validateMiniappRevenue } from "@/lib/miniappRevenueValidation";
+import { requireMiniappTrackingUser } from "@/lib/publicSdkAuth";
 
 type MediationRequestRow = RowDataPacket & {
   id: number;
@@ -39,12 +39,9 @@ function todayDate() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function toPositiveImpressions(value: unknown) {
-  const parsed = value === undefined || value === null || value === "" ? 1 : Number(value);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error("impressions must be greater than or equal to 1");
-  }
-  return Math.floor(parsed);
+function assertSingleClientImpression(value: unknown) {
+  if (value === undefined || value === null || value === "" || Number(value) === 1) return;
+  throw new Error("Client impression confirmation must contain exactly 1 impression");
 }
 
 async function assertNetworkEnabled(conn: PoolConnection, miniappId: number, networkName: string) {
@@ -67,7 +64,8 @@ export async function POST(request: Request) {
     const miniappId = Number(body.miniapp_id);
     const networkName = cleanText(body.network_name);
     const telegramUserId = cleanText(body.telegram_user_id);
-    const impressions = toPositiveImpressions(body.impressions);
+    assertSingleClientImpression(body.impressions);
+    const impressions = 1;
     // Never trust browser-supplied revenue. Trusted provider imports use the internal stats endpoint.
     const grossRevenue = 0;
     const country = normalizeCountry(body.country);
@@ -88,13 +86,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "telegram_user_id is required" }, { status: 400 });
     }
 
-    const initData = request.headers.get("x-telegram-init-data");
-    if (!initData) {
-      return NextResponse.json({ error: "Unauthorized: initData required" }, { status: 401 });
-    }
-
-    const authenticatedUser = await getAuthenticatedUser(initData);
-    if (String(authenticatedUser.telegram_id) !== telegramUserId) {
+    const trackingUser = await requireMiniappTrackingUser(request, miniappId, telegramUserId);
+    if (trackingUser.telegramUserId !== telegramUserId) {
       return NextResponse.json({ error: "telegram_user_id does not match authenticated user" }, { status: 403 });
     }
 

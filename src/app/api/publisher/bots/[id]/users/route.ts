@@ -3,9 +3,9 @@ import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import type { RowDataPacket } from "mysql2/promise";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
+import { getBotAudienceStats } from "@/lib/botAudience";
 
 type OwnerBotRow = RowDataPacket & { id: number; bot_token?: string; bot_token_encrypted?: string | null };
-type CountRow = RowDataPacket & { total: number; active: number | null; blocked: number | null; integration_users: number | null; manually_imported: number | null; pending_verification: number | null };
 type ExistingUserRow = RowDataPacket & { chat_id: string };
 
 function errorMessage(error: unknown) {
@@ -40,35 +40,16 @@ export async function GET(
     if (bots.length === 0) {
       return NextResponse.json({ error: "Bot not found" }, { status: 404 });
     }
-    const hasBotUserSource = await columnExists("bot_users", "source");
-    const integrationUsersExpr = hasBotUserSource
-      ? "SUM(CASE WHEN source = 'integration' THEN 1 ELSE 0 END)"
-      : "0";
-    const manuallyImportedExpr = hasBotUserSource
-      ? "SUM(CASE WHEN source <> 'integration' THEN 1 ELSE 0 END)"
-      : "COUNT(*)";
-
-    // Get detailed counts
-    const [counts] = await pool.query<CountRow[]>(
-      `SELECT 
-        COUNT(*) as total,
-        SUM(CASE WHEN is_active = TRUE AND status = 'active' THEN 1 ELSE 0 END) as active,
-        SUM(CASE WHEN is_active = FALSE OR status IN ('inactive','blocked_bot','user_not_found','chat_not_found','unreachable') THEN 1 ELSE 0 END) as blocked,
-        ${integrationUsersExpr} as integration_users,
-        ${manuallyImportedExpr} as manually_imported,
-        SUM(CASE WHEN status = 'pending_verification' THEN 1 ELSE 0 END) as pending_verification
-       FROM bot_users WHERE bot_id = ?`, 
-      [botId]
-    );
+    const counts = await getBotAudienceStats(botId);
     
     return NextResponse.json({ 
-      total: counts[0].total || 0,
-      active: counts[0].active || 0,
-      blocked: counts[0].blocked || 0,
-      integration_users: counts[0].integration_users || 0,
-      manually_imported: counts[0].manually_imported || 0,
-      verified_reachable: counts[0].active || 0,
-      pending_verification: counts[0].pending_verification || 0
+      total: counts.total_users,
+      active: counts.active_users,
+      blocked: counts.blocked_users,
+      integration_users: counts.integration_users,
+      manually_imported: counts.manually_imported,
+      verified_reachable: counts.reachable_users,
+      pending_verification: counts.pending_verification
     });
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error) }, { status: getAuthErrorStatus(error) });
@@ -124,8 +105,8 @@ export async function POST(
     for (let i = 0; i < newChatIds.length; i += 1000) {
       const values = newChatIds.slice(i, i + 1000).map((id) => (
         hasBotUserSource
-          ? [botId, id, id, "manual_publisher", true, "pending_verification"]
-          : [botId, id, id, true, "pending_verification"]
+          ? [botId, id, id, "manual_publisher", false, "pending_verification"]
+          : [botId, id, id, false, "pending_verification"]
       ));
       const [insert] = await pool.query<import("mysql2/promise").ResultSetHeader>(
         hasBotUserSource

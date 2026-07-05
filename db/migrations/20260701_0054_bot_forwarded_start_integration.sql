@@ -70,4 +70,9 @@ SET @event_request_sql = IF(
 );
 PREPARE request_stmt FROM @event_request_sql; EXECUTE request_stmt; DEALLOCATE PREPARE request_stmt;
 
-CREATE INDEX IF NOT EXISTS idx_bots_token_hash ON bots (bot_token_hash);
+SET @bot_token_index_sql = IF(
+  EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='bots' AND INDEX_NAME='idx_bots_token_hash'),
+  'SELECT 1',
+  'CREATE INDEX idx_bots_token_hash ON bots (bot_token_hash)'
+);
+PREPARE bot_token_index_stmt FROM @bot_token_index_sql; EXECUTE bot_token_index_stmt; DEALLOCATE PREPARE bot_token_index_stmt;

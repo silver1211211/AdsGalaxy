@@ -61,12 +61,6 @@ function readPngDimensions(buffer: Buffer) {
   return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20), type: "static" as const };
 }
 
-function readGifDimensions(buffer: Buffer) {
-  const signature = buffer.toString("ascii", 0, 6);
-  if (buffer.length < 10 || (signature !== "GIF87a" && signature !== "GIF89a")) return null;
-  return { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8), type: "gif" as const };
-}
-
 function readJpegDimensions(buffer: Buffer) {
   if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) return null;
   let offset = 2;
@@ -82,8 +76,39 @@ function readJpegDimensions(buffer: Buffer) {
   return null;
 }
 
+function readWebpDimensions(buffer: Buffer) {
+  if (buffer.length < 30 || buffer.toString("ascii", 0, 4) !== "RIFF" || buffer.toString("ascii", 8, 12) !== "WEBP") return null;
+  const format = buffer.toString("ascii", 12, 16);
+  if (format === "VP8X" && buffer.length >= 30) {
+    return {
+      width: 1 + buffer.readUIntLE(24, 3),
+      height: 1 + buffer.readUIntLE(27, 3),
+      type: "static" as const,
+    };
+  }
+  if (format === "VP8 " && buffer.length >= 30) {
+    return {
+      width: buffer.readUInt16LE(26) & 0x3fff,
+      height: buffer.readUInt16LE(28) & 0x3fff,
+      type: "static" as const,
+    };
+  }
+  if (format === "VP8L" && buffer.length >= 25) {
+    const b0 = buffer[21];
+    const b1 = buffer[22];
+    const b2 = buffer[23];
+    const b3 = buffer[24];
+    return {
+      width: 1 + (((b1 & 0x3f) << 8) | b0),
+      height: 1 + ((b3 << 6) | (b2 >> 2) | ((b1 & 0xc0) << 6)),
+      type: "static" as const,
+    };
+  }
+  return null;
+}
+
 function readImageDimensions(buffer: Buffer) {
-  return readPngDimensions(buffer) || readGifDimensions(buffer) || readJpegDimensions(buffer);
+  return readPngDimensions(buffer) || readJpegDimensions(buffer) || readWebpDimensions(buffer);
 }
 
 function landingReviewFlags(landingUrl: string) {
@@ -109,33 +134,27 @@ async function validateCreativeImageUrl(imageUrl: string) {
 
   const contentLength = Number(response.headers.get("content-length") || 0);
   const contentType = String(response.headers.get("content-type") || "").toLowerCase();
-  const maxPossibleSize = contentType.includes("gif") || imageUrl.toLowerCase().split("?")[0].endsWith(".gif")
-    ? 2 * 1024 * 1024
-    : 1 * 1024 * 1024;
-  if (contentLength > maxPossibleSize) {
-    throw new Error(contentType.includes("gif") ? "GIF must be square (1:1). Maximum file size: 2 MB. Supported dimensions: 240px-600px." : "Image must be square (1:1). Maximum file size: 1 MB. Supported dimensions: 240px-1024px.");
-  }
+  const normalizedUrl = imageUrl.toLowerCase().split("?")[0];
+  const supportedType =
+    contentType.includes("png") ||
+    contentType.includes("jpeg") ||
+    contentType.includes("jpg") ||
+    contentType.includes("webp") ||
+    /\.(png|jpe?g|webp)$/.test(normalizedUrl);
+  const message = "Image must be PNG, JPG, or WEBP, use a 4:5 portrait ratio (recommended 1080×1350), and be 1 MB or smaller.";
+  const maxSize = 1 * 1024 * 1024;
+  if (!supportedType) throw new Error(message);
+  if (contentLength > maxSize) throw new Error(message);
 
   const arrayBuffer = await response.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
   const dimensions = readImageDimensions(buffer);
-  if (!dimensions) throw new Error("Image must be a supported JPG, PNG, or GIF file.");
-
-  const isGif = dimensions.type === "gif" || contentType.includes("gif");
-  const message = isGif
-    ? "GIF must be square (1:1). Maximum file size: 2 MB. Supported dimensions: 240px-600px."
-    : "Image must be square (1:1). Maximum file size: 1 MB. Supported dimensions: 240px-1024px.";
-  const maxSize = isGif ? 2 * 1024 * 1024 : 1 * 1024 * 1024;
-  const maxDimension = isGif ? 600 : 1024;
-
+  if (!dimensions) throw new Error(message);
   if (buffer.length > maxSize) throw new Error(message);
-  if (dimensions.width !== dimensions.height) throw new Error(message);
-  if (dimensions.width < 240 || dimensions.height < 240 || dimensions.width > maxDimension || dimensions.height > maxDimension) {
-    throw new Error(message);
-  }
+  if (Math.abs(dimensions.width / dimensions.height - 4 / 5) > 0.01) throw new Error(message);
 
   return {
-    type: isGif ? "gif" : "static",
+    type: "static",
     width: dimensions.width,
     height: dimensions.height,
     bytes: buffer.length,
@@ -185,6 +204,22 @@ export async function GET(request: Request) {
         COALESCE((SELECT COUNT(*) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0) as conversions,
         COALESCE((SELECT SUM(conv.conversion_value) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0) as conversion_value,
         COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= CURDATE()), 0) as today_spend,
+        CASE WHEN COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) > 0
+          THEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0)
+            / COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 1) * 100
+          ELSE 0 END as ctr,
+        CASE WHEN COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) > 0
+          THEN COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0)
+            / COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 1) * 1000
+          ELSE 0 END as average_cpm,
+        CASE WHEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0) > 0
+          THEN COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0)
+            / COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 1)
+          ELSE 0 END as average_cpc,
+        CASE WHEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0) > 0
+          THEN COALESCE((SELECT COUNT(*) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0)
+            / COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 1) * 100
+          ELSE 0 END as conversion_rate,
         (SELECT MAX(i.created_at) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id) as last_displayed_at
        FROM miniapp_rewarded_campaigns c
        WHERE c.advertiser_id = ?
@@ -233,7 +268,7 @@ export async function POST(request: Request) {
     const categoryCpm = await requiredMiniAppCategoryCpm(categories, conn);
     if (advertiserCpmBid < categoryCpm.required_cpm) {
       return NextResponse.json({
-        error: `CPM Bid must be at least $${categoryCpm.required_cpm.toFixed(2)} for the selected categories.`,
+        error: `CPM Bid must be at least the global minimum CPM of $${categoryCpm.required_cpm.toFixed(2)}.`,
         base_min_cpm: categoryCpm.base_min_cpm,
         category_adjustment: categoryCpm.category_adjustment,
         required_cpm: categoryCpm.required_cpm,

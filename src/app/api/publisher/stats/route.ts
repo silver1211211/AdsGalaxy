@@ -8,6 +8,7 @@ import {
   getReferralTotalRewardAmount,
   getReferralVerificationRewardAmount,
 } from "@/lib/referralSprint";
+import { cpc, cpm, ctr, fixedMetric, metricNumber } from "@/lib/statFormulas";
 
 export async function GET(request: Request) {
   try {
@@ -101,12 +102,104 @@ export async function GET(request: Request) {
       [user.id]
     );
     const totalWithdrawn = withdrawalSumRows[0]?.total || 0;
+    const rangeSql = `
+      SELECT 'today' as range_key, CURDATE() as start_date, CURDATE() as end_date
+      UNION ALL SELECT 'yesterday', DATE_SUB(CURDATE(), INTERVAL 1 DAY), DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+      UNION ALL SELECT 'last7', DATE_SUB(CURDATE(), INTERVAL 6 DAY), CURDATE()
+      UNION ALL SELECT 'last30', DATE_SUB(CURDATE(), INTERVAL 29 DAY), CURDATE()
+      UNION ALL SELECT 'lifetime', DATE('1970-01-01'), CURDATE()
+    `;
+    const [channelRangeRows]: any = await pool.query(
+      `SELECT ranges.range_key,
+        COALESCE(SUM(cds.views), 0) as impressions,
+        COALESCE(SUM(cds.clicks), 0) as clicks,
+        COALESCE(SUM(cds.earnings), 0) as earnings,
+        COALESCE(SUM(cds.spend), 0) as gross_revenue
+       FROM (${rangeSql}) ranges
+       LEFT JOIN channels ch ON ch.user_id = ? AND ch.is_deleted = FALSE
+       LEFT JOIN channel_daily_stats cds ON cds.channel_id = ch.id AND cds.stat_date BETWEEN ranges.start_date AND ranges.end_date
+       GROUP BY ranges.range_key`,
+      [user.id]
+    );
+    const [miniappRevenueRows]: any = await pool.query(
+      `SELECT ranges.range_key,
+        COALESCE(SUM(mds.impressions), 0) as impressions,
+        COALESCE(SUM(mds.publisher_revenue), 0) as earnings,
+        COALESCE(SUM(mds.gross_revenue), 0) as gross_revenue
+       FROM (${rangeSql}) ranges
+       LEFT JOIN miniapps ma ON ma.user_id = ? AND ma.is_deleted = FALSE
+       LEFT JOIN miniapp_daily_stats mds ON mds.miniapp_id = ma.id AND mds.date BETWEEN ranges.start_date AND ranges.end_date
+       GROUP BY ranges.range_key`,
+      [user.id]
+    );
+    const [miniappClickRows]: any = await pool.query(
+      `SELECT ranges.range_key, COUNT(ac.id) as clicks
+       FROM (${rangeSql}) ranges
+       LEFT JOIN miniapps ma ON ma.user_id = ? AND ma.is_deleted = FALSE
+       LEFT JOIN ad_click_attribution ac ON ac.campaign_type = 'miniapp' AND ac.miniapp_id = ma.id AND DATE(ac.created_at) BETWEEN ranges.start_date AND ranges.end_date
+       GROUP BY ranges.range_key`,
+      [user.id]
+    );
+    const [miniappRequestRows]: any = await pool.query(
+      `SELECT ranges.range_key,
+        COUNT(mr.id) as requests,
+        COALESCE(SUM(CASE WHEN mr.impression_confirmed = 1 OR mr.final_result IN ('completed', 'impression_confirmed', 'displayed') THEN 1 ELSE 0 END), 0) as fills
+       FROM (${rangeSql}) ranges
+       LEFT JOIN miniapps ma ON ma.user_id = ? AND ma.is_deleted = FALSE
+       LEFT JOIN miniapp_mediation_requests mr ON mr.miniapp_id = ma.id AND mr.parent_request_id IS NULL AND DATE(mr.created_at) BETWEEN ranges.start_date AND ranges.end_date
+       GROUP BY ranges.range_key`,
+      [user.id]
+    );
+    const rowsByRange = new Map<string, any>();
+    for (const row of [...channelRangeRows, ...miniappRevenueRows, ...miniappClickRows, ...miniappRequestRows]) {
+      const rangeKey = String(row.range_key);
+      const current = rowsByRange.get(rangeKey) || { range_key: rangeKey };
+      rowsByRange.set(rangeKey, {
+        ...current,
+        impressions: metricNumber(current.impressions) + metricNumber(row.impressions),
+        clicks: metricNumber(current.clicks) + metricNumber(row.clicks),
+        earnings: metricNumber(current.earnings) + metricNumber(row.earnings),
+        gross_revenue: metricNumber(current.gross_revenue) + metricNumber(row.gross_revenue),
+        requests: metricNumber(current.requests) + metricNumber(row.requests),
+        fills: metricNumber(current.fills) + metricNumber(row.fills),
+      });
+    }
+    const publisherSummary = Object.fromEntries([...rowsByRange.values()].map((row: any) => {
+      const impressions = metricNumber(row.impressions);
+      const clicks = metricNumber(row.clicks);
+      const earnings = metricNumber(row.earnings);
+      const grossRevenue = metricNumber(row.gross_revenue);
+      const requests = metricNumber(row.requests);
+      const fills = metricNumber(row.fills);
+      return [row.range_key, {
+        impressions,
+        views: impressions,
+        clicks,
+        earnings: fixedMetric(earnings, 8),
+        publisher_revenue: fixedMetric(earnings, 8),
+        gross_revenue: fixedMetric(grossRevenue, 8),
+        ctr: ctr(clicks, impressions),
+        cpm: cpm(earnings, impressions),
+        average_cpm: cpm(grossRevenue, impressions),
+        cpc: cpc(grossRevenue, clicks),
+        fill_rate: requests > 0 ? fixedMetric((fills / requests) * 100) : null,
+        requests,
+        fills,
+      }];
+    }));
 
     // Stats from user profile
     return NextResponse.json({
       balance_locked: user.balance_locked,
       balance_available: user.balance_available,
+      balance_pending: user.balance_locked,
       total_withdrawn: totalWithdrawn,
+      earnings_summary: publisherSummary,
+      today_earnings: publisherSummary.today?.earnings || 0,
+      yesterday_earnings: publisherSummary.yesterday?.earnings || 0,
+      last7_earnings: publisherSummary.last7?.earnings || 0,
+      last30_earnings: publisherSummary.last30?.earnings || 0,
+      lifetime_earnings: publisherSummary.lifetime?.earnings || 0,
       total_channels: channelCountRows[0].total,
       delivery_eligible_channels: deliveryEligibleChannelRows[0].total,
       total_monetized: (channelCountRows[0].total || 0) + (botCountRows[0].total || 0) + (miniappCountRows[0].total || 0),
@@ -121,7 +214,7 @@ export async function GET(request: Request) {
       referral_sprint_enabled: referralSprintSetting?.value === "1",
       referral_dashboard_promotion_enabled: referralPromotionSetting?.value !== "0",
       join_rewarded: user.join_rewarded
-    });
+    }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
   } catch (error: any) {
     console.error("Stats API Error:", error);
     return NextResponse.json({ error: error.message || "Failed to fetch stats" }, { status: getAuthErrorStatus(error) === 403 ? 403 : 401 });

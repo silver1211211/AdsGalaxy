@@ -2,7 +2,8 @@
 
 import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { CheckCircle2, Loader2, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, X, XCircle } from "lucide-react";
+import { apiFetch } from "@/lib/api";
 
 interface TestIntegrationPopupProps {
   isOpen: boolean;
@@ -13,41 +14,29 @@ interface TestIntegrationPopupProps {
 }
 
 export default function TestIntegrationPopup({ isOpen, onClose, integrationUrl, botId, onSuccess }: TestIntegrationPopupProps) {
-  const [testUserId, setTestUserId] = useState("");
-  const [testUsername, setTestUsername] = useState("");
   const [testing, setTesting] = useState(false);
-  const [result, setResult] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [result, setResult] = useState<{ type: "success" | "warning" | "error"; message: string; checks?: Array<{ key: string; label: string; status: "success" | "warning" | "failure"; message: string; diagnostic?: string }> } | null>(null);
 
   function handleClose() {
     if (testing) return;
-    setTestUserId("");
-    setTestUsername("");
     setResult(null);
     onClose();
   }
 
   async function runTest() {
-    if (!integrationUrl || !testUserId) return;
+    if (!integrationUrl) return;
     setTesting(true);
     setResult(null);
     try {
-      const response = await fetch(integrationUrl, {
+      const response = await apiFetch(`/api/publisher/bots/${botId}/test-integration`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          test: true,
-          bot_id: String(botId),
-          telegram_user_id: testUserId || undefined,
-          username: testUsername || undefined,
-          timestamp: Math.floor(Date.now() / 1000),
-          request_id: `test-${botId}-${Date.now()}-${crypto.randomUUID()}`,
-        }),
       });
-      const data = await response.json().catch(() => ({})) as { message?: string };
-      setResult({ type: response.ok ? "success" : "error", message: data.message || "Unknown response" });
-      if (response.ok) onSuccess?.();
+      const data = await response.json().catch(() => ({})) as { message?: string; status?: string; checks?: NonNullable<typeof result>["checks"]; error?: string };
+      const type = response.ok && data.status === "success" ? "success" : response.ok && data.status === "warning" ? "warning" : "error";
+      setResult({ type, message: data.message || data.error || "Integration diagnostic completed", checks: data.checks });
+      if (response.ok && data.status !== "failure") onSuccess?.();
     } catch {
-      setResult({ type: "error", message: "Integration test failed" });
+      setResult({ type: "error", message: "Integration diagnostic failed" });
     } finally {
       setTesting(false);
     }
@@ -93,44 +82,50 @@ export default function TestIntegrationPopup({ isOpen, onClose, integrationUrl, 
                 <div className="min-w-0 flex-1 pt-1.5">
                   <h3 className="text-[17px] font-black leading-snug text-slate-900">Test Integration</h3>
                   <p className="mt-1 text-xs font-medium leading-relaxed text-slate-500">
-                    Runs a test log only. No bot user is created.
+                    Runs a real diagnostic across AdsGalaxy, Telegram, the integration secret, callback storage, and SDK readiness.
                   </p>
                 </div>
               </div>
 
-              <div className="grid gap-2">
-                <input
-                  value={testUserId}
-                  onChange={(event) => setTestUserId(event.target.value.replace(/[^0-9-]/g, ""))}
-                  placeholder="telegram_user_id"
-                  className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-[#0c9de8] focus:bg-white focus:ring-4 focus:ring-[#0c9de8]/10"
-                />
-                <input
-                  value={testUsername}
-                  onChange={(event) => setTestUsername(event.target.value)}
-                  placeholder="username (optional)"
-                  className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-[#0c9de8] focus:bg-white focus:ring-4 focus:ring-[#0c9de8]/10"
-                />
-              </div>
-
               <div className="rounded-2xl border border-slate-100 bg-slate-50 p-3">
-                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Expected success response</p>
-                <code className="mt-2 block break-all text-[10px] text-slate-700">{`{"success":true,"message":"Integration test successful","test":true}`}</code>
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Diagnostic coverage</p>
+                <p className="mt-2 text-[11px] font-semibold leading-relaxed text-slate-600">
+                  Endpoint, Telegram getMe, webhook status, encrypted credentials, integration secret, callback write, database state, ownership, and SDK auth readiness.
+                </p>
               </div>
 
               {result && (
                 <div className={
                   result.type === "success"
                     ? "rounded-2xl border border-emerald-100 bg-emerald-50 px-3 py-3 text-xs font-bold text-emerald-700"
+                    : result.type === "warning"
+                    ? "rounded-2xl border border-amber-100 bg-amber-50 px-3 py-3 text-xs font-bold text-amber-700"
                     : "rounded-2xl border border-red-100 bg-red-50 px-3 py-3 text-xs font-bold text-red-700"
                 }>
                   {result.message}
+                  {result.checks?.length ? (
+                    <div className="mt-3 space-y-2">
+                      {result.checks.map((item) => {
+                        const Icon = item.status === "success" ? CheckCircle2 : item.status === "warning" ? AlertTriangle : XCircle;
+                        return (
+                          <div key={item.key} className="rounded-xl bg-white/70 p-2 text-slate-700">
+                            <div className="flex items-center gap-2 font-black">
+                              <Icon size={14} className={item.status === "success" ? "text-emerald-600" : item.status === "warning" ? "text-amber-600" : "text-red-600"} />
+                              <span>{item.label}</span>
+                            </div>
+                            <p className="mt-1 pl-5 text-[11px] font-semibold text-slate-500">{item.message}</p>
+                            {item.diagnostic && <p className="mt-1 pl-5 text-[10px] font-mono text-slate-400">{item.diagnostic}</p>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </div>
               )}
 
               <button
                 type="button"
-                disabled={!integrationUrl || !testUserId || testing}
+                disabled={!integrationUrl || testing}
                 onClick={runTest}
                 className="flex w-full items-center justify-center gap-2 rounded-2xl bg-emerald-500 py-3.5 text-sm font-black text-white transition-colors hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-50"
               >
