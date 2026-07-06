@@ -4,7 +4,7 @@ import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Modal from "@/components/ui/Modal";
-import { Ban, CheckCircle2, ChevronLeft, ChevronRight, Edit2, Loader2, Search, ShieldOff } from "lucide-react";
+import { Ban, CheckCircle2, ChevronLeft, ChevronRight, Edit2, ExternalLink, Loader2, Search, ShieldOff } from "lucide-react";
 
 type UserRow = {
   id: number;
@@ -45,6 +45,11 @@ function money(value: unknown) {
 
 function displayUsername(user: UserRow) {
   return user.username ? `@${user.username}` : "No Username";
+}
+
+function userTelegramUrl(user: UserRow) {
+  const cleaned = String(user.username || "").trim().replace(/^@/, "");
+  return cleaned ? `https://t.me/${cleaned}` : "";
 }
 
 function displayName(user: UserRow) {
@@ -351,7 +356,20 @@ export default function AdminUsersPage() {
               ) : users.map((user) => (
                 <tr key={user.id} className="hover:bg-slate-50">
                   <td className="px-4 py-3">
-                    <div className="font-semibold text-slate-900">{displayUsername(user)}</div>
+                    <div className="font-semibold text-slate-900">
+                      {userTelegramUrl(user) ? (
+                        <a
+                          href={userTelegramUrl(user)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-blue-700 hover:text-blue-900 hover:underline"
+                        >
+                          {displayUsername(user)}<ExternalLink size={11} />
+                        </a>
+                      ) : (
+                        displayUsername(user)
+                      )}
+                    </div>
                     <div className="text-xs text-slate-500">User #{user.id} - TG {user.telegram_id}</div>
                   </td>
                   <td className="px-4 py-3">
@@ -387,7 +405,21 @@ export default function AdminUsersPage() {
             <div key={user.id} className="rounded-lg border border-slate-200 p-3 shadow-sm">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="truncate font-semibold text-slate-900">{displayUsername(user)}</div>
+                  <div className="truncate font-semibold text-slate-900">
+                    {userTelegramUrl(user) ? (
+                      <a
+                        href={userTelegramUrl(user)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="inline-flex items-center gap-1 text-blue-700 hover:text-blue-900 hover:underline"
+                      >
+                        {displayUsername(user)}<ExternalLink size={11} />
+                      </a>
+                    ) : (
+                      displayUsername(user)
+                    )}
+                  </div>
                   <div className="text-xs text-slate-500">{displayName(user)}</div>
                   <div className="text-xs text-slate-400">User #{user.id} - TG {user.telegram_id}</div>
                 </div>

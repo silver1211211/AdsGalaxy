@@ -41,6 +41,8 @@ export type MiniAppNetworkAdapter = {
       richads_publisher_id?: string;
       richads_app_id?: string;
       richads_placement_type?: typeof RICHADS_PRODUCTION_PLACEMENT;
+      test_mode?: boolean;
+      debug?: boolean;
       backup_script_url?: string | null;
       script_timeout_ms?: number;
     };

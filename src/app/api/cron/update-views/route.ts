@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
+import { debitConfirmedChannelViews } from "@/lib/channelFastBilling";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import { aggregateChannelStatistics } from "@/lib/channelStatistics";
 import { getPrivatePostViews, mtprotoAccountNumber } from "@/lib/telegramMtproto";
@@ -337,6 +338,7 @@ export async function GET(request: NextRequest) {
           [post.id, post.channel_id, monotonicViews, previousViews]
         );
         await pool.query("UPDATE channels SET last_successful_view_fetch_at=NOW() WHERE id=?", [post.channel_id]);
+        await debitConfirmedChannelViews(Number(post.id), monotonicViews);
         stats.viewsUpdated += 1;
         if (post.channel_type === "private") stats.privateViewsUpdated += 1;
         else stats.publicViewsUpdated += 1;

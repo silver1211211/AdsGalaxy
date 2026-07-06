@@ -147,7 +147,11 @@ export async function POST(request: Request) {
     try {
       await conn.rollback();
     } catch {}
-    return NextResponse.json(publicSdkErrorResponse(error, "IMPRESSION_FAILED", "Impression failed"), { status: Number(error?.status || 400) });
+    console.error("Public SDK Mini App impression failed", error);
+    return NextResponse.json({
+      ...publicSdkErrorResponse(error, "IMPRESSION_FAILED", "Impression failed"),
+      message: "Unable to confirm this advertisement.",
+    }, { status: Number(error?.status || 400) });
   } finally {
     conn.release();
   }

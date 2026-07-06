@@ -11,6 +11,7 @@ import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import { columnExists } from "@/lib/schemaGuards";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
+import { validateTotalBudget } from "@/lib/campaignBudget";
 
 export async function POST(request: Request) {
   try {
@@ -29,7 +30,7 @@ export async function POST(request: Request) {
     const postbackUrl = validatePostbackUrl(formData.get("postback_url"));
     const button_text = formData.get("button_text") as string;
     const type = formData.get("type") as string;
-    const budget = parseFloat(formData.get("budget") as string);
+    const budget = validateTotalBudget(formData.get("budget"));
     const cpm = parseFloat(formData.get("cpm") as string);
     const category = normalizeCampaignCategory(formData.get("category"));
     const continents = formData.get("continents") as string;
@@ -151,13 +152,13 @@ export async function POST(request: Request) {
       const [result]: any = await conn.query(
         `INSERT INTO campaigns (
           user_id, name, parse_mode, message_text, image_url, link, postback_url, button_text, type,
-          budget, cpm, category, quality_score, quality_tier, quality_metadata,
+          budget, total_budget, cpm, category, quality_score, quality_tier, quality_metadata,
           continents, countries, languages, vpn_policy,
           device_policy, os_policy, start_at, end_at, daily_budget_limit,
           frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
           direct_inventory_metadata, status
         )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
         [
           user.id,
           name,
@@ -168,6 +169,7 @@ export async function POST(request: Request) {
           postbackUrl,
           button_text,
           type,
+          budget,
           budget,
           cpm,
           category,
@@ -247,9 +249,6 @@ export async function GET(request: Request) {
     const user = await getAuthenticatedUser(initData);
     const hasCampaignPostViews = await columnExists(pool, "campaign_posts", "views");
     const hasBroadcastDeliveryCost = await columnExists(pool, "broadcast_deliveries", "cost");
-    const hasClickSettlementAdvertiserPaid = await columnExists(pool, "ad_settlements", "advertiser_paid");
-    const hasViewSettlementAdvertiserPaid = await columnExists(pool, "ad_settlements_views", "advertiser_paid");
-    const hasViewSettlementCampaignId = await columnExists(pool, "ad_settlements_views", "campaign_id");
     const campaignPostImpressionsExpr = hasCampaignPostViews
       ? "COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.campaign_id = c.id), 0)"
       : "COALESCE((SELECT COUNT(*) FROM campaign_posts cp WHERE cp.campaign_id = c.id), 0)";
@@ -260,27 +259,17 @@ export async function GET(request: Request) {
       ? "COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.campaign_id = c.id AND cp.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND cp.created_at < CURDATE()), 0)"
       : "COALESCE((SELECT COUNT(*) FROM campaign_posts cp WHERE cp.campaign_id = c.id AND cp.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND cp.created_at < CURDATE()), 0)";
     const broadcastSpendExpr = hasBroadcastDeliveryCost
-      ? "COALESCE((SELECT SUM(bd.cost) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)"
+      ? "COALESCE((SELECT SUM(bd.cost) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)"
       : "0";
     const broadcastTodaySpendExpr = hasBroadcastDeliveryCost
-      ? "COALESCE((SELECT SUM(bd.cost) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.created_at >= CURDATE()), 0)"
+      ? "COALESCE((SELECT SUM(bd.cost) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= CURDATE()), 0)"
       : "0";
-    const clickSettlementSpendExpr = hasClickSettlementAdvertiserPaid
-      ? "COALESCE((SELECT SUM(s.advertiser_paid) FROM ad_settlements s WHERE s.campaign_id = c.id), 0)"
-      : "0";
-    const viewSettlementSpendExpr = hasViewSettlementAdvertiserPaid && hasViewSettlementCampaignId
-      ? "COALESCE((SELECT SUM(sv.advertiser_paid) FROM ad_settlements_views sv WHERE sv.campaign_id = c.id), 0)"
-      : "0";
-    const clickSettlementTodaySpendExpr = hasClickSettlementAdvertiserPaid
-      ? "COALESCE((SELECT SUM(s.advertiser_paid) FROM ad_settlements s WHERE s.campaign_id = c.id AND s.created_at >= CURDATE()), 0)"
-      : "0";
-    const viewSettlementTodaySpendExpr = hasViewSettlementAdvertiserPaid && hasViewSettlementCampaignId
-      ? "COALESCE((SELECT SUM(sv.advertiser_paid) FROM ad_settlements_views sv WHERE sv.campaign_id = c.id AND sv.created_at >= CURDATE()), 0)"
-      : "0";
+    const channelTodaySpendExpr = `(COALESCE((SELECT SUM(l.advertiser_debit) FROM channel_settlement_ledger l WHERE l.campaign_id=c.id AND l.created_at>=CURDATE()),0)
+      + COALESCE((SELECT SUM(d.advertiser_debit) FROM channel_advertiser_debits d WHERE d.campaign_id=c.id AND d.created_at>=CURDATE()),0))`;
 
     const [rows]: any = await pool.query(
-      `SELECT id, name, parse_mode, message_text, image_url, link, postback_url, button_text,
-         type, budget, cpm, category, continents, countries, languages, vpn_policy,
+      `SELECT id, name, parse_mode, message_text, image_url, link, postback_url, button_text, rejection_reason,
+         type, budget, total_budget, cpm, category, continents, countries, languages, vpn_policy,
          device_policy, os_policy, start_at, end_at, daily_budget_limit,
          frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
          direct_inventory_metadata, status, paused_at, resume_locked_until,
@@ -305,12 +294,17 @@ export async function GET(request: Request) {
          END as clicks,
          CASE
            WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
-           ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr})
+           ELSE COALESCE(c.channel_spend, 0)
          END as spend,
          CASE
            WHEN type = 'broadcast' THEN ${broadcastTodaySpendExpr}
-           ELSE (${clickSettlementTodaySpendExpr} + ${viewSettlementTodaySpendExpr})
+           ELSE ${channelTodaySpendExpr}
          END as today_spend,
+         CASE WHEN COALESCE(c.budget, 0) <= 0 THEN TRUE ELSE FALSE END AS budget_exhausted,
+         CASE WHEN COALESCE(c.daily_budget_limit, 0) > 0 AND (
+           CASE WHEN type = 'broadcast' THEN ${broadcastTodaySpendExpr}
+           ELSE ${channelTodaySpendExpr} END
+         ) >= c.daily_budget_limit THEN TRUE ELSE FALSE END AS daily_cap_reached,
          CASE
            WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(DISTINCT bd.bot_id) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)
            ELSE COALESCE((SELECT COUNT(DISTINCT cp.channel_id) FROM campaign_posts cp WHERE cp.campaign_id = c.id), 0)
@@ -344,7 +338,7 @@ export async function GET(request: Request) {
            ) > 0
            THEN (
              CASE WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
-             ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) END
+             ELSE COALESCE(c.channel_spend, 0) END
            ) / (
              CASE WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 1)
              ELSE ${campaignPostImpressionsExpr} END
@@ -353,21 +347,21 @@ export async function GET(request: Request) {
          END as average_cpm,
          CASE
            WHEN type != 'broadcast' AND COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0) > 0
-           THEN (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) / COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 1)
+           THEN COALESCE(c.channel_spend, 0) / COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 1)
            ELSE 0
          END as average_cpc,
          CASE
            WHEN (
              CASE WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
-             ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) END
+             ELSE COALESCE(c.channel_spend, 0) END
              + COALESCE(c.budget, 0)
            ) > 0
            THEN (
              CASE WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
-             ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) END
+             ELSE COALESCE(c.channel_spend, 0) END
            ) / (
              CASE WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
-             ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) END
+             ELSE COALESCE(c.channel_spend, 0) END
              + COALESCE(c.budget, 0)
            ) * 100
            ELSE 0

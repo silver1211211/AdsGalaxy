@@ -6,6 +6,7 @@ import { ChartColumn } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
 import { SkeletonChart, SkeletonStatGrid } from "@/components/ui/Skeleton";
+import { hasMinimumCpcSample, hasMinimumCpmSample } from "@/lib/statFormulas";
 
 type DateMode = "today" | "yesterday" | "7d" | "30d";
 
@@ -62,6 +63,11 @@ function resolveRange(mode: DateMode) {
 function formatMoney(value: number) {
   const abs = Math.abs(value);
   return `$${value.toFixed(abs > 0 && abs < 1 ? 4 : 2)}`;
+}
+
+function formatRate(value: number, sample: number, kind: "cpm" | "cpc") {
+  const confident = kind === "cpm" ? hasMinimumCpmSample(sample) : hasMinimumCpcSample(sample);
+  return confident ? formatMoney(value) : "--";
 }
 
 function formatNumber(value: number) {
@@ -190,7 +196,7 @@ export default function MiniAppAnalyticsDashboard({ miniappId }: MiniAppAnalytic
               <div className="grid grid-cols-3 gap-2.5">
                 <StatTile label="Impressions" value={formatNumber(summary?.total_impressions ?? 0)} />
                 <StatTile label="Revenue" value={formatMoney(summary?.total_earnings ?? 0)} />
-                <StatTile label="Avg. CPM" value={formatMoney(summary?.average_cpm ?? 0)} />
+                <StatTile label="Avg. CPM" value={formatRate(summary?.average_cpm ?? 0, summary?.total_impressions ?? 0, "cpm")} />
               </div>
             </div>
 
@@ -237,8 +243,8 @@ export default function MiniAppAnalyticsDashboard({ miniappId }: MiniAppAnalytic
                         <td className="whitespace-nowrap px-3 py-2.5 font-bold text-slate-700">{formatFullDate(row.date)}</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatNumber(row.impressions)}</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatNumber(row.clicks || 0)}</td>
-                        <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatMoney(row.net_cpm)}</td>
-                        <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatMoney(row.cpc || 0)}</td>
+                        <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatRate(row.net_cpm, row.impressions, "cpm")}</td>
+                        <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatRate(row.cpc || 0, row.clicks || 0, "cpc")}</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">{(row.ctr || 0).toFixed(1)}%</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">
                           {row.fill_rate === null ? <span className="text-slate-300">—</span> : `${row.fill_rate.toFixed(1)}%`}

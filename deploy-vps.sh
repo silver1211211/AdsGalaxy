@@ -17,6 +17,32 @@ DB_USER=$(grep '^DB_USER=' "$ENV_FILE" | cut -d'=' -f2-)
 DB_PASS=$(grep '^DB_PASS=' "$ENV_FILE" | cut -d'=' -f2-)
 DB_NAME=$(grep '^DB_NAME=' "$ENV_FILE" | cut -d'=' -f2-)
 
+env_value() {
+  grep "^$1=" "$ENV_FILE" | cut -d'=' -f2- || true
+}
+
+require_env() {
+  local key="$1"
+  local value
+  value="$(env_value "$key")"
+  if [ -z "$value" ]; then
+    echo "  ERROR: Required environment variable is missing: $key"
+    return 1
+  fi
+}
+
+warn_env_pair() {
+  local name="$1"
+  local url_key="$2"
+  local token_key="$3"
+  local url token
+  url="$(env_value "$url_key")"
+  token="$(env_value "$token_key")"
+  if [ -z "$url" ] || [ -z "$token" ]; then
+    echo "  WARNING: $name reporting sync is not configured ($url_key/$token_key). Provider reconciliation will skip this provider."
+  fi
+}
+
 run_migration() {
   local file="$1"
   local name
@@ -26,7 +52,22 @@ run_migration() {
   mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$file"
 }
 
-echo "==> [1/4] Applying database migrations..."
+echo "==> [1/5] Validating production environment..."
+for KEY in \
+  DB_HOST DB_PORT DB_USER DB_PASS DB_NAME \
+  ADMIN_SESSION_SECRET CRON_SECRET BOT_TOKEN TELEGRAM_WEBHOOK_SECRET_TOKEN \
+  BOT_ADD_USER_SECRET BOT_INTEGRATION_ENCRYPTION_KEY PRIVATE_INVITE_LINK_ENCRYPTION_KEY MINIAPP_STATS_SECRET \
+  NEXT_PUBLIC_APP_URL NEXT_PUBLIC_SDK_URL NEXT_PUBLIC_API_BASE_URL
+do
+  require_env "$KEY"
+done
+warn_env_pair "AdsGram" "ADSGRAM_REPORTING_URL" "ADSGRAM_REPORTING_TOKEN"
+warn_env_pair "Monetag" "MONETAG_REPORTING_URL" "MONETAG_REPORTING_TOKEN"
+warn_env_pair "AdExium" "ADEXIUM_REPORTING_URL" "ADEXIUM_REPORTING_TOKEN"
+warn_env_pair "RichAds" "RICHADS_REPORTING_URL" "RICHADS_REPORTING_TOKEN"
+echo "    Required environment variables are present."
+
+echo "==> [2/5] Applying database migrations..."
 
 # Step 1A: Run the comprehensive catch-up migration first.
 # This adds all columns/tables from migrations 0006-0040 that lack IF NOT EXISTS guards,
@@ -92,7 +133,11 @@ for MIG in \
   "20260703_0077_publisher_notifications_and_welcome_post.sql" \
   "20260704_0078_miniapp_telegram_bot_id.sql" \
   "20260705_0079_bot_monetization_integrity.sql" \
-  "20260705_0080_miniapp_revenue_optimizer.sql"
+  "20260705_0080_miniapp_revenue_optimizer.sql" \
+  "20260705_0081_phase_6b_campaign_budgets.sql" \
+  "20260705_0082_phase_6c_fast_debit_ledgers.sql" \
+  "20260705_0083_phase_6d_external_network_reconciliation.sql" \
+  "20260706_0084_phase_6f_performance_hardening.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"
@@ -100,16 +145,16 @@ done
 
 echo "    All migrations applied."
 
-echo "==> [2/4] Cleaning stale Next.js build artifacts..."
+echo "==> [3/5] Cleaning stale Next.js build artifacts..."
 rm -rf "$APP_DIR/.next"
 echo "    .next removed."
 
-echo "==> [3/4] Rebuilding application..."
+echo "==> [4/5] Rebuilding application..."
 NODE_ENV=production npm run build \
   && echo "    Build succeeded." \
   || { echo "    ERROR: Build failed. PM2 will NOT be restarted."; exit 1; }
 
-echo "==> [4/4] Restarting PM2 process: $PM2_APP..."
+echo "==> [5/5] Restarting PM2 process: $PM2_APP..."
 pm2 restart "$PM2_APP" \
   && echo "    PM2 restarted." \
   || { echo "    WARNING: pm2 restart failed — trying reload..."; pm2 reload "$PM2_APP"; }
@@ -129,21 +174,25 @@ else
     $0 == begin { managed=1; next }
     $0 == end { managed=0; next }
     !managed
-  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|referral-sprint)([[:space:]?]|$)' || true)
+  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|referral-sprint)([[:space:]?]|$)' || true)
 
   {
     printf '%s\n' "$CLEAN_CRONTAB"
     echo "$CRON_BEGIN"
+    # Phase 6C timing: delivery workers stay real-time; publisher settlement and
+    # provider synchronization run only at their explicitly scheduled cadence.
     echo "* * * * * $CRON_BASE/process-ads >/dev/null 2>&1"
     echo "* * * * * $CRON_BASE/process-broadcast >/dev/null 2>&1"
-    echo "*/10 * * * * $CRON_BASE/update-views >/dev/null 2>&1"
-    echo "3-59/10 * * * * $CRON_BASE/channel-settlement >/dev/null 2>&1"
+    echo "*/15 * * * * $CRON_BASE/update-views >/dev/null 2>&1"
+    echo "3 * * * * $CRON_BASE/channel-settlement >/dev/null 2>&1"
+    echo "8-59/15 * * * * $CRON_BASE/settle-broadcast-publishers >/dev/null 2>&1"
     echo "17 * * * * $CRON_BASE/publisher-trust-enforcement >/dev/null 2>&1"
     echo "*/30 * * * * $CRON_BASE/channel-fraud-detection >/dev/null 2>&1"
     echo "7-59/15 * * * * $CRON_BASE/channel-health-monitor >/dev/null 2>&1"
     echo "*/5 * * * * $CRON_BASE/unlock-balances >/dev/null 2>&1"
     echo "1-59/5 * * * * $CRON_BASE/unlock-miniapp >/dev/null 2>&1"
-    echo "6-59/10 * * * * $CRON_BASE/settle-miniapp >/dev/null 2>&1"
+    echo "6-59/15 * * * * $CRON_BASE/settle-miniapp >/dev/null 2>&1"
+    echo "27 * * * * $CRON_BASE/external-network-revenue-sync >/dev/null 2>&1"
     echo "25 */6 * * * $CRON_BASE/update-subscribers >/dev/null 2>&1"
     echo "12 * * * * $CRON_BASE/traffic-quality >/dev/null 2>&1"
     echo "35 2 * * * $CRON_BASE/inventory-optimization >/dev/null 2>&1"

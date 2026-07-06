@@ -68,6 +68,18 @@ export async function GET(
       [id]
     );
 
+    const [financialRows]: any = await pool.query(
+      `SELECT
+        CASE WHEN c.type = 'broadcast'
+          THEN COALESCE((SELECT SUM(bd.cost) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
+          ELSE COALESCE(c.channel_spend, 0)
+        END AS spend,
+        (SELECT COUNT(*) FROM campaigns approved WHERE approved.user_id = c.user_id AND approved.status IN ('active', 'completed', 'budget_exhausted')) AS approved_count,
+        (SELECT COUNT(*) FROM campaigns rejected WHERE rejected.user_id = c.user_id AND rejected.status = 'rejected') AS rejected_count
+       FROM campaigns c WHERE c.id = ?`,
+      [id]
+    );
+
     const [placements]: any = await pool.query(`
       SELECT
         cp.id,
@@ -92,7 +104,7 @@ export async function GET(
     const totalClicks = Number(clickRows[0]?.total_clicks || 0);
 
     return NextResponse.json({
-      campaign: campaignRows[0],
+      campaign: { ...campaignRows[0], ...financialRows[0] },
       metrics: {
         ...metrics,
         total_clicks: totalClicks,

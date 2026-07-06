@@ -52,10 +52,13 @@ export async function GET(request: Request) {
       columnExists("bot_users", "integration_first_seen_at"),
     ]);
     const botImpressionsExpr = hasBroadcastDeliveries
-      ? "COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id), 0)"
+      ? "COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent'), 0)"
+      : "0";
+    const botFailedExpr = hasBroadcastDeliveries
+      ? "COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'failed'), 0)"
       : "0";
     const botRevenueExpr = hasBroadcastDeliveries && hasBroadcastPublisherReward
-      ? "COALESCE((SELECT SUM(bd.publisher_reward) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id), 0)"
+      ? "COALESCE((SELECT SUM(bd.publisher_reward) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent'), 0)"
       : "0";
     const webhookTimestampExpr = hasWebhookTimestamp
       ? "b.webhook_last_update_at,"
@@ -104,7 +107,13 @@ export async function GET(request: Request) {
         ${integrationUserCountExpr} as integration_user_count,
         ${manuallyImportedCountExpr} as manually_imported_count,
         ${botImpressionsExpr} as total_impressions,
-        ${botRevenueExpr} as total_revenue
+        ${botImpressionsExpr} as successful_sends,
+        ${botImpressionsExpr} as successful_paid_deliveries,
+        ${botImpressionsExpr} as delivered_sends,
+        ${botFailedExpr} as failed_sends,
+        ${botRevenueExpr} as total_revenue,
+        ${botRevenueExpr} as publisher_revenue,
+        CASE WHEN ${botImpressionsExpr} > 0 THEN (${botRevenueExpr} / ${botImpressionsExpr}) * 1000 ELSE 0 END as effective_cpm
        FROM bots b 
        WHERE b.user_id = ? AND b.is_deleted = FALSE 
        ORDER BY b.created_at DESC`, 

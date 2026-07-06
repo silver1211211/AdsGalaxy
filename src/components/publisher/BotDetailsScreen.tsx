@@ -11,6 +11,7 @@ import { apiFetch } from "@/lib/api";
 import Modal from "@/components/ui/Modal";
 import ManualAddUsersPopup from "@/components/publisher/ManualAddUsersPopup";
 import TestIntegrationPopup from "@/components/publisher/TestIntegrationPopup";
+import { hasMinimumCpmSample } from "@/lib/statFormulas";
 
 const appOrigin = (
   process.env.NEXT_PUBLIC_APP_URL
@@ -30,6 +31,11 @@ type PublisherBot = {
   suggested_fix?: string | null;
   active_count?: number;
   blocked_count?: number;
+  delivery_eligible_count?: number;
+  successful_sends?: number;
+  failed_sends?: number;
+  publisher_revenue?: number;
+  effective_cpm?: number;
   posts_per_day?: number;
   continents?: string | string[] | null;
   categories?: string | string[] | null;
@@ -46,6 +52,13 @@ type IntegrationDetails = {
   integration_last_error_at: string | null;
   integration_last_error: string | null;
   integration_user_count: number;
+  active_count: number;
+  blocked_count: number;
+  delivery_eligible_count: number;
+  successful_sends: number;
+  failed_sends: number;
+  publisher_revenue: number;
+  effective_cpm: number;
   integration_events: Array<{ event_type: string; telegram_user_id: string | null; username: string | null; result: string; error: string | null; message: string; received_at: string }>;
 };
 
@@ -74,6 +87,13 @@ function parseIntegrationDetails(value: unknown): IntegrationDetails {
     integration_last_error_at: typeof data.integration_last_error_at === "string" ? data.integration_last_error_at : null,
     integration_last_error: typeof data.integration_last_error === "string" ? data.integration_last_error : null,
     integration_user_count: Number(data.integration_user_count || 0),
+    active_count: Number(data.active_count || 0),
+    blocked_count: Number(data.blocked_unreachable_count || data.blocked_count || 0),
+    delivery_eligible_count: Number(data.delivery_eligible_count || 0),
+    successful_sends: Number(data.successful_sends || data.successful_paid_deliveries || data.delivered_sends || 0),
+    failed_sends: Number(data.failed_sends || 0),
+    publisher_revenue: Number(data.publisher_revenue || data.total_revenue || 0),
+    effective_cpm: Number(data.effective_cpm || 0),
     integration_events: Array.isArray(data.integration_events) ? data.integration_events as IntegrationDetails["integration_events"] : [],
   };
 }
@@ -105,6 +125,15 @@ function parseStringArray(value: string | string[] | null | undefined): string[]
     const parsed = JSON.parse(value);
     return Array.isArray(parsed) ? parsed.map(String) : [];
   } catch { return []; }
+}
+
+function formatMoney(value: number) {
+  const abs = Math.abs(value);
+  return `$${value.toFixed(abs > 0 && abs < 1 ? 4 : 2)}`;
+}
+
+function formatCpm(value: number, deliveries: number) {
+  return hasMinimumCpmSample(deliveries) ? formatMoney(value) : "--";
 }
 
 interface BotDetailsScreenProps {
@@ -286,6 +315,13 @@ export default function BotDetailsScreen({
   const statusInfo = getStatusInfo(bot.status);
   const continents = parseStringArray(bot.continents);
   const categories = parseStringArray(bot.categories);
+  const activeUsers = integrationDetails?.active_count ?? bot.active_count ?? 0;
+  const blockedUsers = integrationDetails?.blocked_count ?? bot.blocked_count ?? 0;
+  const deliveryEligibleUsers = integrationDetails?.delivery_eligible_count ?? bot.delivery_eligible_count ?? activeUsers;
+  const successfulSends = integrationDetails?.successful_sends ?? bot.successful_sends ?? 0;
+  const failedSends = integrationDetails?.failed_sends ?? bot.failed_sends ?? 0;
+  const publisherRevenue = integrationDetails?.publisher_revenue ?? bot.publisher_revenue ?? 0;
+  const effectiveCpm = integrationDetails?.effective_cpm ?? bot.effective_cpm ?? 0;
 
   const integrationStatus = normalizeIntegrationStatus(integrationDetails?.integration_status);
   const integrationStatusInfo = {
@@ -346,7 +382,7 @@ export default function BotDetailsScreen({
                   <p className="mt-0.5 text-sm font-bold text-[#0c9de8]">@{bot.bot_username}</p>
                 )}
                 <p className="mt-1 text-xs font-semibold text-slate-400">
-                  {(bot.active_count ?? 0).toLocaleString()} active users
+                  {activeUsers.toLocaleString()} active users
                 </p>
               </div>
             </div>
@@ -386,14 +422,42 @@ export default function BotDetailsScreen({
             <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
               <p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-emerald-600">Active Users</p>
               <p className="text-2xl font-black text-emerald-700">
-                {(bot.active_count ?? 0).toLocaleString()}
+                {activeUsers.toLocaleString()}
               </p>
             </div>
             <div className="rounded-2xl border border-red-100 bg-red-50 p-4">
               <p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-red-600">Blocked</p>
               <p className="text-2xl font-black text-red-700">
-                {(bot.blocked_count ?? 0).toLocaleString()}
+                {blockedUsers.toLocaleString()}
               </p>
+            </div>
+          </div>
+
+          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
+            <div className="border-b border-slate-100 px-4 py-3">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Delivery Statistics</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 p-4">
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-slate-400">Delivered</p>
+                <p className="text-xl font-black text-slate-900">{successfulSends.toLocaleString()}</p>
+              </div>
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-slate-400">Failed Sends</p>
+                <p className="text-xl font-black text-slate-900">{failedSends.toLocaleString()}</p>
+              </div>
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-slate-400">Eligible Users</p>
+                <p className="text-xl font-black text-slate-900">{deliveryEligibleUsers.toLocaleString()}</p>
+              </div>
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-slate-400">Revenue</p>
+                <p className="text-xl font-black text-emerald-700">{formatMoney(publisherRevenue)}</p>
+              </div>
+              <div className="col-span-2 rounded-2xl bg-slate-50 p-4">
+                <p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-slate-400">Effective CPM</p>
+                <p className="text-xl font-black text-slate-900">{formatCpm(effectiveCpm, successfulSends)}</p>
+              </div>
             </div>
           </div>
 

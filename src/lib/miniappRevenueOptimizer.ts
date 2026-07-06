@@ -7,6 +7,7 @@ import { getMiniAppNetworkHealthScores } from "@/lib/miniappOptimization";
 import { getMiniAppPublisherCpmSettings } from "@/lib/miniappPublisherCpmEngine";
 import { getDisabledMiniappNetworks } from "@/lib/productionSafety";
 import { cpm, ctr, metricNumber } from "@/lib/statFormulas";
+import { getExternalNetworkReconciliationReport } from "@/lib/externalNetworkRevenueReconciliation";
 
 const TIER_1_COUNTRIES = new Set(["US", "GB", "UK", "CA", "AU", "DE", "FR", "JP", "SG", "TW", "KR", "CH", "NL", "SE", "NO", "DK", "FI", "IE", "NZ", "AT", "BE"]);
 const TIER_2_COUNTRIES = new Set(["ES", "IT", "PT", "PL", "CZ", "GR", "AE", "SA", "QA", "KW", "IL", "TR", "MY", "TH", "HK", "BR", "MX", "CL", "AR", "ZA"]);
@@ -146,7 +147,8 @@ async function platformRevenueMetrics(db: Db) {
        COALESCE(SUM(ads_galaxy_fee), 0) as ads_galaxy_fee,
        COALESCE(SUM(reserve_revenue), 0) as reserve_revenue
      FROM miniapp_daily_stats
-     WHERE date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)`
+     WHERE date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+       AND (reconciliation_status = 'reconciled' OR network_name = 'AdsGalaxyInternal' OR reconciled_at IS NULL)`
   );
   const impressions = metricNumber(row?.impressions);
   return {
@@ -212,6 +214,7 @@ async function buildNetworkMetrics(db: Db, miniapp: MiniAppRow): Promise<Network
        COALESCE(SUM(publisher_revenue), 0) as publisher_revenue
      FROM miniapp_daily_stats
      WHERE miniapp_id = ? AND date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+       AND (reconciliation_status = 'reconciled' OR network_name = 'AdsGalaxyInternal' OR reconciled_at IS NULL)
      GROUP BY network_name`,
     [miniapp.id]
   );
@@ -474,9 +477,11 @@ export async function getMiniAppRevenueOptimizerReport(limit = 100) {
      LIMIT ?`,
     [latest?.id || null, latest?.id || null, Math.max(1, Math.min(Number(limit) || 100, 500))]
   );
+  const reconciliation = await getExternalNetworkReconciliationReport(10).catch(() => null);
   return {
     latest_run: latest || null,
     settings: Object.fromEntries(settingsRows.map((row: any) => [String(row.key), row.value])),
+    reconciliation,
     network_rankings: networkRows.map((row: any) => ({
       ...row,
       score: metricNumber(row.score),

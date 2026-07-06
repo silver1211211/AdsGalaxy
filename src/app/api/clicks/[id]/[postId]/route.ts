@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import crypto from "crypto";
 import { appendClickId, recordAdClick } from "@/lib/conversionTracking";
-import type { RowDataPacket } from "mysql2/promise";
+import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import { debitChannelClick } from "@/lib/channelFastBilling";
 
 type CampaignPostRow = RowDataPacket & {
   id: number;
@@ -32,11 +33,11 @@ async function recordLegacyCampaignClick(input: {
   userAgent: string;
   fingerprint: string;
   isBot: boolean;
-}): Promise<boolean> {
-  if (input.isBot) return false;
+}): Promise<{ id: number; isNew: boolean } | null> {
+  if (input.isBot) return null;
 
   const columns = await getCampaignClickColumns();
-  if (!columns.has("campaign_id")) return false;
+  if (!columns.has("campaign_id")) return null;
 
   if (columns.has("post_id") && columns.has("fingerprint")) {
     const [existing] = await pool.query<RowDataPacket[]>(
@@ -44,14 +45,14 @@ async function recordLegacyCampaignClick(input: {
       [input.postId, input.fingerprint]
     );
 
-    if (existing.length > 0) return false;
+    if (existing.length > 0) return { id: Number(existing[0].id), isNew: false };
   } else if (columns.has("fingerprint")) {
     const [existing] = await pool.query<RowDataPacket[]>(
       "SELECT id FROM campaign_clicks WHERE campaign_id = ? AND fingerprint = ? AND created_at > NOW() - INTERVAL 1 DAY",
       [input.campaignId, input.fingerprint]
     );
 
-    if (existing.length > 0) return false;
+    if (existing.length > 0) return { id: Number(existing[0].id), isNew: false };
   }
 
   const insertColumns = ["campaign_id"];
@@ -79,11 +80,11 @@ async function recordLegacyCampaignClick(input: {
   }
 
   const placeholders = insertColumns.map(() => "?").join(", ");
-  await pool.query(
+  const [result] = await pool.query<ResultSetHeader>(
     `INSERT INTO campaign_clicks (${insertColumns.join(", ")}) VALUES (${placeholders})`,
     insertParams
   );
-  return true;
+  return { id: Number(result.insertId), isNew: true };
 }
 
 export async function GET(
@@ -143,6 +144,9 @@ export async function GET(
     const clickRecorded = await recordLegacyCampaignClick({ campaignId, postId, ip, userAgent, fingerprint, isBot });
 
     if (clickRecorded && campaignPost) {
+      await debitChannelClick(Number(postId), clickRecorded.id);
+    }
+    if (clickRecorded?.isNew && campaignPost) {
       const clickId = await recordAdClick({
         campaignType: "campaign",
         campaignId: Number(campaignPost.id),

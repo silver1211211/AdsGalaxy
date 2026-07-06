@@ -141,7 +141,13 @@ export async function PUT(
     }
 
     const newState = await getNetworkState(id);
-    const configuredNetworkCount = newState.filter((network) => network.enabled).length;
+    const configuredNetworkCount = newState.filter((network) =>
+      network.network_name === "AdsGalaxyInternal"
+        ? network.enabled
+        : network.network_name === "RichAds"
+          ? Boolean(network.richads_publisher_id?.trim() && network.richads_app_id?.trim())
+          : Boolean(network.network_placement_id.trim())
+    ).length;
     const enabledNetworkCount = newState.filter((network) => network.enabled).length;
     const approvableNetworkCount = newState.filter((network) =>
       network.enabled && (network.network_name === "AdsGalaxyInternal" || Boolean(network.network_placement_id.trim()))

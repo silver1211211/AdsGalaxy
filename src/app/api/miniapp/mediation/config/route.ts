@@ -98,7 +98,8 @@ export async function GET(request: Request) {
       enabled_networks: enabledNetworks.map((network) => network.network_name),
       networks: enabledNetworks,
     });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Failed to load Mini App mediation config" }, { status: 500 });
+  } catch (error) {
+    console.error("Mini App mediation config failed", error);
+    return NextResponse.json({ error: "Unable to load this advertisement. Please try again." }, { status: 500 });
   }
 }

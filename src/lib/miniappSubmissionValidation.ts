@@ -36,23 +36,31 @@ function fail(message: string): never {
 
 function normalizeBotUsername(value: unknown) {
   const raw = cleanText(value);
-  if (!raw) fail("Invalid Mini App username");
+  if (!raw) fail("Telegram Bot username must start with @.");
 
-  const withoutAt = raw.replace(/^@/, "");
   if (!raw.startsWith("@")) {
-    fail("Invalid Mini App username: must start with @");
+    fail("Telegram Bot username must start with @.");
+  }
+
+  if (/\s/.test(raw)) {
+    fail("Telegram Bot username cannot contain spaces.");
+  }
+
+  const withoutAt = raw.slice(1);
+  if (withoutAt.includes("@")) {
+    fail("Telegram Bot username must contain only one @, at the start.");
   }
 
   if (withoutAt.length < 3 || withoutAt.length > 32) {
-    fail("Invalid Mini App username");
+    fail("Telegram Bot username must be between 3 and 32 characters (excluding @).");
   }
 
   if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(withoutAt)) {
-    fail("Invalid Mini App username");
+    fail("Telegram Bot username can only contain letters, numbers and underscores after the @.");
   }
 
   if (!/bot$/i.test(withoutAt)) {
-    fail("Invalid Mini App username");
+    fail("Telegram Bot username must end with 'bot' (e.g. @MyAppBot).");
   }
 
   return {
@@ -87,15 +95,15 @@ function validateHttpsUrl(value: unknown) {
   try {
     parsed = new URL(webappUrl);
   } catch {
-    fail("Web App URL must be a valid HTTPS URL (e.g. https://yourapp.example.com)");
+    fail("Please enter a valid HTTPS website URL.");
   }
 
   if (parsed.protocol !== "https:" || !parsed.hostname.includes(".")) {
-    fail("Web App URL must be a valid HTTPS URL (e.g. https://yourapp.example.com)");
+    fail("Please enter a valid HTTPS website URL.");
   }
 
   if (isTelegramLinkHostname(parsed.hostname)) {
-    fail("Web App URL must be the HTTPS website configured in BotFather, not a t.me or telegram.me link");
+    fail("Telegram links are not allowed here. Please enter your website's HTTPS URL.");
   }
 
   return parsed.toString();
@@ -126,16 +134,16 @@ function validateMiniAppUrl(value: unknown, normalizedUsername: string) {
   try {
     parsed = new URL(miniappUrl);
   } catch {
-    fail("Mini App URL must be a valid Telegram Mini App link");
+    fail("Please enter a valid Telegram Mini App URL beginning with https://t.me/.");
   }
 
   const domain = getTelegramMiniAppDomain(parsed);
   if (!domain) {
-    fail("Mini App URL must be a valid Telegram Mini App link");
+    fail("Please enter a valid Telegram Mini App URL beginning with https://t.me/.");
   }
 
   if (domain.toLowerCase() !== normalizedUsername.toLowerCase()) {
-    fail("Mini App URL must match the submitted Mini App username");
+    fail("This Telegram Mini App URL doesn't match the Bot Username you entered above.");
   }
 
   return miniappUrl;

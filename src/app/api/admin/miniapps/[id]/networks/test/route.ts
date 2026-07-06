@@ -8,8 +8,9 @@ import {
   isMiniAppNetworkName,
   type MiniAppNetworkName,
 } from "@/lib/miniappNetworkAdapters";
-import { canShowMonetag } from "@/lib/miniappMonetagProtection";
-import { getDisabledMiniappNetworks, isMonetagTestModeEnabled } from "@/lib/productionSafety";
+import { getDisabledMiniappNetworks } from "@/lib/productionSafety";
+
+const ADEXIUM_TEST_WIDGET_ID = "00585dc9-3ed2-4ef1-afe8-8d06e0847e1a";
 
 type MiniAppRow = RowDataPacket & {
   id: number;
@@ -106,25 +107,22 @@ export async function POST(
     );
     const network = allNetworks.find((row) => row.network_name === networkName);
     const globallyDisabledNetworks = await getDisabledMiniappNetworks();
-    const enabledNetworks = allNetworks
-      .filter((row) => Boolean(row.enabled) && !globallyDisabledNetworks.has(row.network_name))
-      .map((row) => row.network_name);
 
-    if (!network || !Boolean(network.enabled) || globallyDisabledNetworks.has(networkName)) {
+    if (!network) {
       return diagnosticResponse({
         success: false,
         network: networkName,
-        status: "Disabled",
-        error_code: "NETWORK_DISABLED",
-        error_message: "Network is disabled or not configured for this Mini App",
-        checks: [
-          { name: "miniapp_network_enabled", passed: Boolean(network?.enabled) },
-          { name: "global_network_enabled", passed: !globallyDisabledNetworks.has(networkName) },
-        ],
+        status: "Not Configured",
+        error_code: "INVALID_CONFIG",
+        error_message: "Network is not configured for this Mini App",
       });
     }
 
-    if (!hasRequiredPlacement(networkName, network)) {
+    const testNetwork = networkName === "AdExium"
+      ? { ...network, network_placement_id: ADEXIUM_TEST_WIDGET_ID }
+      : network;
+
+    if (!hasRequiredPlacement(networkName, testNetwork)) {
       return diagnosticResponse({
         success: false,
         network: networkName,
@@ -136,9 +134,9 @@ export async function POST(
 
     let config;
     try {
-      config = buildMiniAppNetworkClientConfig(networkName, network.network_placement_id || "", {
-        publisherId: network.richads_publisher_id,
-        appId: network.richads_app_id,
+      config = buildMiniAppNetworkClientConfig(networkName, testNetwork.network_placement_id || "", {
+        publisherId: testNetwork.richads_publisher_id,
+        appId: testNetwork.richads_app_id,
       });
     } catch (error: any) {
       return diagnosticResponse({
@@ -161,27 +159,16 @@ export async function POST(
     }
 
     let monetagProtection = null;
+    const testConfig = {
+      ...config.client_config,
+      sdk: {
+        ...config.client_config.sdk,
+        test_mode: networkName === "Monetag",
+        debug: networkName === "AdExium",
+      },
+    };
     if (networkName === "Monetag") {
-      const monetagOnlyEnabled = enabledNetworks.length === 1 && enabledNetworks[0] === "Monetag";
-      const monetagTestMode = await isMonetagTestModeEnabled();
-      monetagProtection = monetagOnlyEnabled && monetagTestMode
-        ? { allowed: true, reason: "test_mode" }
-        : await canShowMonetag(id, "admin_test");
-      if ((monetagOnlyEnabled && !monetagTestMode) || !monetagProtection.allowed) {
-        return diagnosticResponse({
-          success: false,
-          network: networkName,
-          status: "Protection Active",
-          error_code: "PROTECTION_ACTIVE",
-          error_message: monetagOnlyEnabled && !monetagTestMode
-            ? "Monetag is the only enabled network. Enable Monetag Test Mode before serving it in this state."
-            : "Monetag frequency protection is active.",
-          extra: {
-            monetag_protection: monetagProtection,
-            monetag_test_mode_enabled: monetagTestMode,
-          },
-        });
-      }
+      monetagProtection = { allowed: true, reason: "admin_test_bypass" };
     }
 
     return diagnosticResponse({
@@ -205,6 +192,8 @@ export async function POST(
           required_id_label: config.required_id_label,
         },
         monetag_protection: monetagProtection,
+        test_config: testConfig,
+        test_mode: true,
       },
     });
   } catch (error: unknown) {

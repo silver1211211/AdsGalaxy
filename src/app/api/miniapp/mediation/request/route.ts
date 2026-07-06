@@ -95,7 +95,7 @@ export async function POST(request: Request) {
       return NextResponse.json({
         success: false,
         error_code: "NO_FILL",
-        message: "No ad available right now.",
+        message: "No advertisements are available at the moment. Please try again shortly.",
         request_id: decision.request_id,
         fallback_available: false,
         ad_format: decision.ad_format,
@@ -109,7 +109,7 @@ export async function POST(request: Request) {
       return NextResponse.json({
         success: false,
         error_code: decision.error_code,
-        message: "No ad available right now.",
+        message: "No advertisements are available at the moment. Please try again shortly.",
         request_id: decision.request_id,
         fallback_available: false,
         ad_format: decision.ad_format,
@@ -130,18 +130,19 @@ export async function POST(request: Request) {
       decision_reason: decision.decision_reason,
       monetag_protection: monetagProtection,
     });
-  } catch (error: any) {
+  } catch (error) {
     try {
       await conn.rollback();
     } catch {
       // Transaction may not have started.
     }
 
-    const message = error?.message || "Failed to create mediation request";
+    const message = error instanceof Error ? error.message : "Failed to create mediation request";
     const status = message.startsWith("Unauthorized") || message.startsWith("Invalid initData")
         ? 401
         : 400;
-    return NextResponse.json({ error: message }, { status });
+    console.error("Mini App mediation request failed", error);
+    return NextResponse.json({ error: status === 401 ? "Unable to load this advertisement. Please try again." : "Network temporarily unavailable." }, { status });
   } finally {
     conn.release();
   }

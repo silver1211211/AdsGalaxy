@@ -4,7 +4,7 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Bot, Search, Users, ShieldOff, Pause, Play, Trash2 } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Bot, Search, Users, ShieldOff, Pause, Play, Trash2, ExternalLink } from "lucide-react";
 import EmptyState from "@/components/ui/EmptyState";
 import { SkeletonCard, SkeletonTableRows } from "@/components/ui/Skeleton";
 import Modal from "@/components/ui/Modal";
@@ -223,6 +223,10 @@ export default function AdminBotsPage() {
   };
 
   const qualityLabel = (value?: string) => String(value || "good").replace(/_/g, " ");
+  const botTelegramUrl = (username?: string | null) => {
+    const cleaned = String(username || "").trim().replace(/^@/, "");
+    return cleaned ? `https://t.me/${cleaned}` : "";
+  };
   const isFiltering = search.trim().length > 0 || statusFilter !== "all";
 
   return (
@@ -290,7 +294,18 @@ export default function AdminBotsPage() {
                     </div>
                     <div>
                       <div className="text-xs font-medium text-slate-500">Username</div>
-                      <div className="mt-0.5 font-semibold text-blue-600">@{selectedBot.bot_username || "N/A"}</div>
+                      {botTelegramUrl(selectedBot.bot_username) ? (
+                        <a
+                          href={botTelegramUrl(selectedBot.bot_username)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="mt-0.5 inline-flex items-center gap-1 font-semibold text-blue-600 hover:text-blue-900 hover:underline"
+                        >
+                          @{selectedBot.bot_username}<ExternalLink size={13} />
+                        </a>
+                      ) : (
+                        <div className="mt-0.5 font-semibold text-slate-500">N/A</div>
+                      )}
                     </div>
                     <div>
                       <div className="text-xs font-medium text-slate-500">Status</div>
@@ -455,7 +470,18 @@ export default function AdminBotsPage() {
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-2 font-semibold text-slate-900">
                         <Bot size={14} className="flex-shrink-0 text-indigo-500" />
-                        @{bot.bot_username || "N/A"}
+                        {botTelegramUrl(bot.bot_username) ? (
+                          <a
+                            href={botTelegramUrl(bot.bot_username)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-blue-700 hover:text-blue-900 hover:underline"
+                          >
+                            @{bot.bot_username}<ExternalLink size={12} />
+                          </a>
+                        ) : (
+                          <span>N/A</span>
+                        )}
                       </div>
                       <div className="mt-0.5 text-xs text-slate-500">#{bot.id} · User {bot.user_id}</div>
                     </td>
@@ -517,7 +543,21 @@ export default function AdminBotsPage() {
                       <Bot size={14} className="flex-shrink-0 text-indigo-500" />
                       <span className="truncate">{bot.bot_name || "N/A"}</span>
                     </div>
-                    <div className="mt-0.5 text-xs text-slate-500">@{bot.bot_username || "N/A"} · User #{bot.user_id}</div>
+                    <div className="mt-0.5 text-xs text-slate-500">
+                      {botTelegramUrl(bot.bot_username) ? (
+                        <a
+                          href={botTelegramUrl(bot.bot_username)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="inline-flex items-center gap-1 font-semibold text-blue-700 hover:text-blue-900 hover:underline"
+                        >
+                          @{bot.bot_username}<ExternalLink size={11} />
+                        </a>
+                      ) : (
+                        "N/A"
+                      )} · User #{bot.user_id}
+                    </div>
                   </div>
                   <StatusBadge status={bot.status} />
                 </div>

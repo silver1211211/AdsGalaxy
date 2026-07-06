@@ -263,7 +263,10 @@ export async function POST(request: Request) {
     const status = message.startsWith("Unauthorized") || message.startsWith("Invalid initData")
         ? 401
         : 400;
-    return NextResponse.json({ error: message }, { status });
+    console.error("Mini App impression confirmation failed", error);
+    return NextResponse.json({
+      error: status === 401 ? "Unable to confirm this advertisement." : "Network temporarily unavailable.",
+    }, { status });
   } finally {
     conn.release();
   }

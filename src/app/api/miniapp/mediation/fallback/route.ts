@@ -45,7 +45,7 @@ export async function POST(request: Request) {
       return NextResponse.json({
         success: false,
         error_code: "NO_FILL",
-        message: "No ad available right now.",
+        message: "No advertisements are available at the moment. Please try again shortly.",
         decision_reason: "non_fallback_error",
       });
     }
@@ -120,7 +120,7 @@ export async function POST(request: Request) {
       return NextResponse.json({
         success: false,
         error_code: "NO_FILL",
-        message: "No ad available right now.",
+        message: "No advertisements are available at the moment. Please try again shortly.",
         request_id: nextDecision.request_id,
         fallback_available: false,
         ad_format: nextDecision.ad_format,
@@ -134,7 +134,7 @@ export async function POST(request: Request) {
       return NextResponse.json({
         success: false,
         error_code: "NO_FILL",
-        message: "No ad available right now.",
+        message: "No advertisements are available at the moment. Please try again shortly.",
         request_id: nextDecision.request_id,
         fallback_available: false,
         ad_format: nextDecision.ad_format,
@@ -152,18 +152,19 @@ export async function POST(request: Request) {
       ad_format: nextDecision.ad_format,
       decision_reason: nextDecision.decision_reason,
     });
-  } catch (error: any) {
+  } catch (error) {
     try {
       await conn.rollback();
     } catch {
       // Transaction may not have started.
     }
 
-    const message = error?.message || "Failed to create mediation fallback";
+    const message = error instanceof Error ? error.message : "Failed to create mediation fallback";
     const status = message.startsWith("Unauthorized") || message.startsWith("Invalid initData")
         ? 401
         : 400;
-    return NextResponse.json({ error: message }, { status });
+    console.error("Mini App mediation fallback failed", error);
+    return NextResponse.json({ error: status === 401 ? "Unable to load this advertisement. Please try again." : "Network temporarily unavailable." }, { status });
   } finally {
     conn.release();
   }

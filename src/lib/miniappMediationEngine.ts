@@ -115,9 +115,7 @@ function rankCandidatePool(candidates: NetworkRow[]) {
     const priorityB = Number(b.priority_order || 99);
     const scoreA = Number(a.health_score ?? 100);
     const scoreB = Number(b.health_score ?? 100);
-    const effectiveA = scoreA - ((priorityA - 1) * 8);
-    const effectiveB = scoreB - ((priorityB - 1) * 8);
-    return effectiveB - effectiveA || priorityA - priorityB;
+    return priorityA - priorityB || scoreB - scoreA;
   });
 }
 
@@ -450,9 +448,9 @@ export async function recordMiniappNetworkFailure(input: {
      ON DUPLICATE KEY UPDATE
        health_score = VALUES(health_score),
        recent_failures = VALUES(recent_failures),
-       no_fill_count = no_fill_count + VALUES(no_fill_count),
-       timeout_count = timeout_count + VALUES(timeout_count),
-       sdk_load_failure_count = sdk_load_failure_count + VALUES(sdk_load_failure_count),
+       no_fill_count = IF(no_fill_count >= 18446744073709551614, 18446744073709551615, no_fill_count + VALUES(no_fill_count)),
+       timeout_count = IF(timeout_count >= 18446744073709551614, 18446744073709551615, timeout_count + VALUES(timeout_count)),
+       sdk_load_failure_count = IF(sdk_load_failure_count >= 18446744073709551614, 18446744073709551615, sdk_load_failure_count + VALUES(sdk_load_failure_count)),
        last_failure_at = NOW(),
        temporarily_disabled_until = CASE
          WHEN ? THEN DATE_ADD(NOW(), INTERVAL ? MINUTE)

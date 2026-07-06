@@ -3,6 +3,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
+import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import {
   Activity,
   AlertTriangle,
@@ -137,9 +138,9 @@ function Select({ value, onChange, label, hint, children }: { value: string; onC
   );
 }
 
-function Section({ title, subtitle, icon: Icon, children }: { title: string; subtitle?: string; icon?: any; children: React.ReactNode }) {
+function Section({ id, title, subtitle, icon: Icon, children }: { id?: string; title: string; subtitle?: string; icon?: any; children: React.ReactNode }) {
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/50">
+    <section id={id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/50">
       <div className="mb-4 flex items-start gap-3">
         {Icon && (
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-[#0c9de8]">
@@ -209,7 +210,11 @@ export default function AdminReferralsPage() {
   const [message, setMessage] = useState("");
   const [setting, setSetting] = useState({ key: "referral_reward_amount", value: "0.015", description: "" });
   const [sprint, setSprint] = useState({ name: "Referral Sprint", duration_days: "14", first_place_reward: "10", second_place_reward: "5", third_place_reward: "2", best_team_reward: "15", second_team_reward: "8", third_team_reward: "4", auto_restart: true });
-  const [milestone, setMilestone] = useState({ id: "", scope: "user", threshold_count: "10", reward_type: "withdrawable_balance", reward_amount: "0.25", reward_label: "10 verified referrals", status: "active" });
+  const defaultMilestone = { id: "", scope: "user", threshold_count: "10", reward_type: "withdrawable_balance", reward_amount: "0.25", reward_label: "10 verified referrals", status: "active" };
+  const [milestone, setMilestone] = useState(defaultMilestone);
+  const [backfillLoading, setBackfillLoading] = useState(false);
+  const [deletingMilestoneId, setDeletingMilestoneId] = useState<number | null>(null);
+  const [pendingDeleteMilestone, setPendingDeleteMilestone] = useState<any | null>(null);
   const [teamName, setTeamName] = useState("");
   const [event, setEvent] = useState({ name: "Double Referral Week", team_id: "", multiplier: "2", starts_at: "", ends_at: "", status: "active" });
 
@@ -273,6 +278,7 @@ export default function AdminReferralsPage() {
     const json = await res.json().catch(() => ({}));
     setMessage(res.ok ? success : json.error || "Action failed.");
     if (res.ok) await fetchData();
+    return res.ok;
   };
 
   const saveSetting = (key: string, success = "Setting saved.") => {
@@ -303,8 +309,28 @@ export default function AdminReferralsPage() {
     description: SETTING_DESCRIPTIONS.referral_sprint_popup_interval_seconds,
   }, "Popup interval saved.");
 
+  const confirmDeleteMilestone = async () => {
+    if (!pendingDeleteMilestone) return;
+    const row = pendingDeleteMilestone;
+    setDeletingMilestoneId(row.id);
+    const ok = await submit({ action: "delete_milestone", id: row.id }, "Milestone deleted.");
+    if (ok && String(milestone.id) === String(row.id)) setMilestone(defaultMilestone);
+    setDeletingMilestoneId(null);
+    if (ok) setPendingDeleteMilestone(null);
+  };
+
   return (
     <AdminLayout>
+      <ConfirmationModal
+        isOpen={!!pendingDeleteMilestone}
+        onClose={() => setPendingDeleteMilestone(null)}
+        onConfirm={confirmDeleteMilestone}
+        title="Delete Milestone"
+        message={pendingDeleteMilestone ? `Delete the ${pendingDeleteMilestone.scope} milestone at ${pendingDeleteMilestone.threshold_count} referrals? This stops it from being offered or paid going forward. It cannot be undone.` : ""}
+        confirmBtnText="Delete"
+        confirmBtnVariant="danger"
+        isLoading={deletingMilestoneId !== null}
+      />
       <div className="space-y-6">
         <section className="overflow-hidden rounded-3xl bg-gradient-to-r from-[#13aef5] to-[#0b86d6] text-white shadow-xl shadow-[#0c9de8]/20">
           <div className="p-6 sm:p-7">
@@ -451,8 +477,14 @@ export default function AdminReferralsPage() {
             </div>
 
             <div className="grid gap-5 xl:grid-cols-3">
-              <Section title="Milestone Rewards" subtitle="Extra rewards for user or team referral targets." icon={Medal}>
+              <Section id="milestone-editor" title="Milestone Rewards" subtitle="Extra rewards for user or team referral targets." icon={Medal}>
                 <div className="grid gap-3">
+                  {milestone.id && (
+                    <div className="flex items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50 px-3 py-2.5">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-[#0c9de8]">Editing Milestone #{milestone.id}</p>
+                      <button onClick={() => setMilestone(defaultMilestone)} className="text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-slate-700">Cancel</button>
+                    </div>
+                  )}
                   <Select label="Milestone Scope" value={milestone.scope} onChange={(value) => setMilestone((prev) => ({ ...prev, scope: value }))}>
                     <option value="user">User</option>
                     <option value="team">Team</option>
@@ -460,7 +492,44 @@ export default function AdminReferralsPage() {
                   <Input label="Referral Count Required" value={milestone.threshold_count} onChange={(value) => setMilestone((prev) => ({ ...prev, threshold_count: value }))} />
                   <Input label="Reward Amount" value={milestone.reward_amount} onChange={(value) => setMilestone((prev) => ({ ...prev, reward_amount: value }))} />
                   <Input label="Display Label" value={milestone.reward_label} onChange={(value) => setMilestone((prev) => ({ ...prev, reward_label: value }))} />
-                  <button onClick={() => submit({ action: "save_milestone", ...milestone }, "Milestone saved.")} className="h-11 rounded-xl bg-[#0c9de8] text-xs font-black uppercase tracking-widest text-white">Save Milestone</button>
+                  <button
+                    onClick={async () => {
+                      const ok = await submit({ action: "save_milestone", ...milestone }, milestone.id ? "Milestone updated." : "Milestone saved.");
+                      if (ok) setMilestone(defaultMilestone);
+                    }}
+                    className="h-11 rounded-xl bg-[#0c9de8] text-xs font-black uppercase tracking-widest text-white"
+                  >
+                    {milestone.id ? "Update Milestone" : "Save Milestone"}
+                  </button>
+                  <div className="mt-1 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[10px] font-semibold leading-4 text-slate-500">
+                      User milestones pay out once a user&apos;s lifetime verified referral count crosses a threshold. Run this after adding or lowering a threshold so users who already qualify get paid instead of waiting for their next new referral.
+                    </p>
+                    <button
+                      onClick={async () => {
+                        setBackfillLoading(true);
+                        setMessage("");
+                        try {
+                          const res = await fetch("/api/admin/referrals", {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ action: "backfill_user_milestones" }),
+                          });
+                          const json = await res.json().catch(() => ({}));
+                          if (!res.ok) throw new Error(json.error || "Backfill failed.");
+                          setMessage(`Backfill complete. Checked ${json.result.users_checked} users, awarded ${json.result.milestones_awarded} milestone(s) to ${json.result.users_awarded} user(s).`);
+                        } catch (error: any) {
+                          setMessage(error.message || "Backfill failed.");
+                        } finally {
+                          setBackfillLoading(false);
+                        }
+                      }}
+                      disabled={backfillLoading}
+                      className="mt-2 h-10 w-full rounded-xl border border-slate-200 bg-white text-[10px] font-black uppercase tracking-widest text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                    >
+                      {backfillLoading ? "Checking existing users…" : "Backfill Existing Users"}
+                    </button>
+                  </div>
                 </div>
               </Section>
 
@@ -511,18 +580,28 @@ export default function AdminReferralsPage() {
                 ["Reward", (row) => money(row.reward_amount)],
                 ["Status", (row) => row.status],
                 ["Action", (row) => (
-                  <button
-                    onClick={() => setMilestone({
-                      id: String(row.id),
-                      scope: String(row.scope || "user"),
-                      threshold_count: String(row.threshold_count || "1"),
-                      reward_type: String(row.reward_type || "withdrawable_balance"),
-                      reward_amount: String(row.reward_amount || "0"),
-                      reward_label: String(row.reward_label || ""),
-                      status: String(row.status || "active"),
-                    })}
-                    className="rounded-lg bg-blue-50 px-3 py-1.5 text-[10px] font-black uppercase text-[#0c9de8]"
-                  >Edit</button>
+                  <div className="flex gap-1.5">
+                    <button
+                      onClick={() => {
+                        setMilestone({
+                          id: String(row.id),
+                          scope: String(row.scope || "user"),
+                          threshold_count: String(row.threshold_count || "1"),
+                          reward_type: String(row.reward_type || "withdrawable_balance"),
+                          reward_amount: String(row.reward_amount || "0"),
+                          reward_label: String(row.reward_label || ""),
+                          status: String(row.status || "active"),
+                        });
+                        document.getElementById("milestone-editor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+                      }}
+                      className="rounded-lg bg-blue-50 px-3 py-1.5 text-[10px] font-black uppercase text-[#0c9de8]"
+                    >Edit</button>
+                    <button
+                      disabled={deletingMilestoneId === row.id}
+                      onClick={() => setPendingDeleteMilestone(row)}
+                      className="rounded-lg bg-red-50 px-3 py-1.5 text-[10px] font-black uppercase text-red-600 disabled:opacity-50"
+                    >{deletingMilestoneId === row.id ? "…" : "Delete"}</button>
+                  </div>
                 )],
               ]} />
               <Table title="Active & Scheduled Events" rows={data.events} columns={[

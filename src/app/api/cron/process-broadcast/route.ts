@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
-import { creditUserAvailableBalance } from "@/lib/earnings";
 import { getAdvertiserTrustMultipliers, normalizeAdvertiserTrustLevel, qualityMultiplier } from "@/lib/advertiserTrust";
 import {
   calculateAdvertiserPerformanceScore,
@@ -69,8 +68,16 @@ async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: 
       [input.campaign.id]
     );
     const lockedCampaign = campaignRows[0];
-    if (!lockedCampaign || lockedCampaign.status !== "active" || Number(lockedCampaign.budget || 0) < input.cost) {
+    if (!lockedCampaign || lockedCampaign.status !== "active") {
       await conn.rollback();
+      return { ok: false as const, reason: "campaign_budget_exhausted" };
+    }
+    if (Number(lockedCampaign.budget || 0) + 1e-10 < input.cost) {
+      await conn.query(
+        "UPDATE campaigns SET status = 'paused', pause_reason = 'insufficient_budget_for_delivery', paused_at = NOW() WHERE id = ? AND status = 'active'",
+        [input.campaign.id]
+      );
+      await conn.commit();
       return { ok: false as const, reason: "campaign_budget_exhausted" };
     }
 
@@ -137,9 +144,6 @@ async function finalizeBroadcastDelivery(input: {
     }
     if (delivery.status !== "pending") throw new Error("broadcast_reservation_not_pending");
 
-    if (!(await creditUserAvailableBalance(conn, input.bot.user_id, input.reward))) {
-      throw new Error("publisher_credit_failed");
-    }
     const [deliveryUpdate]: any = await conn.query(
       `UPDATE broadcast_deliveries
        SET publisher_reward = ?, status = 'sent', retry_count = ?, last_success_at = NOW(),

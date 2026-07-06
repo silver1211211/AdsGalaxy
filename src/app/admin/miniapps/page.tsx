@@ -89,6 +89,24 @@ type OptimizerReport = {
     manual_override?: string | number | boolean;
   } | null;
   settings?: Record<string, string>;
+  reconciliation?: {
+    last_reconciliation?: {
+      started_at?: string | null;
+      finished_at?: string | null;
+      records_updated?: string | number;
+    } | null;
+    provider_status?: Array<{
+      provider: string;
+      status: string;
+      success: boolean;
+      last_sync?: string | null;
+      last_successful_sync?: string | null;
+      duration_ms?: number;
+      records_updated?: number;
+      records_skipped?: number;
+      errors?: string | null;
+    }>;
+  } | null;
   network_rankings?: Array<{
     miniapp_name?: string;
     miniapp_username?: string;
@@ -303,9 +321,14 @@ export default function AdminMiniAppsPage() {
         body: JSON.stringify({ network_name: networkName }),
       });
       const data = await res.json().catch(() => ({}));
-      const status = res.ok
-        ? `Ready - rewarded ${data.adapter_initialization?.supports_rewarded ? "supported" : "unsupported"}, interstitial ${data.adapter_initialization?.supports_interstitial ? "supported" : "unsupported"}`
-        : `${data.error_code || "ERROR"} - ${data.error_message || data.error || "Adapter test failed"}`;
+      if (!res.ok || !data.test_config) {
+        throw new Error(data.error_message || data.error || "Adapter test failed");
+      }
+      const { testMiniAppNetworkInitialization } = await import("@/lib/miniappSdkRuntime");
+      const result = await testMiniAppNetworkInitialization(data.test_config);
+      const status = result.success
+        ? `Ready - SDK initialized${data.test_mode ? " in isolated test mode" : ""}`
+        : `${result.error_code || "ERROR"} - ${result.error_message || "Adapter test failed"}`;
       setNetworkTestResult((prev) => ({ ...prev, [networkName]: status }));
     } catch (err: any) {
       setNetworkTestResult((prev) => ({ ...prev, [networkName]: err.message || "Adapter test failed" }));
@@ -596,7 +619,7 @@ export default function AdminMiniAppsPage() {
                         <input
                           type="number"
                           min={1}
-                          max={4}
+                          max={6}
                           value={network.priority_order || index + 1}
                           onChange={(e) => setNetworks((prev) => prev.map((item, i) => i === index ? { ...item, priority_order: Number(e.target.value) || index + 1 } : item))}
                           className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
@@ -936,6 +959,11 @@ export default function AdminMiniAppsPage() {
                 <div className="font-bold uppercase tracking-widest text-slate-400">Manual Override</div>
                 <div className="mt-1 font-black text-slate-900">{Number(optimizerReport.settings?.global_recommended_cpm_manual_override || 0) ? "Enabled" : "Off"}</div>
               </div>
+              <div className="col-span-2 rounded-xl bg-emerald-50 p-3">
+                <div className="font-bold uppercase tracking-widest text-emerald-500">Last Reconciliation</div>
+                <div className="mt-1 font-black text-slate-900">{formatDate(optimizerReport.reconciliation?.last_reconciliation?.started_at)}</div>
+                <div className="mt-0.5 text-slate-500">Updated {numberValue(optimizerReport.reconciliation?.last_reconciliation?.records_updated || 0)}</div>
+              </div>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full min-w-[720px] text-left text-xs">
@@ -963,6 +991,33 @@ export default function AdminMiniAppsPage() {
                   )}
                 </tbody>
               </table>
+              <div className="mt-4 overflow-x-auto">
+                <table className="w-full min-w-[720px] text-left text-xs">
+                  <thead className="bg-slate-50 text-slate-500">
+                    <tr>
+                      {["Provider", "Status", "Last Success", "Updated", "Skipped", "Duration", "Errors"].map((item) => (
+                        <th key={item} className="px-3 py-2 font-semibold">{item}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {(optimizerReport.reconciliation?.provider_status || []).map((row) => (
+                      <tr key={row.provider}>
+                        <td className="px-3 py-2 font-semibold text-slate-900">{row.provider}</td>
+                        <td className="px-3 py-2 text-slate-700">{row.status}</td>
+                        <td className="px-3 py-2 text-slate-700">{formatDate(row.last_successful_sync)}</td>
+                        <td className="px-3 py-2 text-slate-700">{numberValue(row.records_updated)}</td>
+                        <td className="px-3 py-2 text-slate-700">{numberValue(row.records_skipped)}</td>
+                        <td className="px-3 py-2 text-slate-700">{numberValue(row.duration_ms)}ms</td>
+                        <td className="max-w-[220px] truncate px-3 py-2 text-slate-700" title={row.errors || ""}>{row.errors || "None"}</td>
+                      </tr>
+                    ))}
+                    {(!optimizerReport.reconciliation?.provider_status || optimizerReport.reconciliation.provider_status.length === 0) && (
+                      <tr><td colSpan={7} className="px-3 py-6 text-center text-slate-500">No reconciliation runs yet.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </div>
@@ -1039,7 +1094,20 @@ export default function AdminMiniAppsPage() {
                       <Smartphone size={14} className="flex-shrink-0 text-blue-500" />
                       <span>{miniapp.miniapp_name}</span>
                     </div>
-                    <div className="mt-0.5 text-xs text-slate-500">@{miniapp.miniapp_username}</div>
+                    <div className="mt-0.5 text-xs text-slate-500">
+                      {miniAppBotUrl(miniapp) ? (
+                        <a
+                          href={miniAppBotUrl(miniapp)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 font-semibold text-blue-700 hover:text-blue-900 hover:underline"
+                        >
+                          @{miniapp.miniapp_username}<ExternalLink size={11} />
+                        </a>
+                      ) : (
+                        `@${miniapp.miniapp_username}`
+                      )}
+                    </div>
                     <div className="text-xs text-slate-400">#{miniapp.id}</div>
                   </td>
                   <td className="px-5 py-4">
@@ -1132,7 +1200,21 @@ export default function AdminMiniAppsPage() {
                     <Smartphone size={14} className="flex-shrink-0 text-blue-500" />
                     <span className="truncate">{miniapp.miniapp_name}</span>
                   </div>
-                  <div className="mt-0.5 text-xs text-slate-500">@{miniapp.miniapp_username} · {displayOwner(miniapp)}</div>
+                  <div className="mt-0.5 text-xs text-slate-500">
+                    {miniAppBotUrl(miniapp) ? (
+                      <a
+                        href={miniAppBotUrl(miniapp)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="inline-flex items-center gap-1 font-semibold text-blue-700 hover:text-blue-900 hover:underline"
+                      >
+                        @{miniapp.miniapp_username}<ExternalLink size={11} />
+                      </a>
+                    ) : (
+                      `@${miniapp.miniapp_username}`
+                    )} · {displayOwner(miniapp)}
+                  </div>
                 </div>
                 <StatusBadge status={miniapp.status} />
               </div>

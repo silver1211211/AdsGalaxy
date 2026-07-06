@@ -417,8 +417,9 @@ async function getActiveBoostMultiplier(userId: number, teamId?: number | null, 
   return { multiplier, events: rows.map((row: any) => ({ name: row.name, multiplier: toNumber(row.multiplier), team_id: row.team_id })) };
 }
 
-// Retained for compatibility with historical milestone claim processing.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+// Awards lifetime cumulative "user" scope referral_milestones the first time a user's
+// all-time verified referral count crosses each configured threshold. The unique key on
+// referral_milestone_claims(milestone_id, user_id) guarantees each milestone is paid once ever.
 async function awardEligibleUserMilestones(conn: PoolConnection, userId: number, verifiedCount: number, sprintId: number) {
   const [milestones]: any = await conn.query(
     "SELECT * FROM referral_milestones WHERE scope = 'user' AND status = 'active' AND threshold_count <= ? ORDER BY threshold_count ASC",
@@ -1002,7 +1003,7 @@ export async function processVerifiedReferralForUser(userId: number) {
     const verifiedCount = await getVerifiedReferralCount(Number(referral.invited_by), conn);
     const sprintId = activeSprint ? Number(activeSprint.id) : 0;
     const firstBonusPaid = verifiedCount === 1 ? await awardFirstReferralBonus(conn, Number(referral.invited_by), settings, sprintId) : false;
-    const milestones: any[] = [];
+    const milestones = await awardEligibleUserMilestones(conn, Number(referral.invited_by), verifiedCount, sprintId);
     const team = growthEnabled ? await ensureTeamMembership(Number(referral.invited_by), verifiedCount, conn, settings, sprintId) : null;
     await createGrowthNotification(conn, {
       userId: Number(referral.invited_by),
@@ -1874,6 +1875,71 @@ export async function getAdminReferralGrowthData() {
     audits,
     totals,
   };
+}
+
+// One-time catch-up for lifetime "user" scope milestones: awards any milestone whose
+// threshold a user's existing all-time verified referral count already crosses, but that
+// was never paid because it predates the fix wiring awardEligibleUserMilestones into the
+// live verification flow (or because the milestone was configured/edited afterwards).
+export async function backfillUserMilestones(actorId?: number | null) {
+  const settings = await getSettings();
+  const growthEnabled = sprintEnabled(settings);
+  const activeSprint = growthEnabled ? await ensureActiveReferralSprint() : null;
+  const sprintId = activeSprint ? Number(activeSprint.id) : 0;
+
+  const [[minRow]]: any = await pool.query(
+    "SELECT MIN(threshold_count) as min_threshold FROM referral_milestones WHERE scope = 'user' AND status = 'active'"
+  );
+  const minThreshold = Number(minRow?.min_threshold || 0);
+  if (!minThreshold) {
+    return { users_checked: 0, users_awarded: 0, milestones_awarded: 0 };
+  }
+
+  const [candidates]: any = await pool.query(
+    `SELECT invited_by as user_id, COUNT(*) as verified_count
+     FROM referrals
+     WHERE verification_status = 'verified'
+     GROUP BY invited_by
+     HAVING verified_count >= ?`,
+    [minThreshold]
+  );
+
+  let usersAwarded = 0;
+  let milestonesAwarded = 0;
+
+  for (const candidate of candidates) {
+    const userId = Number(candidate.user_id);
+    const verifiedCount = Number(candidate.verified_count);
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const awarded = await awardEligibleUserMilestones(conn, userId, verifiedCount, sprintId);
+      await conn.commit();
+      if (awarded.length > 0) {
+        usersAwarded += 1;
+        milestonesAwarded += awarded.length;
+        for (const milestoneRow of awarded) {
+          await notifyUser(userId, `Milestone reached\n\n${milestoneRow.reward_label || `${milestoneRow.threshold_count} verified referrals`} unlocked $${toNumber(milestoneRow.reward_amount).toFixed(2)} pending settlement.`);
+        }
+      }
+    } catch (error) {
+      await conn.rollback();
+      console.error(`Milestone backfill failed for user ${userId}:`, error);
+    } finally {
+      conn.release();
+    }
+  }
+
+  await recordReferralSprintAudit({
+    actorType: "admin",
+    actorId: actorId || null,
+    action: "user_milestones_backfilled",
+    entityType: "referral_milestone",
+    reason: "manual_admin_backfill",
+    metadata: { users_checked: candidates.length, users_awarded: usersAwarded, milestones_awarded: milestonesAwarded },
+  });
+
+  return { users_checked: candidates.length, users_awarded: usersAwarded, milestones_awarded: milestonesAwarded };
 }
 
 export function channelUsernameFromSettings(settings: Map<string, string>) {

@@ -57,6 +57,9 @@ type CampaignDetailsCampaign = {
   budget_exhausted_at?: string | null;
   completed_at?: string | null;
   auto_reactivate?: boolean | number;
+  spend?: string | number;
+  approved_count?: string | number;
+  rejected_count?: string | number;
 };
 
 type CampaignMetrics = Record<string, string | number | null | undefined>;
@@ -311,11 +314,16 @@ export default function AdminCampaignDetailsPage() {
                 {[
                   ["Advertiser User ID", campaign.user_id],
                   ["Name", campaign.name],
-                  ["Type", campaign.type],
+                  ["Type", campaign.type === "broadcast" ? "BOT" : "CHANNEL"],
                   ["Category", campaign.category],
                   ["Continents", renderContinents(campaign.continents)],
                   ["Budget Remaining", `$${campaign.budget}`],
+                  ["Lifetime Spend", `$${campaign.spend || 0}`],
                   ["CPM", `$${campaign.cpm}`],
+                  ["Impressions", metrics.total_views || 0],
+                  ["Clicks", metrics.total_clicks || 0],
+                  ["Approved Count", campaign.approved_count || 0],
+                  ["Rejected Count", campaign.rejected_count || 0],
                   ["Created", campaign.created_at],
                   ["Updated", campaign.updated_at],
                   ["Paused At", campaign.paused_at],

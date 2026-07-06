@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedAdmin, requireAdminPermission } from "@/lib/adminAuth";
 import {
+  backfillUserMilestones,
   ensureActiveReferralSprint,
   finalizeExpiredReferralSprints,
   getAdminReferralGrowthData,
@@ -182,6 +183,22 @@ export async function PATCH(request: Request) {
       return NextResponse.json({ success: true });
     }
 
+    if (action === "delete_milestone") {
+      const id = Number(body.id || 0);
+      if (id <= 0) return NextResponse.json({ error: "Missing milestone id" }, { status: 400 });
+      const [result]: any = await pool.query("DELETE FROM referral_milestones WHERE id = ?", [id]);
+      if (result.affectedRows === 0) return NextResponse.json({ error: "Milestone not found" }, { status: 404 });
+      await recordReferralSprintAudit({
+        actorType: "admin",
+        actorId: admin.id,
+        action: "milestone_deleted",
+        entityType: "referral_milestone",
+        entityId: id,
+        reason: "manual_admin_delete",
+      });
+      return NextResponse.json({ success: true });
+    }
+
     if (action === "add_team_name") {
       await pool.query("INSERT IGNORE INTO referral_team_name_pool (name) VALUES (?)", [clean(body.name)]);
       await recordReferralSprintAudit({
@@ -229,6 +246,11 @@ export async function PATCH(request: Request) {
 
     if (action === "settle_referrals") {
       const result = await settlePendingReferralRewards({ settlementDate: clean(body.settlement_date) || undefined, actorId: admin.id });
+      return NextResponse.json({ success: true, result });
+    }
+
+    if (action === "backfill_user_milestones") {
+      const result = await backfillUserMilestones(admin.id);
       return NextResponse.json({ success: true, result });
     }
 

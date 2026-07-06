@@ -33,6 +33,7 @@ type Campaign = {
   required_cpm?: string | number;
   creative_review_status?: string | null;
   creative_review_notes?: string | null;
+  requires_re_moderation?: boolean | number;
   landing_review_flags?: string | string[] | null;
   image_review_metadata?: string | Record<string, unknown> | null;
   advertiser_id: number;
@@ -326,7 +327,7 @@ export default function AdminMiniAppRewardedPage() {
                         : campaign.status === "rejected" ? "border-red-200 bg-red-50 text-red-700"
                         : "border-slate-200 bg-slate-100 text-slate-600"
                       }`}>{campaign.status}</span>
-                      <div className="mt-1.5 text-xs text-slate-500">Review: {campaign.creative_review_status || "pending"}</div>
+                          <div className="mt-1.5 text-xs text-slate-500">Review: {campaign.requires_re_moderation ? "Re-Moderation" : (campaign.creative_review_status || "pending")}</div>
                     </td>
 
                     {/* Budget */}
@@ -393,7 +394,7 @@ export default function AdminMiniAppRewardedPage() {
                       <div className="space-y-2">
                         <div>
                           <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Advertiser CPM</label>
-                          <input
+                          <textarea
                             value={cpms[campaign.id] ?? String(campaign.admin_cpm || campaign.advertiser_cpm_bid || "")}
                             onChange={(e) => setCpms((prev) => ({ ...prev, [campaign.id]: e.target.value }))}
                             className="w-32 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-blue-500"
@@ -413,7 +414,7 @@ export default function AdminMiniAppRewardedPage() {
                         </div>
                         <div>
                           <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Fixed Pub CPM</label>
-                          <input
+                          <textarea
                             value={fixedCpms[campaign.id] ?? String(campaign.fixed_publisher_cpm || "")}
                             onChange={(e) => setFixedCpms((prev) => ({ ...prev, [campaign.id]: e.target.value }))}
                             className="w-32 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-blue-500"
@@ -421,12 +422,13 @@ export default function AdminMiniAppRewardedPage() {
                           />
                         </div>
                         <div>
-                          <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Review Note</label>
-                          <input
+                          <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Reason (optional)</label>
+                          <textarea
                             value={moderationNotes[campaign.id] || ""}
                             onChange={(e) => setModerationNotes((prev) => ({ ...prev, [campaign.id]: e.target.value }))}
                             className="w-32 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-blue-500"
-                            placeholder="Note"
+                            placeholder="Reason (optional)"
+                            rows={2}
                           />
                         </div>
                       </div>

@@ -9,6 +9,7 @@ import {
   getReferralVerificationRewardAmount,
 } from "@/lib/referralSprint";
 import { cpc, cpm, ctr, fixedMetric, metricNumber } from "@/lib/statFormulas";
+import { botUserCountExpressions } from "@/lib/botAudience";
 
 export async function GET(request: Request) {
   try {
@@ -150,8 +151,20 @@ export async function GET(request: Request) {
        GROUP BY ranges.range_key`,
       [user.id]
     );
+    const [botRangeRows]: any = await pool.query(
+      `SELECT ranges.range_key,
+        COALESCE(SUM(CASE WHEN bd.status = 'sent' THEN 1 ELSE 0 END), 0) as impressions,
+        COALESCE(SUM(CASE WHEN bd.status = 'sent' THEN bd.publisher_reward ELSE 0 END), 0) as earnings,
+        COALESCE(SUM(CASE WHEN bd.status = 'sent' THEN bd.cost ELSE 0 END), 0) as gross_revenue,
+        COALESCE(SUM(CASE WHEN bd.status = 'failed' THEN 1 ELSE 0 END), 0) as failed_sends
+       FROM (${rangeSql}) ranges
+       LEFT JOIN bots b ON b.user_id = ? AND b.is_deleted = FALSE
+       LEFT JOIN broadcast_deliveries bd ON bd.bot_id = b.id AND DATE(bd.created_at) BETWEEN ranges.start_date AND ranges.end_date
+       GROUP BY ranges.range_key`,
+      [user.id]
+    );
     const rowsByRange = new Map<string, any>();
-    for (const row of [...channelRangeRows, ...miniappRevenueRows, ...miniappClickRows, ...miniappRequestRows]) {
+    for (const row of [...channelRangeRows, ...miniappRevenueRows, ...miniappClickRows, ...miniappRequestRows, ...botRangeRows]) {
       const rangeKey = String(row.range_key);
       const current = rowsByRange.get(rangeKey) || { range_key: rangeKey };
       rowsByRange.set(rangeKey, {
@@ -162,6 +175,7 @@ export async function GET(request: Request) {
         gross_revenue: metricNumber(current.gross_revenue) + metricNumber(row.gross_revenue),
         requests: metricNumber(current.requests) + metricNumber(row.requests),
         fills: metricNumber(current.fills) + metricNumber(row.fills),
+        failed_sends: metricNumber(current.failed_sends) + metricNumber(row.failed_sends),
       });
     }
     const publisherSummary = Object.fromEntries([...rowsByRange.values()].map((row: any) => {
@@ -180,13 +194,27 @@ export async function GET(request: Request) {
         gross_revenue: fixedMetric(grossRevenue, 8),
         ctr: ctr(clicks, impressions),
         cpm: cpm(earnings, impressions),
-        average_cpm: cpm(grossRevenue, impressions),
-        cpc: cpc(grossRevenue, clicks),
+        average_cpm: cpm(earnings, impressions),
+        advertiser_average_cpm: cpm(grossRevenue, impressions),
+        cpc: cpc(earnings, clicks),
+        publisher_cpc: cpc(earnings, clicks),
+        advertiser_cpc: cpc(grossRevenue, clicks),
         fill_rate: requests > 0 ? fixedMetric((fills / requests) * 100) : null,
         requests,
         fills,
+        failed_sends: metricNumber(row.failed_sends),
       }];
     }));
+    const botCounts = botUserCountExpressions("b");
+    const [[botAudienceRow]]: any = await pool.query(
+      `SELECT
+        COALESCE(SUM(${botCounts.active}), 0) as active_users,
+        COALESCE(SUM(${botCounts.blocked}), 0) as blocked_users,
+        COALESCE(SUM(${botCounts.deliveryEligible}), 0) as delivery_eligible_users
+       FROM bots b
+       WHERE b.user_id = ? AND b.is_deleted = FALSE`,
+      [user.id]
+    );
 
     // Stats from user profile
     return NextResponse.json({
@@ -200,6 +228,9 @@ export async function GET(request: Request) {
       last7_earnings: publisherSummary.last7?.earnings || 0,
       last30_earnings: publisherSummary.last30?.earnings || 0,
       lifetime_earnings: publisherSummary.lifetime?.earnings || 0,
+      bot_active_users: metricNumber(botAudienceRow?.active_users),
+      bot_blocked_users: metricNumber(botAudienceRow?.blocked_users),
+      bot_delivery_eligible_users: metricNumber(botAudienceRow?.delivery_eligible_users),
       total_channels: channelCountRows[0].total,
       delivery_eligible_channels: deliveryEligibleChannelRows[0].total,
       total_monetized: (channelCountRows[0].total || 0) + (botCountRows[0].total || 0) + (miniappCountRows[0].total || 0),

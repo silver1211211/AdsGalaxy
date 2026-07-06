@@ -5,6 +5,7 @@ import { ChartColumn } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
 import { SkeletonChart, SkeletonStatGrid } from "@/components/ui/Skeleton";
+import { hasMinimumCpcSample, hasMinimumCpmSample } from "@/lib/statFormulas";
 
 type AnalyticsSummary = {
   earnings: number;
@@ -28,8 +29,8 @@ type DailyRow = {
   clicks: number;
   ctr: number;
   earnings: number;
-  average_cpm: number;
-  average_cpc: number;
+  effective_publisher_cpm: number;
+  effective_publisher_cpc: number;
 };
 
 type ChannelAnalytics = {
@@ -69,6 +70,11 @@ function resolveModeQuery(mode: DateMode) {
 function formatMoney(value: number) {
   const abs = Math.abs(value);
   return `$${value.toFixed(abs > 0 && abs < 1 ? 4 : 2)}`;
+}
+
+function formatRate(value: number, sample: number, kind: "cpm" | "cpc") {
+  const confident = kind === "cpm" ? hasMinimumCpmSample(sample) : hasMinimumCpcSample(sample);
+  return confident ? formatMoney(value) : "--";
 }
 
 function formatNumber(value: number) {
@@ -193,7 +199,7 @@ export default function ChannelAnalyticsDashboard({ channelId, onSubscriberCount
               <div className="grid grid-cols-3 gap-2.5">
                 <StatTile label="Impressions" value={formatNumber(summary?.views ?? 0)} />
                 <StatTile label="Revenue" value={formatMoney(summary?.earnings ?? 0)} />
-                <StatTile label="Avg. CPM" value={formatMoney(summary?.cpm ?? 0)} />
+                <StatTile label="Avg. CPM" value={formatRate(summary?.cpm ?? 0, summary?.views ?? 0, "cpm")} />
               </div>
             </div>
 
@@ -239,8 +245,8 @@ export default function ChannelAnalyticsDashboard({ channelId, onSubscriberCount
                         <td className="whitespace-nowrap px-3 py-2.5 font-bold text-slate-700">{formatFullDate(row.date)}</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatNumber(row.views)}</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatNumber(row.clicks)}</td>
-                        <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatMoney(row.average_cpm)}</td>
-                        <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatMoney(row.average_cpc)}</td>
+                        <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatRate(row.effective_publisher_cpm, row.views, "cpm")}</td>
+                        <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatRate(row.effective_publisher_cpc, row.clicks, "cpc")}</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">{row.ctr.toFixed(1)}%</td>
                         <td className="px-3 py-2.5 text-center font-bold text-emerald-600">{formatMoney(row.earnings)}</td>
                       </tr>

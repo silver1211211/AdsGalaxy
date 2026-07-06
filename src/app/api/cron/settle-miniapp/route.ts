@@ -7,6 +7,53 @@ import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronS
 
 export const dynamic = "force-dynamic";
 
+async function settleInternalImpressions() {
+  const [candidates] = await pool.query<Array<RowDataPacket & { id: number }>>(`
+    SELECT i.id FROM miniapp_internal_ad_impressions i
+    LEFT JOIN miniapp_internal_publisher_settlements s ON s.impression_id=i.id
+    WHERE (s.id IS NULL OR s.status='pending') AND i.publisher_revenue>0 ORDER BY i.id LIMIT 1000`);
+  let settled = 0;
+  let totalLocked = 0;
+  for (const candidate of candidates) {
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [rows] = await conn.query<Array<RowDataPacket & { id: number; miniapp_id: number; publisher_id: number; publisher_revenue: string | number; stat_date: string; settlement_id: number | null; stats_applied: number }>>(`
+        SELECT i.id,i.miniapp_id,m.user_id publisher_id,i.publisher_revenue,DATE_FORMAT(i.created_at,'%Y-%m-%d') stat_date,
+          s.id settlement_id,COALESCE(s.stats_applied,0) stats_applied
+        FROM miniapp_internal_ad_impressions i JOIN miniapps m ON m.id=i.miniapp_id
+        LEFT JOIN miniapp_internal_publisher_settlements s ON s.impression_id=i.id
+        WHERE i.id=? AND (s.id IS NULL OR s.status='pending') FOR UPDATE`, [candidate.id]);
+      const row = rows[0];
+      if (!row) { await conn.rollback(); continue; }
+      const revenue = Math.max(0, toNumber(row.publisher_revenue));
+      let settlementId = Number(row.settlement_id || 0);
+      if (!settlementId) {
+        const [insert] = await conn.query<ResultSetHeader>(`
+          INSERT INTO miniapp_internal_publisher_settlements
+            (impression_id,miniapp_id,publisher_id,publisher_revenue,status,stats_applied)
+          VALUES (?,?,?,?,'pending',0)`, [row.id,row.miniapp_id,row.publisher_id,revenue]);
+        settlementId = Number(insert.insertId);
+      }
+      if (!(await creditUserLockedBalance(conn,row.publisher_id,revenue))) {
+        await conn.rollback(); continue;
+      }
+      if (!Number(row.stats_applied)) {
+        await conn.query(`UPDATE miniapp_daily_stats
+          SET publisher_revenue=publisher_revenue+?, net_cpm=((publisher_revenue)/GREATEST(impressions,1))*1000
+          WHERE miniapp_id=? AND network_name='AdsGalaxyInternal' AND date=?`,
+          [revenue,row.miniapp_id,row.stat_date]);
+      }
+      await conn.query("UPDATE miniapp_internal_publisher_settlements SET status='locked',stats_applied=1,settled_at=NOW() WHERE id=? AND status='pending'", [settlementId]);
+      await conn.commit(); settled++; totalLocked += revenue;
+    } catch (error) {
+      await conn.rollback();
+      console.error("Mini App internal publisher settlement failed", { impression_id: candidate.id, error });
+    } finally { conn.release(); }
+  }
+  return { scanned: candidates.length, settled, total_locked: Number(totalLocked.toFixed(8)) };
+}
+
 type DailyStatRow = RowDataPacket & {
   id: number;
   miniapp_id: number;
@@ -54,6 +101,7 @@ export async function GET(_req: NextRequest) {
   }
 
   try {
+    const internalResults = await settleInternalImpressions();
     const [behaviorRows] = await pool.query<SettingRow[]>(
       "SELECT value FROM revenue_protection_settings WHERE `key` = 'suspicious_revenue_settlement_behavior' LIMIT 1"
     );
@@ -87,7 +135,8 @@ export async function GET(_req: NextRequest) {
         AND m.is_deleted = FALSE
         AND ds.publisher_revenue > 0
         AND ds.date < CURDATE()
-        AND (ds.network_name = 'AdsGalaxyInternal' OR ${externalRevenueValidationCondition})
+        AND ds.network_name <> 'AdsGalaxyInternal'
+        AND ${externalRevenueValidationCondition}
       ORDER BY ds.date ASC, ds.id ASC
       LIMIT 500
     `);
@@ -125,7 +174,8 @@ export async function GET(_req: NextRequest) {
               AND m.status IN ('approved', 'monetized')
               AND m.is_deleted = FALSE
               AND ds.date < CURDATE()
-              AND (ds.network_name = 'AdsGalaxyInternal' OR ${externalRevenueValidationCondition})
+              AND ds.network_name <> 'AdsGalaxyInternal'
+              AND ${externalRevenueValidationCondition}
             FOR UPDATE
           `, [stat.id]);
 
@@ -255,7 +305,7 @@ export async function GET(_req: NextRequest) {
       conn.release();
     }
 
-    return NextResponse.json({ success: true, results });
+    return NextResponse.json({ success: true, internalResults, results });
   } catch (error: unknown) {
     console.error("Mini App Settlement Cron Error:", error);
     const message = error instanceof Error ? error.message : "Mini App settlement failed";

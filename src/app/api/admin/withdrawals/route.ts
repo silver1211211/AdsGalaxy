@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import type { PoolConnection, RowDataPacket } from "mysql2/promise";
+import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
@@ -267,9 +267,23 @@ export async function PATCH(request: Request) {
             return NextResponse.json({ error: "User available balance is lower than this refunded withdrawal amount" }, { status: 400 });
           }
 
-          await conn.query("UPDATE users SET balance_available = balance_available - ?, total_withdrawn = total_withdrawn + ? WHERE id = ?", [amount, amount, withdrawal.user_id]);
+          const [availableDebitResult] = await conn.query<ResultSetHeader>(
+            "UPDATE users SET balance_available = balance_available - ?, total_withdrawn = total_withdrawn + ? WHERE id = ? AND balance_available >= ?",
+            [amount, amount, withdrawal.user_id, amount]
+          );
+          if (availableDebitResult.affectedRows !== 1) {
+            await conn.rollback();
+            return NextResponse.json({ error: "User available balance changed before approval; retry after refresh" }, { status: 409 });
+          }
         } else {
-          await conn.query("UPDATE users SET balance_locked = GREATEST(balance_locked - ?, 0), total_withdrawn = total_withdrawn + ? WHERE id = ?", [amount, amount, withdrawal.user_id]);
+          const [lockedDebitResult] = await conn.query<ResultSetHeader>(
+            "UPDATE users SET balance_locked = balance_locked - ?, total_withdrawn = total_withdrawn + ? WHERE id = ? AND balance_locked >= ?",
+            [amount, amount, withdrawal.user_id, amount]
+          );
+          if (lockedDebitResult.affectedRows !== 1) {
+            await conn.rollback();
+            return NextResponse.json({ error: "User locked balance is lower than this withdrawal amount" }, { status: 409 });
+          }
         }
       }
 
@@ -305,10 +319,14 @@ export async function PATCH(request: Request) {
       const shouldRefund = Boolean(refund) && currentStatus !== "success" && !wasRefunded;
 
       if (shouldRefund) {
-        await conn.query(
-          "UPDATE users SET balance_locked = GREATEST(balance_locked - ?, 0), balance_available = balance_available + ? WHERE id = ?",
-          [amount, amount, withdrawal.user_id]
+        const [refundResult] = await conn.query<ResultSetHeader>(
+          "UPDATE users SET balance_locked = balance_locked - ?, balance_available = balance_available + ? WHERE id = ? AND balance_locked >= ?",
+          [amount, amount, withdrawal.user_id, amount]
         );
+        if (refundResult.affectedRows !== 1) {
+          await conn.rollback();
+          return NextResponse.json({ error: "User locked balance is lower than this withdrawal amount" }, { status: 409 });
+        }
       }
 
       await conn.query(

@@ -24,6 +24,7 @@ type CampaignRow = RowDataPacket & {
   body_color: string | null;
   categories: string | null;
   image_url: string | null;
+  logo_url: string | null;
   landing_url: string;
   remaining_budget: string | number;
   budget: string | number;
@@ -133,7 +134,7 @@ export async function selectInternalRewardedCampaign(input: {
 
   const [campaigns] = await input.conn.query<CampaignRow[]>(`
     SELECT
-      c.id, c.advertiser_id, c.campaign_name, c.title, c.description, c.cta_text, c.title_color, c.body_color, c.categories, c.image_url, c.landing_url, c.budget,
+      c.id, c.advertiser_id, c.campaign_name, c.title, c.description, c.cta_text, c.title_color, c.body_color, c.categories, c.image_url, c.logo_url, c.landing_url, c.budget,
       remaining_budget, total_spend, impressions, admin_cpm, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm,
       campaign_budget_mode, target_countries, countries, start_at,
       end_at, daily_budget_limit, frequency_cap_per_user, c.quality_score,
@@ -141,6 +142,7 @@ export async function selectInternalRewardedCampaign(input: {
     FROM miniapp_rewarded_campaigns c
     JOIN users u ON c.advertiser_id = u.id
     WHERE c.status = 'approved'
+      AND c.remaining_budget > 0
       AND COALESCE(u.advertiser_trust_level, 'new') != 'restricted'
       AND c.advertiser_cpm_bid > 0
       AND (c.start_at IS NULL OR c.start_at <= NOW())
@@ -239,6 +241,11 @@ export async function selectInternalRewardedCampaign(input: {
     }
 
     const budget = toNumber(row.budget);
+    const remainingBudget = toNumber(row.remaining_budget);
+    if (remainingBudget + 1e-10 < cost) {
+      skipReason = "campaign_budget_exhausted";
+      continue;
+    }
     if (budget > 0) {
       const [[miniappSpendRow]] = await input.conn.query<RowDataPacket[]>(
         "SELECT COALESCE(SUM(cost), 0) as spend FROM miniapp_internal_ad_impressions WHERE campaign_id = ? AND miniapp_id = ?",
@@ -299,6 +306,7 @@ export async function selectInternalRewardedCampaign(input: {
       body_color: campaign.body_color || null,
       categories: campaign.categories || null,
       image_url: campaign.image_url,
+      logo_url: campaign.logo_url,
       landing_url: campaign.landing_url,
       admin_cpm: cpm,
       estimated_cost: cost,
@@ -320,7 +328,8 @@ export async function recordInternalAdImpression(input: {
   completionStatus?: string;
 }) {
   const [campaignRows] = await input.conn.query<CampaignRow[]>(
-    `SELECT id, advertiser_id, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm
+    `SELECT id, advertiser_id, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm,
+       remaining_budget, daily_budget_limit
      FROM miniapp_rewarded_campaigns
      WHERE id = ? AND status = 'approved'
      FOR UPDATE`,
@@ -362,6 +371,23 @@ export async function recordInternalAdImpression(input: {
 
   if (cost <= 0) {
     throw new Error("Internal campaign CPM is invalid");
+  }
+
+  if (toNumber(campaign.remaining_budget) + 1e-10 < cost) {
+    await input.conn.query(
+      "UPDATE miniapp_rewarded_campaigns SET status = 'paused', pause_reason = 'budget_exhausted', remaining_budget = GREATEST(remaining_budget, 0) WHERE id = ?",
+      [input.campaignId]
+    );
+    throw new Error("campaign_budget_exhausted");
+  }
+  if (toNumber(campaign.daily_budget_limit) > 0) {
+    const [[dailyRow]] = await input.conn.query<RowDataPacket[]>(
+      "SELECT COALESCE(SUM(advertiser_debit), 0) spend FROM miniapp_internal_ad_impressions WHERE campaign_id = ? AND created_at >= CURDATE()",
+      [input.campaignId]
+    );
+    if (toNumber(dailyRow?.spend) + cost > toNumber(campaign.daily_budget_limit) + 1e-10) {
+      throw new Error("daily_budget_limit");
+    }
   }
 
   const payout = await calculateMiniAppPublisherPayout({
@@ -433,13 +459,19 @@ export async function recordInternalAdImpression(input: {
     ]
   );
 
-  await input.conn.query(
+  const [campaignUpdate] = await input.conn.query<ResultSetHeader>(
     `UPDATE miniapp_rewarded_campaigns
      SET total_spend = total_spend + ?, impressions = impressions + 1,
-         remaining_budget = 0, campaign_budget_mode = 'pay_as_you_go', pause_reason = NULL
-     WHERE id = ?`,
-    [cost, input.campaignId]
+         remaining_budget = GREATEST(remaining_budget - ?, 0),
+         pause_reason = CASE
+           WHEN remaining_budget - ? <= 0 THEN 'budget_exhausted'
+           WHEN remaining_budget - ? < ? THEN 'insufficient_budget_for_delivery'
+           ELSE NULL END,
+         status = CASE WHEN remaining_budget - ? < ? THEN 'paused' ELSE status END
+     WHERE id = ? AND status = 'approved' AND remaining_budget >= ?`,
+    [cost, cost, cost, cost, cost, cost, cost, input.campaignId, cost]
   );
+  if (campaignUpdate.affectedRows !== 1) throw new Error("campaign_budget_exhausted");
   await input.conn.query(
     "INSERT INTO advertiser_transactions (user_id, amount, type, description) VALUES (?, ?, 'debit', ?)",
     [campaign.advertiser_id, cost, `Mini App impression ${input.requestId}`]
@@ -452,27 +484,24 @@ export async function recordInternalAdImpression(input: {
   );
   const statDate = String(dateRows[0].stat_date);
   const grossCpm = cpm;
-  const netCpm = payout.publisher_cpm;
 
   await input.conn.query(
     `INSERT INTO miniapp_daily_stats
       (miniapp_id, network_name, date, impressions, gross_revenue, ads_galaxy_fee, reserve_revenue, publisher_revenue, gross_cpm, net_cpm,
        revenue_validation_status, revenue_validation_reason, revenue_validation_metadata, revenue_validated_at, revenue_review_status)
-     VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'passed', NULL, ?, NOW(), 'not_required')
+     VALUES (?, ?, ?, 1, ?, ?, ?, 0, ?, 0, 'passed', NULL, ?, NOW(), 'not_required')
      ON DUPLICATE KEY UPDATE
       impressions = impressions + 1,
       gross_revenue = gross_revenue + VALUES(gross_revenue),
       ads_galaxy_fee = ads_galaxy_fee + VALUES(ads_galaxy_fee),
       reserve_revenue = reserve_revenue + VALUES(reserve_revenue),
-      publisher_revenue = publisher_revenue + VALUES(publisher_revenue),
       gross_cpm = (gross_revenue / impressions) * 1000,
-      net_cpm = (publisher_revenue / impressions) * 1000,
       revenue_validation_status = 'passed',
       revenue_validation_reason = NULL,
       revenue_validation_metadata = VALUES(revenue_validation_metadata),
       revenue_validated_at = NOW(),
       revenue_review_status = 'not_required'`,
-    [input.miniappId, INTERNAL_NETWORK_NAME, statDate, cost, adsGalaxyFee, payout.reserve_revenue, publisherRevenue, grossCpm, netCpm,
+    [input.miniappId, INTERNAL_NETWORK_NAME, statDate, cost, adsGalaxyFee, payout.reserve_revenue, grossCpm,
       JSON.stringify({ source: "server_internal_impression_ledger", request_id: input.requestId })]
   );
 

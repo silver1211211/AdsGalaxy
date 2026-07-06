@@ -239,6 +239,10 @@ export default function NewCampaignWizardPage() {
       setError("Please select a button text");
       return;
     }
+    if (!Number.isFinite(Number(formData.budget)) || Number(formData.budget) < 10) {
+      setError("Total budget must be at least $10.");
+      return;
+    }
 
     if (checkRestrictedContent(formData.message_text)) {
       setError("Click campaigns cannot contain usernames (@) or links in the message text.");
@@ -250,6 +254,10 @@ export default function NewCampaignWizardPage() {
     }
     if (formData.daily_budget_limit && Number(formData.daily_budget_limit) > Number(formData.budget || 0)) {
       setError("Daily budget cannot exceed total campaign budget.");
+      return;
+    }
+    if (formData.daily_budget_limit && Number(formData.daily_budget_limit) < 10) {
+      setError("Daily budget must be at least $10 when provided.");
       return;
     }
     if (formData.frequency_cap_per_user && (!Number.isInteger(Number(formData.frequency_cap_per_user)) || Number(formData.frequency_cap_per_user) <= 0)) {
@@ -950,6 +958,20 @@ export default function NewCampaignWizardPage() {
                 />
               </div>
               <p className="text-[11px] text-slate-400">Minimum budget: <span className="font-black text-slate-600">${limits.min_budget}</span></p>
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 pt-2">Daily Budget <span className="font-normal normal-case">(optional)</span></p>
+              <div className="relative">
+                <DollarSign size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="number"
+                  step="1"
+                  min="10"
+                  value={formData.daily_budget_limit}
+                  onChange={(e) => setFormData({ ...formData, daily_budget_limit: e.target.value })}
+                  placeholder="No daily cap"
+                  className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-[#0c9de8] outline-none text-sm font-bold text-slate-900 transition-all"
+                />
+              </div>
+              <p className="text-[11px] text-slate-400">If set, minimum $10 and no more than the total budget.</p>
             </div>
 
             {/* ── Reach estimate ── */}

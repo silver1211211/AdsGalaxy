@@ -43,7 +43,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error_code: "REQUEST_FAILED", message: "request_id is required" }, { status: 400 });
     }
     if (!isFallbackErrorCode(errorCode)) {
-      return NextResponse.json({ success: false, error_code: "NO_FILL", message: "No ad available right now." });
+      return NextResponse.json({ success: false, error_code: "NO_FILL", message: "No advertisements are available at the moment. Please try again shortly." });
     }
 
     await conn.beginTransaction();
@@ -66,7 +66,7 @@ export async function POST(request: Request) {
     }
     if (!isMiniAppNetworkName(String(mediationRequest.selected_network))) {
       await conn.rollback();
-      return NextResponse.json({ success: false, error_code: "NO_FILL", message: "No ad available right now." });
+      return NextResponse.json({ success: false, error_code: "NO_FILL", message: "No advertisements are available at the moment. Please try again shortly." });
     }
 
     await recordMiniappNetworkFailure({
@@ -98,7 +98,7 @@ export async function POST(request: Request) {
       return NextResponse.json({
         success: false,
         error_code: "NO_FILL",
-        message: "No ad available right now.",
+        message: "No advertisements are available at the moment. Please try again shortly.",
         request_id: nextDecision.request_id,
         fallback_available: false,
         ad_format: nextDecision.ad_format,
@@ -111,7 +111,11 @@ export async function POST(request: Request) {
     try {
       await conn.rollback();
     } catch {}
-    return NextResponse.json(publicSdkErrorResponse(error, "REQUEST_FAILED", "Fallback failed"), { status: Number(error?.status || 400) });
+    console.error("Public SDK Mini App fallback failed", error);
+    return NextResponse.json(
+      { ...publicSdkErrorResponse(error, "REQUEST_FAILED", "Fallback failed"), message: "Network temporarily unavailable." },
+      { status: Number(error?.status || 400) }
+    );
   } finally {
     conn.release();
   }

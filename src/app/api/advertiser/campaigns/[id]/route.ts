@@ -39,7 +39,7 @@ export async function GET(
     if (campaign.type === 'broadcast') {
       // Get broadcast summary
       const [broadcastSummary]: any = await pool.query(
-        "SELECT COUNT(*) as count, SUM(cost) as total_cost FROM broadcast_deliveries WHERE campaign_id = ?",
+        "SELECT COUNT(*) as count, SUM(cost) as total_cost FROM broadcast_deliveries WHERE campaign_id = ? AND status = 'sent'",
         [id]
       );
       
@@ -50,7 +50,7 @@ export async function GET(
          SUM(bd.cost) as total_spent
          FROM broadcast_deliveries bd
          JOIN bots b ON bd.bot_id = b.id
-         WHERE bd.campaign_id = ?
+         WHERE bd.campaign_id = ? AND bd.status = 'sent'
          GROUP BY b.id`,
         [id]
       );
@@ -274,23 +274,23 @@ export async function PATCH(
           if (shouldAutoReactivate) {
             await conn.query(`
               UPDATE campaigns
-              SET budget = budget + ?,
+              SET budget = budget + ?, total_budget = total_budget + ?,
                 status = 'active',
                 budget_exhausted_at = NULL,
                 pause_reason = NULL,
                 completed_at = NULL
               WHERE id = ?
-            `, [amount, id]);
+            `, [amount, amount, id]);
           } else {
             await conn.query(
-              "UPDATE campaigns SET budget = budget + ? WHERE id = ?",
-              [amount, id]
+              "UPDATE campaigns SET budget = budget + ?, total_budget = total_budget + ? WHERE id = ?",
+              [amount, amount, id]
             );
           }
         } else {
           await conn.query(
-            "UPDATE campaigns SET budget = budget + ? WHERE id = ?",
-            [amount, id]
+            "UPDATE campaigns SET budget = budget + ?, total_budget = total_budget + ? WHERE id = ?",
+            [amount, amount, id]
           );
         }
 

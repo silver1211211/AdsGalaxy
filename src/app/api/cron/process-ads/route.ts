@@ -34,6 +34,7 @@ interface CampaignRow {
   name: string;
   budget: string | number;
   cpm?: string | number;
+  daily_budget_limit?: string | number | null;
   category: string;
   continents: string;
   parse_mode: string;
@@ -272,6 +273,13 @@ export async function GET(req: NextRequest) {
       WHERE c.status = 'active' AND c.budget > 0 AND c.type != 'broadcast'
         AND (c.start_at IS NULL OR c.start_at <= NOW())
         AND (c.end_at IS NULL OR c.end_at >= NOW())
+        AND (
+          c.daily_budget_limit IS NULL OR c.daily_budget_limit <= 0 OR
+          (COALESCE((SELECT SUM(l.advertiser_debit) FROM channel_settlement_ledger l
+            WHERE l.campaign_id = c.id AND l.created_at >= CURDATE()), 0)
+          + COALESCE((SELECT SUM(d.advertiser_debit) FROM channel_advertiser_debits d
+            WHERE d.campaign_id = c.id AND d.created_at >= CURDATE()), 0)) < c.daily_budget_limit
+        )
         AND COALESCE(u.advertiser_trust_level, 'new') != 'restricted'
       ORDER BY budget DESC
       LIMIT ?
@@ -298,29 +306,36 @@ export async function GET(req: NextRequest) {
               THEN COALESCE(c.cpm, 0) / 1000
               ELSE 0
             END
-          ), 0) AS active_post_buffer
+          ), 0) AS active_post_buffer,
+          (COALESCE((SELECT SUM(l.advertiser_debit) FROM channel_settlement_ledger l
+            WHERE l.campaign_id = c.id AND l.created_at >= CURDATE()), 0)
+          + COALESCE((SELECT SUM(d.advertiser_debit) FROM channel_advertiser_debits d
+            WHERE d.campaign_id = c.id AND d.created_at >= CURDATE()), 0)) AS today_spend
         FROM campaigns c
         LEFT JOIN campaign_posts cp ON cp.campaign_id = c.id
         WHERE c.id IN (?)
         GROUP BY c.id
       `, [campaigns.map((campaign) => campaign.id)]);
 
-      const liabilityByCampaign = new Map<number, { unsettled: number; buffer: number }>(
+      const liabilityByCampaign = new Map<number, { unsettled: number; buffer: number; todaySpend: number }>(
         liabilityRows.map((row: any) => [
           Number(row.campaign_id),
           {
             unsettled: Math.max(0, Number(row.unsettled_liability || 0)),
             buffer: Math.max(0, Number(row.active_post_buffer || 0)),
+            todaySpend: Math.max(0, Number(row.today_spend || 0)),
           },
         ])
       );
 
       campaigns = campaigns
         .map((campaign) => {
-          const liability = liabilityByCampaign.get(Number(campaign.id)) || { unsettled: 0, buffer: 0 };
+          const liability = liabilityByCampaign.get(Number(campaign.id)) || { unsettled: 0, buffer: 0, todaySpend: 0 };
           const originalBudget = Number(campaign.budget || 0);
           const pendingLiability = Number((liability.unsettled + liability.buffer).toFixed(8));
-          const availableBudget = Number((originalBudget - pendingLiability).toFixed(8));
+          const dailyBudget = Number(campaign.daily_budget_limit || 0);
+          const dailyAvailable = dailyBudget > 0 ? dailyBudget - liability.todaySpend - pendingLiability : Number.POSITIVE_INFINITY;
+          const availableBudget = Number((Math.min(originalBudget - pendingLiability, dailyAvailable)).toFixed(8));
           return {
             ...campaign,
             original_budget: campaign.budget,
@@ -617,6 +632,40 @@ export async function GET(req: NextRequest) {
       let postId = 0;
       try {
         await conn.beginTransaction();
+        const [[lockedCampaign]]: any = await conn.query(
+          "SELECT status, budget, cpm, daily_budget_limit FROM campaigns WHERE id = ? FOR UPDATE",
+          [campaign.id]
+        );
+        const unitLiability = Number(lockedCampaign?.cpm || 0) / 1000;
+        const [[lockedLiability]]: any = await conn.query(`
+          SELECT
+            COALESCE(SUM(CASE
+              WHEN ? = 'views' THEN GREATEST(COALESCE(cp.views, 0) - COALESCE(cp.settled_views, 0), 0)
+              ELSE GREATEST((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) - COALESCE(cp.settled_clicks, 0), 0)
+            END * ?), 0) +
+            COALESCE(SUM(CASE WHEN cp.status IN ('active','posted','sent','pending_delivery')
+              AND cp.delivery_failed_at IS NULL ${schedulerSchema.hasPostDeletedAtColumn ? "AND cp.deleted_at IS NULL" : ""}
+              THEN ? ELSE 0 END), 0) pending_liability,
+            (COALESCE((SELECT SUM(l.advertiser_debit) FROM channel_settlement_ledger l
+              WHERE l.campaign_id = ? AND l.created_at >= CURDATE()), 0)
+            + COALESCE((SELECT SUM(d.advertiser_debit) FROM channel_advertiser_debits d
+              WHERE d.campaign_id = ? AND d.created_at >= CURDATE()), 0)) today_spend
+          FROM campaign_posts cp WHERE cp.campaign_id = ?`,
+          [campaign.type, unitLiability, unitLiability, campaign.id, campaign.id, campaign.id]
+        );
+        const pendingLiability = Number(lockedLiability?.pending_liability || 0);
+        const remaining = Number(lockedCampaign?.budget || 0) - pendingLiability;
+        const dailyCap = Number(lockedCampaign?.daily_budget_limit || 0);
+        const dailyRemaining = dailyCap > 0
+          ? dailyCap - Number(lockedLiability?.today_spend || 0) - pendingLiability
+          : Number.POSITIVE_INFINITY;
+        if (lockedCampaign?.status !== "active" || unitLiability <= 0
+          || remaining + 1e-10 < unitLiability || dailyRemaining + 1e-10 < unitLiability) {
+          await conn.rollback();
+          conn.release();
+          incrementSkip(dailyRemaining + 1e-10 < unitLiability ? "daily_budget_limit" : "budget_liability_limit");
+          continue;
+        }
         const [insertPost]: any = await conn.query(
           `INSERT INTO campaign_posts (${insertColumns.join(", ")}) VALUES (${insertPlaceholders})`,
           insertParams

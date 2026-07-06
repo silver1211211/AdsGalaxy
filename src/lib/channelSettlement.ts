@@ -40,6 +40,7 @@ type LockedPost = RowDataPacket & {
   publisher_id: number;
   campaign_status: string;
   budget: string | number;
+  daily_budget_limit: string | number | null;
   price_per_thousand: string | number;
   views: string | number;
   settled_views: string | number;
@@ -81,6 +82,7 @@ export type ChannelSettlementResult = {
   candidates: number;
   settledPosts: number;
   failedPosts: number;
+  failedDetails: Array<{ postId: number; reason: string }>;
   advertiserDebited: number;
   publisherCredited: number;
   platformRevenue: number;
@@ -135,7 +137,7 @@ async function lockedPost(connection: PoolConnection, postId: number) {
   const [rows] = await connection.query<LockedPost[]>(
     `SELECT cp.id AS post_id, cp.campaign_id, cp.channel_id, cp.views, cp.settled_views, cp.settled_clicks,
        c.type AS campaign_type, c.name AS campaign_name, c.user_id AS advertiser_id,
-       c.status AS campaign_status, c.budget, c.cpm AS price_per_thousand,
+       c.status AS campaign_status, c.budget, c.daily_budget_limit, c.cpm AS price_per_thousand,
        ch.user_id AS publisher_id, ch.status AS channel_status, ch.settlement_excluded_until,
        publisher.status AS publisher_status, publisher.is_banned AS publisher_is_banned,
        u.telegram_id AS advertiser_telegram_id,
@@ -198,6 +200,7 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
   }
 
   const details: ChannelSettlementDetail[] = [];
+  const failedDetails: ChannelSettlementResult["failedDetails"] = [];
   const exhausted = new Map<number, { name: string; telegramId: string | number }>();
   const qualityByChannel = new Map<number, PublisherQualityMetrics>();
   let failedPosts = 0;
@@ -262,18 +265,35 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
           continue;
         }
         if (!Number.isFinite(unitPrice) || unitPrice <= 0 || currentBudget <= 0) {
-          await markCampaignBudgetExhausted(post.campaign_id, connection);
+          if (currentBudget <= 0) await markCampaignBudgetExhausted(post.campaign_id, connection);
+          else await connection.query("UPDATE campaigns SET status='paused', pause_reason='invalid_unit_price' WHERE id=?", [post.campaign_id]);
           await connection.commit();
-          exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
+          if (currentBudget <= 0) exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
           continue;
         }
 
-        const affordableUnits = Math.max(0, Math.floor((currentBudget + 1e-10) / unitPrice));
+        const [[todaySpendRow]] = await connection.query<Array<RowDataPacket & { spend: string | number }>>(
+          `SELECT COALESCE((SELECT SUM(advertiser_debit) FROM channel_settlement_ledger WHERE campaign_id=? AND created_at>=CURDATE()),0)
+            + COALESCE((SELECT SUM(advertiser_debit) FROM channel_advertiser_debits WHERE campaign_id=? AND created_at>=CURDATE()),0) spend`,
+          [post.campaign_id, post.campaign_id]
+        );
+        const dailyBudget = Number(post.daily_budget_limit || 0);
+        const dailyRemaining = dailyBudget > 0
+          ? Math.max(0, dailyBudget - Number(todaySpendRow?.spend || 0))
+          : Number.POSITIVE_INFINITY;
+        const allowedBudget = Math.min(currentBudget, dailyRemaining);
+        const affordableUnits = Math.max(0, Math.floor((allowedBudget + 1e-10) / unitPrice));
         const settledUnits = Math.min(dueUnits, affordableUnits);
         if (settledUnits <= 0) {
-          await markCampaignBudgetExhausted(post.campaign_id, connection);
-          await connection.commit();
-          exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
+          if (currentBudget + 1e-10 < unitPrice) {
+            await connection.query(
+              "UPDATE campaigns SET status='paused', pause_reason='insufficient_budget_for_delivery' WHERE id=? AND status='active'",
+              [post.campaign_id]
+            );
+            await connection.commit();
+          } else {
+            await connection.rollback();
+          }
           continue;
         }
 
@@ -292,7 +312,7 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
         const effectivePublisherCpc = kind === "click" && settledUnits > 0 ? amount(publisherCredit / settledUnits) : 0;
         const settledThrough = (kind === "view" ? oldViews : oldClicks) + settledUnits;
         const remaining = amount(currentBudget - debit);
-        const isExhausted = settledUnits < dueUnits || remaining < unitPrice || remaining <= 0;
+        const isExhausted = remaining < unitPrice || remaining <= 0;
 
         const safety = await recordPayoutSafetyCheck({
           settlementType: kind,
@@ -317,6 +337,7 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
         if (safety.status !== "passed") {
           await connection.rollback();
           failedPosts += 1;
+          failedDetails.push({ postId: post.post_id, reason: "payout_safety_check_failed" });
           continue;
         }
 
@@ -398,6 +419,7 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
       } catch (error) {
         await connection.rollback().catch(() => undefined);
         failedPosts += 1;
+        failedDetails.push({ postId: Number(candidate.post_id), reason: error instanceof Error ? error.message : "unknown_error" });
         console.error("Channel campaign settlement failed", {
           post_id: candidate.post_id,
           error: error instanceof Error ? error.message : "unknown_error",
@@ -449,6 +471,7 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
     candidates: totalCandidates,
     settledPosts: details.length,
     failedPosts,
+    failedDetails,
     advertiserDebited: amount(details.reduce((sum, item) => sum + item.amount_debited, 0)),
     publisherCredited: amount(details.reduce((sum, item) => sum + item.publisher_credited, 0)),
     platformRevenue: amount(details.reduce((sum, item) => sum + item.platform_revenue, 0)),
@@ -473,6 +496,7 @@ export type CampaignSettlementBeforeDeletionResult = {
   viewRefresh: { checked: number; updated: number; failed: number } | null;
   postsSettled: number;
   failedPosts: number;
+  failedDetails: Array<{ postId: number; reason: string }>;
   amountDebited: number;
   publisherCredited: number;
   error?: string;
@@ -503,7 +527,7 @@ export async function settleCampaignEngagementBeforeDeletion(
   if (!campaign || campaign.type === "broadcast") {
     return {
       ok: true, campaignId, skipped: true, viewRefresh: null,
-      postsSettled: 0, failedPosts: 0, amountDebited: 0, publisherCredited: 0,
+      postsSettled: 0, failedPosts: 0, failedDetails: [], amountDebited: 0, publisherCredited: 0,
     };
   }
 
@@ -534,6 +558,7 @@ export async function settleCampaignEngagementBeforeDeletion(
 
   const postsSettled = result?.settledPosts ?? 0;
   const failedPosts = result?.failedPosts ?? (settlementError ? 1 : 0);
+  const failedDetails = result?.failedDetails ?? [];
   const amountDebited = result?.advertiserDebited ?? 0;
   const publisherCredited = result?.publisherCredited ?? 0;
   const ok = !settlementError && failedPosts === 0;
@@ -557,6 +582,7 @@ export async function settleCampaignEngagementBeforeDeletion(
       publisher_credited: publisherCredited,
       view_refresh: viewRefresh,
       error: settlementError || null,
+      failed_details: failedDetails,
     },
   }).catch((error: unknown) => {
     console.error("Failed to record pre-deletion settlement system log", {
@@ -572,6 +598,7 @@ export async function settleCampaignEngagementBeforeDeletion(
     viewRefresh,
     postsSettled,
     failedPosts,
+    failedDetails,
     amountDebited,
     publisherCredited,
     error: settlementError,

@@ -98,8 +98,6 @@ const OS_OPTIONS = [
 
 const STEPS = ["Ad Creative", "Targeting", "Budget & Launch"];
 const REWARDED_IMAGE_MAX_BYTES = 1 * 1024 * 1024;
-const REWARDED_IMAGE_RATIO = 4 / 5;
-const REWARDED_IMAGE_RATIO_TOLERANCE = 0.01;
 const REWARDED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
 
 const emptyForm = {
@@ -108,11 +106,11 @@ const emptyForm = {
   title: "",
   description: "",
   image_url: "",
+  logo_url: "",
   landing_url: "",
   cta_text: "Learn More",
   title_color: "",
   body_color: "",
-  postback_url: "",
   categories: [] as string[],
   budget: "",
   advertiser_cpm_bid: "",
@@ -171,10 +169,10 @@ function StepBar({ step }: { step: number }) {
 // ── Field component ────────────────────────────────────────────────────────────
 
 function Field({
-  label, value, onChange, placeholder, type = "text", required = false,
+  label, value, onChange, placeholder, type = "text", required = false, maxLength,
 }: {
   label: string; value: string; onChange: (v: string) => void;
-  placeholder?: string; type?: string; required?: boolean;
+  placeholder?: string; type?: string; required?: boolean; maxLength?: number;
 }) {
   return (
     <div className="space-y-1.5">
@@ -186,6 +184,7 @@ function Field({
         value={value}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
+        maxLength={maxLength}
         className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-semibold text-slate-900 outline-none focus:border-[#0c9de8] focus:bg-white transition-all placeholder:font-normal placeholder:text-slate-400"
       />
     </div>
@@ -208,16 +207,20 @@ export default function AdvertiserMiniAppRewardedPage() {
   const [imageUploading, setImageUploading] = useState(false);
   const [imageError, setImageError] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [logoPreview, setLogoPreview] = useState("");
+  const [logoUploading, setLogoUploading] = useState(false);
+  const [logoError, setLogoError] = useState("");
+  const logoInputRef = useRef<HTMLInputElement>(null);
   const [countrySearch, setCountrySearch] = useState("");
   const [step, setStep] = useState(1);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [recommendedCpm, setRecommendedCpm] = useState(1.0);
+  const [recommendedCpm, setRecommendedCpm] = useState(1);
+  const [cpmMin, setCpmMin] = useState(0.5);
+  const [cpmMax, setCpmMax] = useState(5);
+  const [cpmAdjustmentWarning, setCpmAdjustmentWarning] = useState("");
   const [cpmPercent, setCpmPercent] = useState(50);
-
-  const cpmMin = 0.1;
-  const cpmMax = 20;
 
   const filteredCountries = useMemo(() =>
     COUNTRIES.filter(c =>
@@ -228,7 +231,11 @@ export default function AdvertiserMiniAppRewardedPage() {
   useEffect(() => {
     setTitle(isEditMode ? "Edit Mini App Ad" : "Mini App Campaign");
     apiFetch("/api/settings").then(r => r.json()).then(d => {
-      const rec = parseFloat(d?.miniapp_internal_recommended_cpm || "1.00");
+      const min = parseFloat(d?.global_min_cpm ?? d?.miniapp_internal_min_cpm ?? "0.50");
+      const max = parseFloat(d?.global_max_cpm ?? d?.miniapp_internal_max_cpm ?? "5.00");
+      const rec = parseFloat(d?.global_recommended_cpm ?? d?.miniapp_internal_recommended_cpm ?? "1.00");
+      setCpmMin(min);
+      setCpmMax(max);
       setRecommendedCpm(rec);
       if (!isEditMode) {
         setForm(prev => ({ ...prev, advertiser_cpm_bid: rec.toFixed(2) }));
@@ -258,11 +265,11 @@ export default function AdvertiserMiniAppRewardedPage() {
           title: c.title || "",
           description: c.description || "",
           image_url: c.image_url || "",
+          logo_url: c.logo_url || "",
           landing_url: c.landing_url || "",
           cta_text: c.cta_text || "Learn More",
           title_color: c.title_color || "",
           body_color: c.body_color || "",
-          postback_url: c.postback_url || "",
           categories: parseList(c.categories),
           budget: c.budget ? String(parseFloat(c.budget)) : "",
           advertiser_cpm_bid: c.advertiser_cpm_bid ? String(parseFloat(c.advertiser_cpm_bid)) : "",
@@ -279,11 +286,24 @@ export default function AdvertiserMiniAppRewardedPage() {
         setSelectedCountries(parseList(c.countries));
         setSelectedLanguages(parseList(c.languages));
         if (c.image_url) setImagePreview(c.image_url);
+        if (c.logo_url) setLogoPreview(c.logo_url);
         const cpm = parseFloat(c.advertiser_cpm_bid || "1.0");
         if (!isNaN(cpm)) setCpmPercent(Math.min(100, Math.max(0, Math.round(((cpm - cpmMin) / (cpmMax - cpmMin)) * 100))));
       })
       .catch(() => {});
   }, [editId]);
+
+  useEffect(() => {
+    if (!isEditMode || !form.advertiser_cpm_bid) return;
+    const current = Number(form.advertiser_cpm_bid);
+    if (current < cpmMin) {
+      setForm((prev) => ({ ...prev, advertiser_cpm_bid: cpmMin.toFixed(2) }));
+      setCpmAdjustmentWarning(`The previous bid was below the current minimum and was adjusted to $${cpmMin.toFixed(2)}. Save to confirm the update.`);
+    } else if (current > cpmMax) {
+      setForm((prev) => ({ ...prev, advertiser_cpm_bid: cpmMax.toFixed(2) }));
+      setCpmAdjustmentWarning(`The previous bid exceeded the current maximum and was adjusted to $${cpmMax.toFixed(2)}. Save to confirm the update.`);
+    }
+  }, [isEditMode, form.advertiser_cpm_bid, cpmMin, cpmMax]);
 
   const handleCpmSlider = (val: number) => {
     setCpmPercent(val);
@@ -340,28 +360,6 @@ export default function AdvertiserMiniAppRewardedPage() {
       return;
     }
 
-    // Dimension + 4:5 portrait check
-    const dimensionError = await new Promise<string>((resolve) => {
-      const img = new window.Image();
-      img.onload = () => {
-        const { naturalWidth: w, naturalHeight: h } = img;
-        const ratio = w / h;
-        if (Math.abs(ratio - REWARDED_IMAGE_RATIO) > REWARDED_IMAGE_RATIO_TOLERANCE) {
-          resolve(`Image must use a 4:5 portrait ratio. Recommended: 1080×1350px. Yours is ${w}×${h}px.`);
-          return;
-        }
-        resolve("");
-        return;
-      };
-      img.onerror = () => resolve("Could not read image dimensions.");
-      img.src = previewUrl;
-    });
-
-    if (dimensionError) {
-      setImageError(dimensionError);
-      return;
-    }
-
     // All checks passed — upload
     setImageUploading(true);
     try {
@@ -380,6 +378,35 @@ export default function AdvertiserMiniAppRewardedPage() {
     }
   };
 
+  const handleLogoFile = async (file: File) => {
+    if (!REWARDED_IMAGE_TYPES.includes(file.type)) return setLogoError("Upload a PNG, JPG, or WEBP logo.");
+    if (file.size > 500 * 1024) return setLogoError("Logo must not exceed 500 KB.");
+    const previewUrl = URL.createObjectURL(file);
+    const isSquare = await new Promise<boolean>((resolve) => {
+      const image = new window.Image();
+      image.onload = () => resolve(image.naturalWidth === image.naturalHeight);
+      image.onerror = () => resolve(false);
+      image.src = previewUrl;
+    });
+    if (!isSquare) return setLogoError("Logo must be square.");
+    setLogoPreview(previewUrl);
+    setLogoError("");
+    setLogoUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("image", file);
+      fd.append("kind", "logo");
+      const res = await apiFetch("/api/advertiser/upload-image", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Logo upload failed");
+      setForm((prev) => ({ ...prev, logo_url: data.url }));
+    } catch (reason) {
+      setLogoError(reason instanceof Error ? reason.message : "Logo upload failed");
+    } finally {
+      setLogoUploading(false);
+    }
+  };
+
   const clearImage = () => {
     setImageFile(null);
     setImagePreview("");
@@ -389,9 +416,10 @@ export default function AdvertiserMiniAppRewardedPage() {
   };
 
   const isValidLandingUrl = form.landing_url.trim().length > 0 && /^https?:\/\/.+\..+/.test(form.landing_url.trim());
-  const step1Valid = form.campaign_name.trim().length >= 3 && form.title.trim().length >= 3 && form.description.trim().length > 0 && isValidLandingUrl && !!form.image_url && !imageUploading && !imageError;
-  const step3Valid = Number(form.advertiser_cpm_bid) > 0 &&
-    (form.campaign_budget_mode === "unlimited" || Number(form.budget) > 0);
+  const step1Valid = form.campaign_name.trim().length >= 3 && form.campaign_name.length <= 15 && form.title.trim().length >= 3 && form.title.length <= 20 && form.description.trim().length > 0 && form.description.length <= 80 && isValidLandingUrl && !!form.image_url && !imageUploading && !imageError && !logoUploading && !logoError;
+  const cpmOutsideRange = Number(form.advertiser_cpm_bid) < cpmMin || Number(form.advertiser_cpm_bid) > cpmMax;
+  const step3Valid = !cpmOutsideRange && Number(form.advertiser_cpm_bid) > 0 && Number(form.budget) >= 10 &&
+    (!form.daily_budget_limit || (Number(form.daily_budget_limit) >= 10 && Number(form.daily_budget_limit) <= Number(form.budget)));
 
   const recPct = Math.min(100, Math.max(0, ((recommendedCpm - cpmMin) / (cpmMax - cpmMin)) * 100));
 
@@ -400,12 +428,13 @@ export default function AdvertiserMiniAppRewardedPage() {
     setError("");
     setSuccess("");
     try {
-      if (!step3Valid) throw new Error("Please set a valid CPM bid and budget.");
+      if (!step3Valid) throw new Error("Total budget must be at least $10. An optional daily budget must be at least $10 and cannot exceed the total budget.");
       if (form.start_at && form.end_at && new Date(form.start_at) >= new Date(form.end_at)) {
         throw new Error("Start date must be before end date.");
       }
       const payload = {
         ...form,
+        categories: form.categories.length ? form.categories : ["All"],
         countries: selectedCountries.join(","),
         languages: selectedLanguages.join(","),
       };
@@ -497,7 +526,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                       "text-[10px] font-bold",
                       form.campaign_name.length > 0 && form.campaign_name.trim().length < 3 ? "text-red-400" : "text-slate-300"
                     )}>
-                      {form.campaign_name.length}/50
+                      {form.campaign_name.length}/15
                     </span>
                   </div>
                   <div className="relative">
@@ -507,7 +536,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                       value={form.campaign_name}
                       onChange={e => setForm(p => ({ ...p, campaign_name: e.target.value }))}
                       placeholder="e.g. Summer Crypto Promo"
-                      maxLength={50}
+                      maxLength={15}
                       className={cn(
                         "w-full pl-10 pr-4 py-3 bg-slate-50 border rounded-2xl outline-none text-sm font-semibold text-slate-900 transition-all placeholder:font-normal placeholder:text-slate-400",
                         form.campaign_name.length > 0 && form.campaign_name.trim().length < 3
@@ -533,7 +562,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                       "text-[10px] font-bold",
                       form.title.length > 0 && form.title.trim().length < 3 ? "text-red-400" : "text-slate-300"
                     )}>
-                      {form.title.length}/80
+                      {form.title.length}/20
                     </span>
                   </div>
                   <div className="relative">
@@ -543,7 +572,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                       value={form.title}
                       onChange={e => setForm(p => ({ ...p, title: e.target.value }))}
                       placeholder="Short attention-grabbing headline"
-                      maxLength={80}
+                      maxLength={20}
                       className={cn(
                         "w-full pl-10 pr-4 py-3 bg-slate-50 border rounded-2xl outline-none text-sm font-semibold text-slate-900 transition-all placeholder:font-normal placeholder:text-slate-400",
                         form.title.length > 0 && form.title.trim().length < 3
@@ -559,12 +588,16 @@ export default function AdvertiserMiniAppRewardedPage() {
                   )}
                 </div>
                 <div className="space-y-1.5">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Description <span className="text-red-400">*</span></label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Description <span className="text-red-400">*</span></label>
+                    <span className="text-[10px] font-bold text-slate-300">{form.description.length}/80</span>
+                  </div>
                   <textarea
                     value={form.description}
                     onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
                     placeholder="Describe what this ad is about"
                     rows={3}
+                    maxLength={80}
                     className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-semibold text-slate-900 outline-none focus:border-[#0c9de8] focus:bg-white transition-all placeholder:font-normal placeholder:text-slate-400 resize-none"
                   />
                 </div>
@@ -586,7 +619,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                         "relative rounded-2xl overflow-hidden border",
                         imageError ? "border-red-300" : "border-slate-200"
                       )}>
-                        <img src={imagePreview} alt="Ad preview" className="mx-auto aspect-[4/5] max-h-80 w-full object-cover" />
+                        <img src={imagePreview} alt="Ad preview" className="mx-auto aspect-video max-h-80 w-full object-contain bg-slate-50" />
                         {imageUploading && (
                           <div className="absolute inset-0 bg-white/60 flex items-center justify-center gap-2">
                             <Loader2 size={20} className="animate-spin text-[#0c9de8]" />
@@ -633,7 +666,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                       <ImageIcon size={28} className="text-slate-300" />
                       <div className="text-center">
                         <p className="text-xs font-black text-slate-600">Tap to choose image</p>
-                        <p className="text-[10px] font-medium text-slate-400 mt-0.5">1080×1350 recommended · 4:5 · PNG/JPG/WEBP · max 1 MB</p>
+                        <p className="text-[10px] font-medium text-slate-400 mt-0.5">1200×628 or 1280×720 recommended · PNG/JPG/WEBP · max 1 MB</p>
                         <p className="text-[10px] font-medium text-slate-400 mt-0.5">PNG/JPG/WEBP only · immediate validation before upload</p>
                       </div>
                     </button>
@@ -641,7 +674,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                   <div className="flex items-start gap-2 rounded-2xl border border-blue-100 bg-blue-50 px-3 py-2.5">
                     <AlertCircle size={13} className="text-blue-500 shrink-0 mt-0.5" />
                     <p className="text-[11px] font-semibold text-blue-700 leading-relaxed">
-                      Recommended image: <span className="font-black">1080×1350</span>. Aspect ratio: <span className="font-black">4:5 portrait only</span>. Maximum: <span className="font-black">1 MB</span>. Supported: <span className="font-black">PNG, JPG, WEBP</span>.
+                      Landscape is recommended at <span className="font-black">1200×628 or 1280×720</span>. Square and portrait images are accepted. Maximum: <span className="font-black">1 MB</span>.
                     </p>
                   </div>
                 </div>
@@ -671,8 +704,30 @@ export default function AdvertiserMiniAppRewardedPage() {
                     </div>
                   );
                 })()}
-                <Field label="CTA Button Text" value={form.cta_text} onChange={v => setForm(p => ({ ...p, cta_text: v }))} placeholder="Learn More" />
-                <Field label="Postback URL (optional)" value={form.postback_url} onChange={v => setForm(p => ({ ...p, postback_url: v }))} placeholder="https://tracker.example.com/postback?click_id={click_id}" />
+                <Field label="CTA Button Text" value={form.cta_text} onChange={v => setForm(p => ({ ...p, cta_text: v }))} placeholder="Learn More" maxLength={60} />
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Logo <span className="font-normal text-slate-300">(optional)</span></label>
+                  <input ref={logoInputRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) handleLogoFile(file); }} />
+                  <button type="button" onClick={() => logoInputRef.current?.click()} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-left">
+                    {logoPreview ? <img src={logoPreview} alt="Logo preview" className="h-14 w-14 rounded-xl object-contain bg-white" /> : <ImageIcon className="m-3 text-slate-300" size={24} />}
+                    <span className="text-xs font-bold text-slate-600">{logoUploading ? "Uploading..." : "Square PNG, JPG, or WEBP · max 500 KB"}</span>
+                  </button>
+                  {logoError && <p className="text-[11px] font-bold text-red-500">{logoError}</p>}
+                </div>
+
+                <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+                  {imagePreview && <img src={imagePreview} alt="Live ad preview" className="aspect-video w-full object-contain bg-slate-50" />}
+                  <div className="space-y-2 p-4">
+                    <div className="flex items-center gap-2">
+                      {logoPreview && <img src={logoPreview} alt="" className="h-9 w-9 rounded-lg object-contain" />}
+                      <h3 className="text-sm font-black text-slate-900">{form.title || "Ad title"}</h3>
+                    </div>
+                    <p className="text-xs text-slate-600">{form.description || "Your ad description will appear here."}</p>
+                    <button type="button" className="w-full rounded-xl bg-[#0c9de8] py-2.5 text-xs font-black text-white">{form.cta_text || "Learn More"}</button>
+                    <p className="truncate text-[10px] text-slate-400">{form.landing_url || "https://example.com"}</p>
+                  </div>
+                </div>
               </div>
 
               {/* Categories */}
@@ -986,35 +1041,17 @@ export default function AdvertiserMiniAppRewardedPage() {
                     <span>${cpmMax}</span>
                   </div>
                 </div>
+                {cpmAdjustmentWarning && <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] font-bold text-amber-700">{cpmAdjustmentWarning}</p>}
               </div>
 
               {/* Campaign Budget */}
               <div className="space-y-3">
                 <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Campaign Budget <span className="text-red-400">*</span></label>
-                <div className="grid grid-cols-2 gap-2">
-                  {[
-                    { value: "custom",    label: "Custom Budget" },
-                    { value: "unlimited", label: "Unlimited" },
-                  ].map(opt => (
-                    <button
-                      key={opt.value}
-                      onClick={() => setForm(p => ({ ...p, campaign_budget_mode: opt.value }))}
-                      className={cn(
-                        "py-3 rounded-2xl border text-[11px] font-black transition-all",
-                        form.campaign_budget_mode === opt.value
-                          ? "border-[#0c9de8]/40 bg-blue-50 text-[#0c9de8]"
-                          : "border-slate-100 bg-slate-50 text-slate-600 hover:border-slate-300"
-                      )}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
                 {form.campaign_budget_mode === "custom" && (
                   <div className="relative">
                     <DollarSign size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input
-                      type="number" min="1" step="0.01"
+                      type="number" min="10" step="0.01"
                       value={form.budget}
                       onChange={e => setForm(p => ({ ...p, budget: e.target.value }))}
                       placeholder="Total campaign budget"
@@ -1022,9 +1059,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                     />
                   </div>
                 )}
-                {form.campaign_budget_mode === "unlimited" && (
-                  <p className="text-[11px] font-semibold text-slate-400 px-1">Runs until your ad balance is exhausted.</p>
-                )}
+                <p className="text-[11px] font-semibold text-slate-400 px-1">Minimum total budget: $10.</p>
               </div>
 
               {/* Daily Budget */}
@@ -1053,7 +1088,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                   <div className="relative">
                     <DollarSign size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input
-                      type="number" min="1" step="0.01"
+                      type="number" min="10" step="0.01"
                       value={form.daily_budget_limit}
                       onChange={e => setForm(p => ({ ...p, daily_budget_limit: e.target.value }))}
                       placeholder="Max spend per day"

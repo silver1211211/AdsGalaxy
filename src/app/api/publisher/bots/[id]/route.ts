@@ -28,6 +28,11 @@ type PublisherBotDetailsRow = RowDataPacket & {
   manually_imported_count: number;
   pending_verification_count: number;
   blocked_count: number;
+  delivery_eligible_count: number;
+  successful_sends: number;
+  failed_sends: number;
+  publisher_revenue: number;
+  effective_cpm: number;
 };
 
 type BotStatusRow = RowDataPacket & { status: string; bot_token: string; bot_token_encrypted: string | null };
@@ -46,6 +51,19 @@ async function columnExists(tableName: string, columnName: string) {
   return rows.length > 0;
 }
 
+async function tableExists(tableName: string) {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT 1
+     FROM INFORMATION_SCHEMA.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+     LIMIT 1`,
+    [tableName]
+  );
+
+  return rows.length > 0;
+}
+
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -54,9 +72,11 @@ export async function GET(
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
     const { id } = await params;
-    const [hasBotUserSource, hasIntegrationFirstSeen] = await Promise.all([
+    const [hasBotUserSource, hasIntegrationFirstSeen, hasBroadcastDeliveries, hasBroadcastPublisherReward] = await Promise.all([
       columnExists("bot_users", "source"),
       columnExists("bot_users", "integration_first_seen_at"),
+      tableExists("broadcast_deliveries"),
+      columnExists("broadcast_deliveries", "publisher_reward"),
     ]);
     const integrationUserCountExpr = hasIntegrationFirstSeen
       ? "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.integration_first_seen_at IS NOT NULL)"
@@ -69,6 +89,15 @@ export async function GET(
         ? "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.integration_first_seen_at IS NULL)"
         : "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id)";
     const userCounts = botUserCountExpressions("b");
+    const botSuccessfulExpr = hasBroadcastDeliveries
+      ? "COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent'), 0)"
+      : "0";
+    const botFailedExpr = hasBroadcastDeliveries
+      ? "COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'failed'), 0)"
+      : "0";
+    const botRevenueExpr = hasBroadcastDeliveries && hasBroadcastPublisherReward
+      ? "COALESCE((SELECT SUM(bd.publisher_reward) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent'), 0)"
+      : "0";
     const [rows] = await pool.query<PublisherBotDetailsRow[]>(
       `SELECT
         b.id,
@@ -89,6 +118,13 @@ export async function GET(
         ,${manuallyImportedCountExpr} as manually_imported_count
         ,${userCounts.pending} as pending_verification_count
         ,${userCounts.blocked} as blocked_count
+        ,${userCounts.deliveryEligible} as delivery_eligible_count
+        ,${botSuccessfulExpr} as successful_sends
+        ,${botSuccessfulExpr} as successful_paid_deliveries
+        ,${botSuccessfulExpr} as delivered_sends
+        ,${botFailedExpr} as failed_sends
+        ,${botRevenueExpr} as publisher_revenue
+        ,CASE WHEN ${botSuccessfulExpr} > 0 THEN (${botRevenueExpr} / ${botSuccessfulExpr}) * 1000 ELSE 0 END as effective_cpm
        FROM bots b
        WHERE b.id = ? AND b.user_id = ? AND b.is_deleted = FALSE
        LIMIT 1`,
@@ -127,6 +163,14 @@ export async function GET(
       reachable_count: Number(bot.active_count || 0),
       blocked_unreachable_count: Number(bot.blocked_count || 0),
       pending_verification_count: Number(bot.pending_verification_count || 0),
+      delivery_eligible_count: Number(bot.delivery_eligible_count || 0),
+      successful_sends: Number(bot.successful_sends || 0),
+      successful_paid_deliveries: Number(bot.successful_sends || 0),
+      delivered_sends: Number(bot.successful_sends || 0),
+      failed_sends: Number(bot.failed_sends || 0),
+      publisher_revenue: Number(bot.publisher_revenue || 0),
+      total_revenue: Number(bot.publisher_revenue || 0),
+      effective_cpm: Number(bot.effective_cpm || 0),
       integration_url: integrationUrl,
       integration_secret_masked: `••••••••••••${integrationUrl.slice(-6)}`,
       integration_status: integrationStatus,

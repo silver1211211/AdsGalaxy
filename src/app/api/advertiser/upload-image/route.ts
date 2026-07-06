@@ -11,14 +11,16 @@ export async function POST(request: Request) {
 
     const formData = await request.formData();
     const file = formData.get("image");
+    const kind = String(formData.get("kind") || "image");
 
     const supportedTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
     if (!(file instanceof File) || !supportedTypes.has(file.type)) {
       return NextResponse.json({ error: "Please upload a valid image file (PNG, JPG, or WEBP)" }, { status: 400 });
     }
 
-    if (file.size > 1 * 1024 * 1024) {
-      return NextResponse.json({ error: "Image must not exceed 1 MB" }, { status: 400 });
+    const maxBytes = kind === "logo" ? 500 * 1024 : 1 * 1024 * 1024;
+    if (file.size > maxBytes) {
+      return NextResponse.json({ error: kind === "logo" ? "Logo must not exceed 500 KB" : "Image must not exceed 1 MB" }, { status: 400 });
     }
 
     if (!process.env.IMG_API_ENDPOINT) {

@@ -7,12 +7,12 @@ import { getMiniAppPublisherCpmSettings, validateAdvertiserCpmBid } from "@/lib/
 import { calculateCampaignQualityScore } from "@/lib/advertiserTrust";
 import {
   normalizeMiniAppCategories,
-  requiredMiniAppCategoryCpm,
 } from "@/lib/miniappCreativeCategories";
-import { validatePostbackUrl } from "@/lib/conversionTracking";
+import { normalizeMiniAppCampaignCategories, validateMiniAppCampaignText } from "@/lib/miniappCampaignValidation";
 import { normalizeMarketplaceType, publicSelectionMetadata, recordMarketplaceEvent, validateDirectPlacementTargets } from "@/lib/publisherMarketplace";
 import { evaluateCampaignAutomation } from "@/lib/approvalAutomation";
 import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
+import { validateTotalBudget } from "@/lib/campaignBudget";
 
 function cleanText(value: unknown) {
   return String(value || "").trim();
@@ -128,7 +128,7 @@ function landingReviewFlags(landingUrl: string) {
   return flags;
 }
 
-async function validateCreativeImageUrl(imageUrl: string) {
+async function validateCreativeImageUrl(imageUrl: string, maxSize = 1 * 1024 * 1024) {
   const response = await fetch(imageUrl, { redirect: "follow" });
   if (!response.ok) throw new Error("Image URL could not be loaded for validation.");
 
@@ -141,8 +141,7 @@ async function validateCreativeImageUrl(imageUrl: string) {
     contentType.includes("jpg") ||
     contentType.includes("webp") ||
     /\.(png|jpe?g|webp)$/.test(normalizedUrl);
-  const message = "Image must be PNG, JPG, or WEBP, use a 4:5 portrait ratio (recommended 1080×1350), and be 1 MB or smaller.";
-  const maxSize = 1 * 1024 * 1024;
+  const message = `Image must be PNG, JPG, or WEBP and be ${maxSize <= 500 * 1024 ? "500 KB" : "1 MB"} or smaller.`;
   if (!supportedType) throw new Error(message);
   if (contentLength > maxSize) throw new Error(message);
 
@@ -151,8 +150,6 @@ async function validateCreativeImageUrl(imageUrl: string) {
   const dimensions = readImageDimensions(buffer);
   if (!dimensions) throw new Error(message);
   if (buffer.length > maxSize) throw new Error(message);
-  if (Math.abs(dimensions.width / dimensions.height - 4 / 5) > 0.01) throw new Error(message);
-
   return {
     type: "static",
     width: dimensions.width,
@@ -176,10 +173,11 @@ export async function GET(request: Request) {
         c.body_color,
         c.categories,
         c.image_url,
+        c.logo_url,
         c.landing_url,
-        c.postback_url,
         c.budget,
         c.remaining_budget,
+        c.total_spend,
         c.advertiser_cpm_bid,
         c.campaign_budget_mode,
         c.daily_budget_mode,
@@ -194,6 +192,8 @@ export async function GET(request: Request) {
         c.daily_budget_limit,
         c.frequency_cap_per_user,
         c.status,
+        c.creative_review_notes,
+        c.requires_re_moderation,
         c.created_at,
         c.updated_at,
         COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as impressions,
@@ -204,6 +204,10 @@ export async function GET(request: Request) {
         COALESCE((SELECT COUNT(*) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0) as conversions,
         COALESCE((SELECT SUM(conv.conversion_value) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0) as conversion_value,
         COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= CURDATE()), 0) as today_spend,
+        CASE WHEN COALESCE(c.remaining_budget, 0) <= 0 THEN TRUE ELSE FALSE END AS budget_exhausted,
+        CASE WHEN COALESCE(c.daily_budget_limit, 0) > 0 AND
+          COALESCE((SELECT SUM(i.advertiser_debit) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= CURDATE()), 0) >= c.daily_budget_limit
+          THEN TRUE ELSE FALSE END AS daily_cap_reached,
         CASE WHEN COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) > 0
           THEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0)
             / COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 1) * 100
@@ -244,11 +248,11 @@ export async function POST(request: Request) {
     const ctaText = cleanCtaText(body.cta_text);
     const titleColor = cleanHexColor(body.title_color);
     const bodyColor = cleanHexColor(body.body_color);
-    const categories = normalizeMiniAppCategories(body.categories);
+    const categories = normalizeMiniAppCampaignCategories(normalizeMiniAppCategories(body.categories));
     const landingUrl = cleanText(body.landing_url);
-    const postbackUrl = validatePostbackUrl(body.postback_url);
     const imageUrl = cleanText(body.image_url);
-    const campaignBudgetMode = cleanText(body.campaign_budget_mode) === "unlimited" ? "unlimited" : "custom";
+    const logoUrl = cleanText(body.logo_url);
+    const campaignBudgetMode = "custom";
     const dailyBudgetMode = cleanText(body.daily_budget_mode) === "unlimited" ? "unlimited" : "custom";
     const directPlacementMode = cleanText(body.direct_placement_mode) === "direct" ? "direct" : "network";
     const directInventoryScope = cleanText(body.direct_inventory_scope) || "network";
@@ -261,19 +265,10 @@ export async function POST(request: Request) {
       direct_countries: body.direct_countries,
       direct_languages: body.direct_languages,
     });
-    const budget = campaignBudgetMode === "unlimited" ? 0 : toPositiveMoney(body.budget, "Budget");
+    const budget = validateTotalBudget(body.budget);
     const advertiserCpmBid = toPositiveMoney(body.advertiser_cpm_bid ?? body.cpm_bid, "CPM Bid");
     const cpmSettings = await getMiniAppPublisherCpmSettings(conn);
     validateAdvertiserCpmBid(advertiserCpmBid, cpmSettings);
-    const categoryCpm = await requiredMiniAppCategoryCpm(categories, conn);
-    if (advertiserCpmBid < categoryCpm.required_cpm) {
-      return NextResponse.json({
-        error: `CPM Bid must be at least the global minimum CPM of $${categoryCpm.required_cpm.toFixed(2)}.`,
-        base_min_cpm: categoryCpm.base_min_cpm,
-        category_adjustment: categoryCpm.category_adjustment,
-        required_cpm: categoryCpm.required_cpm,
-      }, { status: 400 });
-    }
     const targeting = normalizeAdvertiserTargeting({
       countries: body.countries ?? body.target_countries,
       languages: body.languages,
@@ -284,17 +279,22 @@ export async function POST(request: Request) {
       end_at: body.end_at,
       daily_budget_limit: dailyBudgetMode === "unlimited" ? "" : body.daily_budget_limit,
       frequency_cap_per_user: body.frequency_cap_per_user,
-    }, campaignBudgetMode === "unlimited" ? Number.MAX_SAFE_INTEGER : budget);
+    }, budget);
     const targetCountries = normalizeCountries(targeting.countries);
 
     if (!campaignName || !title || !description || !landingUrl || !imageUrl) {
       return NextResponse.json({ error: "Campaign name, title, description, landing URL, and image URL are required" }, { status: 400 });
     }
+    validateMiniAppCampaignText({ campaignName, title, description });
 
     if (!/^https?:\/\//i.test(landingUrl) || !/^https?:\/\//i.test(imageUrl)) {
       return NextResponse.json({ error: "Landing URL and image URL must be valid http(s) URLs" }, { status: 400 });
     }
     const imageMetadata = await validateCreativeImageUrl(imageUrl);
+    if (logoUrl) {
+      const logoMetadata = await validateCreativeImageUrl(logoUrl, 500 * 1024);
+      if (logoMetadata.width !== logoMetadata.height) throw new Error("Logo must be square");
+    }
     const landingFlags = landingReviewFlags(landingUrl);
     const directTargets = await validateDirectPlacementTargets({
       mode: directPlacementMode,
@@ -330,7 +330,7 @@ export async function POST(request: Request) {
       `INSERT INTO miniapp_rewarded_campaigns
         (
           advertiser_id, campaign_name, title, quality_score, quality_tier,
-          quality_metadata, description, cta_text, title_color, body_color, categories, image_url, landing_url, postback_url,
+          quality_metadata, description, cta_text, title_color, body_color, categories, image_url, logo_url, landing_url,
           budget, remaining_budget, advertiser_cpm_bid, admin_cpm, required_cpm, campaign_budget_mode,
           daily_budget_mode, target_countries, countries, languages,
           vpn_policy, device_policy, os_policy, start_at, end_at, daily_budget_limit,
@@ -351,14 +351,14 @@ export async function POST(request: Request) {
         bodyColor,
         JSON.stringify(categories),
         imageUrl,
+        logoUrl || null,
         landingUrl,
-        postbackUrl,
         budget,
-        0,
+        budget,
         advertiserCpmBid,
         advertiserCpmBid,
-        categoryCpm.required_cpm,
-        "pay_as_you_go",
+        cpmSettings.min_cpm,
+        campaignBudgetMode,
         dailyBudgetMode,
         targetCountries || null,
         ...targetingDbParams(targeting),

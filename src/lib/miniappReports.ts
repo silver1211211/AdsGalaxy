@@ -107,10 +107,11 @@ function aggregateSummary(row: Record<string, unknown>, clicks = 0, requests = 0
     no_fill_count: noFills,
     fill_rate: requests > 0 ? fixedMetric((successfulFills / requests) * 100) : null,
     ctr: ctr(totalClicks, totalImpressions),
-    cpc: cpc(grossRevenue, totalClicks),
+    cpc: cpc(publisherRevenue, totalClicks),
     publisher_cpc: cpc(publisherRevenue, totalClicks),
+    advertiser_cpc: cpc(grossRevenue, totalClicks),
     blended_cpm: cpm(publisherRevenue, totalImpressions),
-    average_cpm: cpm(grossRevenue, totalImpressions),
+    average_cpm: cpm(publisherRevenue, totalImpressions),
     gross_cpm: cpm(grossRevenue, totalImpressions),
     net_cpm: cpm(publisherRevenue, totalImpressions),
   };

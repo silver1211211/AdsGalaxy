@@ -116,6 +116,9 @@ export function normalizeAdvertiserTargeting(input: TargetingInput, totalBudget:
   }
 
   const dailyBudgetLimit = normalizeOptionalMoney(input.daily_budget_limit, "Daily budget limit");
+  if (dailyBudgetLimit !== null && dailyBudgetLimit < 10) {
+    throw new Error("Daily budget must be at least $10 when provided");
+  }
   if (dailyBudgetLimit !== null && dailyBudgetLimit > totalBudget) {
     throw new Error("Daily budget limit cannot exceed total campaign budget");
   }

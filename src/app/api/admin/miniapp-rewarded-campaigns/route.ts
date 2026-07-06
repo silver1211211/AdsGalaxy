@@ -7,10 +7,7 @@ import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { recordAutomationAudit } from "@/lib/approvalAutomation";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { getMiniAppPublisherCpmSettings, maxPublisherCpm, normalizeMiniAppCpmMode, validateAdvertiserCpmBid } from "@/lib/miniappPublisherCpmEngine";
-import {
-  normalizeMiniAppCategories,
-  requiredMiniAppCategoryCpm,
-} from "@/lib/miniappCreativeCategories";
+import { validateOptionalDailyBudget } from "@/lib/campaignBudget";
 
 function cleanText(value: unknown) {
   return String(value || "").trim();
@@ -113,7 +110,7 @@ export async function PATCH(request: Request) {
       return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
     }
 
-    const selectedCategories = normalizeMiniAppCategories(parseJsonArray(beforeRows[0].categories));
+    parseJsonArray(beforeRows[0].categories);
     const [[owner]] = await pool.query<OwnerRow[]>("SELECT telegram_id FROM users WHERE id = ?", [beforeRows[0].advertiser_id]);
 
     if (action === "approve") {
@@ -125,10 +122,6 @@ export async function PATCH(request: Request) {
       }
       const cpmSettings = await getMiniAppPublisherCpmSettings();
       validateAdvertiserCpmBid(approvalCpm, cpmSettings);
-      const categoryCpm = await requiredMiniAppCategoryCpm(selectedCategories);
-      if (approvalCpm < categoryCpm.required_cpm) {
-        return NextResponse.json({ error: `Admin CPM must be at least the global minimum CPM of $${categoryCpm.required_cpm.toFixed(2)}` }, { status: 400 });
-      }
       if (cpmMode === "fixed") {
         if (!Number.isFinite(fixedPublisherCpm) || Number(fixedPublisherCpm) <= 0) {
           return NextResponse.json({ error: "Fixed Publisher CPM must be greater than 0" }, { status: 400 });
@@ -146,10 +139,11 @@ export async function PATCH(request: Request) {
            fixed_publisher_cpm = ?,
            required_cpm = ?,
            creative_review_status = 'approved',
+           requires_re_moderation = 0,
            creative_review_notes = ?,
            approved_at = COALESCE(approved_at, NOW())
           WHERE id = ?`,
-        [approvalCpm, approvalCpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, categoryCpm.required_cpm, moderationNotes || null, id]
+        [approvalCpm, approvalCpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, cpmSettings.min_cpm, moderationNotes || null, id]
       );
       await safeNotify(owner?.telegram_id, `✅ Your Mini App ad "${beforeRows[0].campaign_name}" was approved.`);
     } else if (action === "reject") {
@@ -172,6 +166,7 @@ export async function PATCH(request: Request) {
          JOIN users u ON u.id = c.advertiser_id
          SET c.status = 'approved', c.pause_reason = NULL
          WHERE c.id = ? AND c.status = 'paused'
+           AND c.remaining_budget >= (c.advertiser_cpm_bid / 1000)
            AND u.ad_balance >= (c.advertiser_cpm_bid / 1000)`,
         [id]
       );
@@ -184,10 +179,6 @@ export async function PATCH(request: Request) {
       }
       const cpmSettings = await getMiniAppPublisherCpmSettings();
       validateAdvertiserCpmBid(Number(adminCpm), cpmSettings);
-      const categoryCpm = await requiredMiniAppCategoryCpm(selectedCategories);
-      if (Number(adminCpm) < categoryCpm.required_cpm) {
-        return NextResponse.json({ error: `Admin CPM must be at least the global minimum CPM of $${categoryCpm.required_cpm.toFixed(2)}` }, { status: 400 });
-      }
       if (cpmMode === "fixed") {
         if (!Number.isFinite(fixedPublisherCpm) || Number(fixedPublisherCpm) <= 0) {
           return NextResponse.json({ error: "Fixed Publisher CPM must be greater than 0" }, { status: 400 });
@@ -198,7 +189,7 @@ export async function PATCH(request: Request) {
       }
       await pool.query(
         "UPDATE miniapp_rewarded_campaigns SET admin_cpm = ?, advertiser_cpm_bid = ?, required_cpm = ?, cpm_mode = ?, fixed_publisher_cpm = ? WHERE id = ?",
-        [adminCpm, adminCpm, categoryCpm.required_cpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, id]
+        [adminCpm, adminCpm, cpmSettings.min_cpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, id]
       );
     } else if (action === "edit") {
       const campaign_name = cleanText(body.campaign_name) || beforeRows[0].campaign_name;
@@ -217,7 +208,7 @@ export async function PATCH(request: Request) {
       const os_policy = cleanText(body.os_policy) || "all";
       const start_at = body.start_at || null;
       const end_at = body.end_at || null;
-      const daily_budget_limit = body.daily_budget_limit ? Number(body.daily_budget_limit) : null;
+      const daily_budget_limit = validateOptionalDailyBudget(body.daily_budget_limit, Number(beforeRows[0].budget));
       const frequency_cap_per_user = body.frequency_cap_per_user ? Number(body.frequency_cap_per_user) : null;
       await pool.query(
         `UPDATE miniapp_rewarded_campaigns

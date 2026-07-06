@@ -69,7 +69,7 @@ export async function POST(request: Request) {
       return NextResponse.json({
         success: false,
         error_code: "NO_FILL",
-        message: "No ad available right now.",
+        message: "No advertisements are available at the moment. Please try again shortly.",
         request_id: decision.request_id,
         enabled_networks: decision.enabled_networks,
         candidate_networks: decision.candidate_networks,
@@ -85,7 +85,11 @@ export async function POST(request: Request) {
     try {
       await conn.rollback();
     } catch {}
-    return NextResponse.json(publicSdkErrorResponse(error), { status: Number(error?.status || 400) });
+    console.error("Public SDK Mini App request failed", error);
+    return NextResponse.json(
+      { ...publicSdkErrorResponse(error), message: "Unable to load this advertisement. Please try again." },
+      { status: Number(error?.status || 400) }
+    );
   } finally {
     conn.release();
   }

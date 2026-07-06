@@ -52,6 +52,13 @@ Open `.env` and configure:
 * Your `BOT_TOKEN` for Telegram
 * NextAuth secrets or other application-specific secrets
 
+Production startup requires these security variables and fails fast if they are missing:
+* `BOT_INTEGRATION_ENCRYPTION_KEY`
+* `PRIVATE_INVITE_LINK_ENCRYPTION_KEY`
+* `TELEGRAM_WEBHOOK_SECRET_TOKEN`
+
+Use at least 32 random characters for the encryption keys, or exactly 64 hex characters. Development mode continues to run without this production-only startup gate.
+
 ### 4. Database Initialization
 You do not need to manually import any `.sql` files. The project includes a dedicated database builder.
 To create all tables and populate the default admin configurations (Settings, FAQs, Placement Logic), run:

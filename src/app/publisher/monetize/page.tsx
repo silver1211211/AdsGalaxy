@@ -146,7 +146,8 @@ const slideVariants = {
 // state changes, which would destroy input focus.
 
 function getMaErrors(maName: string, maUsername: string, maBotId: string, maWebUrl: string, maMaUrl: string) {
-  const u = maUsername.replace(/^@/, "").trim();
+  const usernameTrimmed = maUsername.trim();
+  const u = usernameTrimmed.replace(/^@/, "");
   const normUsername = u.toLowerCase();
 
   const name = maName.length > 0
@@ -154,11 +155,13 @@ function getMaErrors(maName: string, maUsername: string, maBotId: string, maWebU
       : maName.trim().length > 50 ? "Maximum 50 characters allowed" : "") : "";
 
   const username = maUsername.length > 0
-    ? (!maUsername.trim().startsWith("@") ? "Username must start with @ (e.g. @MyAppBot)"
-      : u.length < 3 ? "Minimum 3 characters required (without @)"
-      : u.length > 32 ? "Must be at most 32 characters (without @)"
-      : !/^[A-Za-z][A-Za-z0-9_]*$/.test(u) ? "Letters, numbers & underscores only; must start with a letter"
-      : !/bot$/i.test(u) ? "Username must end with 'bot' (e.g. @MyAppBot)" : "") : "";
+    ? (!usernameTrimmed.startsWith("@") ? "Telegram Bot username must start with @."
+      : /\s/.test(usernameTrimmed) ? "Telegram Bot username cannot contain spaces."
+      : u.includes("@") ? "Telegram Bot username must contain only one @, at the start."
+      : u.length < 3 ? "Must be at least 3 characters (excluding @)"
+      : u.length > 32 ? "Must be at most 32 characters (excluding @)"
+      : !/^[A-Za-z][A-Za-z0-9_]*$/.test(u) ? "Only letters, numbers & underscores are allowed after the @"
+      : !/bot$/i.test(u) ? "Telegram Bot username must end with 'bot' (e.g. @MyAppBot)" : "") : "";
 
   const botId = maBotId.length > 0
     ? (!/^\d{9,20}$/.test(maBotId.trim()) ? "Must be a numeric Bot ID (9–20 digits)" : "") : "";
@@ -166,13 +169,13 @@ function getMaErrors(maName: string, maUsername: string, maBotId: string, maWebU
   const webUrl = maWebUrl.length > 0 ? (() => {
     try {
       const p = new URL(maWebUrl.trim());
-      if (p.protocol !== "https:" || !p.hostname.includes(".")) return "Must be a valid HTTPS URL";
+      if (p.protocol !== "https:" || !p.hostname.includes(".")) return "Please enter a valid HTTPS website URL.";
       const host = p.hostname.toLowerCase();
       if (host === "t.me" || host === "telegram.me" || host.endsWith(".t.me") || host.endsWith(".telegram.me")) {
-        return "This must be your website's HTTPS URL from BotFather, not a t.me/telegram.me link";
+        return "Telegram links are not allowed here. Please enter your website's HTTPS URL.";
       }
       return "";
-    } catch { return "Must be a valid HTTPS URL"; }
+    } catch { return "Please enter a valid HTTPS website URL."; }
   })() : "";
 
   const maUrl = maMaUrl.length > 0 ? (() => {
@@ -180,20 +183,61 @@ function getMaErrors(maName: string, maUsername: string, maBotId: string, maWebU
       const p = new URL(maMaUrl.trim());
       const isTme = p.protocol === "https:" && (p.hostname === "t.me" || p.hostname === "telegram.me");
       const isTg  = p.protocol === "tg:" && p.hostname === "resolve";
-      if (!isTme && !isTg) return "Must be a t.me/BotName/app or tg:// link";
+      if (!isTme && !isTg) return "Please enter a valid Telegram Mini App URL beginning with https://t.me/.";
       if (isTme) {
         const parts = p.pathname.split("/").filter(Boolean);
         const domain = (parts[0] || "").toLowerCase();
         const hasAppPath = parts.length >= 2;
         const hasStartApp = p.searchParams.has("startapp");
-        if (!domain || (!hasAppPath && !hasStartApp)) return "Format: https://t.me/MyAppBot/AppName";
-        if (normUsername && domain !== normUsername) return "URL must match the Mini App Username";
+        if (!domain || (!hasAppPath && !hasStartApp)) return "Please enter a valid Telegram Mini App URL beginning with https://t.me/.";
+        if (normUsername && domain !== normUsername) return "This link's bot username doesn't match the Bot Username you entered above.";
       }
       return "";
-    } catch { return "Must be a valid Mini App link"; }
+    } catch { return "Please enter a valid Telegram Mini App URL beginning with https://t.me/."; }
   })() : "";
 
   return { name, username, botId, webUrl, maUrl };
+}
+
+function InfoTip({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    // capture:true catches scroll/touchmove on any scrollable ancestor (e.g. the modal's
+    // own overflow-y-auto body), not just the window itself — scroll doesn't bubble.
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("touchmove", close, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("touchmove", close);
+    };
+  }, [open]);
+
+  return (
+    <span className="relative inline-flex">
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setOpen(o => !o); }}
+        title={text}
+        aria-label="More information"
+        className="relative flex h-4 w-4 items-center justify-center rounded-full text-sky-500 hover:text-sky-600"
+      >
+        {!open && <span className="absolute inset-0 -m-px rounded-full bg-sky-400/60 animate-infotip-ping" />}
+        <span className="absolute inset-0 rounded-full bg-sky-100" />
+        <Info size={12} className="relative" />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full z-50 mt-1.5 w-60 max-w-[80vw] rounded-xl border border-slate-200 bg-white p-3 text-[11px] font-medium normal-case leading-snug tracking-normal text-slate-600 shadow-xl">
+            {text}
+          </div>
+        </>
+      )}
+    </span>
+  );
 }
 
 type BotVerifyStatus = "idle" | "loading" | "ok" | "mismatch" | "notfound" | "error";
@@ -334,16 +378,24 @@ function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBo
     <div className="space-y-4">
       <div className="space-y-1.5">
         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Mini App Name</label>
-        <input type="text" value={maName} onChange={e => setMaName(e.target.value)} placeholder="e.g. My Awesome App" className={inputCls(errs.name)} />
+        <input type="text" value={maName} onChange={e => setMaName(e.target.value)} placeholder="e.g. My Mini App 💸" className={inputCls(errs.name)} />
         {errs.name && <p className="text-[11px] font-bold text-red-500 pl-1">{errs.name}</p>}
+        <p className="text-[11px] text-slate-400 pl-1">Enter the public name of your Mini App. Emojis are supported.</p>
       </div>
       <div className="space-y-1.5">
-        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Bot Username</label>
-        <input type="text" value={maUsername} onChange={e => setMaUsername(e.target.value)} placeholder="e.g. @MyAppBot" className={inputCls(errs.username)} />
+        <label className="flex items-center gap-1 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+          Bot Username
+          <InfoTip text="Your bot's public Telegram @username, exactly as registered with BotFather. It must start with @ and end in 'bot' (e.g. @MyAppBot)." />
+        </label>
+        <input type="text" value={maUsername} onChange={e => setMaUsername(e.target.value)} placeholder="@MyAppBot" className={inputCls(errs.username)} />
         {errs.username && <p className="text-[11px] font-bold text-red-500 pl-1">{errs.username}</p>}
+        <p className="text-[11px] text-slate-400 pl-1">Enter your Telegram Bot username starting with @ (example: @MyBot).</p>
       </div>
       <div className="space-y-1.5">
-        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Numeric Telegram Bot ID</label>
+        <label className="flex items-center gap-1 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+          Numeric Telegram Bot ID
+          <InfoTip text="The numeric ID of the same bot as your Bot Username above. Get it from BotFather or Telegram's getMe response — it must belong to that exact bot, not a different one." />
+        </label>
         <div className="relative">
           <input
             type="text"
@@ -366,7 +418,14 @@ function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBo
           <p className="text-[11px] font-bold text-emerald-600 pl-1">{botVerify.message}</p>
         )}
         {!errs.botId && (botVerify.status === "mismatch" || botVerify.status === "notfound") && (
-          <p className="text-[11px] font-bold text-red-500 pl-1">{botVerify.message}</p>
+          <>
+            <p className="text-[11px] font-bold text-red-500 pl-1">{botVerify.message}</p>
+            <p className="text-[11px] text-slate-400 pl-1">
+              {botVerify.status === "mismatch"
+                ? "Make sure the Bot ID and Bot Username belong to the same bot — re-check the ID from BotFather's getMe response for that exact bot."
+                : "We couldn't find this bot on Telegram — double-check the Bot Username above is spelled correctly and the bot exists."}
+            </p>
+          </>
         )}
         {!errs.botId && botVerify.status === "error" && (
           <p className="text-[11px] font-bold text-amber-500 pl-1">{botVerify.message} — check ID manually</p>
@@ -376,9 +435,7 @@ function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBo
       <div className="space-y-1.5">
         <label className="flex items-center gap-1 text-[10px] font-black text-slate-400 uppercase tracking-widest">
           Web App URL
-          <span title="The HTTPS website configured as your Mini App in BotFather. This is the URL required by AdsGram and most Telegram Mini App ad networks.">
-            <Info size={12} className="text-slate-300" />
-          </span>
+          <InfoTip text="The HTTPS website configured as your Mini App in BotFather. This is the URL required by AdsGram and most Telegram Mini App ad networks." />
         </label>
         <div className="relative">
           <input
@@ -407,13 +464,12 @@ function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBo
         {!errs.webUrl && urlVerify.status === "error" && (
           <p className="text-[11px] font-bold text-amber-500 pl-1">{urlVerify.message} — check manually</p>
         )}
+        <p className="text-[11px] text-slate-400 pl-1">Enter your secure HTTPS website URL. Telegram links are not allowed here.</p>
       </div>
       <div className="space-y-1.5">
         <label className="flex items-center gap-1 text-[10px] font-black text-slate-400 uppercase tracking-widest">
           Telegram Mini App URL
-          <span title="The Telegram launch link for your Mini App.">
-            <Info size={12} className="text-slate-300" />
-          </span>
+          <InfoTip text="The Telegram launch link for your Mini App — must begin with https://t.me/ and include your bot username followed by the app path (e.g. https://t.me/MyAppBot/app)." />
         </label>
         <div className="relative">
           <input
@@ -442,6 +498,7 @@ function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBo
         {!errs.maUrl && maUrlVerify.status === "error" && (
           <p className="text-[11px] font-bold text-amber-500 pl-1">{maUrlVerify.message} — check manually</p>
         )}
+        <p className="text-[11px] text-slate-400 pl-1">Paste your Telegram Mini App link (example: https://t.me/YourBot/app).</p>
       </div>
       <button
         onClick={onSubmit}
@@ -1845,7 +1902,9 @@ export default function MonetizePage() {
   useEffect(() => {
     if (editingMiniApp) {
       setMaEditName(editingMiniApp.miniapp_name || "");
-      setMaEditUser(editingMiniApp.miniapp_username || "");
+      setMaEditUser(editingMiniApp.miniapp_username
+        ? (String(editingMiniApp.miniapp_username).startsWith("@") ? editingMiniApp.miniapp_username : `@${editingMiniApp.miniapp_username}`)
+        : "");
       setMaEditBotId(String(editingMiniApp.telegram_bot_id || editingMiniApp.bot_id || ""));
       setMaEditWebUrl(editingMiniApp.webapp_url || "");
       setMaEditMaUrl(editingMiniApp.miniapp_url || "");

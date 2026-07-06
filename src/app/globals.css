@@ -424,6 +424,17 @@ body {
   scrollbar-color: var(--admin-scrollbar-thumb) var(--admin-scrollbar-track) !important;
 }
 
+/* Info-tip "there's something here" cue — a single quick ping every 7s,
+   rather than Tailwind's default animate-ping which loops every 1s. */
+@keyframes infotip-ping {
+  0% { transform: scale(1); opacity: 0.6; }
+  14%, 100% { transform: scale(2); opacity: 0; }
+}
+
+.animate-infotip-ping {
+  animation: infotip-ping 7s ease-out infinite;
+}
+
 /* ─── Mobile Input Zoom Prevention ───────────────────────────────────────────
    iOS Safari zooms the viewport when a focused input has font-size < 16px.
    The viewport meta maximum-scale=1 does not stop this system behaviour.

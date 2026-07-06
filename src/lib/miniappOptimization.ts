@@ -278,7 +278,7 @@ export async function recordNetworkSuccess(conn: PoolConnection, miniappId: numb
      ON DUPLICATE KEY UPDATE
       last_success_at = NOW(),
       health_score = LEAST(100, health_score + 5),
-      recent_failures = GREATEST(recent_failures - 1, 0)`,
+      recent_failures = IF(recent_failures > 0, recent_failures - 1, 0)`,
     [miniappId, networkName]
   );
 }

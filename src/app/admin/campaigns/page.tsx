@@ -57,10 +57,27 @@ type AdminCampaignRow = {
   advertiser_trust_level?: string;
   quality_score?: string | number;
   quality_tier?: string;
-  advertiser_total_spend?: string | number;
   advertiser_approved_campaigns?: string | number;
   advertiser_rejected_campaigns?: string | number;
+  type_label: "CHANNEL" | "BOT" | "MINI APP";
+  remaining_budget?: string | number;
+  spend?: string | number;
+  impressions?: string | number;
+  clicks?: string | number;
+  average_cpc?: string | number;
+  requires_re_moderation?: boolean | number;
+  rejection_reason?: string | null;
 };
+
+function money(value: unknown) {
+  const amount = Number(value || 0);
+  return `$${Number.isFinite(amount) ? amount.toFixed(2) : "0.00"}`;
+}
+
+function statusLabel(campaign: AdminCampaignRow) {
+  if (campaign.requires_re_moderation) return "Re-Moderation";
+  return campaign.status === "approved" ? "Active" : campaign.status.replaceAll("_", " ");
+}
 
 function renderTargetingList(value: unknown) {
   if (Array.isArray(value)) return value.length > 0 ? value.join(", ") : "All";
@@ -107,6 +124,7 @@ export default function AdminCampaignsPage() {
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [emergencyAction, setEmergencyAction] = useState<EmergencyAction>(null);
   const [typedConfirmation, setTypedConfirmation] = useState("");
+  const [rejectionReason, setRejectionReason] = useState("");
   const [toast, setToast] = useState<{ type: "success" | "error"; title: string; message: string } | null>(null);
   
   const [viewModalOpen, setViewModalOpen] = useState(false);
@@ -133,14 +151,14 @@ export default function AdminCampaignsPage() {
     return () => clearTimeout(timer);
   }, [page, statusFilter, trustFilter, search]);
 
-  const handleAction = async (id: number, action: string, kind = "campaign") => {
+  const handleAction = async (id: number, action: string, kind = "campaign", moderationNotes = "") => {
     setActionLoading(id);
     try {
       const endpoint = kind === "miniapp" ? "/api/admin/miniapp-rewarded-campaigns" : "/api/admin/campaigns";
       const res = await fetch(endpoint, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, action })
+        body: JSON.stringify({ id, action, moderation_notes: moderationNotes })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Action failed");
@@ -211,15 +229,17 @@ export default function AdminCampaignsPage() {
   };
 
   const openConfirmAction = (id: number, kind: string, action: CampaignConfirmActionType, title: string, message: string, danger = false) => {
+    setRejectionReason("");
     setConfirmAction({ id, kind, action, title, message, danger });
   };
 
   const runConfirmedAction = async () => {
     if (!confirmAction) return;
     const { id, kind, action } = confirmAction;
+    const reason = rejectionReason;
     setConfirmAction(null);
     if (action === "approve" || action === "reject") {
-      await handleAction(id, action, kind);
+      await handleAction(id, action, kind, action === "reject" ? reason : "");
     } else {
       await handleManagementAction(id, action as "pause" | "resume", kind);
     }
@@ -282,7 +302,14 @@ export default function AdminCampaignsPage() {
         confirmBtnText="Confirm"
         confirmBtnVariant={confirmAction?.danger ? "danger" : "primary"}
         isLoading={actionLoading !== null}
-      />
+      >
+        {confirmAction?.action === "reject" && (
+          <div className="space-y-2">
+            <label className="block text-[11px] font-black uppercase tracking-widest text-slate-400">Reason (optional)</label>
+            <textarea value={rejectionReason} onChange={(event) => setRejectionReason(event.target.value)} rows={3} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-red-400" />
+          </div>
+        )}
+      </ConfirmationModal>
       <ConfirmationModal
         isOpen={!!emergencyAction}
         onClose={() => { setEmergencyAction(null); setTypedConfirmation(""); }}
@@ -307,6 +334,7 @@ export default function AdminCampaignsPage() {
           <div className="bg-white rounded-lg w-full max-w-2xl shadow-xl border border-slate-200 flex flex-col max-h-[90vh]">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
               <h3 className="text-lg font-bold text-slate-900">Campaign Details (#{selectedCampaign.id})</h3>
+              <span className="rounded border border-slate-200 bg-slate-100 px-2 py-1 text-[10px] font-black text-slate-700">{selectedCampaign.type_label}</span>
               <button onClick={() => setViewModalOpen(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
                 <X size={20} />
               </button>
@@ -352,15 +380,20 @@ export default function AdminCampaignsPage() {
                 <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Configuration</h4>
                 <div className="bg-slate-50 p-3 rounded-md border border-slate-200 text-sm">
                   <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                    <div><span className="text-slate-500">Type:</span> <span className="font-medium text-slate-900 capitalize">{selectedCampaign.type}</span></div>
-                    <div><span className="text-slate-500">Budget:</span> <span className="font-medium text-slate-900">${selectedCampaign.budget}</span></div>
+                    <div><span className="text-slate-500">Type:</span> <span className="font-medium text-slate-900">{selectedCampaign.type_label}</span></div>
+                    <div><span className="text-slate-500">Budget:</span> <span className="font-medium text-slate-900">{money(selectedCampaign.budget)}</span></div>
+                    <div><span className="text-slate-500">Remaining:</span> <span className="font-medium text-slate-900">{money(selectedCampaign.remaining_budget)}</span></div>
                     <div><span className="text-slate-500">CPM:</span> <span className="font-medium text-slate-900">${selectedCampaign.cpm}</span></div>
-                    <div><span className="text-slate-500">Status:</span> <span className="font-medium text-slate-900 capitalize">{selectedCampaign.status}</span></div>
+                    {selectedCampaign.type === "clicks" && <div><span className="text-slate-500">CPC:</span> <span className="font-medium text-slate-900">{money(selectedCampaign.average_cpc)}</span></div>}
+                    <div><span className="text-slate-500">Status:</span> <span className="font-medium text-slate-900 capitalize">{statusLabel(selectedCampaign)}</span></div>
                     <div><span className="text-slate-500">Trust:</span> <span className="font-medium text-slate-900 capitalize">{selectedCampaign.advertiser_trust_level || "new"}</span></div>
                     <div><span className="text-slate-500">Quality:</span> <span className="font-medium text-slate-900 capitalize">{selectedCampaign.quality_score || 50} / {selectedCampaign.quality_tier || "average"}</span></div>
-                    <div><span className="text-slate-500">Spend:</span> <span className="font-medium text-slate-900">${selectedCampaign.advertiser_total_spend || 0}</span></div>
+                    <div><span className="text-slate-500">Lifetime Spend:</span> <span className="font-medium text-slate-900">{money(selectedCampaign.spend)}</span></div>
+                    <div><span className="text-slate-500">Impressions:</span> <span className="font-medium text-slate-900">{Number(selectedCampaign.impressions || 0).toLocaleString()}</span></div>
+                    <div><span className="text-slate-500">Clicks:</span> <span className="font-medium text-slate-900">{Number(selectedCampaign.clicks || 0).toLocaleString()}</span></div>
                     <div><span className="text-slate-500">Approved:</span> <span className="font-medium text-slate-900">{selectedCampaign.advertiser_approved_campaigns || 0}</span></div>
                     <div><span className="text-slate-500">Rejected:</span> <span className="font-medium text-slate-900">{selectedCampaign.advertiser_rejected_campaigns || 0}</span></div>
+                    {selectedCampaign.status === "rejected" && selectedCampaign.rejection_reason && <div className="col-span-2 rounded-md border border-red-100 bg-red-50 p-2 text-red-700"><span className="font-semibold">Rejection reason:</span> {selectedCampaign.rejection_reason}</div>}
                     <div className="col-span-2">
                       <span className="text-slate-500 block">Continents:</span> 
                       {renderContinents(selectedCampaign.continents)}
@@ -430,8 +463,8 @@ export default function AdminCampaignsPage() {
           </div>
         </div>
         
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm whitespace-nowrap min-w-[800px]">
+        <div className="max-w-full overflow-x-auto overscroll-x-contain">
+          <table className="w-full min-w-[860px] whitespace-nowrap text-left text-sm">
             <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
               <tr>
                 <th className="px-4 py-3 font-medium">ID & Name</th>
@@ -456,27 +489,29 @@ export default function AdminCampaignsPage() {
                 </tr>
               ) : (
                 campaigns.map((campaign) => (
-                  <tr key={`${campaign.campaign_kind}-${campaign.id}`} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-3">
+                  <tr key={`${campaign.campaign_kind}-${campaign.id}`} className="group hover:bg-slate-50 transition-colors">
+                    <td className="sticky left-0 z-10 max-w-[260px] bg-white px-4 py-3 group-hover:bg-slate-50">
                       <div className="flex items-center gap-2">
                         <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide ${campaign.campaign_kind === 'miniapp' ? 'bg-purple-50 text-purple-600 border border-purple-100' : 'bg-slate-100 text-slate-500 border border-slate-200'}`}>
-                          {campaign.campaign_kind === 'miniapp' ? 'Mini App' : 'Channel/Bot'}
+                          {campaign.type_label}
                         </span>
-                        <span className="font-medium text-slate-900">{campaign.name}</span>
+                        <span className="max-w-[150px] truncate font-medium text-slate-900" title={campaign.name}>{campaign.name}</span>
                       </div>
                       <div className="text-xs text-slate-500 mt-0.5">ID: #{campaign.id} - User: {campaign.user_id}</div>
                       <div className="text-xs text-slate-500 capitalize">Trust: {campaign.advertiser_trust_level || "new"} - Quality: {campaign.quality_score || 50}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <div className="font-medium text-slate-900 capitalize">{campaign.type}</div>
-                      <div className="text-xs text-slate-500">Budget: ${campaign.budget} - CPM: ${campaign.cpm}</div>
+                      <div className="font-black text-slate-900">{campaign.type_label}</div>
+                      <div className="text-xs text-slate-500">Budget: {money(campaign.budget)}</div>
+                      <div className="text-xs text-slate-500">Spend: {money(campaign.spend)}</div>
+                      <div className="text-xs text-slate-500">{campaign.type === "clicks" ? `CPC: ${money(campaign.average_cpc)}` : `CPM: ${money(campaign.cpm)}`}</div>
                     </td>
                     <td className="px-4 py-3">
                       <a href={campaign.link} target="_blank" className="text-blue-600 hover:underline block truncate max-w-[150px]">{campaign.link}</a>
                     </td>
                     <td className="px-4 py-3">
                       <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${campaign.status === 'active' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : campaign.status === 'pending' ? 'bg-amber-50 text-amber-700 border border-amber-200' : campaign.status === 'rejected' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-700 border border-slate-200'}`}>
-                        {campaign.status}
+                        {statusLabel(campaign)}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-right">

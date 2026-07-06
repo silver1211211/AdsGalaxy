@@ -49,7 +49,7 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const { response } = await requireAdminPermission("operate");
+  const { admin, response } = await requireAdminPermission("operate");
   if (response) return response;
 
   try {
@@ -82,8 +82,19 @@ export async function POST(
       // paused/exhausted campaigns and for broadcast/bot campaigns).
       settlement = await settleCampaignEngagementBeforeDeletion(Number(id), action === "delete" ? "admin_delete" : "admin_pause");
       if (!settlement.ok) {
+        const blocker = settlement.failedDetails[0];
+        console.error("Admin campaign action blocked by settlement", {
+          campaign_id: id,
+          action,
+          failed_posts: settlement.failedPosts,
+          blocker_post_id: blocker?.postId || null,
+          blocker_reason: blocker?.reason || settlement.error || "unknown_settlement_error",
+          settlement,
+        });
         return NextResponse.json({
-          error: "Could not settle outstanding engagement for this campaign before the requested action. Please try again in a moment.",
+          error: blocker
+            ? `Campaign remains active because post #${blocker.postId} could not be settled safely. Review the settlement log and retry.`
+            : "Campaign remains active because outstanding engagement could not be settled safely. Review the settlement log and retry.",
           settlement,
         }, { status: 409 });
       }
@@ -91,6 +102,14 @@ export async function POST(
 
     if (action === "pause") {
       deletion = await deleteCampaignPostsSafely(id);
+      if (deletion.failed > 0) {
+        console.error("Admin campaign pause blocked by post cleanup", { campaign_id: id, action, deletion });
+        return NextResponse.json({
+          error: `Campaign remains active because ${deletion.failed} active post${deletion.failed === 1 ? "" : "s"} could not be removed safely. Review the post cleanup details and retry.`,
+          deletion,
+          settlement,
+        }, { status: 409 });
+      }
       const updates = ["status = 'paused'"];
 
       if (columns.has("pause_reason")) updates.push("pause_reason = 'admin_paused'");
@@ -141,6 +160,7 @@ export async function POST(
     }
 
     await recordAdminActionAudit({
+      adminId: admin?.id,
       action: `campaign_${action}`,
       entityType: "campaign",
       entityId: id,

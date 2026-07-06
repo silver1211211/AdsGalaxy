@@ -85,6 +85,12 @@ interface Campaign {
   impressions?: number;
   spend?: number;
   clicks?: number;
+  rejection_reason?: string | null;
+}
+
+function campaignTypeLabel(campaign: Campaign) {
+  if (campaign.kind === "miniapp") return "MINI APP";
+  return campaign.kind === "bot" ? "BOT" : "CHANNEL";
 }
 
 export default function MyCampaignsPage() {
@@ -154,6 +160,7 @@ export default function MyCampaignsPage() {
         impressions: Number(c.impressions || 0),
         spend: Number(c.spend || 0),
         clicks: Number(c.clicks || 0),
+        rejection_reason: c.creative_review_notes || null,
       }));
 
       const all = [...regular, ...miniapp].sort(
@@ -444,10 +451,11 @@ export default function MyCampaignsPage() {
                         <DollarSign size={10} />{parseFloat(String(campaign.budget)).toFixed(2)}
                       </span>
                       <span className="w-1 h-1 bg-slate-200 rounded-full" />
-                      <span>{campaign.kind === 'miniapp' ? 'mini app' : campaign.type}</span>
+                      <span className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[9px] text-slate-600">{campaignTypeLabel(campaign)}</span>
                       <span className="w-1 h-1 bg-slate-200 rounded-full" />
                       <span className="text-[#0c9de8]">{campaign.status}</span>
                     </div>
+                    {campaign.status === "rejected" && campaign.rejection_reason && <p className="mt-1 text-[11px] font-semibold text-red-600">{campaign.rejection_reason}</p>}
                   </div>
 
                   <div className="relative">
