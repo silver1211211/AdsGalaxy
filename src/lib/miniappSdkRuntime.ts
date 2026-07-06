@@ -49,7 +49,7 @@ type MediationResponse = {
   internal_ad?: InternalAdPayload | null;
 };
 
-type InternalAdPayload = {
+export type InternalAdPayload = {
   id: number;
   title: string;
   description: string;
@@ -862,7 +862,9 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
       completionNotified = true;
       sendQualityEvent({ event_type: "completed", watch_duration_seconds: maxSeconds, completed: true });
       if (countdownTimer !== undefined) window.clearInterval(countdownTimer);
-      countdownBox.hidden = true;
+      countdownLabel.innerHTML = `<svg class="agx-rewarded-clock" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v6l4 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Skip in <strong>0s</strong></span>`;
+      ringText.textContent = "0";
+      ringProgress.style.strokeDashoffset = `${ringLength}`;
       close.hidden = false;
       close.disabled = false;
       resolve();
@@ -892,6 +894,10 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
     window.addEventListener("blur", onBlur);
     window.addEventListener("pagehide", onPageHide);
   });
+}
+
+export function previewInternalRewardedAd(ad: InternalAdPayload) {
+  return showInternalRewardedAd(ad);
 }
 
 export function getMiniAppRuntimeAdapter(networkName: MiniAppNetworkName) {

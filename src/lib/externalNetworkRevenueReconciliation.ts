@@ -8,7 +8,7 @@ import { cpm, metricNumber } from "@/lib/statFormulas";
 
 type Db = typeof pool | PoolConnection;
 
-type ProviderName = "AdsGram" | "Monetag" | "AdExium" | "RichAds";
+type ProviderName = "AdsGram" | "Monetag" | "AdExium" | "RichAds" | "GigaPub";
 
 type ProviderReportRecord = {
   providerRecordId: string;
@@ -35,7 +35,22 @@ type ProviderFetchResult = {
 type ProviderAdapter = {
   provider: ProviderName;
   networkName: MiniAppNetworkName;
-  fetchReports: (input: { sinceDate: string; untilDate: string }) => Promise<ProviderFetchResult>;
+  support: ProviderCapability;
+  fetchReports: (input: { sinceDate: string; untilDate: string; configs: NetworkConfigRow[] }) => Promise<ProviderFetchResult>;
+};
+
+type ProviderCapability = {
+  supported: boolean;
+  sdk_only: boolean;
+  api_reporting: boolean;
+  needs_credentials: boolean;
+  needs_account_id: boolean;
+  needs_widget_id: boolean;
+  credentials_scope: "publisher" | "platform" | "none";
+  reporting_frequency: "unknown" | "hourly_or_better" | "daily";
+  status: "supported" | "not_supported" | "sdk_only";
+  notes: string;
+  sources: string[];
 };
 
 type NetworkConfigRow = RowDataPacket & {
@@ -48,11 +63,20 @@ type NetworkConfigRow = RowDataPacket & {
 type DailyStatRow = RowDataPacket & {
   id: number;
   miniapp_id: number;
+  user_id?: number;
   network_name: string;
   date: string;
   impressions: string | number;
   gross_revenue: string | number;
   ads_galaxy_fee: string | number;
+  publisher_revenue: string | number;
+};
+
+type SettlementRow = RowDataPacket & {
+  id: number;
+  user_id: number;
+  status: string;
+  impressions: string | number;
   publisher_revenue: string | number;
 };
 
@@ -67,11 +91,86 @@ type RunSummary = {
   error?: string;
 };
 
-const REPORTING_PROVIDERS: Array<{ provider: ProviderName; networkName: MiniAppNetworkName; envPrefix: string }> = [
-  { provider: "AdsGram", networkName: "AdsGram", envPrefix: "ADSGRAM" },
-  { provider: "Monetag", networkName: "Monetag", envPrefix: "MONETAG" },
-  { provider: "AdExium", networkName: "AdExium", envPrefix: "ADEXIUM" },
-  { provider: "RichAds", networkName: "RichAds", envPrefix: "RICHADS" },
+const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapability> = {
+  AdsGram: {
+    supported: false,
+    sdk_only: true,
+    api_reporting: false,
+    needs_credentials: false,
+    needs_account_id: false,
+    needs_widget_id: false,
+    credentials_scope: "publisher",
+    reporting_frequency: "unknown",
+    status: "sdk_only",
+    notes: "Public publisher docs verify SDK/blockId integration and platform statistics, but no public reporting API endpoint.",
+    sources: [
+      "https://docs.adsgram.ai/publisher/api-reference",
+      "https://docs.adsgram.ai/publisher/get-block-id",
+    ],
+  },
+  Monetag: {
+    supported: false,
+    sdk_only: true,
+    api_reporting: false,
+    needs_credentials: false,
+    needs_account_id: false,
+    needs_widget_id: false,
+    credentials_scope: "publisher",
+    reporting_frequency: "unknown",
+    status: "sdk_only",
+    notes: "Public TMA docs verify SDK zone IDs and reward postbacks, but not a pull reporting API.",
+    sources: [
+      "https://docs.monetag.com/docs/sdk-reference/",
+      "https://docs.monetag.com/docs/postbacks/configuration/",
+    ],
+  },
+  AdExium: {
+    supported: true,
+    sdk_only: false,
+    api_reporting: true,
+    needs_credentials: true,
+    needs_account_id: false,
+    needs_widget_id: true,
+    credentials_scope: "platform",
+    reporting_frequency: "unknown",
+    status: "supported",
+    notes: "Public publisher docs verify Bearer-token stats by widget ID.",
+    sources: ["https://docs.adexium.io/publisher/api-stats.html"],
+  },
+  RichAds: {
+    supported: false,
+    sdk_only: true,
+    api_reporting: false,
+    needs_credentials: false,
+    needs_account_id: true,
+    needs_widget_id: true,
+    credentials_scope: "publisher",
+    reporting_frequency: "unknown",
+    status: "sdk_only",
+    notes: "Public publisher article verifies personalized JS tags with publisher ID and widget/app ID, but no public reporting API.",
+    sources: ["https://richads.com/blog/faq-for-richads-publishers-how-to-make-telegram-ads-in-your-mini-apps/"],
+  },
+  GigaPub: {
+    supported: false,
+    sdk_only: true,
+    api_reporting: false,
+    needs_credentials: false,
+    needs_account_id: false,
+    needs_widget_id: true,
+    credentials_scope: "publisher",
+    reporting_frequency: "unknown",
+    status: "sdk_only",
+    notes: "No verifiable public reporting API documentation was found; SDK serving remains configured by project ID.",
+    sources: [],
+  },
+};
+
+const PROVIDER_ORDER: Array<{ provider: ProviderName; networkName: MiniAppNetworkName }> = [
+  { provider: "AdsGram", networkName: "AdsGram" },
+  { provider: "Monetag", networkName: "Monetag" },
+  { provider: "AdExium", networkName: "AdExium" },
+  { provider: "RichAds", networkName: "RichAds" },
+  { provider: "GigaPub", networkName: "GigaPub" },
 ];
 
 function isoDate(date: Date) {
@@ -105,85 +204,132 @@ function cleanId(value: unknown) {
   return String(value || "").trim();
 }
 
-function envValue(prefix: string, suffix: string) {
-  return process.env[`${prefix}_${suffix}`] || process.env[`EXTERNAL_REVENUE_${prefix}_${suffix}`] || "";
-}
-
-function extractRecords(payload: unknown) {
-  if (Array.isArray(payload)) return payload;
-  if (!payload || typeof payload !== "object") return [];
-  const body = payload as Record<string, unknown>;
-  for (const key of ["records", "data", "items", "results", "reports"]) {
-    if (Array.isArray(body[key])) return body[key] as unknown[];
+function envValue(prefix: string, suffixes: string[]) {
+  for (const suffix of suffixes) {
+    const value = process.env[`${prefix}_${suffix}`] || process.env[`EXTERNAL_REVENUE_${prefix}_${suffix}`];
+    if (value) return value;
   }
-  return [];
+  return "";
 }
 
-function normalizeProviderRecord(provider: ProviderName, raw: unknown): ProviderReportRecord | null {
-  if (!raw || typeof raw !== "object") return null;
-  const row = raw as Record<string, unknown>;
-  const date = normalizeDate(row.date ?? row.day ?? row.report_date ?? row.stat_date);
-  const publisherEarnings = optionalMetric(row.publisher_earnings ?? row.publisher_revenue ?? row.earnings ?? row.revenue ?? row.net_revenue);
-  if (!date || publisherEarnings === undefined) return null;
-
-  const miniappId = wholeMetric(row.miniapp_id ?? row.app_id);
-  const placementId = cleanId(row.placement_id ?? row.zone_id ?? row.widget_id ?? row.network_placement_id ?? row.project_id);
-  const providerRecordId = cleanId(row.id ?? row.report_id ?? row.record_id)
-    || `${provider}:${miniappId || placementId}:${date}`;
-  if (!miniappId && !placementId) return null;
-
-  return {
-    providerRecordId,
-    miniappId,
-    placementId,
-    date,
-    publisherEarnings,
-    grossEarnings: optionalMetric(row.gross_earnings ?? row.gross_revenue ?? row.total_revenue),
-    impressions: wholeMetric(row.impressions),
-    clicks: wholeMetric(row.clicks),
-    completedViews: wholeMetric(row.completed_views ?? row.completed ?? row.completedViews),
-    fillRate: optionalMetric(row.fill_rate ?? row.fillRate),
-    effectiveCpm: optionalMetric(row.effective_cpm ?? row.ecpm ?? row.eCPM),
-    metadata: { source: "provider_reporting_api", raw },
-  };
+function datesBetween(sinceDate: string, untilDate: string) {
+  const dates: string[] = [];
+  const cursor = new Date(`${sinceDate}T00:00:00.000Z`);
+  const end = new Date(`${untilDate}T00:00:00.000Z`);
+  while (cursor <= end) {
+    dates.push(isoDate(cursor));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return dates;
 }
 
-function createHttpProviderAdapter(config: { provider: ProviderName; networkName: MiniAppNetworkName; envPrefix: string }): ProviderAdapter {
-  return {
-    provider: config.provider,
-    networkName: config.networkName,
-    async fetchReports({ sinceDate, untilDate }) {
-      const url = envValue(config.envPrefix, "REPORTING_URL") || envValue(config.envPrefix, "REPORTS_URL");
-      const token = envValue(config.envPrefix, "REPORTING_TOKEN") || envValue(config.envPrefix, "API_TOKEN") || envValue(config.envPrefix, "API_KEY");
-      if (!url || !token) {
-        return { status: "skipped", reason: "provider_api_not_configured", records: [] };
-      }
-
-      const endpoint = new URL(url);
-      endpoint.searchParams.set("since", sinceDate);
-      endpoint.searchParams.set("until", untilDate);
-      const response = await fetch(endpoint, {
+async function fetchJsonWithRetry(url: URL, token: string, provider: ProviderName) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
+    try {
+      const response = await fetch(url, {
         headers: {
           Accept: "application/json",
           Authorization: `Bearer ${token}`,
         },
         cache: "no-store",
+        signal: controller.signal,
       });
-      if (!response.ok) {
-        throw new Error(`${config.provider} reporting API returned ${response.status}`);
+      if (!response.ok) throw new Error(`${provider} reporting API returned ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 750));
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`${provider} reporting API failed`);
+}
+
+function createUnsupportedProviderAdapter(config: { provider: ProviderName; networkName: MiniAppNetworkName }): ProviderAdapter {
+  return {
+    provider: config.provider,
+    networkName: config.networkName,
+    support: PROVIDER_CAPABILITIES[config.provider],
+    async fetchReports() {
+      return {
+        status: "skipped",
+        reason: "no_verified_reporting_api",
+        records: [],
+        metadata: { support: PROVIDER_CAPABILITIES[config.provider] },
+      };
+    },
+  };
+}
+
+function createAdExiumProviderAdapter(): ProviderAdapter {
+  return {
+    provider: "AdExium",
+    networkName: "AdExium",
+    support: PROVIDER_CAPABILITIES.AdExium,
+    async fetchReports({ sinceDate, untilDate, configs }) {
+      const token = envValue("ADEXIUM", ["REPORTING_TOKEN", "API_TOKEN", "API_KEY"]);
+      if (!token) {
+        return { status: "skipped", reason: "missing_adexium_api_token", records: [], metadata: { required_env: ["ADEXIUM_REPORTING_TOKEN", "ADEXIUM_API_TOKEN", "ADEXIUM_API_KEY"] } };
       }
 
-      const payload = await response.json();
-      const records = extractRecords(payload)
-        .map((item) => normalizeProviderRecord(config.provider, item))
-        .filter((item): item is ProviderReportRecord => Boolean(item));
-      return { status: "success", records, metadata: { endpoint: endpoint.origin } };
+      const baseUrl = process.env.ADEXIUM_STATS_BASE_URL || "https://api.tg-ads.co/api/v1/widget/stats";
+      const records: ProviderReportRecord[] = [];
+      const enabledConfigs = configs.filter((config) => cleanId(config.network_placement_id));
+      for (const config of enabledConfigs) {
+        const widgetId = cleanId(config.network_placement_id);
+        for (const date of datesBetween(sinceDate, untilDate)) {
+          const endpoint = new URL(`${baseUrl.replace(/\/$/, "")}/${encodeURIComponent(widgetId)}/`);
+          endpoint.searchParams.set("startDate", date);
+          endpoint.searchParams.set("endDate", date);
+          endpoint.searchParams.set("viewBy", "country");
+          const payload = await fetchJsonWithRetry(endpoint, token, "AdExium");
+          if (!Array.isArray(payload)) continue;
+          let revenue = 0;
+          let impressions = 0;
+          let clicks = 0;
+          const countries: unknown[] = [];
+          for (const row of payload) {
+            if (!row || typeof row !== "object") continue;
+            const item = row as Record<string, unknown>;
+            revenue += optionalMetric(item.revenue) ?? 0;
+            impressions += wholeMetric(item.impressions) ?? 0;
+            clicks += wholeMetric(item.clicks) ?? 0;
+            countries.push(item);
+          }
+          records.push({
+            providerRecordId: `AdExium:${widgetId}:${date}`,
+            miniappId: Number(config.miniapp_id),
+            placementId: widgetId,
+            date,
+            publisherEarnings: revenue,
+            impressions,
+            clicks,
+            effectiveCpm: impressions > 0 ? cpm(revenue, impressions) : 0,
+            metadata: { source: "adexium_widget_stats_api", view_by: "country", countries },
+          });
+        }
+      }
+      return {
+        status: "success",
+        records,
+        metadata: {
+          endpoint: new URL(baseUrl).origin,
+          configured_widgets: enabledConfigs.length,
+          support: PROVIDER_CAPABILITIES.AdExium,
+        },
+      };
     },
   };
 }
 
 function createAdapters(): ProviderAdapter[] {
-  return REPORTING_PROVIDERS.map(createHttpProviderAdapter);
+  return PROVIDER_ORDER.map((config) => config.provider === "AdExium"
+    ? createAdExiumProviderAdapter()
+    : createUnsupportedProviderAdapter(config));
 }
 
 function aggregateProviderRecords(provider: string, records: ProviderReportRecord[]) {
@@ -254,7 +400,11 @@ function findNetworkConfig(record: ProviderReportRecord, configs: NetworkConfigR
 
 async function findOrCreateDailyStat(conn: PoolConnection, miniappId: number, networkName: MiniAppNetworkName, date: string) {
   const [existing] = await conn.query<DailyStatRow[]>(
-    "SELECT * FROM miniapp_daily_stats WHERE miniapp_id = ? AND network_name = ? AND date = ? FOR UPDATE",
+    `SELECT ds.*, m.user_id
+     FROM miniapp_daily_stats ds
+     JOIN miniapps m ON m.id = ds.miniapp_id
+     WHERE ds.miniapp_id = ? AND ds.network_name = ? AND ds.date = ?
+     FOR UPDATE`,
     [miniappId, networkName, date]
   );
   if (existing[0]) return existing[0];
@@ -267,7 +417,11 @@ async function findOrCreateDailyStat(conn: PoolConnection, miniappId: number, ne
     [miniappId, networkName, date, JSON.stringify({ source: "external_reconciliation_placeholder" })]
   );
   const [created] = await conn.query<DailyStatRow[]>(
-    "SELECT * FROM miniapp_daily_stats WHERE miniapp_id = ? AND network_name = ? AND date = ? FOR UPDATE",
+    `SELECT ds.*, m.user_id
+     FROM miniapp_daily_stats ds
+     JOIN miniapps m ON m.id = ds.miniapp_id
+     WHERE ds.miniapp_id = ? AND ds.network_name = ? AND ds.date = ?
+     FOR UPDATE`,
     [miniappId, networkName, date]
   );
   if (!created[0]) throw new Error("Unable to create daily stat for reconciliation");
@@ -275,11 +429,38 @@ async function findOrCreateDailyStat(conn: PoolConnection, miniappId: number, ne
 }
 
 async function hasSettlement(conn: PoolConnection, dailyStatId: number) {
-  const [[row]]: any = await conn.query(
-    "SELECT COUNT(*) as count FROM miniapp_earnings_settlements WHERE daily_stat_id = ?",
+  const [rows] = await conn.query<SettlementRow[]>(
+    "SELECT id, user_id, status, impressions, publisher_revenue FROM miniapp_earnings_settlements WHERE daily_stat_id = ? FOR UPDATE",
     [dailyStatId]
   );
-  return metricNumber(row?.count) > 0;
+  return rows[0] || null;
+}
+
+async function applySettlementAdjustment(
+  conn: PoolConnection,
+  settlement: SettlementRow,
+  impressions: number,
+  reconciledPublisherRevenue: number
+) {
+  const previousSettlementRevenue = metricNumber(settlement.publisher_revenue);
+  const delta = reconciledPublisherRevenue - previousSettlementRevenue;
+  const nextImpressions = Math.max(0, Math.floor(impressions));
+  if (Math.abs(delta) <= 0.00000001 && nextImpressions === Math.floor(metricNumber(settlement.impressions))) {
+    return { adjusted: false, delta: 0 };
+  }
+
+  const balanceColumn = settlement.status === "locked" ? "balance_locked" : "balance_available";
+  await conn.query(
+    `UPDATE users SET ${balanceColumn} = ${balanceColumn} + ? WHERE id = ?`,
+    [delta, settlement.user_id]
+  );
+  await conn.query(
+    `UPDATE miniapp_earnings_settlements
+     SET publisher_revenue = ?, impressions = ?, updated_at = NOW()
+     WHERE id = ?`,
+    [reconciledPublisherRevenue, nextImpressions, settlement.id]
+  );
+  return { adjusted: true, delta };
 }
 
 async function reconcileRecord(conn: PoolConnection, adapter: ProviderAdapter, record: ProviderReportRecord, configs: NetworkConfigRow[], feePercent: number) {
@@ -289,7 +470,7 @@ async function reconcileRecord(conn: PoolConnection, adapter: ProviderAdapter, r
   if (!config) return { updated: false, reason: "network_config_not_found" };
 
   const stat = await findOrCreateDailyStat(conn, Number(config.miniapp_id), adapter.networkName, record.date);
-  const settled = await hasSettlement(conn, Number(stat.id));
+  const settlement = await hasSettlement(conn, Number(stat.id));
   const previousPublisherRevenue = metricNumber(stat.publisher_revenue);
   const previousGrossRevenue = metricNumber(stat.gross_revenue);
   const reconciledPublisherRevenue = record.publisherEarnings;
@@ -315,14 +496,56 @@ async function reconcileRecord(conn: PoolConnection, adapter: ProviderAdapter, r
     raw: record.metadata || null,
   };
 
-  if (settled) {
+  if (settlement) {
+    const adjustment = await applySettlementAdjustment(conn, settlement, impressions, reconciledPublisherRevenue);
+    await conn.query(
+      `UPDATE miniapp_daily_stats
+       SET impressions = ?,
+           provider_reported_impressions = ?,
+           provider_reported_clicks = ?,
+           provider_reported_completed_views = ?,
+           provider_reported_fill_rate = ?,
+           provider_reported_effective_cpm = ?,
+           gross_revenue = ?,
+           ads_galaxy_fee = ?,
+           publisher_revenue = ?,
+           gross_cpm = CASE WHEN ? > 0 THEN (? / ?) * 1000 ELSE 0 END,
+           net_cpm = ?,
+           revenue_validation_status = 'passed',
+           revenue_validation_reason = NULL,
+           revenue_validation_metadata = ?,
+           revenue_validated_at = NOW(),
+           revenue_review_status = 'not_required',
+           reconciliation_status = 'reconciled',
+           reconciliation_metadata = ?,
+           reconciled_at = NOW()
+       WHERE id = ?`,
+      [
+        impressions,
+        record.impressions ?? null,
+        record.clicks ?? null,
+        record.completedViews ?? null,
+        record.fillRate ?? null,
+        effectivePublisherCpm,
+        reconciledGrossRevenue,
+        adsGalaxyFee,
+        reconciledPublisherRevenue,
+        impressions,
+        reconciledGrossRevenue,
+        impressions,
+        effectivePublisherCpm,
+        JSON.stringify({ source: "external_provider_reporting", provider: adapter.provider }),
+        JSON.stringify({ ...metadata, settlement_adjusted: adjustment.adjusted, settlement_delta: adjustment.delta }),
+        stat.id,
+      ]
+    );
     await conn.query(
       `INSERT INTO miniapp_external_revenue_reconciliations
         (provider, provider_record_id, miniapp_id, daily_stat_id, network_name, date,
          previous_gross_revenue, previous_publisher_revenue, reconciled_gross_revenue, reconciled_publisher_revenue,
          gross_revenue_delta, publisher_revenue_delta, impressions, clicks, completed_views, fill_rate, effective_cpm,
          settlement_status, action, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'settled', 'blocked_settled', ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
          previous_gross_revenue = VALUES(previous_gross_revenue),
          previous_publisher_revenue = VALUES(previous_publisher_revenue),
@@ -356,10 +579,12 @@ async function reconcileRecord(conn: PoolConnection, adapter: ProviderAdapter, r
         record.completedViews ?? null,
         record.fillRate ?? null,
         effectivePublisherCpm,
-        JSON.stringify(metadata),
+        settlement.status,
+        adjustment.adjusted ? "adjusted_settlement" : "settled_no_change",
+        JSON.stringify({ ...metadata, settlement_id: settlement.id, settlement_delta: adjustment.delta }),
       ]
     );
-    return { updated: false, reason: "settled_row_not_adjusted" };
+    return { updated: adjustment.adjusted, reason: adjustment.adjusted ? "adjusted_settlement" : "settled_no_change" };
   }
 
   await conn.query(
@@ -476,7 +701,8 @@ async function reconcileProvider(adapter: ProviderAdapter, sinceDate: string, un
   let updated = 0;
   let skipped = 0;
   try {
-    const result = await adapter.fetchReports({ sinceDate, untilDate });
+    const configs = await enabledNetworkConfigs(pool, adapter.networkName);
+    const result = await adapter.fetchReports({ sinceDate, untilDate, configs });
     fetched = result.records.length;
     if (result.status === "skipped") {
       const summary: RunSummary = {
@@ -493,7 +719,6 @@ async function reconcileProvider(adapter: ProviderAdapter, sinceDate: string, un
       return summary;
     }
 
-    const configs = await enabledNetworkConfigs(pool, adapter.networkName);
     const feePercent = await getMiniAppFeePercent();
     for (const record of aggregateProviderRecords(adapter.provider, result.records)) {
       const conn = await pool.getConnection();
@@ -542,7 +767,7 @@ async function reconcileProvider(adapter: ProviderAdapter, sinceDate: string, un
 }
 
 export async function runExternalNetworkRevenueReconciliation(input: { sinceDate?: string; untilDate?: string } = {}) {
-  const sinceDate = normalizeDate(input.sinceDate) || daysAgo(Math.max(1, Number(process.env.EXTERNAL_REVENUE_RECONCILIATION_LOOKBACK_DAYS || 3)));
+  const sinceDate = normalizeDate(input.sinceDate) || daysAgo(Math.max(1, Number(process.env.EXTERNAL_REVENUE_RECONCILIATION_LOOKBACK_DAYS || 1)));
   const untilDate = normalizeDate(input.untilDate) || isoDate(new Date());
   const providers = createAdapters();
   const results: RunSummary[] = [];
@@ -556,6 +781,7 @@ export async function runExternalNetworkRevenueReconciliation(input: { sinceDate
     providers: results,
     records_updated: results.reduce((sum, result) => sum + result.records_updated, 0),
     records_skipped: results.reduce((sum, result) => sum + result.records_skipped, 0),
+    provider_capabilities: PROVIDER_CAPABILITIES,
   };
 }
 
@@ -574,7 +800,7 @@ export async function getExternalNetworkReconciliationReport(limit = 20) {
        WHERE status = 'success'
        GROUP BY provider
      ) success ON success.provider = r.provider
-     ORDER BY FIELD(r.provider, 'AdsGram', 'Monetag', 'AdExium', 'RichAds'), r.provider`
+     ORDER BY FIELD(r.provider, 'AdsGram', 'Monetag', 'AdExium', 'RichAds', 'GigaPub'), r.provider`
   );
   const [[latest]]: any = await pool.query(
     "SELECT * FROM miniapp_external_reconciliation_runs ORDER BY started_at DESC LIMIT 1"
@@ -600,6 +826,7 @@ export async function getExternalNetworkReconciliationReport(limit = 20) {
       records_updated: metricNumber(row.records_updated),
       records_skipped: metricNumber(row.records_skipped),
       errors: row.error_message || null,
+      capability: PROVIDER_CAPABILITIES[row.provider as ProviderName] || null,
     })),
     recent_adjustments: historyRows.map((row: any) => ({
       ...row,
@@ -607,4 +834,8 @@ export async function getExternalNetworkReconciliationReport(limit = 20) {
       effective_cpm: metricNumber(row.effective_cpm),
     })),
   };
+}
+
+export function getExternalNetworkProviderCapabilities() {
+  return PROVIDER_CAPABILITIES;
 }

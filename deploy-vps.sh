@@ -31,15 +31,17 @@ require_env() {
   fi
 }
 
-warn_env_pair() {
+warn_env_any() {
   local name="$1"
-  local url_key="$2"
-  local token_key="$3"
-  local url token
-  url="$(env_value "$url_key")"
-  token="$(env_value "$token_key")"
-  if [ -z "$url" ] || [ -z "$token" ]; then
-    echo "  WARNING: $name reporting sync is not configured ($url_key/$token_key). Provider reconciliation will skip this provider."
+  shift
+  local key value found
+  found=0
+  for key in "$@"; do
+    value="$(env_value "$key")"
+    if [ -n "$value" ]; then found=1; fi
+  done
+  if [ "$found" -eq 0 ]; then
+    echo "  WARNING: $name is not configured ($*). Verified reconciliation will skip this provider."
   fi
 }
 
@@ -61,10 +63,12 @@ for KEY in \
 do
   require_env "$KEY"
 done
-warn_env_pair "AdsGram" "ADSGRAM_REPORTING_URL" "ADSGRAM_REPORTING_TOKEN"
-warn_env_pair "Monetag" "MONETAG_REPORTING_URL" "MONETAG_REPORTING_TOKEN"
-warn_env_pair "AdExium" "ADEXIUM_REPORTING_URL" "ADEXIUM_REPORTING_TOKEN"
-warn_env_pair "RichAds" "RICHADS_REPORTING_URL" "RICHADS_REPORTING_TOKEN"
+echo "    Provider reporting verification:"
+echo "      AdsGram: SDK/blockId verified; no public reporting API wired."
+echo "      Monetag: SDK/postbacks verified; no public pull reporting API wired."
+echo "      RichAds: publisher/widget JS tag verified; no public reporting API wired."
+echo "      GigaPub: SDK project ID support only; no verified reporting API wired."
+warn_env_any "AdExium reporting API token" "ADEXIUM_API_KEY" "ADEXIUM_API_TOKEN" "ADEXIUM_REPORTING_TOKEN"
 echo "    Required environment variables are present."
 
 echo "==> [2/5] Applying database migrations..."
@@ -174,7 +178,7 @@ else
     $0 == begin { managed=1; next }
     $0 == end { managed=0; next }
     !managed
-  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|referral-sprint)([[:space:]?]|$)' || true)
+  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|referral-sprint)([[:space:]?]|$)' || true)
 
   {
     printf '%s\n' "$CLEAN_CRONTAB"
@@ -199,7 +203,8 @@ else
     echo "42 * * * * $CRON_BASE/miniapp-revenue-optimizer >/dev/null 2>&1"
     echo "45 3 * * * $CRON_BASE/system-logs-cleanup >/dev/null 2>&1"
     echo "*/15 * * * * $CRON_BASE/developer-webhooks >/dev/null 2>&1"
-    echo "*/5 * * * * $CRON_BASE/delete-expired-posts >/dev/null 2>&1"
+    echo "*/30 * * * * $CRON_BASE/cleanup-expired-posts >/dev/null 2>&1"
+    echo "*/30 * * * * $CRON_BASE/cleanup-expired-channel-views >/dev/null 2>&1"
     echo "2 0 * * * $CRON_BASE/referral-sprint >/dev/null 2>&1"
     echo "$CRON_END"
   } | sed '/^[[:space:]]*$/d' | crontab -
