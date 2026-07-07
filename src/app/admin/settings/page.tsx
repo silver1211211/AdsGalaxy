@@ -100,7 +100,7 @@ export default function AdminSettingsPage() {
   
   // Modal states
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editingSetting, setEditingSetting] = useState<any>(null);
+  const [editingSetting, setEditingSetting] = useState<SettingRow | null>(null);
   const [editValue, setEditValue] = useState("");
   const [editingCpmGroup, setEditingCpmGroup] = useState<CpmGroup | null>(null);
   const [cpmGroupValues, setCpmGroupValues] = useState({ min: "", recommended: "", max: "" });
@@ -159,7 +159,7 @@ export default function AdminSettingsPage() {
     fetchSelfPromotion();
   }, []);
 
-  const openEditModal = (setting: any) => {
+  const openEditModal = (setting: SettingRow) => {
     setEditingSetting(setting);
     setEditValue(setting.value);
     setIsModalOpen(true);

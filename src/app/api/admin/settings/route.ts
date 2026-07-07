@@ -32,16 +32,16 @@ const HIDDEN_CPM_KEYS = new Set([
 ]);
 
 const CPM_GROUPS = [
-  ["min_cpm_views", "recommended_cpm_views", "max_cpm_views"],
-  ["min_cpm_clicks", "recommended_cpm_clicks", "max_cpm_clicks"],
-  ["min_cpm_broadcast", "recommended_cpm_broadcast", "max_cpm_broadcast"],
-  ["miniapp_internal_min_cpm", "miniapp_internal_recommended_cpm", "miniapp_internal_max_cpm"],
+  ["Channel views", "min_cpm_views", "recommended_cpm_views", "max_cpm_views"],
+  ["Channel clicks", "min_cpm_clicks", "recommended_cpm_clicks", "max_cpm_clicks"],
+  ["Bot broadcast", "min_cpm_broadcast", "recommended_cpm_broadcast", "max_cpm_broadcast"],
+  ["Mini App", "miniapp_internal_min_cpm", "miniapp_internal_recommended_cpm", "miniapp_internal_max_cpm"],
 ] as const;
 
 function validateCpmGroup(label: string, minValue: unknown, recommendedValue: unknown, maxValue: unknown) {
-  const min = Number(minValue);
-  const recommended = Number(recommendedValue);
-  const max = Number(maxValue);
+  const min = Number(minValue ?? 0);
+  const recommended = Number(recommendedValue ?? 0);
+  const max = Number(maxValue ?? 0);
   if (![min, recommended, max].every((value) => Number.isFinite(value) && value >= 0)) {
     throw new Error(`${label} CPM values must be non-negative numbers`);
   }
@@ -101,10 +101,11 @@ export async function PUT(request: Request) {
           values.set(settingKey, String(settingValue));
         }
         try {
-          validateCpmGroup("Channel views", values.get("min_cpm_views"), values.get("recommended_cpm_views"), values.get("max_cpm_views"));
-          validateCpmGroup("Channel clicks", values.get("min_cpm_clicks"), values.get("recommended_cpm_clicks"), values.get("max_cpm_clicks"));
-          validateCpmGroup("Bot broadcast", values.get("min_cpm_broadcast"), values.get("recommended_cpm_broadcast"), values.get("max_cpm_broadcast"));
-          validateCpmGroup("Mini App", values.get("miniapp_internal_min_cpm"), values.get("miniapp_internal_recommended_cpm"), values.get("miniapp_internal_max_cpm"));
+          for (const [label, minKey, recommendedKey, maxKey] of CPM_GROUPS) {
+            if (suppliedKeys.has(minKey) || suppliedKeys.has(recommendedKey) || suppliedKeys.has(maxKey)) {
+              validateCpmGroup(label, values.get(minKey), values.get(recommendedKey), values.get(maxKey));
+            }
+          }
         } catch (error) {
           return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid CPM settings" }, { status: 400 });
         }
@@ -200,9 +201,9 @@ export async function PUT(request: Request) {
       const values = new Map(rows.map((row) => [row.key, Number(row.value || 0)]));
       values.set(key, cpm);
       try {
-        for (const [minKey, recommendedKey, maxKey] of CPM_GROUPS) {
+        for (const [label, minKey, recommendedKey, maxKey] of CPM_GROUPS) {
           if (key === minKey || key === recommendedKey || key === maxKey) {
-            validateCpmGroup("CPM", values.get(minKey), values.get(recommendedKey), values.get(maxKey));
+            validateCpmGroup(label, values.get(minKey), values.get(recommendedKey), values.get(maxKey));
           }
         }
       } catch (error) {
