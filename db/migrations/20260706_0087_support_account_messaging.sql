@@ -101,22 +101,22 @@ ON DUPLICATE KEY UPDATE `key` = VALUES(`key`);
 
 INSERT INTO support_message_templates (message_type, version, subject, body, is_active) VALUES
   ('publisher_welcome', 1, 'Publisher welcome',
-'Hi {{first_name}}, welcome to AdsGalaxy 👋
+'Hi {{first_name}}, welcome to AdsGalaxy.
 I noticed you just created your publisher account.
 You can monetize your Telegram channels, bots, and Mini Apps with AdsGalaxy. If you want to test it first, you can connect one or two of your best channels and watch how the earnings perform before adding more.
 Quick guides:
- • Monetize Channel: {{channel_docs_link}}
- • Monetize Bot: {{bot_docs_link}}
- • Monetize Mini App: {{miniapp_docs_link}}
+- Monetize Channel: {{channel_docs_link}}
+- Monetize Bot: {{bot_docs_link}}
+- Monetize Mini App: {{miniapp_docs_link}}
 Reply here if you need any help.', 1),
   ('advertiser_onboarding', 1, 'Advertiser onboarding',
-'Hi {{first_name}}, welcome to AdsGalaxy Advertiser 👋
+'Hi {{first_name}}, welcome to AdsGalaxy Advertiser.
 I noticed you activated advertiser mode.
 You can run ads inside Telegram Mini Apps, channels, and bots. The minimum campaign budget starts from $10, so you can test with a small budget first and scale when you see results.
 Quick guides:
- • Run Mini App Ads: {{miniapp_ads_docs_link}}
- • Run Channel Ads: {{channel_ads_docs_link}}
- • Run Bot Ads: {{bot_ads_docs_link}}
+- Run Mini App Ads: {{miniapp_ads_docs_link}}
+- Run Channel Ads: {{channel_ads_docs_link}}
+- Run Bot Ads: {{bot_ads_docs_link}}
 Reply here if you need any help setting up your first campaign.', 1)
 ON DUPLICATE KEY UPDATE
   subject = VALUES(subject),

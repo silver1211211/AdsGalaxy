@@ -96,6 +96,11 @@ export default function TrafficQualityDetailPage() {
   const trend: any[] = data?.trend || [];
   const trendMaxScore = maxMetric(trend, "quality_score");
   const trendMaxImpressions = maxMetric(trend, "impressions");
+  const trafficLabel = params.type === "channel"
+    ? "Views + Clicks"
+    : params.type === "miniapp"
+      ? "Displayed Ads"
+      : "Broadcast Deliveries";
 
   return (
     <AdminLayout>
@@ -125,7 +130,7 @@ export default function TrafficQualityDetailPage() {
           <>
             <div className="grid gap-3 md:grid-cols-4">
               <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase text-slate-400"><BarChart3 size={14} /> Impressions</div>
+                <div className="flex items-center gap-2 text-xs font-bold uppercase text-slate-400"><BarChart3 size={14} /> {trafficLabel}</div>
                 <div className="mt-2 text-2xl font-black text-slate-900">{numberValue(metrics.impressions)}</div>
               </div>
               <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">

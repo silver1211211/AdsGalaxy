@@ -9,17 +9,49 @@ const MINIAPP_INTERNAL_SPLIT_KEYS = new Set([
   "miniapp_internal_reserve_percent",
 ]);
 const CHANNEL_SETTLEMENT_PERCENT_KEYS = new Set(["platform_margin_percent", "safety_reserve_percent"]);
-const GLOBAL_CPM_KEYS = new Set(["global_min_cpm", "global_recommended_cpm", "global_max_cpm"]);
 const MIN_ADS_GALAXY_SHARE_PERCENT = 15;
 const MIN_RESERVE_PERCENT = 10;
-const CPM_ALIAS_KEYS = new Set([
+const CPM_SETTING_KEYS = new Set([
+  "min_cpm_views",
+  "recommended_cpm_views",
+  "max_cpm_views",
+  "min_cpm_clicks",
+  "recommended_cpm_clicks",
+  "max_cpm_clicks",
+  "min_cpm_broadcast",
+  "recommended_cpm_broadcast",
+  "max_cpm_broadcast",
   "miniapp_internal_min_cpm",
   "miniapp_internal_recommended_cpm",
   "miniapp_internal_max_cpm",
-  "recommended_cpm_views",
-  "recommended_cpm_clicks",
-  "recommended_cpm_broadcast",
 ]);
+const HIDDEN_CPM_KEYS = new Set([
+  "global_min_cpm",
+  "global_recommended_cpm",
+  "global_max_cpm",
+]);
+
+const CPM_GROUPS = [
+  ["min_cpm_views", "recommended_cpm_views", "max_cpm_views"],
+  ["min_cpm_clicks", "recommended_cpm_clicks", "max_cpm_clicks"],
+  ["min_cpm_broadcast", "recommended_cpm_broadcast", "max_cpm_broadcast"],
+  ["miniapp_internal_min_cpm", "miniapp_internal_recommended_cpm", "miniapp_internal_max_cpm"],
+] as const;
+
+function validateCpmGroup(label: string, minValue: unknown, recommendedValue: unknown, maxValue: unknown) {
+  const min = Number(minValue);
+  const recommended = Number(recommendedValue);
+  const max = Number(maxValue);
+  if (![min, recommended, max].every((value) => Number.isFinite(value) && value >= 0)) {
+    throw new Error(`${label} CPM values must be non-negative numbers`);
+  }
+  if (max > 0 && min > max) {
+    throw new Error(`${label} Minimum CPM cannot exceed Maximum CPM`);
+  }
+  if (recommended < min || (max > 0 && recommended > max)) {
+    throw new Error(`${label} Recommended CPM must stay between Minimum CPM and Maximum CPM`);
+  }
+}
 
 export async function GET() {
   if (!(await checkAdminAuth())) {
@@ -39,7 +71,7 @@ export async function GET() {
         "last_system_logs_cleanup_run"
       ]
     );
-    const visibleRows = rows.filter((row) => !CPM_ALIAS_KEYS.has(row.key));
+    const visibleRows = rows.filter((row) => !HIDDEN_CPM_KEYS.has(row.key));
     return NextResponse.json({ settings: visibleRows });
   } catch (error) {
     console.error("Admin Settings GET Error:", error);
@@ -59,8 +91,46 @@ export async function PUT(request: Request) {
 
     if (atomicSettings.length > 0) {
       const suppliedKeys = new Set(atomicSettings.map(([settingKey]) => settingKey));
+      if (atomicSettings.every(([settingKey]) => CPM_SETTING_KEYS.has(settingKey))) {
+        const [rows] = await pool.query<Array<RowDataPacket & { key: string; value: string }>>(
+          "SELECT `key`, value FROM settings WHERE `key` IN (?)",
+          [[...CPM_SETTING_KEYS]]
+        );
+        const values = new Map(rows.map((row) => [row.key, row.value]));
+        for (const [settingKey, settingValue] of atomicSettings) {
+          values.set(settingKey, String(settingValue));
+        }
+        try {
+          validateCpmGroup("Channel views", values.get("min_cpm_views"), values.get("recommended_cpm_views"), values.get("max_cpm_views"));
+          validateCpmGroup("Channel clicks", values.get("min_cpm_clicks"), values.get("recommended_cpm_clicks"), values.get("max_cpm_clicks"));
+          validateCpmGroup("Bot broadcast", values.get("min_cpm_broadcast"), values.get("recommended_cpm_broadcast"), values.get("max_cpm_broadcast"));
+          validateCpmGroup("Mini App", values.get("miniapp_internal_min_cpm"), values.get("miniapp_internal_recommended_cpm"), values.get("miniapp_internal_max_cpm"));
+        } catch (error) {
+          return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid CPM settings" }, { status: 400 });
+        }
+
+        const conn = await pool.getConnection();
+        try {
+          await conn.beginTransaction();
+          for (const [settingKey, settingValue] of atomicSettings) {
+            const value = Number(settingValue);
+            await conn.query(
+              "INSERT INTO settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)",
+              [settingKey, value.toString()]
+            );
+          }
+          await conn.commit();
+        } catch (error) {
+          await conn.rollback().catch(() => undefined);
+          throw error;
+        } finally {
+          conn.release();
+        }
+        return NextResponse.json({ success: true });
+      }
+
       if (atomicSettings.some(([settingKey]) => !MINIAPP_INTERNAL_SPLIT_KEYS.has(settingKey))) {
-        return NextResponse.json({ error: "Atomic settings updates are limited to Mini App revenue split settings" }, { status: 400 });
+        return NextResponse.json({ error: "Atomic settings updates are limited to CPM groups or Mini App revenue split settings" }, { status: 400 });
       }
       if (suppliedKeys.size !== MINIAPP_INTERNAL_SPLIT_KEYS.size
         || [...MINIAPP_INTERNAL_SPLIT_KEYS].some((settingKey) => !suppliedKeys.has(settingKey))) {
@@ -118,24 +188,25 @@ export async function PUT(request: Request) {
       }
     }
 
-    if (GLOBAL_CPM_KEYS.has(key)) {
+    if (CPM_SETTING_KEYS.has(key)) {
       const cpm = Number(value);
       if (!Number.isFinite(cpm) || cpm < 0) {
         return NextResponse.json({ error: "CPM setting must be a non-negative number" }, { status: 400 });
       }
       const [rows] = await pool.query<Array<RowDataPacket & { key: string; value: string }>>(
-        "SELECT `key`, value FROM settings WHERE `key` IN ('global_min_cpm', 'global_recommended_cpm', 'global_max_cpm')"
+        "SELECT `key`, value FROM settings WHERE `key` IN (?)",
+        [[...CPM_SETTING_KEYS]]
       );
       const values = new Map(rows.map((row) => [row.key, Number(row.value || 0)]));
       values.set(key, cpm);
-      const min = Number(values.get("global_min_cpm") || 0);
-      const recommended = Number(values.get("global_recommended_cpm") || 0);
-      const max = Number(values.get("global_max_cpm") || 0);
-      if (max > 0 && min > max) {
-        return NextResponse.json({ error: "Minimum CPM cannot exceed Maximum CPM" }, { status: 400 });
-      }
-      if (recommended < min || (max > 0 && recommended > max)) {
-        return NextResponse.json({ error: "Recommended CPM must stay between Minimum CPM and Maximum CPM" }, { status: 400 });
+      try {
+        for (const [minKey, recommendedKey, maxKey] of CPM_GROUPS) {
+          if (key === minKey || key === recommendedKey || key === maxKey) {
+            validateCpmGroup("CPM", values.get(minKey), values.get(recommendedKey), values.get(maxKey));
+          }
+        }
+      } catch (error) {
+        return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid CPM setting" }, { status: 400 });
       }
     }
 
@@ -166,31 +237,15 @@ export async function PUT(request: Request) {
       }
     }
 
-    await pool.query(
-      "UPDATE settings SET value = ? WHERE `key` = ?",
-      [value.toString(), key]
-    );
-
-    if (key === "global_min_cpm") {
+    if (CPM_SETTING_KEYS.has(key)) {
       await pool.query(
-        "INSERT INTO settings (`key`, value) VALUES ('miniapp_internal_min_cpm', ?) ON DUPLICATE KEY UPDATE value = VALUES(value)",
-        [value.toString()]
+        "INSERT INTO settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)",
+        [key, value.toString()]
       );
-    } else if (key === "global_max_cpm") {
+    } else {
       await pool.query(
-        "INSERT INTO settings (`key`, value) VALUES ('miniapp_internal_max_cpm', ?) ON DUPLICATE KEY UPDATE value = VALUES(value)",
-        [value.toString()]
-      );
-    } else if (key === "global_recommended_cpm") {
-      await pool.query(
-        `INSERT INTO settings (\`key\`, value) VALUES
-          ('miniapp_internal_recommended_cpm', ?),
-          ('recommended_cpm_views', ?),
-          ('recommended_cpm_clicks', ?),
-          ('recommended_cpm_broadcast', ?),
-          ('global_recommended_cpm_manual_override', '1')
-         ON DUPLICATE KEY UPDATE value = VALUES(value)`,
-        [value.toString(), value.toString(), value.toString(), value.toString()]
+        "UPDATE settings SET value = ? WHERE `key` = ?",
+        [value.toString(), key]
       );
     }
 

@@ -16,7 +16,7 @@ export async function GET(
     const user = await getAuthenticatedUser(initData);
 
     const [campaignRows]: any = await pool.query(
-      `SELECT id, name, parse_mode, message_text, image_url, link, postback_url, button_text,
+      `SELECT id, name, campaign_title, parse_mode, message_text, image_url, link, postback_url, button_text,
          type, budget, cpm, category, continents, countries, languages, vpn_policy,
          device_policy, os_policy, start_at, end_at, daily_budget_limit,
          frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,

@@ -94,6 +94,21 @@ type PendingConfirm = {
 
 type PendingEmergency = "fill_empty_slots" | "replace_everything" | null;
 
+type CampaignActionResult = {
+  status?: string;
+  warning?: string;
+  deletion?: {
+    deleted?: number;
+    failed?: number;
+    details?: Array<{
+      id: number;
+      status: string;
+      reason?: string;
+      telegram_response?: string;
+    }>;
+  } | null;
+} | null;
+
 export default function AdminCampaignDetailsPage() {
   const params = useParams<{ id: string }>();
   const [loading, setLoading] = useState(true);
@@ -103,6 +118,7 @@ export default function AdminCampaignDetailsPage() {
   const [data, setData] = useState<CampaignDetailsData | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm>(null);
   const [pendingEmergency, setPendingEmergency] = useState<PendingEmergency>(null);
+  const [actionResult, setActionResult] = useState<CampaignActionResult>(null);
   const [typedConfirmation, setTypedConfirmation] = useState("");
 
   const fetchDetails = async () => {
@@ -133,6 +149,7 @@ export default function AdminCampaignDetailsPage() {
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || "Action failed");
+      setActionResult(body as CampaignActionResult);
       await fetchDetails();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Action failed");
@@ -202,6 +219,29 @@ export default function AdminCampaignDetailsPage() {
   return (
     <AdminLayout>
       <Modal isOpen={!!error} onClose={() => setError("")} type="error" title="Error">{error}</Modal>
+      <Modal
+        isOpen={!!actionResult}
+        onClose={() => setActionResult(null)}
+        type={actionResult?.warning ? "warning" : "success"}
+        title={actionResult?.warning ? "Campaign Updated With Cleanup Details" : "Campaign Updated"}
+      >
+        {actionResult && (
+          <div className="space-y-2">
+            <p>Status: {formatValue(actionResult.status)}</p>
+            {actionResult.warning && <p>{actionResult.warning}</p>}
+            {actionResult.deletion && (
+              <p>
+                Deleted {actionResult.deletion.deleted || 0} post(s); {actionResult.deletion.failed || 0} cleanup failure(s).
+              </p>
+            )}
+            {(actionResult.deletion?.details || []).filter((item) => item.status !== "deleted").slice(0, 8).map((item) => (
+              <p key={item.id} className="break-words">
+                Post #{item.id}: {item.reason || item.telegram_response || item.status}
+              </p>
+            ))}
+          </div>
+        )}
+      </Modal>
       <ConfirmationModal
         isOpen={!!pendingConfirm}
         onClose={() => setPendingConfirm(null)}

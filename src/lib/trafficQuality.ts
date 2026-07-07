@@ -123,17 +123,142 @@ function normalizeBreakdown(rows: Array<Record<string, unknown>>, keyField: stri
   return result;
 }
 
+async function getMiniAppDisplayedTraffic(db: PoolConnection | typeof pool, entityId: number, days = 7) {
+  const [[confirmed]]: any = await db.query(`
+    SELECT COUNT(*) as impressions, COUNT(DISTINCT telegram_user_id) as unique_users
+    FROM miniapp_mediation_requests
+    WHERE miniapp_id = ?
+      AND impression_confirmed = 1
+      AND impression_confirmed_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+  `, [entityId, days]);
+  const confirmedImpressions = toNumber(confirmed?.impressions);
+  if (confirmedImpressions > 0) {
+    return {
+      source: "confirmed_mediation_impressions",
+      impressions: confirmedImpressions,
+      uniqueUsers: toNumber(confirmed?.unique_users),
+    };
+  }
+
+  const [[internal]]: any = await db.query(`
+    SELECT COUNT(*) as impressions, COUNT(DISTINCT telegram_user_id) as unique_users
+    FROM miniapp_internal_ad_impressions
+    WHERE miniapp_id = ?
+      AND created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+  `, [entityId, days]);
+  return {
+    source: "internal_rewarded_impressions",
+    impressions: toNumber(internal?.impressions),
+    uniqueUsers: toNumber(internal?.unique_users),
+  };
+}
+
+async function getMiniAppTopDisplayedUser(db: PoolConnection | typeof pool, entityId: number, source: string, days = 7) {
+  if (source === "confirmed_mediation_impressions") {
+    const [[topUser]]: any = await db.query(`
+      SELECT COUNT(*) as impressions
+      FROM miniapp_mediation_requests
+      WHERE miniapp_id = ?
+        AND impression_confirmed = 1
+        AND impression_confirmed_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+      GROUP BY telegram_user_id
+      ORDER BY impressions DESC
+      LIMIT 1
+    `, [entityId, days]);
+    return toNumber(topUser?.impressions);
+  }
+
+  const [[topUser]]: any = await db.query(`
+    SELECT COUNT(*) as impressions
+    FROM miniapp_internal_ad_impressions
+    WHERE miniapp_id = ?
+      AND created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+    GROUP BY telegram_user_id
+    ORDER BY impressions DESC
+    LIMIT 1
+  `, [entityId, days]);
+  return toNumber(topUser?.impressions);
+}
+
+async function getMiniAppCountryBreakdown(db: PoolConnection | typeof pool, entityId: number, source: string, days = 7) {
+  if (source === "confirmed_mediation_impressions") {
+    const [countries]: any = await db.query(`
+      SELECT COALESCE(country, 'unknown') as country, COUNT(*) as impressions
+      FROM miniapp_mediation_requests
+      WHERE miniapp_id = ?
+        AND impression_confirmed = 1
+        AND impression_confirmed_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+      GROUP BY COALESCE(country, 'unknown')
+      ORDER BY impressions DESC
+      LIMIT 10
+    `, [entityId, days]);
+    return countries;
+  }
+
+  const [countries]: any = await db.query(`
+    SELECT COALESCE(country, 'unknown') as country, COUNT(*) as impressions
+    FROM miniapp_internal_ad_impressions
+    WHERE miniapp_id = ?
+      AND created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+    GROUP BY COALESCE(country, 'unknown')
+    ORDER BY impressions DESC
+    LIMIT 10
+  `, [entityId, days]);
+  return countries;
+}
+
+async function getChannelDeliveredTraffic(db: PoolConnection | typeof pool, entityId: number, days = 7) {
+  const [[summary]]: any = await db.query(`
+    SELECT
+      COALESCE(SUM(CASE WHEN c.type = 'views' THEN cp.views ELSE 0 END), 0) as views,
+      COALESCE(COUNT(DISTINCT CASE WHEN c.type = 'views' THEN cp.id END), 0) as view_posts,
+      COALESCE(COUNT(DISTINCT CASE WHEN c.type = 'clicks' THEN cc.id END), 0) as clicks,
+      COALESCE(COUNT(DISTINCT CASE WHEN c.type = 'clicks' THEN cp.id END), 0) as click_posts,
+      COALESCE(SUM(CASE WHEN cva.status = 'invalid' THEN 1 ELSE 0 END), 0) as invalid_audits,
+      COUNT(DISTINCT cva.id) as audits
+    FROM campaign_posts cp
+    JOIN campaigns c ON c.id = cp.campaign_id
+    LEFT JOIN campaign_clicks cc ON cc.post_id = cp.id AND cc.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+    LEFT JOIN campaign_views_audit cva ON cva.post_id = cp.id
+    WHERE cp.channel_id = ?
+      AND cp.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+      AND c.type IN ('views', 'clicks')
+  `, [days, entityId, days]);
+
+  const views = toNumber(summary?.views);
+  const clicks = toNumber(summary?.clicks);
+  return {
+    views,
+    clicks,
+    impressions: views + clicks,
+    posts: toNumber(summary?.view_posts) + toNumber(summary?.click_posts),
+    invalidRatio: toNumber(summary?.audits) > 0 ? toNumber(summary?.invalid_audits) / toNumber(summary?.audits) : 0,
+  };
+}
+
 async function calculateVelocity(conn: PoolConnection | typeof pool, entityType: TrafficEntityType, entityId: number) {
   if (entityType === "miniapp") {
     const [rows]: any = await conn.query(`
       SELECT
-        COALESCE(SUM(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 10 MINUTE) THEN 1 ELSE 0 END), 0) as recent,
-        COALESCE(SUM(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR) THEN 1 ELSE 0 END), 0) as hourly
+        COALESCE(SUM(CASE WHEN impression_confirmed_at >= DATE_SUB(NOW(), INTERVAL 10 MINUTE) THEN 1 ELSE 0 END), 0) as recent,
+        COALESCE(SUM(CASE WHEN impression_confirmed_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR) THEN 1 ELSE 0 END), 0) as hourly
       FROM miniapp_mediation_requests
-      WHERE miniapp_id = ?
+      WHERE miniapp_id = ? AND impression_confirmed = 1
     `, [entityId]);
-    const recent = toNumber(rows[0]?.recent);
-    const hourly = Math.max(toNumber(rows[0]?.hourly), recent, 1);
+    let recent = toNumber(rows[0]?.recent);
+    let hourly = Math.max(toNumber(rows[0]?.hourly), recent);
+    if (hourly <= 0) {
+      const [fallbackRows]: any = await conn.query(`
+        SELECT
+          COALESCE(SUM(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 10 MINUTE) THEN 1 ELSE 0 END), 0) as recent,
+          COALESCE(SUM(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR) THEN 1 ELSE 0 END), 0) as hourly
+        FROM miniapp_internal_ad_impressions
+        WHERE miniapp_id = ?
+      `, [entityId]);
+      recent = toNumber(fallbackRows[0]?.recent);
+      hourly = Math.max(toNumber(fallbackRows[0]?.hourly), recent);
+    }
+    hourly = Math.max(hourly, 1);
     const spikeRatio = recent / hourly;
     return Math.round(clamp(100 - Math.max(0, spikeRatio - 0.35) * 160, 0, 100));
   }
@@ -159,30 +284,11 @@ export async function calculateTrafficQuality(entityType: TrafficEntityType, ent
   const settings = await getTrafficSettings(conn);
 
   if (entityType === "miniapp") {
-    const [[summary]]: any = await db.query(`
-      SELECT COUNT(*) as impressions, COUNT(DISTINCT telegram_user_id) as unique_users
-      FROM miniapp_mediation_requests
-      WHERE miniapp_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-    `, [entityId]);
-    const [[topUser]]: any = await db.query(`
-      SELECT COUNT(*) as impressions
-      FROM miniapp_mediation_requests
-      WHERE miniapp_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-      GROUP BY telegram_user_id
-      ORDER BY impressions DESC
-      LIMIT 1
-    `, [entityId]);
-    const [countries]: any = await db.query(`
-      SELECT COALESCE(country, 'unknown') as country, COUNT(*) as impressions
-      FROM miniapp_mediation_requests
-      WHERE miniapp_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-      GROUP BY COALESCE(country, 'unknown')
-      ORDER BY impressions DESC
-      LIMIT 10
-    `, [entityId]);
-    const impressions = toNumber(summary?.impressions);
-    const uniqueUsers = toNumber(summary?.unique_users);
-    const topUserRatio = impressions > 0 ? toNumber(topUser?.impressions) / impressions : 0;
+    const displayed = await getMiniAppDisplayedTraffic(db, entityId);
+    const countries = await getMiniAppCountryBreakdown(db, entityId, displayed.source);
+    const impressions = displayed.impressions;
+    const uniqueUsers = displayed.uniqueUsers;
+    const topUserRatio = impressions > 0 ? (await getMiniAppTopDisplayedUser(db, entityId, displayed.source)) / impressions : 0;
     const velocityScore = await calculateVelocity(db, "miniapp", entityId);
     const completionAnalytics = await getInternalAdCompletionAnalytics({ conn: db, miniappId: entityId });
     const qualityScore = scoreFromSignals({
@@ -213,6 +319,7 @@ export async function calculateTrafficQuality(entityType: TrafficEntityType, ent
       language_breakdown: {},
       session_breakdown: {},
       signal_metadata: {
+        source: displayed.source,
         device_detection: "unavailable",
         language_detection: "unavailable",
         vpn_detection: "unavailable",
@@ -265,19 +372,10 @@ export async function calculateTrafficQuality(entityType: TrafficEntityType, ent
   }
 
   if (entityType === "channel") {
-    const [[summary]]: any = await db.query(`
-      SELECT
-        COALESCE(SUM(cp.views), 0) as impressions,
-        COUNT(DISTINCT cp.id) as posts,
-        COALESCE(SUM(CASE WHEN cva.status = 'invalid' THEN 1 ELSE 0 END), 0) as invalid_audits,
-        COUNT(cva.id) as audits
-      FROM campaign_posts cp
-      LEFT JOIN campaign_views_audit cva ON cva.post_id = cp.id
-      WHERE cp.channel_id = ? AND cp.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-    `, [entityId]);
-    const impressions = toNumber(summary?.impressions);
-    const invalidRatio = toNumber(summary?.audits) > 0 ? toNumber(summary?.invalid_audits) / toNumber(summary?.audits) : 0;
-    const pseudoUnique = Math.min(impressions, toNumber(summary?.posts) * 100);
+    const traffic = await getChannelDeliveredTraffic(db, entityId);
+    const impressions = traffic.impressions;
+    const invalidRatio = traffic.invalidRatio;
+    const pseudoUnique = Math.min(impressions, traffic.posts * 100);
     const qualityScore = scoreFromSignals({ impressions, uniqueUsers: pseudoUnique, topUserRatio: 0, invalidRatio, velocityScore: 85, sensitivity: settings.sensitivity, signalCoverage: 0.35 });
     return {
       entity_type: entityType,
@@ -295,7 +393,7 @@ export async function calculateTrafficQuality(entityType: TrafficEntityType, ent
       device_breakdown: {},
       language_breakdown: {},
       session_breakdown: {},
-      signal_metadata: { per_user_channel_views: "unavailable", invalid_view_audit_ratio: invalidRatio },
+      signal_metadata: { source: "campaign_post_views_and_clicks", channel_views: traffic.views, channel_clicks: traffic.clicks, per_user_channel_views: "unavailable", invalid_view_audit_ratio: invalidRatio },
     };
   }
 

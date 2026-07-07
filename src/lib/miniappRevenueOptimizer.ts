@@ -88,19 +88,19 @@ async function getSettings(db: Db): Promise<OptimizerSettings> {
     `SELECT \`key\`, value
      FROM settings
      WHERE \`key\` IN (
-       'global_min_cpm',
-       'global_recommended_cpm',
-       'global_max_cpm',
+       'miniapp_internal_min_cpm',
+       'miniapp_internal_recommended_cpm',
+       'miniapp_internal_max_cpm',
        'global_recommended_cpm_manual_override',
        'miniapp_revenue_optimizer_enabled'
      )`
   );
   const map = new Map(rows.map((row: any) => [String(row.key), String(row.value)]));
-  const minCpm = Math.max(0, metricNumber(map.get("global_min_cpm") ?? 0.5));
-  const maxCpm = Math.max(minCpm, metricNumber(map.get("global_max_cpm") ?? 5));
+  const minCpm = Math.max(0, metricNumber(map.get("miniapp_internal_min_cpm") ?? 0.5));
+  const maxCpm = Math.max(minCpm, metricNumber(map.get("miniapp_internal_max_cpm") ?? 5));
   return {
     minCpm,
-    recommendedCpm: clamp(metricNumber(map.get("global_recommended_cpm") ?? 1), minCpm, maxCpm),
+    recommendedCpm: clamp(metricNumber(map.get("miniapp_internal_recommended_cpm") ?? 1), minCpm, maxCpm),
     maxCpm,
     manualOverride: settingBool(map.get("global_recommended_cpm_manual_override"), false),
     enabled: settingBool(map.get("miniapp_revenue_optimizer_enabled"), true),
@@ -110,9 +110,9 @@ async function getSettings(db: Db): Promise<OptimizerSettings> {
 async function insertDefaultSettings(db: Db) {
   await db.query(
     `INSERT INTO settings (\`key\`, value, description) VALUES
-      ('global_min_cpm', '0.50', 'Global minimum CPM used across Mini App, Channel, Bot, and all categories.'),
-      ('global_recommended_cpm', '1.00', 'Global recommended CPM shown as the default bid unless manually overridden.'),
-      ('global_max_cpm', '5.00', 'Global maximum CPM used across Mini App, Channel, Bot, and all categories.'),
+      ('miniapp_internal_min_cpm', '0.50', 'Minimum CPM for Mini App rewarded campaigns.'),
+      ('miniapp_internal_recommended_cpm', '1.00', 'Recommended CPM for Mini App rewarded campaigns.'),
+      ('miniapp_internal_max_cpm', '5.00', 'Maximum CPM for Mini App rewarded campaigns.'),
       ('global_recommended_cpm_optimizer_value', '1.00', 'Latest CPM recommendation calculated by the hourly optimizer.'),
       ('global_recommended_cpm_manual_override', '0', 'When 1, hourly optimizer records recommendations but does not replace the active recommended CPM.'),
       ('miniapp_revenue_optimizer_enabled', '1', 'Enable hourly Mini App revenue optimizer.'),
@@ -400,13 +400,9 @@ async function syncRecommendedSettings(db: Db, value: number) {
   await db.query(
     `INSERT INTO settings (\`key\`, value) VALUES
       ('global_recommended_cpm_optimizer_value', ?),
-      ('global_recommended_cpm', ?),
-      ('miniapp_internal_recommended_cpm', ?),
-      ('recommended_cpm_views', ?),
-      ('recommended_cpm_clicks', ?),
-      ('recommended_cpm_broadcast', ?)
+      ('miniapp_internal_recommended_cpm', ?)
      ON DUPLICATE KEY UPDATE value = VALUES(value)`,
-    [formatted, formatted, formatted, formatted, formatted, formatted]
+    [formatted, formatted]
   );
 }
 
@@ -466,7 +462,7 @@ export async function getMiniAppRevenueOptimizerReport(limit = 100) {
   );
   const [settingsRows]: any = await pool.query(
     `SELECT \`key\`, value FROM settings
-     WHERE \`key\` IN ('global_min_cpm', 'global_recommended_cpm', 'global_max_cpm', 'global_recommended_cpm_optimizer_value', 'global_recommended_cpm_manual_override', 'miniapp_revenue_optimizer_enabled')`
+     WHERE \`key\` IN ('miniapp_internal_min_cpm', 'miniapp_internal_recommended_cpm', 'miniapp_internal_max_cpm', 'global_recommended_cpm_optimizer_value', 'global_recommended_cpm_manual_override', 'miniapp_revenue_optimizer_enabled')`
   );
   const [networkRows]: any = await pool.query(
     `SELECT s.*, m.miniapp_name, m.miniapp_username

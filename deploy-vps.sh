@@ -31,6 +31,25 @@ require_env() {
   fi
 }
 
+validate_required_env() {
+  local missing=()
+  local key value
+  for key in "$@"; do
+    value="$(env_value "$key")"
+    if [ -z "$value" ]; then
+      missing+=("$key")
+    fi
+  done
+
+  if [ "${#missing[@]}" -gt 0 ]; then
+    echo "  ERROR: Missing required environment variables:"
+    for key in "${missing[@]}"; do
+      echo "    - $key"
+    done
+    return 1
+  fi
+}
+
 warn_env_any() {
   local name="$1"
   shift
@@ -55,14 +74,11 @@ run_migration() {
 }
 
 echo "==> [1/5] Validating production environment..."
-for KEY in \
+validate_required_env \
   DB_HOST DB_PORT DB_USER DB_PASS DB_NAME \
   ADMIN_SESSION_SECRET CRON_SECRET BOT_TOKEN TELEGRAM_WEBHOOK_SECRET_TOKEN \
   BOT_ADD_USER_SECRET BOT_INTEGRATION_ENCRYPTION_KEY PRIVATE_INVITE_LINK_ENCRYPTION_KEY MINIAPP_STATS_SECRET \
   NEXT_PUBLIC_APP_URL NEXT_PUBLIC_SDK_URL NEXT_PUBLIC_API_BASE_URL
-do
-  require_env "$KEY"
-done
 echo "    Provider reporting verification:"
 echo "      AdsGram: SDK/blockId verified; no public reporting API wired."
 echo "      Monetag: SDK/postbacks verified; no public pull reporting API wired."
@@ -148,7 +164,11 @@ for MIG in \
   "20260706_0085_production_schema_repair.sql" \
   "20260706_0086_user_negative_balance_guards.sql" \
   "20260706_0087_support_account_messaging.sql" \
-  "20260706_0088_support_message_backfill_controls.sql"
+  "20260706_0088_support_message_backfill_controls.sql" \
+  "20260707_0089_separate_campaign_cpm_settings.sql" \
+  "20260707_0090_campaign_creative_title.sql" \
+  "20260707_0091_campaign_category_normalization.sql" \
+  "20260707_0092_miniapp_mediation_randomization.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"

@@ -103,12 +103,7 @@ export async function POST(
     if (action === "pause") {
       deletion = await deleteCampaignPostsSafely(id);
       if (deletion.failed > 0) {
-        console.error("Admin campaign pause blocked by post cleanup", { campaign_id: id, action, deletion });
-        return NextResponse.json({
-          error: `Campaign remains active because ${deletion.failed} active post${deletion.failed === 1 ? "" : "s"} could not be removed safely. Review the post cleanup details and retry.`,
-          deletion,
-          settlement,
-        }, { status: 409 });
+        console.error("Admin campaign pause had post cleanup failures", { campaign_id: id, action, deletion });
       }
       const updates = ["status = 'paused'"];
 
@@ -150,6 +145,9 @@ export async function POST(
 
     if (action === "delete") {
       deletion = await deleteCampaignPostsSafely(id);
+      if (deletion.failed > 0) {
+        console.error("Admin campaign delete had post cleanup failures", { campaign_id: id, action, deletion });
+      }
       const updates = ["status = 'deleted'"];
 
       if (columns.has("pause_reason")) updates.push("pause_reason = 'admin_deleted'");
@@ -173,7 +171,17 @@ export async function POST(
       },
     });
 
-    return NextResponse.json({ success: true, status: newStatus, deletion, settlement });
+    const cleanupFailed = Boolean(deletion && deletion.failed > 0);
+    const cleanupFailedCount = deletion?.failed || 0;
+    return NextResponse.json({
+      success: true,
+      status: newStatus,
+      warning: cleanupFailed
+        ? `${cleanupFailedCount} post${cleanupFailedCount === 1 ? "" : "s"} could not be deleted from Telegram and were marked delete_failed locally.`
+        : undefined,
+      deletion,
+      settlement,
+    });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Internal Server Error";
     console.error("Admin Campaign Action Error:", error);

@@ -15,6 +15,13 @@ type CampaignPostRow = RowDataPacket & {
   channel_id: number | null;
 };
 
+function normalizePositiveId(value: string) {
+  const match = String(value || "").trim().match(/^\d+/);
+  if (!match) return null;
+  const id = Number(match[0]);
+  return Number.isSafeInteger(id) && id > 0 ? String(id) : null;
+}
+
 async function getCampaignClickColumns() {
   const [rows] = await pool.query<Array<RowDataPacket & { COLUMN_NAME: string }>>(`
     SELECT COLUMN_NAME
@@ -91,7 +98,9 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string; postId: string }> }
 ) {
-  const { id: campaignId, postId } = await params;
+  const { id: rawCampaignId, postId: rawPostId } = await params;
+  const campaignId = normalizePositiveId(rawCampaignId);
+  const postId = normalizePositiveId(rawPostId);
   
   // 1. Validate both IDs are present
   if (!campaignId || !postId) {

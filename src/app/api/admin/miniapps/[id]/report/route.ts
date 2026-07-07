@@ -14,6 +14,17 @@ function parseJsonArray(value: unknown) {
   }
 }
 
+function parseJsonObject(value: unknown) {
+  if (!value) return null;
+  if (typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -40,7 +51,7 @@ export async function GET(
       buildMiniAppAdminBreakdown(id, startDate, endDate, dateSearch),
     ]);
     const [diagnosticRows]: any = await pool.query(`
-      SELECT request_id, selected_network, candidate_networks, skipped_networks, decision_reason, final_result, created_at
+      SELECT request_id, selected_network, candidate_networks, skipped_networks, fallback_attempts, decision_reason, final_result, mediation_diagnostics, created_at
       FROM miniapp_mediation_requests
       WHERE miniapp_id = ?
       ORDER BY created_at DESC
@@ -55,6 +66,8 @@ export async function GET(
         selected_network: row.selected_network || null,
         candidate_pool: parseJsonArray(row.candidate_networks).map(String),
         excluded_networks: parseJsonArray(row.skipped_networks),
+        fallback_attempts: parseJsonArray(row.fallback_attempts),
+        mediation_diagnostics: parseJsonObject(row.mediation_diagnostics),
         decision_reason: row.decision_reason,
         final_result: row.final_result,
         created_at: row.created_at,

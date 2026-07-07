@@ -497,6 +497,7 @@ export type CampaignSettlementBeforeDeletionResult = {
   postsSettled: number;
   failedPosts: number;
   failedDetails: Array<{ postId: number; reason: string }>;
+  outstandingPosts: number;
   amountDebited: number;
   publisherCredited: number;
   error?: string;
@@ -527,6 +528,7 @@ export async function settleCampaignEngagementBeforeDeletion(
   if (!campaign || campaign.type === "broadcast") {
     return {
       ok: true, campaignId, skipped: true, viewRefresh: null,
+      outstandingPosts: 0,
       postsSettled: 0, failedPosts: 0, failedDetails: [], amountDebited: 0, publisherCredited: 0,
     };
   }
@@ -561,7 +563,8 @@ export async function settleCampaignEngagementBeforeDeletion(
   const failedDetails = result?.failedDetails ?? [];
   const amountDebited = result?.advertiserDebited ?? 0;
   const publisherCredited = result?.publisherCredited ?? 0;
-  const ok = !settlementError && failedPosts === 0;
+  const outstandingPosts = settlementError ? 0 : await countOutstandingCampaignEngagement(campaignId);
+  const ok = !settlementError && failedPosts === 0 && outstandingPosts === 0;
 
   await createSystemLog({
     logType: "channel_campaign_pause_delete_settlement",
@@ -569,7 +572,7 @@ export async function settleCampaignEngagementBeforeDeletion(
     title: `Channel campaign ${actionType} settlement`,
     summary: ok
       ? `Settled ${postsSettled} post(s) before ${actionType} for campaign ${campaignId}.`
-      : `Settlement had ${failedPosts} failure(s) before ${actionType} for campaign ${campaignId}; deletion withheld.`,
+      : `Settlement had ${failedPosts} failure(s) and ${outstandingPosts} outstanding post(s) before ${actionType} for campaign ${campaignId}; deletion withheld.`,
     successCount: postsSettled,
     failedCount: failedPosts,
     failureReasons: settlementError ? { channel_settlement_failed: 1 } : null,
@@ -583,6 +586,7 @@ export async function settleCampaignEngagementBeforeDeletion(
       view_refresh: viewRefresh,
       error: settlementError || null,
       failed_details: failedDetails,
+      outstanding_posts: outstandingPosts,
     },
   }).catch((error: unknown) => {
     console.error("Failed to record pre-deletion settlement system log", {
@@ -599,6 +603,7 @@ export async function settleCampaignEngagementBeforeDeletion(
     postsSettled,
     failedPosts,
     failedDetails,
+    outstandingPosts,
     amountDebited,
     publisherCredited,
     error: settlementError,

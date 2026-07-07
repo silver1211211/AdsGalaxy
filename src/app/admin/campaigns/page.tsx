@@ -421,12 +421,12 @@ export default function AdminCampaignsPage() {
         </div>
       )}
 
-      <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-col gap-3 border-b border-slate-200 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
           <h2 className="text-sm font-semibold text-slate-900">Campaigns</h2>
-          
-          <div className="flex flex-col sm:flex-row items-center gap-4">
-            <div className="relative w-full sm:w-64">
+
+          <div className="flex w-full flex-col gap-3 lg:w-auto lg:flex-row lg:items-center">
+            <div className="relative w-full lg:w-96">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
               <input 
                 type="text"
@@ -437,12 +437,12 @@ export default function AdminCampaignsPage() {
               />
             </div>
 
-            <div className="flex bg-slate-100 p-0.5 rounded-md border border-slate-200/50 w-full sm:w-auto">
+            <div className="flex w-full rounded-md border border-slate-200/50 bg-slate-100 p-0.5 lg:w-auto">
               {["all", "pending", "active", "rejected", "paused"].map(f => (
                 <button
                   key={f}
                   onClick={() => { setPage(1); setStatusFilter(f); }}
-                  className={`flex-1 sm:flex-none px-3 py-1.5 text-xs font-medium capitalize rounded transition-all cursor-pointer ${statusFilter === f ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}
+                  className={`flex-1 rounded px-3 py-1.5 text-xs font-medium capitalize transition-all cursor-pointer lg:flex-none lg:px-4 ${statusFilter === f ? "bg-blue-500 text-white shadow-sm" : "text-slate-600 hover:bg-slate-200/50"}`}
                 >
                   {f}
                 </button>
@@ -451,7 +451,7 @@ export default function AdminCampaignsPage() {
             <select
               value={trustFilter}
               onChange={(event) => { setPage(1); setTrustFilter(event.target.value); }}
-              className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs outline-none focus:ring-2 focus:ring-blue-500 sm:w-auto"
+              className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs outline-none focus:ring-2 focus:ring-blue-500 lg:w-32"
             >
               <option value="all">All Trust</option>
               <option value="new">New</option>
@@ -490,7 +490,7 @@ export default function AdminCampaignsPage() {
               ) : (
                 campaigns.map((campaign) => (
                   <tr key={`${campaign.campaign_kind}-${campaign.id}`} className="group hover:bg-slate-50 transition-colors">
-                    <td className="sticky left-0 z-10 max-w-[260px] bg-white px-4 py-3 group-hover:bg-slate-50">
+                    <td className="max-w-[260px] px-4 py-3">
                       <div className="flex items-center gap-2">
                         <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide ${campaign.campaign_kind === 'miniapp' ? 'bg-purple-50 text-purple-600 border border-purple-100' : 'bg-slate-100 text-slate-500 border border-slate-200'}`}>
                           {campaign.type_label}

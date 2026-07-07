@@ -2,19 +2,21 @@ import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/prom
 import pool from "@/lib/db";
 import { creditUserLockedBalance } from "@/lib/earnings";
 import { getPublisherQuality } from "@/lib/publisherQuality";
+import { recordPayoutSafetyCheck } from "@/lib/revenueProtection";
 
 const money = (value: number) => Number(Math.max(0, value).toFixed(8));
 
 type LockedPost = RowDataPacket & {
   campaign_id: number; channel_id: number; publisher_id: number; campaign_type: string;
-  status: string; budget: string | number; cpm: string | number; daily_budget_limit: string | number | null;
+  campaign_status: string; post_status: string; budget: string | number; cpm: string | number; daily_budget_limit: string | number | null;
   views: string | number; settled_views: string | number; settled_clicks: string | number;
 };
 
 async function lockedPost(conn: PoolConnection, postId: number) {
   const [rows] = await conn.query<LockedPost[]>(`
     SELECT cp.campaign_id, cp.channel_id, cp.views, cp.settled_views, cp.settled_clicks,
-      c.type campaign_type, c.status, c.budget, c.cpm, c.daily_budget_limit,
+      c.type campaign_type, c.status campaign_status, cp.status post_status,
+      c.budget, c.cpm, c.daily_budget_limit,
       ch.user_id publisher_id
     FROM campaign_posts cp JOIN campaigns c ON c.id=cp.campaign_id
     JOIN channels ch ON ch.id=cp.channel_id WHERE cp.id=? FOR UPDATE`, [postId]);
@@ -25,7 +27,9 @@ async function fastDebit(input: { conn: PoolConnection; postId: number; type: "c
   const [existing] = await input.conn.query<RowDataPacket[]>("SELECT id FROM channel_advertiser_debits WHERE source_key=?", [input.sourceKey]);
   if (existing.length) return { debited: false, duplicate: true, units: 0 };
   const post = await lockedPost(input.conn, input.postId);
-  if (!post || post.status !== "active" || post.campaign_type !== `${input.type}s`) return { debited: false, duplicate: false, units: 0 };
+  if (!post || post.campaign_status !== "active" || post.post_status !== "active" || post.campaign_type !== `${input.type}s`) {
+    return { debited: false, duplicate: false, units: 0 };
+  }
   const unitPrice = Number(post.cpm || 0) / 1000;
   if (!(unitPrice > 0)) return { debited: false, duplicate: false, units: 0 };
   const [[today]] = await input.conn.query<Array<RowDataPacket & { spend: string | number }>>(
@@ -101,6 +105,26 @@ export async function settlePendingChannelPublisherCredits(limit = 500) {
       const publisherCredit = money(debit * (1 - margin) * (1 - reserve) * quality.qualityWeight);
       const platformRevenue = money(debit * margin);
       const reserveAmount = money(debit - platformRevenue - publisherCredit);
+      const safety = await recordPayoutSafetyCheck({
+        settlementType: String(row.settlement_type) === "view" ? "view" : "click",
+        campaignId: Number(row.campaign_id),
+        publisherId: Number(row.publisher_id),
+        advertiserPaid: debit,
+        publisherShare: publisherCredit,
+        platformShare: platformRevenue,
+        reserveShare: reserveAmount,
+        expectedPublisherShare: publisherCredit,
+        expectedPlatformShare: platformRevenue,
+        expectedReserveShare: reserveAmount,
+        metadata: {
+          source: "channel_fast_debit",
+          debit_id: Number(row.id),
+          post_id: Number(row.post_id),
+          units: Number(row.units || 0),
+          quality_weight: quality.qualityWeight,
+        },
+      });
+      if (safety.status !== "passed") throw new Error("payout_safety_check_failed");
       if (!(await creditUserLockedBalance(conn, Number(row.publisher_id), publisherCredit))) throw new Error("publisher_credit_failed");
       const table = row.settlement_type === "view" ? "ad_settlements_views" : "ad_settlements";
       const metric = row.settlement_type === "view" ? "views_count" : "clicks_count";

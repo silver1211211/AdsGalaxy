@@ -8,6 +8,7 @@ import { apiFetch } from "@/lib/api";
 import { Eye, MousePointer2, Send, Bot } from "lucide-react";
 import EmptyState from "@/components/ui/EmptyState";
 import { SkeletonBlock } from "@/components/ui/Skeleton";
+import { composeCampaignCreativeText } from "@/lib/campaignCreative";
 
 interface Campaign {
   id: number;
@@ -16,6 +17,7 @@ interface Campaign {
   status: string;
   budget: string | number;
   cpm: string | number;
+  campaign_title?: string | null;
   message_text: string;
   image_url: string | null;
   link: string;
@@ -332,7 +334,7 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
               )}
               <div className="p-4 bg-white rounded-2xl shadow-sm border border-slate-200/50 min-h-[100px]">
                 <p className="text-sm font-medium text-slate-700 whitespace-pre-wrap leading-relaxed">
-                  {campaign.message_text}
+                  {composeCampaignCreativeText(campaign.campaign_title, campaign.message_text)}
                 </p>
               </div>
               <div className="w-full py-4 bg-[#0c9de8] text-white rounded-2xl font-black uppercase text-xs tracking-widest flex items-center justify-center gap-2 shadow-md shadow-[#0c9de8]/20">

@@ -16,6 +16,10 @@ export const CAMPAIGN_CATEGORIES = [
 export function normalizeCampaignCategory(input: unknown) {
   const category = String(input || "").trim();
 
+  if (!category) {
+    return ALL_CATEGORIES;
+  }
+
   if (!CAMPAIGN_CATEGORIES.includes(category)) {
     throw new Error("Please select a valid campaign category");
   }

@@ -25,6 +25,8 @@ import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronS
 import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
 import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { botUserBroadcastEligibleCondition } from "@/lib/botAudience";
+import { composeCampaignCreativeText } from "@/lib/campaignCreative";
+import { ALL_CATEGORIES } from "@/lib/campaignCategories";
 
 export const dynamic = 'force-dynamic';
 
@@ -352,7 +354,7 @@ export async function GET(req: NextRequest) {
       const suitableBots = rankInventoryForDelivery(healthyBots.filter((bot: any) => {
         // Category match
         const botCats = bot.categories ? (typeof bot.categories === 'string' ? JSON.parse(bot.categories) : bot.categories) : [];
-        if (!botCats.includes(campaign.category)) return false;
+        if (campaign.category !== ALL_CATEGORIES && !botCats.includes(campaign.category)) return false;
 
         // Continent match
         const campConts = campaign.continents ? (typeof campaign.continents === 'string' ? JSON.parse(campaign.continents) : campaign.continents) : [];
@@ -462,7 +464,7 @@ export async function GET(req: NextRequest) {
 
         let sendResult;
         try {
-          sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, campaign.message_text, {
+          sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, composeCampaignCreativeText(campaign.campaign_title, campaign.message_text), {
             photo: campaign.image_url,
             parse_mode: parseMode,
             reply_markup: replyMarkup,

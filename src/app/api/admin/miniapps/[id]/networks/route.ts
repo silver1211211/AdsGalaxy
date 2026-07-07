@@ -13,6 +13,7 @@ type NetworkRow = RowDataPacket & {
   network_name: string;
   network_placement_id: string | null;
   enabled: number | boolean;
+  monetag_test_mode: number | boolean | null;
   priority_order: number | null;
   richads_publisher_id: string | null;
   richads_app_id: string | null;
@@ -27,6 +28,7 @@ type SubmittedNetwork = {
   network_name?: unknown;
   network_placement_id?: unknown;
   enabled?: unknown;
+  monetag_test_mode?: unknown;
   priority_order?: unknown;
   richads_publisher_id?: unknown;
   richads_app_id?: unknown;
@@ -58,7 +60,7 @@ function missingProviderConfiguration(networkName: string, submitted: SubmittedN
 
 async function getNetworkState(miniappId: string) {
   const [rows] = await pool.query<NetworkRow[]>(
-    `SELECT network_name, network_placement_id, enabled, priority_order, richads_publisher_id, richads_app_id
+    `SELECT network_name, network_placement_id, enabled, COALESCE(monetag_test_mode, 0) as monetag_test_mode, priority_order, richads_publisher_id, richads_app_id
      FROM miniapp_ad_networks
      WHERE miniapp_id = ?
      ORDER BY COALESCE(NULLIF(priority_order, 0), FIELD(network_name, 'AdsGalaxyInternal', 'AdsGram', 'GigaPub', 'AdExium', 'Monetag', 'RichAds')),
@@ -73,6 +75,7 @@ async function getNetworkState(miniappId: string) {
       network_name: networkName,
       network_placement_id: row?.network_placement_id || "",
       enabled: Boolean(row?.enabled),
+      monetag_test_mode: networkName === "Monetag" ? Boolean(row?.monetag_test_mode) : false,
       priority_order: Number(row?.priority_order || NETWORKS.indexOf(networkName) + 1),
       ...(networkName === "RichAds" ? {
         richads_publisher_id: row?.richads_publisher_id || "",
@@ -167,17 +170,19 @@ export async function PUT(
       const richAdsPublisherId = networkName === "RichAds" ? String(submitted.richads_publisher_id || "").trim() : null;
       const richAdsAppId = networkName === "RichAds" ? String(submitted.richads_app_id || "").trim() : null;
       const effectivePlacementId = networkName === "RichAds" ? richAdsAppId : placementId;
+      const monetagTestMode = networkName === "Monetag" && submitted.monetag_test_mode === true;
 
       await pool.query(
-        `INSERT INTO miniapp_ad_networks (miniapp_id, network_name, network_placement_id, richads_publisher_id, richads_app_id, enabled, priority_order)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO miniapp_ad_networks (miniapp_id, network_name, network_placement_id, richads_publisher_id, richads_app_id, enabled, monetag_test_mode, priority_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
           network_placement_id = VALUES(network_placement_id),
           richads_publisher_id = VALUES(richads_publisher_id),
           richads_app_id = VALUES(richads_app_id),
           enabled = VALUES(enabled),
+          monetag_test_mode = VALUES(monetag_test_mode),
           priority_order = VALUES(priority_order)`,
-        [id, networkName, effectivePlacementId || null, richAdsPublisherId || null, richAdsAppId || null, enabled ? 1 : 0, priorityOrder]
+        [id, networkName, effectivePlacementId || null, richAdsPublisherId || null, richAdsAppId || null, enabled ? 1 : 0, monetagTestMode ? 1 : 0, priorityOrder]
       );
     }
 

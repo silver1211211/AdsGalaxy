@@ -29,6 +29,7 @@ import { useHeader } from "@/context/HeaderContext";
 import { useRouter, useParams, useSearchParams } from "next/navigation";
 import Modal from "@/components/ui/Modal";
 import { CAMPAIGN_CATEGORIES } from "@/lib/campaignCategories";
+import { composeCampaignCreativeText, hasRestrictedClickCreativeContent } from "@/lib/campaignCreative";
 
 const BUTTON_TEXTS = ["Learn more", "Get started", "Join channel", "Join group", "Start bot", "Buy Now", "Sign Up", "Download", "Visit site", "Play now", "Shop now"];
 const CONTINENTS = [
@@ -84,6 +85,7 @@ export default function NewCampaignWizardPage() {
   // Form State
   const [formData, setFormData] = useState({
     name: "",
+    campaign_title: "",
     category: "",
     type: defaultType,
     parse_mode: "markdown",
@@ -206,9 +208,7 @@ export default function NewCampaignWizardPage() {
 
   const checkRestrictedContent = (text: string) => {
     if (formData.type !== "clicks") return false;
-    const hasUsername = /@\w+/.test(text);
-    const hasLink = /(https?:\/\/[^\s]+)|(\w+\.\w+)/.test(text);
-    return hasUsername || hasLink;
+    return hasRestrictedClickCreativeContent(text);
   };
 
   const hasValidCampaignObjective = () => {
@@ -218,12 +218,21 @@ export default function NewCampaignWizardPage() {
 
   const handleSubmit = async () => {
     const trimmedName = (formData.name || "").trim();
+    const trimmedCampaignTitle = (formData.campaign_title || "").trim();
     if (trimmedName.length < 3) {
       setError("Campaign name must be at least 3 characters.");
       return;
     }
     if (trimmedName.length > 50) {
       setError("Campaign name must be at most 50 characters.");
+      return;
+    }
+    if (trimmedCampaignTitle.length < 3) {
+      setError("Campaign title must be at least 3 characters.");
+      return;
+    }
+    if (trimmedCampaignTitle.length > 255) {
+      setError("Campaign title must be at most 255 characters.");
       return;
     }
 
@@ -243,9 +252,17 @@ export default function NewCampaignWizardPage() {
       setError("Total budget must be at least $10.");
       return;
     }
+    if (!formData.message_text.trim()) {
+      setError("Message text is required.");
+      return;
+    }
+    if (formData.message_text.length > 1000) {
+      setError("Message text must be at most 1000 characters.");
+      return;
+    }
 
-    if (checkRestrictedContent(formData.message_text)) {
-      setError("Click campaigns cannot contain usernames (@) or links in the message text.");
+    if (checkRestrictedContent(formData.campaign_title) || checkRestrictedContent(formData.message_text)) {
+      setError("Click campaigns cannot contain usernames (@) or links in the campaign title or message text.");
       return;
     }
     if (formData.start_at && formData.end_at && new Date(formData.start_at).getTime() >= new Date(formData.end_at).getTime()) {
@@ -472,7 +489,7 @@ export default function NewCampaignWizardPage() {
                     )}
                     <div className="space-y-3 p-4">
                       <p className="whitespace-pre-wrap text-[15px] font-medium leading-relaxed text-slate-950 sm:text-base">
-                        {formData.message_text || "Your advertisement message will appear here."}
+                        {composeCampaignCreativeText(formData.campaign_title, formData.message_text) || "Your advertisement message will appear here."}
                       </p>
 
                       {/* Reactions row — channels only */}
@@ -661,28 +678,80 @@ export default function NewCampaignWizardPage() {
               <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
                 <AlertCircle size={16} className="text-amber-500 shrink-0 mt-0.5" />
                 <p className="text-xs font-semibold text-amber-700 leading-relaxed">
-                  <span className="font-black">Click campaigns:</span> your message text must not contain any URLs or @usernames. Put your destination link in the Campaign Link field below — only one URL per ad is allowed.
+                  <span className="font-black">Click campaigns:</span> your campaign title and message text must not contain any URLs or @usernames. Put your destination link in the Campaign Link field below — only one URL per ad is allowed.
                 </p>
               </div>
             )}
 
             {/* ── Message ── */}
+            <div className="rounded-2xl border border-slate-100 bg-white p-5 space-y-3 shadow-sm">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Campaign Title <span className="text-red-400">*</span></p>
+                <span className={cn(
+                  "text-[10px] font-bold",
+                  formData.campaign_title.length > 255 || (formData.campaign_title.length > 0 && formData.campaign_title.trim().length < 3) ? "text-red-400" : "text-slate-300"
+                )}>
+                  {formData.campaign_title.trim().length}/255
+                </span>
+              </div>
+              <input
+                type="text"
+                value={formData.campaign_title}
+                onChange={(e) => setFormData({ ...formData, campaign_title: e.target.value })}
+                placeholder="Monetize your Telegram mini app"
+                className={cn(
+                  "w-full px-4 py-3.5 bg-slate-50 border rounded-xl focus:border-[#0c9de8] outline-none text-sm font-medium text-slate-900 transition-all",
+                  formData.campaign_title.length > 255 || (formData.campaign_title.length > 0 && formData.campaign_title.trim().length < 3) || checkRestrictedContent(formData.campaign_title)
+                    ? "border-red-400 bg-red-50/30"
+                    : "border-slate-200"
+                )}
+              />
+              {formData.campaign_title.length > 0 && formData.campaign_title.trim().length < 3 && (
+                <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2">
+                  <AlertCircle size={13} className="text-red-500 shrink-0" />
+                  <p className="text-[11px] font-bold text-red-600">Campaign title must be at least 3 characters.</p>
+                </div>
+              )}
+              {formData.campaign_title.length > 255 && (
+                <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2">
+                  <AlertCircle size={13} className="text-red-500 shrink-0" />
+                  <p className="text-[11px] font-bold text-red-600">Campaign title must be at most 255 characters.</p>
+                </div>
+              )}
+              {checkRestrictedContent(formData.campaign_title) && (
+                <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2">
+                  <AlertCircle size={13} className="text-red-500 shrink-0" />
+                  <p className="text-[11px] font-bold text-red-600">Remove all URLs and @usernames from the campaign title - only the Campaign Link field may contain your URL.</p>
+                </div>
+              )}
+            </div>
+
             <div className="rounded-2xl border border-slate-100 bg-white p-5 space-y-4 shadow-sm">
               <div className="flex items-center justify-between">
                 <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Message Text <span className="text-red-400">*</span></p>
-                <span className="text-[10px] font-bold text-slate-300">{formData.message_text.length}/1000</span>
+                <span className={cn(
+                  "text-[10px] font-bold",
+                  formData.message_text.length > 1000 ? "text-red-400" : "text-slate-300"
+                )}>{formData.message_text.length}/1000</span>
               </div>
 
               <textarea
                 value={formData.message_text}
-                onChange={(e) => setFormData({ ...formData, message_text: e.target.value.slice(0, 1000) })}
+                onChange={(e) => setFormData({ ...formData, message_text: e.target.value })}
                 rows={6}
                 placeholder="Your advertisement message here…"
                 className={cn(
                   "w-full px-4 py-3.5 bg-slate-50 border rounded-xl focus:border-[#0c9de8] outline-none text-sm font-medium text-slate-900 transition-all resize-none",
-                  checkRestrictedContent(formData.message_text) ? "border-red-400 bg-red-50/30" : "border-slate-200"
+                  checkRestrictedContent(formData.message_text) || formData.message_text.length > 1000 ? "border-red-400 bg-red-50/30" : "border-slate-200"
                 )}
               />
+
+              {formData.message_text.length > 1000 && (
+                <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2">
+                  <AlertCircle size={13} className="text-red-500 shrink-0" />
+                  <p className="text-[11px] font-bold text-red-600">Message text must be at most 1000 characters.</p>
+                </div>
+              )}
 
               {checkRestrictedContent(formData.message_text) && (
                 <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2">
@@ -801,7 +870,7 @@ export default function NewCampaignWizardPage() {
             <button
               type="button"
               onClick={() => setShowAdPreview(true)}
-              disabled={!formData.message_text}
+              disabled={formData.campaign_title.trim().length < 3 || formData.campaign_title.length > 255 || !formData.message_text.trim() || formData.message_text.length > 1000}
               className="flex w-full items-center justify-center gap-2 rounded-2xl border border-[#0c9de8]/30 bg-blue-50 py-3.5 text-xs font-black uppercase tracking-widest text-[#0c9de8] transition-colors hover:border-[#0c9de8]/50 hover:bg-blue-100 disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
             >
               <Eye size={16} /> Preview Ads
@@ -816,9 +885,9 @@ export default function NewCampaignWizardPage() {
               </button>
               <button
                 onClick={() => setStep(3)}
-                disabled={!formData.message_text || !formData.link || !isValidUrl(formData.link) || !formData.button_text || checkRestrictedContent(formData.message_text)}
+                disabled={formData.campaign_title.trim().length < 3 || formData.campaign_title.length > 255 || !formData.message_text.trim() || formData.message_text.length > 1000 || !formData.link || !isValidUrl(formData.link) || !formData.button_text || checkRestrictedContent(formData.campaign_title) || checkRestrictedContent(formData.message_text)}
                 className="flex-1 py-3.5 text-white rounded-2xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:bg-slate-100 disabled:text-slate-400 transition-colors"
-                style={{ background: (!formData.message_text || !formData.link || !isValidUrl(formData.link) || !formData.button_text || checkRestrictedContent(formData.message_text)) ? undefined : "#0c9de8" }}
+                style={{ background: (formData.campaign_title.trim().length < 3 || formData.campaign_title.length > 255 || !formData.message_text.trim() || formData.message_text.length > 1000 || !formData.link || !isValidUrl(formData.link) || !formData.button_text || checkRestrictedContent(formData.campaign_title) || checkRestrictedContent(formData.message_text)) ? undefined : "#0c9de8" }}
               >
                 Next <ChevronRight size={16} />
               </button>

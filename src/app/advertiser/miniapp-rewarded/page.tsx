@@ -232,9 +232,9 @@ export default function AdvertiserMiniAppRewardedPage() {
   useEffect(() => {
     setTitle(isEditMode ? "Edit Mini App Ad" : "Mini App Campaign");
     apiFetch("/api/settings").then(r => r.json()).then(d => {
-      const min = parseFloat(d?.global_min_cpm ?? d?.miniapp_internal_min_cpm ?? "0.50");
-      const max = parseFloat(d?.global_max_cpm ?? d?.miniapp_internal_max_cpm ?? "5.00");
-      const rec = parseFloat(d?.global_recommended_cpm ?? d?.miniapp_internal_recommended_cpm ?? "1.00");
+      const min = parseFloat(d?.miniapp_internal_min_cpm ?? "0.50");
+      const max = parseFloat(d?.miniapp_internal_max_cpm ?? "5.00");
+      const rec = parseFloat(d?.miniapp_internal_recommended_cpm ?? "1.00");
       setCpmMin(min);
       setCpmMax(max);
       setRecommendedCpm(rec);

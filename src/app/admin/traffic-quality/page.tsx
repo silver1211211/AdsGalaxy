@@ -81,13 +81,14 @@ export default function TrafficQualityPage() {
   const [error, setError] = useState("");
   const [qualityFilter, setQualityFilter] = useState("all");
   const [riskFilter, setRiskFilter] = useState("all");
+  const [surface, setSurface] = useState("all");
   const [data, setData] = useState<any>(null);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/traffic-quality?quality=${qualityFilter}&risk=${riskFilter}`);
+      const res = await fetch(`/api/admin/traffic-quality?surface=${surface}&quality=${qualityFilter}&risk=${riskFilter}`);
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(payload.error || "Failed to load traffic quality");
       setData(payload);
@@ -100,7 +101,7 @@ export default function TrafficQualityPage() {
 
   useEffect(() => {
     fetchData();
-  }, [qualityFilter, riskFilter]);
+  }, [surface, qualityFilter, riskFilter]);
 
   const runQueueAction = async (item: QueueItem, action: string) => {
     setActionLoading(item.id);
@@ -142,6 +143,20 @@ export default function TrafficQualityPage() {
             <p className="text-xs text-slate-500">Fraud signals, quality trends, and manual review queue.</p>
           </div>
           <div className="flex flex-wrap gap-2">
+            {[
+              ["all", "All"],
+              ["channel", "Channel"],
+              ["miniapp", "Mini App"],
+              ["bot", "Bot"],
+            ].map(([value, text]) => (
+              <button
+                key={value}
+                onClick={() => setSurface(value)}
+                className={`rounded-md border px-3 py-2 text-xs font-bold transition-colors ${surface === value ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100"}`}
+              >
+                {text}
+              </button>
+            ))}
             <select value={qualityFilter} onChange={(event) => setQualityFilter(event.target.value)} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs outline-none focus:border-blue-500">
               <option value="all">All Quality</option>
               <option value="excellent">Excellent</option>
@@ -174,7 +189,7 @@ export default function TrafficQualityPage() {
               <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex items-center gap-2 text-xs font-bold uppercase text-slate-400"><BarChart3 size={14} /> Impressions</div>
                 <div className="mt-2 text-2xl font-black text-slate-900">{numberValue(platform?.impressions)}</div>
-                <p className="mt-2 text-xs text-slate-500">7-day scored traffic</p>
+                <p className="mt-2 text-xs text-slate-500">{surface === "channel" ? "Channel views + clicks" : surface === "miniapp" ? "Displayed rewarded ads" : surface === "bot" ? "Bot broadcast deliveries" : "7-day scored traffic"}</p>
               </div>
               <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex items-center gap-2 text-xs font-bold uppercase text-slate-400"><Activity size={14} /> Unique Users</div>

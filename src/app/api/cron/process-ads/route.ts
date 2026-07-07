@@ -25,6 +25,7 @@ import { createSystemLog, logStatus } from "@/lib/systemLogs";
 import { requireAdServingAllowed, upsertAdminAlert } from "@/lib/productionSafety";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
+import { composeCampaignCreativeText } from "@/lib/campaignCreative";
 
 export const dynamic = 'force-dynamic';
 
@@ -41,6 +42,7 @@ interface CampaignRow {
   type: string;
   link: string;
   button_text: string;
+  campaign_title?: string | null;
   message_text: string;
   image_url: string | null;
   quality_score?: number;
@@ -698,7 +700,7 @@ export async function GET(req: NextRequest) {
       };
 
       attemptedPosts++;
-      const result = await sendTelegramMessageWithRetries(channel.chat_id, campaign.message_text, {
+      const result = await sendTelegramMessageWithRetries(channel.chat_id, composeCampaignCreativeText(campaign.campaign_title, campaign.message_text), {
         photo: campaign.image_url,
         parse_mode: parseMode,
         reply_markup: replyMarkup

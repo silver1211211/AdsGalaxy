@@ -40,27 +40,39 @@ async function getTrafficTrend(entityType: string, entityId: number) {
 }
 
 async function getMiniAppDetails(entityId: number) {
+  const [[confirmedSummary]]: any = await pool.query(`
+    SELECT COUNT(*) as count
+    FROM miniapp_mediation_requests
+    WHERE miniapp_id = ?
+      AND impression_confirmed = 1
+      AND impression_confirmed_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+  `, [entityId]);
+  const useConfirmed = Number(confirmedSummary?.count || 0) > 0;
+  const sourceTable = useConfirmed ? "miniapp_mediation_requests" : "miniapp_internal_ad_impressions";
+  const timeColumn = useConfirmed ? "impression_confirmed_at" : "created_at";
+  const confirmedWhere = useConfirmed ? "AND impression_confirmed = 1" : "";
+
   const [countries]: any = await pool.query(`
     SELECT COALESCE(country, 'unknown') as label, COUNT(*) as impressions
-    FROM miniapp_mediation_requests
-    WHERE miniapp_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+    FROM ${sourceTable}
+    WHERE miniapp_id = ? ${confirmedWhere} AND ${timeColumn} >= DATE_SUB(NOW(), INTERVAL 7 DAY)
     GROUP BY COALESCE(country, 'unknown')
     ORDER BY impressions DESC
     LIMIT 10
   `, [entityId]);
 
   const [sessions]: any = await pool.query(`
-    SELECT DATE_FORMAT(created_at, '%Y-%m-%d %H:00:00') as label, COUNT(*) as impressions
-    FROM miniapp_mediation_requests
-    WHERE miniapp_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-    GROUP BY DATE_FORMAT(created_at, '%Y-%m-%d %H:00:00')
+    SELECT DATE_FORMAT(${timeColumn}, '%Y-%m-%d %H:00:00') as label, COUNT(*) as impressions
+    FROM ${sourceTable}
+    WHERE miniapp_id = ? ${confirmedWhere} AND ${timeColumn} >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+    GROUP BY DATE_FORMAT(${timeColumn}, '%Y-%m-%d %H:00:00')
     ORDER BY label ASC
   `, [entityId]);
 
   const [topUsers]: any = await pool.query(`
     SELECT telegram_user_id as user_id, COUNT(*) as impressions
-    FROM miniapp_mediation_requests
-    WHERE miniapp_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+    FROM ${sourceTable}
+    WHERE miniapp_id = ? ${confirmedWhere} AND ${timeColumn} >= DATE_SUB(NOW(), INTERVAL 7 DAY)
     GROUP BY telegram_user_id
     ORDER BY impressions DESC
     LIMIT 10
@@ -77,18 +89,31 @@ async function getMiniAppDetails(entityId: number) {
     session_breakdown: sessions,
     top_repeat_users: topUsers,
     completion_analytics: completionAnalytics,
+    source: useConfirmed ? "confirmed_mediation_impressions" : "internal_rewarded_impressions",
     unavailable_signals: ["device_distribution", "language_distribution", "vpn_proxy_ratio"],
   };
 }
 
 async function getChannelDetails(entityId: number) {
   const [sessions]: any = await pool.query(`
-    SELECT DATE_FORMAT(created_at, '%Y-%m-%d') as label, COALESCE(SUM(views), 0) as impressions
-    FROM campaign_posts
-    WHERE channel_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-    GROUP BY DATE_FORMAT(created_at, '%Y-%m-%d')
+    SELECT label, SUM(impressions) as impressions
+    FROM (
+      SELECT DATE_FORMAT(cp.created_at, '%Y-%m-%d') as label, COALESCE(SUM(cp.views), 0) as impressions
+      FROM campaign_posts cp
+      JOIN campaigns c ON c.id = cp.campaign_id
+      WHERE cp.channel_id = ? AND c.type = 'views' AND cp.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+      GROUP BY DATE_FORMAT(cp.created_at, '%Y-%m-%d')
+      UNION ALL
+      SELECT DATE_FORMAT(cc.created_at, '%Y-%m-%d') as label, COUNT(*) as impressions
+      FROM campaign_clicks cc
+      JOIN campaign_posts cp ON cp.id = cc.post_id
+      JOIN campaigns c ON c.id = cp.campaign_id
+      WHERE cp.channel_id = ? AND c.type = 'clicks' AND cc.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+      GROUP BY DATE_FORMAT(cc.created_at, '%Y-%m-%d')
+    ) daily
+    GROUP BY label
     ORDER BY label ASC
-  `, [entityId]);
+  `, [entityId, entityId]);
 
   const [auditRows]: any = await pool.query(`
     SELECT cva.status as label, COUNT(*) as count

@@ -18,6 +18,7 @@ import {
 import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
 import { createSystemLog } from "@/lib/systemLogs";
 import { botUserBroadcastEligibleCondition } from "@/lib/botAudience";
+import { composeCampaignCreativeText } from "@/lib/campaignCreative";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +41,7 @@ type CampaignRow = RowDataPacket & {
   type: string;
   link: string;
   button_text: string;
+  campaign_title?: string | null;
   message_text: string;
   image_url: string | null;
 };
@@ -81,6 +83,11 @@ type BroadcastSchema = {
   hasDeliveryStatus: boolean;
   hasDeliveryCost: boolean;
   hasDeliveryPublisherReward: boolean;
+  hasDeliveryRetryCount: boolean;
+  hasDeliverySuccessAt: boolean;
+  hasDeliveryFailureAt: boolean;
+  hasDeliveryFailureReason: boolean;
+  hasDeliveryTelegramError: boolean;
 };
 
 type ColumnRow = RowDataPacket & {
@@ -114,6 +121,19 @@ function parseJsonArray(value: unknown): string[] {
 
 function normalizeTarget(value: string) {
   return value.toLowerCase().replace(/[_\s-]+/g, "");
+}
+
+function normalizeFailureReason(value?: string) {
+  const text = String(value || "").toLowerCase();
+  if (text.includes("blocked")) return "user_blocked_bot";
+  if (text.includes("user not found")) return "user_not_found";
+  if (text.includes("chat not found")) return "chat_not_found";
+  if (text.includes("forbidden") || text.includes("initiate conversation")) return "forbidden";
+  if (text.includes("token") || text.includes("unauthorized")) return "bot_token_invalid";
+  if (text.includes("timeout")) return "telegram_timeout";
+  if (text.includes("paused")) return "bot_paused";
+  if (text.includes("error")) return "system_error";
+  return "unknown_error";
 }
 
 function campaignMatchesChannel(campaign: CampaignRow, channel: ChannelRow) {
@@ -185,6 +205,11 @@ async function getBroadcastSchema(): Promise<BroadcastSchema> {
     hasDeliveryStatus: columns.has("broadcast_deliveries.status"),
     hasDeliveryCost: columns.has("broadcast_deliveries.cost"),
     hasDeliveryPublisherReward: columns.has("broadcast_deliveries.publisher_reward"),
+    hasDeliveryRetryCount: columns.has("broadcast_deliveries.retry_count"),
+    hasDeliverySuccessAt: columns.has("broadcast_deliveries.last_success_at"),
+    hasDeliveryFailureAt: columns.has("broadcast_deliveries.last_failure_at"),
+    hasDeliveryFailureReason: columns.has("broadcast_deliveries.failure_reason"),
+    hasDeliveryTelegramError: columns.has("broadcast_deliveries.telegram_error"),
   };
 }
 
@@ -327,7 +352,7 @@ async function postCampaignToChannel(options: {
     ],
   };
 
-  const result = await sendTelegramMessage(channel.chat_id, campaign.message_text, {
+  const result = await sendTelegramMessage(channel.chat_id, composeCampaignCreativeText(campaign.campaign_title, campaign.message_text), {
     photo: campaign.image_url,
     parse_mode: parseMode,
     reply_markup: replyMarkup,
@@ -444,36 +469,169 @@ async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: Bro
   };
 }
 
-async function recordBroadcastDelivery(
-  schema: BroadcastSchema,
-  campaignId: number,
-  botId: number,
-  userId: number,
-  chatId: string | number
-) {
-  const columns = ["campaign_id", "bot_id", "user_id", "chat_id"];
-  const params: Array<number | string> = [campaignId, botId, userId, String(chatId)];
-
-  if (schema.hasDeliveryStatus) {
-    columns.push("status");
-    params.push("sent");
+function requireBillableBroadcastSchema(schema: BroadcastSchema) {
+  if (!schema.hasDeliveryStatus || !schema.hasDeliveryCost || !schema.hasDeliveryPublisherReward) {
+    throw new Error("broadcast_billing_schema_missing");
   }
+}
 
-  if (schema.hasDeliveryCost) {
-    columns.push("cost");
-    params.push(0);
+async function getBroadcastRewardPercentage() {
+  const [rows] = await pool.query<Array<RowDataPacket & { value: string }>>(
+    "SELECT value FROM settings WHERE `key` = 'broadcast_ad_reward_percentage' LIMIT 1"
+  );
+  const value = Number.parseFloat(String(rows[0]?.value || "50"));
+  return Math.min(1, Math.max(0, (Number.isFinite(value) ? value : 50) / 100));
+}
+
+async function reserveEmergencyBroadcastDelivery(input: {
+  schema: BroadcastSchema;
+  campaign: CampaignRow;
+  bot: BotRow;
+  user: BroadcastUserRow;
+  cost: number;
+}) {
+  requireBillableBroadcastSchema(input.schema);
+  if (!Number.isFinite(input.cost) || input.cost <= 0) throw new Error("invalid_campaign_cost");
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [campaignRows] = await conn.query<Array<RowDataPacket & { budget: string | number; status: string; daily_budget_limit: string | number | null }>>(
+      "SELECT budget,status,daily_budget_limit FROM campaigns WHERE id=? FOR UPDATE",
+      [input.campaign.id]
+    );
+    const campaign = campaignRows[0];
+    if (!campaign || campaign.status !== "active") {
+      await conn.rollback();
+      return { ok: false as const, reason: "campaign_not_active" };
+    }
+    if (Number(campaign.budget || 0) + 1e-10 < input.cost) {
+      await conn.query(
+        "UPDATE campaigns SET status='paused',pause_reason='insufficient_budget_for_delivery',paused_at=NOW() WHERE id=? AND status='active'",
+        [input.campaign.id]
+      );
+      await conn.commit();
+      return { ok: false as const, reason: "campaign_budget_exhausted" };
+    }
+    if (Number(campaign.daily_budget_limit || 0) > 0) {
+      const [[daily]] = await conn.query<Array<RowDataPacket & { spend: string | number }>>(
+        "SELECT COALESCE(SUM(cost),0) spend FROM broadcast_deliveries WHERE campaign_id=? AND created_at>=CURDATE() AND status IN ('pending','sent')",
+        [input.campaign.id]
+      );
+      if (Number(daily?.spend || 0) + input.cost > Number(campaign.daily_budget_limit)) {
+        await conn.rollback();
+        return { ok: false as const, reason: "daily_budget_limit" };
+      }
+    }
+
+    const [budgetUpdate] = await conn.query<ResultSetHeader>(
+      "UPDATE campaigns SET budget=budget-? WHERE id=? AND status='active' AND budget>=?",
+      [input.cost, input.campaign.id, input.cost]
+    );
+    if (budgetUpdate.affectedRows !== 1) {
+      await conn.rollback();
+      return { ok: false as const, reason: "campaign_budget_race" };
+    }
+
+    const columns = ["campaign_id", "bot_id", "user_id", "chat_id", "cost", "publisher_reward", "status"];
+    const params: Array<number | string> = [input.campaign.id, input.bot.id, input.user.id, String(input.user.chat_id), input.cost, 0, "pending"];
+    if (input.schema.hasDeliveryRetryCount) {
+      columns.push("retry_count");
+      params.push(0);
+    }
+    const placeholders = columns.map(() => "?").join(",");
+    const [deliveryInsert] = await conn.query<ResultSetHeader>(
+      `INSERT INTO broadcast_deliveries (${columns.join(",")}) VALUES (${placeholders})`,
+      params
+    );
+    const [[updatedCampaign]] = await conn.query<Array<RowDataPacket & { budget: string | number }>>(
+      "SELECT budget FROM campaigns WHERE id=?",
+      [input.campaign.id]
+    );
+    await conn.commit();
+    return { ok: true as const, deliveryId: Number(deliveryInsert.insertId), remainingBudget: Number(updatedCampaign?.budget || 0) };
+  } catch (error) {
+    await conn.rollback().catch(() => undefined);
+    throw error;
+  } finally {
+    conn.release();
   }
+}
 
-  if (schema.hasDeliveryPublisherReward) {
-    columns.push("publisher_reward");
-    params.push(0);
+async function finalizeEmergencyBroadcastDelivery(input: {
+  schema: BroadcastSchema;
+  deliveryId: number;
+  reward: number;
+  attempts: number;
+}) {
+  const assignments = ["publisher_reward=?", "status='sent'"];
+  const params: Array<number | string> = [input.reward];
+  if (input.schema.hasDeliveryRetryCount) {
+    assignments.push("retry_count=?");
+    params.push(input.attempts);
   }
+  if (input.schema.hasDeliverySuccessAt) assignments.push("last_success_at=NOW()");
+  if (input.schema.hasDeliveryFailureReason) assignments.push("failure_reason=NULL");
+  if (input.schema.hasDeliveryTelegramError) assignments.push("telegram_error=NULL");
+  params.push(input.deliveryId);
 
-  const placeholders = columns.map(() => "?").join(", ");
-  await pool.query(
-    `INSERT INTO broadcast_deliveries (${columns.join(", ")}) VALUES (${placeholders})`,
+  const [updated] = await pool.query<ResultSetHeader>(
+    `UPDATE broadcast_deliveries SET ${assignments.join(",")} WHERE id=? AND status='pending'`,
     params
   );
+  if (updated.affectedRows !== 1) throw new Error("broadcast_finalize_race");
+}
+
+async function refundEmergencyBroadcastDelivery(input: {
+  schema: BroadcastSchema;
+  deliveryId: number;
+  campaignId: number;
+  failureReason: string;
+  telegramError: string;
+  attempts: number;
+}) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.query<Array<RowDataPacket & { cost: string | number; status: string }>>(
+      "SELECT cost,status FROM broadcast_deliveries WHERE id=? FOR UPDATE",
+      [input.deliveryId]
+    );
+    const delivery = rows[0];
+    if (!delivery || delivery.status !== "pending") {
+      await conn.commit();
+      return;
+    }
+    const reservedCost = Number(delivery.cost || 0);
+    await conn.query("UPDATE campaigns SET budget=budget+? WHERE id=?", [reservedCost, input.campaignId]);
+    const assignments = ["cost=0", "publisher_reward=0", "status='failed'"];
+    const params: Array<number | string> = [];
+    if (input.schema.hasDeliveryFailureReason) {
+      assignments.push("failure_reason=?");
+      params.push(input.failureReason);
+    }
+    if (input.schema.hasDeliveryTelegramError) {
+      assignments.push("telegram_error=?");
+      params.push(input.telegramError.slice(0, 500));
+    }
+    if (input.schema.hasDeliveryRetryCount) {
+      assignments.push("retry_count=?");
+      params.push(input.attempts);
+    }
+    if (input.schema.hasDeliveryFailureAt) assignments.push("last_failure_at=NOW()");
+    params.push(input.deliveryId);
+    const [updated] = await conn.query<ResultSetHeader>(
+      `UPDATE broadcast_deliveries SET ${assignments.join(",")} WHERE id=? AND status='pending'`,
+      params
+    );
+    if (updated.affectedRows !== 1) throw new Error("broadcast_refund_race");
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback().catch(() => undefined);
+    throw error;
+  } finally {
+    conn.release();
+  }
 }
 
 async function postBroadcastToBotUser(options: {
@@ -481,6 +639,7 @@ async function postBroadcastToBotUser(options: {
   bot: BotRow;
   user: BroadcastUserRow;
   schema: BroadcastSchema;
+  rewardPercentage: number;
 }) {
   const { campaign, bot, user, schema } = options;
   const parseModeMap: Record<string, string | undefined> = { html: "HTML", markdown: "MarkdownV2", none: undefined };
@@ -490,24 +649,61 @@ async function postBroadcastToBotUser(options: {
       { text: campaign.button_text, url: campaign.link },
     ]],
   };
+  const cost = Number((Number(campaign.cpm || 0) / 1000).toFixed(8));
+  const reward = Number((cost * options.rewardPercentage).toFixed(8));
+  const reservation = await reserveEmergencyBroadcastDelivery({ schema, campaign, bot, user, cost });
+  if (!reservation.ok) return { ok: false, reason: reservation.reason };
 
-  const sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, campaign.message_text, {
-    photo: campaign.image_url,
-    parse_mode: parseMode,
-    reply_markup: replyMarkup,
-    token: bot.bot_token,
-  }) as Promise<TelegramSendResponse | undefined>);
+  let sendResult;
+  try {
+    sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, composeCampaignCreativeText(campaign.campaign_title, campaign.message_text), {
+      photo: campaign.image_url,
+      parse_mode: parseMode,
+      reply_markup: replyMarkup,
+      token: bot.bot_token,
+    }) as Promise<TelegramSendResponse | undefined>);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Telegram send failed";
+    await refundEmergencyBroadcastDelivery({
+      schema,
+      deliveryId: reservation.deliveryId,
+      campaignId: campaign.id,
+      failureReason: normalizeFailureReason(message),
+      telegramError: message,
+      attempts: 1,
+    });
+    throw error;
+  }
   const result = sendResult.result;
 
   if (result?.ok) {
-    await recordBroadcastDelivery(schema, campaign.id, bot.id, user.id, user.chat_id);
+    await finalizeEmergencyBroadcastDelivery({
+      schema,
+      deliveryId: reservation.deliveryId,
+      reward,
+      attempts: sendResult.attempts || 1,
+    });
     await pool.query("UPDATE bot_users SET last_broadcast_at = NOW() WHERE id = ?", [user.id]);
     await markBotUserDeliverySuccess(user.id);
     await recordBotBroadcastSuccess(bot.id);
-    return { ok: true };
+    if (reservation.remainingBudget <= 0) {
+      await pool.query(
+        "UPDATE campaigns SET status='budget_exhausted',budget=0,budget_exhausted_at=NOW(),pause_reason='budget_exhausted' WHERE id=? AND status='active'",
+        [campaign.id]
+      );
+    }
+    return { ok: true, cost, reward, remainingBudget: reservation.remainingBudget };
   }
 
   const reason = result?.description || "Telegram send failed";
+  await refundEmergencyBroadcastDelivery({
+    schema,
+    deliveryId: reservation.deliveryId,
+    campaignId: campaign.id,
+    failureReason: normalizeFailureReason(reason),
+    telegramError: reason,
+    attempts: sendResult.attempts || 1,
+  });
   if (sendResult.failure) {
     const botFailure = classifyBotTokenFailure(result?.description);
     if (botFailure) {
@@ -522,6 +718,8 @@ async function postBroadcastToBotUser(options: {
 
 async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode) {
   const schema = await getBroadcastSchema();
+  requireBillableBroadcastSchema(schema);
+  const rewardPercentage = await getBroadcastRewardPercentage();
   const { dispatches, skippedByLimit } = await getEligibleBroadcastDispatches(campaign, schema);
   const failedUsers: Array<{ botId: number; userId: number; reason: string }> = [];
   let attempted = 0;
@@ -536,6 +734,7 @@ async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode
         bot: dispatch.bot,
         user: dispatch.user,
         schema,
+        rewardPercentage,
       });
 
       if (result.ok) {

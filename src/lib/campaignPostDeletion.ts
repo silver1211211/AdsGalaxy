@@ -96,7 +96,7 @@ async function fetchDeletionBatch(options: {
   hasDeliveryConfirmedAt: boolean;
   batchSize: number;
 }) {
-  const filters = [options.olderThan24Hours ? "cp.status = 'active'" : "cp.status IN ('active', 'posted', 'sent')"];
+  const filters = [options.olderThan24Hours ? "cp.status = 'active'" : "cp.status IN ('active', 'posted', 'sent', 'delete_failed')"];
   const params: Array<number | string> = [];
 
   if (options.olderThan24Hours) {
@@ -178,7 +178,7 @@ async function recordDeleteSuccess(postId: number, attemptsUsed: number, columns
 }
 
 async function recordDeleteFailure(postId: number, attemptsUsed: number, reason: string, columns: CampaignPostColumns) {
-  const updates = ["status = 'active'"];
+  const updates = ["status = 'delete_failed'"];
   const params: Array<number | string> = [];
 
   if (columns.hasDeleteAttempts) {
@@ -197,7 +197,7 @@ async function recordDeleteFailure(postId: number, attemptsUsed: number, reason:
   await pool.query(`UPDATE campaign_posts SET ${updates.join(", ")} WHERE id = ?`, params);
 }
 
-async function deletePostWithRetries(token: string, post: CleanupPostRow): Promise<DeleteResult> {
+async function deletePostWithRetries(token: string | undefined, post: CleanupPostRow): Promise<DeleteResult> {
   if (!post.message_id) {
     return {
       success: true,
@@ -221,6 +221,16 @@ async function deletePostWithRetries(token: string, post: CleanupPostRow): Promi
       reason: "Missing chat_id and channel_username.",
       alreadyDeleted: false,
       telegramResponse: "missing_chat_id_and_username",
+    };
+  }
+
+  if (!token) {
+    return {
+      success: false,
+      attemptsUsed: 0,
+      reason: "BOT_TOKEN is missing; Telegram delete skipped.",
+      alreadyDeleted: false,
+      telegramResponse: "missing_bot_token",
     };
   }
 
@@ -283,7 +293,6 @@ export async function deleteCampaignPosts(options: {
   maxPostsPerRun?: number;
 }): Promise<CampaignPostDeletionSummary> {
   const token = process.env.BOT_TOKEN;
-  if (!token) throw new Error("BOT_TOKEN is missing");
 
   const columns = await getCampaignPostDeletionColumns();
   const summary: CampaignPostDeletionSummary = {
@@ -334,7 +343,7 @@ export async function deleteCampaignPosts(options: {
           await recordDeleteFailure(post.id, result.attemptsUsed, result.reason, columns);
           summary.failed++;
           summary.failedIds.push(post.id);
-          summary.details.push({ id: post.id, status: "active", attempts: result.attemptsUsed, reason: result.reason, telegram_response: result.telegramResponse });
+          summary.details.push({ id: post.id, status: "delete_failed", attempts: result.attemptsUsed, reason: result.reason, telegram_response: result.telegramResponse });
           console.warn(JSON.stringify({
             event: "telegram_post_delete_failed",
             message: `Failed after ${result.attemptsUsed} attempts`,

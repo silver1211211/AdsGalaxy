@@ -54,6 +54,7 @@ type NetworkConfig = {
   network_name: string;
   network_placement_id: string;
   enabled: boolean;
+  monetag_test_mode?: boolean;
   priority_order?: number;
   richads_publisher_id?: string;
   richads_app_id?: string;
@@ -728,6 +729,23 @@ export default function AdminMiniAppsPage() {
                           className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
                         />
                       </div>
+                      {network.network_name === "Monetag" && (
+                        <div className="col-span-3 flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2">
+                          <div>
+                            <div className="text-xs font-semibold text-slate-700">Monetag Test Mode</div>
+                            <div className="text-[11px] text-slate-400">Force Monetag for this Mini App while enabled.</div>
+                          </div>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={Boolean(network.monetag_test_mode)}
+                            onClick={() => setNetworks((prev) => prev.map((item, i) => i === index ? { ...item, monetag_test_mode: !item.monetag_test_mode } : item))}
+                            className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors focus:outline-none ${network.monetag_test_mode ? "bg-amber-500" : "bg-slate-200"}`}
+                          >
+                            <span className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${network.monetag_test_mode ? "translate-x-6" : "translate-x-1"}`} />
+                          </button>
+                        </div>
+                      )}
                       {configWarnings.length > 0 && (
                         <div className="col-span-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
                           {configWarnings.join(" / ")}
@@ -1089,15 +1107,15 @@ export default function AdminMiniAppsPage() {
               </div>
               <div className="rounded-xl bg-slate-50 p-3">
                 <div className="font-bold uppercase tracking-widest text-slate-400">Applied</div>
-                <div className="mt-1 text-lg font-black text-slate-900">{money(optimizerReport.latest_run?.applied_recommended_cpm || optimizerReport.settings?.global_recommended_cpm)}</div>
+                <div className="mt-1 text-lg font-black text-slate-900">{money(optimizerReport.latest_run?.applied_recommended_cpm || optimizerReport.settings?.miniapp_internal_recommended_cpm)}</div>
               </div>
               <div className="rounded-xl bg-slate-50 p-3">
                 <div className="font-bold uppercase tracking-widest text-slate-400">Minimum</div>
-                <div className="mt-1 text-base font-black text-slate-900">{money(optimizerReport.settings?.global_min_cpm)}</div>
+                <div className="mt-1 text-base font-black text-slate-900">{money(optimizerReport.settings?.miniapp_internal_min_cpm)}</div>
               </div>
               <div className="rounded-xl bg-slate-50 p-3">
                 <div className="font-bold uppercase tracking-widest text-slate-400">Maximum</div>
-                <div className="mt-1 text-base font-black text-slate-900">{money(optimizerReport.settings?.global_max_cpm)}</div>
+                <div className="mt-1 text-base font-black text-slate-900">{money(optimizerReport.settings?.miniapp_internal_max_cpm)}</div>
               </div>
               <div className="col-span-2 rounded-xl bg-slate-50 p-3">
                 <div className="font-bold uppercase tracking-widest text-slate-400">Manual Override</div>

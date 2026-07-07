@@ -19,6 +19,58 @@ type SelfPromotionForm = {
   image_data_url?: string | null;
 };
 
+type SettingRow = {
+  key: string;
+  value: string;
+  description?: string | null;
+};
+
+type CpmGroup = {
+  id: string;
+  title: string;
+  description: string;
+  minKey: string;
+  recommendedKey: string;
+  maxKey: string;
+};
+
+const CPM_GROUPS: CpmGroup[] = [
+  {
+    id: "views",
+    title: "Channel View Campaign CPM",
+    description: "Controls pricing for channel view campaigns.",
+    minKey: "min_cpm_views",
+    recommendedKey: "recommended_cpm_views",
+    maxKey: "max_cpm_views",
+  },
+  {
+    id: "clicks",
+    title: "Channel Click Campaign CPM",
+    description: "Controls pricing for channel click campaigns.",
+    minKey: "min_cpm_clicks",
+    recommendedKey: "recommended_cpm_clicks",
+    maxKey: "max_cpm_clicks",
+  },
+  {
+    id: "broadcast",
+    title: "Bot Broadcast Campaign CPM",
+    description: "Controls pricing for bot broadcast campaigns.",
+    minKey: "min_cpm_broadcast",
+    recommendedKey: "recommended_cpm_broadcast",
+    maxKey: "max_cpm_broadcast",
+  },
+  {
+    id: "miniapp",
+    title: "Mini App Campaign CPM",
+    description: "Controls pricing for Mini App rewarded campaigns.",
+    minKey: "miniapp_internal_min_cpm",
+    recommendedKey: "miniapp_internal_recommended_cpm",
+    maxKey: "miniapp_internal_max_cpm",
+  },
+];
+
+const GROUPED_CPM_KEYS = new Set(CPM_GROUPS.flatMap((group) => [group.minKey, group.recommendedKey, group.maxKey]));
+
 const defaultSelfPromotionForm: SelfPromotionForm = {
   enabled: true,
   status: "active",
@@ -42,7 +94,7 @@ function datetimeLocal(value: unknown) {
 }
 
 export default function AdminSettingsPage() {
-  const [settings, setSettings] = useState([]);
+  const [settings, setSettings] = useState<SettingRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   
@@ -50,6 +102,8 @@ export default function AdminSettingsPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingSetting, setEditingSetting] = useState<any>(null);
   const [editValue, setEditValue] = useState("");
+  const [editingCpmGroup, setEditingCpmGroup] = useState<CpmGroup | null>(null);
+  const [cpmGroupValues, setCpmGroupValues] = useState({ min: "", recommended: "", max: "" });
   const [submitting, setSubmitting] = useState(false);
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [logoUploading, setLogoUploading] = useState(false);
@@ -111,6 +165,17 @@ export default function AdminSettingsPage() {
     setIsModalOpen(true);
   };
 
+  const settingValue = (key: string, fallback = "") => settings.find((setting) => setting.key === key)?.value ?? fallback;
+
+  const openCpmGroupModal = (group: CpmGroup) => {
+    setEditingCpmGroup(group);
+    setCpmGroupValues({
+      min: settingValue(group.minKey, "0"),
+      recommended: settingValue(group.recommendedKey, "0"),
+      max: settingValue(group.maxKey, "0"),
+    });
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSetting) return;
@@ -129,6 +194,35 @@ export default function AdminSettingsPage() {
       fetchSettings();
     } catch (err: any) {
       setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleCpmGroupSave = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingCpmGroup) return;
+
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/admin/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            [editingCpmGroup.minKey]: cpmGroupValues.min,
+            [editingCpmGroup.recommendedKey]: cpmGroupValues.recommended,
+            [editingCpmGroup.maxKey]: cpmGroupValues.max,
+          },
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to save CPM settings");
+
+      setEditingCpmGroup(null);
+      fetchSettings();
+    } catch (err: any) {
+      setError(err.message || "Failed to save CPM settings");
     } finally {
       setSubmitting(false);
     }
@@ -256,6 +350,76 @@ export default function AdminSettingsPage() {
                   className="flex-1 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 transition-colors cursor-pointer disabled:opacity-50"
                 >
                   {submitting ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {editingCpmGroup && (
+        <div className="fixed inset-0 z-[100] bg-slate-900/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg w-full max-w-lg shadow-xl border border-slate-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">{editingCpmGroup.title}</h3>
+                <p className="text-xs font-semibold text-slate-500">{editingCpmGroup.description}</p>
+              </div>
+            </div>
+            <form onSubmit={handleCpmGroupSave} className="p-6 space-y-4">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <label className="space-y-1">
+                  <span className="text-xs font-bold text-slate-600">Minimum</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    required
+                    value={cpmGroupValues.min}
+                    onChange={(e) => setCpmGroupValues((current) => ({ ...current, min: e.target.value }))}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm font-mono"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-bold text-slate-600">Recommended</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    required
+                    value={cpmGroupValues.recommended}
+                    onChange={(e) => setCpmGroupValues((current) => ({ ...current, recommended: e.target.value }))}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm font-mono"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-bold text-slate-600">Maximum</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    required
+                    value={cpmGroupValues.max}
+                    onChange={(e) => setCpmGroupValues((current) => ({ ...current, max: e.target.value }))}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm font-mono"
+                  />
+                </label>
+              </div>
+
+              <div className="flex gap-3 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setEditingCpmGroup(null)}
+                  className="flex-1 py-2 text-slate-600 border border-slate-200 rounded-md text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="flex-1 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  {submitting ? "Saving..." : "Save CPM Group"}
                 </button>
               </div>
             </form>
@@ -416,6 +580,42 @@ export default function AdminSettingsPage() {
             )}
           </div>
 
+          {!loading && settings.length > 0 && (
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              {CPM_GROUPS.map((group) => (
+                <div key={group.id} className="bg-white border border-blue-100 rounded-lg p-4 shadow-sm">
+                  <div className="mb-4 flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-black text-slate-900">{group.title}</h3>
+                      <p className="mt-1 text-xs font-semibold text-slate-500">{group.description}</p>
+                    </div>
+                    <button
+                      onClick={() => openCpmGroupModal(group)}
+                      className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors cursor-pointer shrink-0"
+                      title="Edit CPM group"
+                    >
+                      <Edit2 size={16} />
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="min-w-0 rounded-lg border border-slate-100 bg-slate-50 p-2.5">
+                      <p className="break-words text-[9px] font-black uppercase text-slate-400">Minimum</p>
+                      <p className="mt-1 font-mono text-sm font-bold text-blue-700">{settingValue(group.minKey, "0")}</p>
+                    </div>
+                    <div className="min-w-0 rounded-lg border border-slate-100 bg-slate-50 p-2.5">
+                      <p className="break-words text-[9px] font-black uppercase text-slate-400">Recommended</p>
+                      <p className="mt-1 font-mono text-sm font-bold text-blue-700">{settingValue(group.recommendedKey, "0")}</p>
+                    </div>
+                    <div className="min-w-0 rounded-lg border border-slate-100 bg-slate-50 p-2.5">
+                      <p className="break-words text-[9px] font-black uppercase text-slate-400">Maximum</p>
+                      <p className="mt-1 font-mono text-sm font-bold text-blue-700">{settingValue(group.maxKey, "0")}</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           {loading ? (
             <div className="flex justify-center p-12"><Loader2 className="animate-spin text-blue-600" size={24} /></div>
           ) : settings.length === 0 ? (
@@ -423,8 +623,8 @@ export default function AdminSettingsPage() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {settings
-                .filter((s: any) => s.key !== "last_broadcast_cron_run")
-                .map((setting: any) => (
+                .filter((s) => s.key !== "last_broadcast_cron_run" && !GROUPED_CPM_KEYS.has(s.key))
+                .map((setting) => (
                 <div key={setting.key} className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm flex flex-col justify-between">
                   <div>
                     <div className="flex items-start justify-between gap-2 mb-2">

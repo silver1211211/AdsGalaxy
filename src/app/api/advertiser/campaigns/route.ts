@@ -13,6 +13,8 @@ import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { validateTotalBudget } from "@/lib/campaignBudget";
 import { safeQueueAdvertiserOnboarding } from "@/lib/supportMessages";
+import { validateCampaignCpmBid } from "@/lib/campaignCpmSettings";
+import { hasRestrictedClickCreativeContent } from "@/lib/campaignCreative";
 
 export async function POST(request: Request) {
   try {
@@ -24,9 +26,10 @@ export async function POST(request: Request) {
 
     const formData = await request.formData();
     
-    const name = formData.get("name") as string;
+    const name = String(formData.get("name") || "").trim();
+    const campaignTitle = String(formData.get("campaign_title") || "").trim();
     const parse_mode = formData.get("parse_mode") as string;
-    const message_text = formData.get("message_text") as string;
+    const message_text = String(formData.get("message_text") || "");
     const link = formData.get("link") as string;
     const postbackUrl = validatePostbackUrl(formData.get("postback_url"));
     const button_text = formData.get("button_text") as string;
@@ -60,21 +63,29 @@ export async function POST(request: Request) {
     }, budget);
 
     // 1. Validation
-    if (!name || !message_text || !link || !budget || !cpm) {
+    if (!name || !campaignTitle || !message_text.trim() || !link || !budget || !cpm) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+    }
+
+    if (campaignTitle.length < 3) {
+      return NextResponse.json({ error: "Campaign title must be at least 3 characters" }, { status: 400 });
+    }
+
+    if (campaignTitle.length > 255) {
+      return NextResponse.json({ error: "Campaign title exceeds 255 characters" }, { status: 400 });
     }
 
     if (message_text.length > 1000) {
       return NextResponse.json({ error: "Message text exceeds 1000 characters" }, { status: 400 });
     }
 
+    await validateCampaignCpmBid(type, cpm);
+
     // Click-type restriction: No usernames or links in text
     if (type === "clicks") {
-      const hasUsername = /@\w+/.test(message_text);
-      const hasLink = /(https?:\/\/[^\s]+)|(\w+\.\w+)/.test(message_text);
-      if (hasUsername || hasLink) {
+      if (hasRestrictedClickCreativeContent(campaignTitle) || hasRestrictedClickCreativeContent(message_text)) {
         return NextResponse.json({ 
-          error: "Click campaigns cannot contain usernames (@) or links in the message text. Use the button for your link." 
+          error: "Click campaigns cannot contain usernames (@) or links in the campaign title or message text. Use the button for your link."
         }, { status: 400 });
       }
     }
@@ -152,17 +163,18 @@ export async function POST(request: Request) {
       // Insert campaign
       const [result]: any = await conn.query(
         `INSERT INTO campaigns (
-          user_id, name, parse_mode, message_text, image_url, link, postback_url, button_text, type,
+          user_id, name, campaign_title, parse_mode, message_text, image_url, link, postback_url, button_text, type,
           budget, total_budget, cpm, category, quality_score, quality_tier, quality_metadata,
           continents, countries, languages, vpn_policy,
           device_policy, os_policy, start_at, end_at, daily_budget_limit,
           frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
           direct_inventory_metadata, status
         )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
         [
           user.id,
           name,
+          campaignTitle,
           parse_mode,
           message_text,
           imageUrl,
@@ -273,7 +285,7 @@ export async function GET(request: Request) {
     const campaignUpdatedAtExpr = hasCampaignUpdatedAt ? "c.updated_at" : "c.created_at";
 
     const [rows]: any = await pool.query(
-      `SELECT id, name, parse_mode, message_text, image_url, link, postback_url, button_text, rejection_reason,
+      `SELECT id, name, campaign_title, parse_mode, message_text, image_url, link, postback_url, button_text, rejection_reason,
          type, budget, total_budget, cpm, category, continents, countries, languages, vpn_policy,
          device_policy, os_policy, start_at, end_at, daily_budget_limit,
          frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,

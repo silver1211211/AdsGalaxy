@@ -2,7 +2,6 @@ import { randomUUID } from "crypto";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import {
   MINIAPP_NETWORKS,
-  MINIAPP_FALLBACK_ORDER,
   buildMiniAppNetworkClientConfig,
   isMiniAppNetworkName,
   type MiniAppAdFormat,
@@ -34,6 +33,7 @@ type NetworkRow = RowDataPacket & {
   network_name: string;
   network_placement_id: string | null;
   enabled: number | boolean;
+  monetag_test_mode: number | boolean | null;
   priority_order: number | null;
   recent_failures: number | null;
   temporarily_disabled_until: Date | string | null;
@@ -86,6 +86,7 @@ export type MediationDecision = {
   ad_format: MiniAppAdFormat;
   decision_reason: string;
   error_code?: "NO_FILL";
+  mediation_diagnostics: Record<string, unknown>;
 };
 
 function parseJsonArray(value: unknown) {
@@ -115,18 +116,39 @@ function supportsFormat(network: NetworkRow, adFormat: MiniAppAdFormat) {
   return false;
 }
 
-function rankCandidatePool(candidates: NetworkRow[]) {
-  return [...candidates].sort((a, b) => {
-    if (a.network_name === INTERNAL_NETWORK_NAME && b.network_name !== INTERNAL_NETWORK_NAME) return -1;
-    if (b.network_name === INTERNAL_NETWORK_NAME && a.network_name !== INTERNAL_NETWORK_NAME) return 1;
-    const priorityA = Number(a.priority_order || 99);
-    const priorityB = Number(b.priority_order || 99);
-    const scoreA = Number(a.health_score ?? 100);
-    const scoreB = Number(b.health_score ?? 100);
-    const fallbackA = MINIAPP_FALLBACK_ORDER.indexOf(a.network_name as MiniAppNetworkName);
-    const fallbackB = MINIAPP_FALLBACK_ORDER.indexOf(b.network_name as MiniAppNetworkName);
-    return priorityA - priorityB || scoreB - scoreA || fallbackA - fallbackB;
-  });
+function weightedNetworkWeight(network: NetworkRow, remaining: NetworkRow[]) {
+  const internalRemaining = remaining.some((item) => item.network_name === INTERNAL_NETWORK_NAME);
+  const externalRemaining = remaining.filter((item) => item.network_name !== INTERNAL_NETWORK_NAME);
+  if (network.network_name === INTERNAL_NETWORK_NAME) {
+    return externalRemaining.length > 0 ? 0.18 : 1;
+  }
+  if (internalRemaining) return 0.82 / Math.max(1, externalRemaining.length);
+  return 1 / Math.max(1, externalRemaining.length);
+}
+
+function buildWeightedSelectionOrder(candidates: NetworkRow[]) {
+  const remaining = [...candidates];
+  const selected: NetworkRow[] = [];
+
+  while (remaining.length > 0) {
+    const weights = remaining.map((network) => weightedNetworkWeight(network, remaining));
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+    let cursor = Math.random() * totalWeight;
+    let selectedIndex = 0;
+
+    for (let index = 0; index < remaining.length; index += 1) {
+      cursor -= weights[index];
+      if (cursor <= 0) {
+        selectedIndex = index;
+        break;
+      }
+    }
+
+    const [network] = remaining.splice(selectedIndex, 1);
+    selected.push(network);
+  }
+
+  return selected;
 }
 
 export function isFallbackErrorCode(errorCode: string) {
@@ -141,6 +163,7 @@ export async function getMiniappNetworksForMediation(miniappId: number | string,
       mn.richads_publisher_id,
       mn.richads_app_id,
       mn.enabled,
+      COALESCE(mn.monetag_test_mode, 0) as monetag_test_mode,
       COALESCE(NULLIF(mn.priority_order, 0), FIELD(mn.network_name, 'AdsGalaxyInternal', 'AdsGram', 'GigaPub', 'AdExium', 'Monetag', 'RichAds')) as priority_order,
       mh.recent_failures,
       mh.temporarily_disabled_until
@@ -163,6 +186,7 @@ export async function selectMediationNetwork(input: {
   country?: string | null;
   alreadyAttempted?: string[];
 }) {
+  const startedAt = Date.now();
   const networks = await getMiniappNetworksForMediation(input.miniappId, input.conn);
   const globallyDisabledNetworks = await getDisabledMiniappNetworks(input.conn);
   const monetagTestModeEnabled = await isMonetagTestModeEnabled(input.conn);
@@ -179,6 +203,9 @@ export async function selectMediationNetwork(input: {
   const attempted = new Set((input.alreadyAttempted || []).filter(Boolean));
   const skipped: SkippedNetwork[] = [];
   const candidatePool: NetworkRow[] = [];
+  const initialEnabledPool = networks
+    .filter((network) => Boolean(network.enabled) && isMiniAppNetworkName(network.network_name))
+    .map((network) => network.network_name);
 
   for (const network of networks) {
     if (!isMiniAppNetworkName(network.network_name)) {
@@ -204,11 +231,12 @@ export async function selectMediationNetwork(input: {
     }
 
     if (network.network_name === "Monetag") {
-      if (monetagIsOnlyEnabledNetwork && !monetagTestModeEnabled) {
+      const perMiniAppMonetagTestMode = Boolean(network.monetag_test_mode);
+      if (monetagIsOnlyEnabledNetwork && !monetagTestModeEnabled && !perMiniAppMonetagTestMode) {
         skipped.push({ network_name: "Monetag", reason: "monetag_only_protection_active" });
         continue;
       }
-      const monetagState = monetagIsOnlyEnabledNetwork && monetagTestModeEnabled
+      const monetagState = (monetagIsOnlyEnabledNetwork && monetagTestModeEnabled) || perMiniAppMonetagTestMode
         ? { allowed: true, reason: "test_mode" }
         : await canShowMonetag(input.miniappId, input.telegramUserId, input.conn);
       if (!monetagState.allowed) {
@@ -242,8 +270,9 @@ export async function selectMediationNetwork(input: {
           skipped.push({ network_name: network.network_name, reason: "unsupported_ad_format" });
           continue;
         }
-      } catch (error: any) {
-        skipped.push({ network_name: network.network_name, reason: error?.message || "invalid_config" });
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "invalid_config";
+        skipped.push({ network_name: network.network_name, reason: message || "invalid_config" });
         continue;
       }
     }
@@ -271,17 +300,42 @@ export async function selectMediationNetwork(input: {
     candidatePool.push(network);
   }
 
-  const rankedCandidates = rankCandidatePool(candidatePool);
-  const selected = rankedCandidates[0];
+  const monetagTestCandidate = candidatePool.find((network) => network.network_name === "Monetag" && Boolean(network.monetag_test_mode));
+  const randomizedCandidates = monetagTestCandidate
+    ? [monetagTestCandidate, ...candidatePool.filter((network) => network !== monetagTestCandidate)]
+    : buildWeightedSelectionOrder(candidatePool);
+  const selected = randomizedCandidates[0];
   if (selected?.network_name === "Monetag" && !selected.monetag_test_mode_override) {
     await recordMonetagShown(input.miniappId, input.telegramUserId, input.conn);
   }
+  const finalReason = selected
+    ? monetagTestCandidate
+      ? "monetag_test_mode_forced"
+      : "weighted_random_selected"
+    : "no_eligible_network";
+  const selectionOrder = randomizedCandidates.map((network) => network.network_name);
 
   return {
     selected,
     enabled_networks: enabledNetworkNames,
-    candidate_networks: rankedCandidates.map((network) => network.network_name),
+    candidate_networks: selectionOrder,
     skipped_networks: skipped,
+    mediation_diagnostics: {
+      initial_pool: initialEnabledPool,
+      eligible_pool: candidatePool.map((network) => network.network_name),
+      random_selection_order: selectionOrder,
+      attempted_networks: Array.from(attempted),
+      remaining_pool: selected ? selectionOrder.slice(1) : [],
+      skipped_networks: skipped,
+      final_provider: selected?.network_name || null,
+      final_reason: finalReason,
+      monetag_test_mode_forced: Boolean(monetagTestCandidate),
+      weighting: {
+        internal_target_share_when_external_available: 0.18,
+        external_target_share_when_internal_available: 0.82,
+      },
+      duration_ms: Date.now() - startedAt,
+    },
   };
 }
 
@@ -321,8 +375,8 @@ export async function createMediationAttempt(input: {
     await input.conn.query(
       `INSERT INTO miniapp_mediation_requests
         (miniapp_id, telegram_user_id, country, ad_format, selected_network, internal_campaign_id, request_id, parent_request_id, root_request_id,
-         candidate_networks, attempted_networks, skipped_networks, fallback_attempts, decision_reason, final_result)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         candidate_networks, attempted_networks, skipped_networks, fallback_attempts, decision_reason, final_result, mediation_diagnostics)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.miniappId,
         input.telegramUserId,
@@ -339,6 +393,11 @@ export async function createMediationAttempt(input: {
         JSON.stringify(fallbackAttempts),
         "no_eligible_network",
         "no_fill",
+        JSON.stringify({
+          ...decision.mediation_diagnostics,
+          attempts: fallbackAttempts,
+          final_result: "no_fill",
+        }),
       ]
     );
 
@@ -354,17 +413,20 @@ export async function createMediationAttempt(input: {
       ad_format: input.adFormat,
       decision_reason: "no_eligible_network",
       error_code: "NO_FILL",
+      mediation_diagnostics: decision.mediation_diagnostics,
     } satisfies MediationDecision;
   }
 
   const fallbackAvailable = decision.candidate_networks.length > 1;
-  const decisionReason = input.parentRequestId ? "fallback_candidate_ranked" : "candidate_pool_ranked";
+  const decisionReason = decision.mediation_diagnostics.monetag_test_mode_forced
+    ? "monetag_test_mode_forced"
+    : input.parentRequestId ? "fallback_weighted_random_selected" : "weighted_random_selected";
 
   await input.conn.query(
     `INSERT INTO miniapp_mediation_requests
       (miniapp_id, telegram_user_id, country, ad_format, selected_network, internal_campaign_id, request_id, parent_request_id, root_request_id,
-       candidate_networks, attempted_networks, skipped_networks, fallback_attempts, decision_reason, final_result)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       candidate_networks, attempted_networks, skipped_networks, fallback_attempts, decision_reason, final_result, mediation_diagnostics)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.miniappId,
       input.telegramUserId,
@@ -381,6 +443,12 @@ export async function createMediationAttempt(input: {
       JSON.stringify(fallbackAttempts),
       decisionReason,
       "selected",
+      JSON.stringify({
+        ...decision.mediation_diagnostics,
+        attempts: fallbackAttempts,
+        selected_request_id: requestId,
+        final_result: "selected",
+      }),
     ]
   );
 
@@ -400,6 +468,7 @@ export async function createMediationAttempt(input: {
     fallback_available: fallbackAvailable,
     ad_format: input.adFormat,
     decision_reason: decisionReason,
+    mediation_diagnostics: decision.mediation_diagnostics,
   } satisfies MediationDecision;
 }
 
