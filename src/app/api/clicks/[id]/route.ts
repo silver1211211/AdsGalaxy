@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import crypto from "crypto";
 import { appendClickId, recordAdClick } from "@/lib/conversionTracking";
+import { parsePositiveIntegerId } from "@/lib/routeIds";
 
 async function recordCampaignClick(input: {
-  campaignId: string;
+  campaignId: number;
   ip: string;
   userAgent: string;
   fingerprint: string;
@@ -31,6 +32,12 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: campaignId } = await params;
+  const parsedCampaignId = parsePositiveIntegerId(campaignId);
+
+  if (!parsedCampaignId) {
+    console.warn("Malformed campaign click id rejected", { campaign_id: campaignId });
+    return NextResponse.redirect(process.env.NEXT_PUBLIC_APP_URL || "/", 302);
+  }
   
   // Get user info for tracking
   const ip = req.headers.get("x-forwarded-for")?.split(',')[0] || "127.0.0.1";
@@ -46,21 +53,21 @@ export async function GET(
   try {
     const [rows]: any = await pool.query(
       "SELECT id, user_id, link, image_url, category FROM campaigns WHERE id = ?",
-      [campaignId]
+      [parsedCampaignId]
     );
     if (rows.length === 0) {
       return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
     }
     campaign = rows[0];
   } catch (error) {
-    console.error("Click destination resolution failed", { campaign_id: campaignId, error: error instanceof Error ? error.message : "unknown_error" });
+    console.error("Click destination resolution failed", { campaign_id: parsedCampaignId, error: error instanceof Error ? error.message : "unknown_error" });
     return NextResponse.redirect(process.env.NEXT_PUBLIC_APP_URL || "/", 302);
   }
 
   let targetUrl = campaign.link;
   try {
     const isBot = /bot|spider|crawl|slurp|github-camo|googlebot|bingbot|yandex|baidu/i.test(userAgent);
-    const clickRecorded = await recordCampaignClick({ campaignId, ip, userAgent, fingerprint, isBot });
+    const clickRecorded = await recordCampaignClick({ campaignId: parsedCampaignId, ip, userAgent, fingerprint, isBot });
     if (clickRecorded) {
       const clickId = await recordAdClick({
         campaignType: "campaign",
@@ -76,7 +83,7 @@ export async function GET(
       targetUrl = appendClickId(targetUrl, clickId);
     }
   } catch (error) {
-    console.error("Click tracking failed; redirect preserved", { campaign_id: campaignId, error: error instanceof Error ? error.message : "unknown_error" });
+    console.error("Click tracking failed; redirect preserved", { campaign_id: parsedCampaignId, error: error instanceof Error ? error.message : "unknown_error" });
   }
   return NextResponse.redirect(targetUrl, 302);
 }

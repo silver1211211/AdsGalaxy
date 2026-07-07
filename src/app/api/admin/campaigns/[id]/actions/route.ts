@@ -5,6 +5,7 @@ import { requireAdminPermission } from "@/lib/adminAuth";
 import { deleteActiveCampaignPosts } from "@/lib/campaignPostDeletion";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { settleCampaignEngagementBeforeDeletion, type CampaignSettlementBeforeDeletionResult } from "@/lib/channelSettlement";
+import { acquireCronLock, releaseCronLock } from "@/lib/cronSecurity";
 
 const LIFECYCLE_COLUMNS = ["paused_at", "resume_locked_until", "pause_reason", "completed_at"];
 
@@ -52,6 +53,7 @@ export async function POST(
   const { admin, response } = await requireAdminPermission("operate");
   if (response) return response;
 
+  let lock: { lockName: string; ownerToken: string } | null = null;
   try {
     const { id } = await params;
     const { action } = await request.json();
@@ -59,6 +61,13 @@ export async function POST(
 
     if (!validActions.has(action)) {
       return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+    }
+
+    lock = await acquireCronLock(`admin-campaign-action-${id}`, 600);
+    if (!lock) {
+      return NextResponse.json({
+        error: "This campaign is already being updated. Please wait for the current cleanup to finish and retry.",
+      }, { status: 409 });
     }
 
     const [rows] = await pool.query<CampaignActionRow[]>("SELECT id, status, budget, cpm, user_id FROM campaigns WHERE id = ?", [id]);
@@ -101,10 +110,6 @@ export async function POST(
     }
 
     if (action === "pause") {
-      deletion = await deleteCampaignPostsSafely(id);
-      if (deletion.failed > 0) {
-        console.error("Admin campaign pause had post cleanup failures", { campaign_id: id, action, deletion });
-      }
       const updates = ["status = 'paused'"];
 
       if (columns.has("pause_reason")) updates.push("pause_reason = 'admin_paused'");
@@ -113,6 +118,10 @@ export async function POST(
 
       await pool.query(`UPDATE campaigns SET ${updates.join(", ")} WHERE id = ?`, [id]);
       newStatus = "paused";
+      deletion = await deleteCampaignPostsSafely(id);
+      if (deletion.failed > 0) {
+        console.error("Admin campaign pause had post cleanup failures", { campaign_id: id, action, deletion });
+      }
     }
 
     if (action === "resume") {
@@ -144,10 +153,6 @@ export async function POST(
     }
 
     if (action === "delete") {
-      deletion = await deleteCampaignPostsSafely(id);
-      if (deletion.failed > 0) {
-        console.error("Admin campaign delete had post cleanup failures", { campaign_id: id, action, deletion });
-      }
       const updates = ["status = 'deleted'"];
 
       if (columns.has("pause_reason")) updates.push("pause_reason = 'admin_deleted'");
@@ -155,6 +160,10 @@ export async function POST(
 
       await pool.query(`UPDATE campaigns SET ${updates.join(", ")} WHERE id = ?`, [id]);
       newStatus = "deleted";
+      deletion = await deleteCampaignPostsSafely(id);
+      if (deletion.failed > 0) {
+        console.error("Admin campaign delete had post cleanup failures", { campaign_id: id, action, deletion });
+      }
     }
 
     await recordAdminActionAudit({
@@ -186,5 +195,7 @@ export async function POST(
     const message = error instanceof Error ? error.message : "Internal Server Error";
     console.error("Admin Campaign Action Error:", error);
     return NextResponse.json({ error: message }, { status: 500 });
+  } finally {
+    await releaseCronLock(lock);
   }
 }

@@ -4,8 +4,10 @@ import { POSTING_TIME_OPTIONS } from "@/lib/postingTimes";
 import { createSystemLog, maskEntityId } from "@/lib/systemLogs";
 
 export type ChannelStatusType =
+  | "pending"
   | "active"
   | "paused"
+  | "rejected"
   | "bot_removed"
   | "channel_not_found"
   | "deleted"

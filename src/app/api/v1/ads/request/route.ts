@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { enqueueDeveloperWebhook, logDeveloperApiRequest, recordSandboxEvent, sandboxAdPayload, validateDeveloperApiRequest } from "@/lib/developerPlatform";
 import { requireAdServingAllowed } from "@/lib/productionSafety";
+import { publicApiErrorMessage } from "@/lib/publicApiErrors";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +26,6 @@ export async function POST(request: Request) {
   } catch (error: any) {
     const status = Number(error.statusCode || 400);
     await logDeveloperApiRequest(context, request, status, false, undefined, error.message);
-    return NextResponse.json({ error: error.message || "Ad request failed" }, { status });
+    return NextResponse.json({ error: publicApiErrorMessage(error, "Ad request failed", status) }, { status });
   }
 }

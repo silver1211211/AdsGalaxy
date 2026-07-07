@@ -8,7 +8,7 @@ export async function GET(request: Request) {
   if (unauthorized) return unauthorized;
 
   return NextResponse.json(
-    { success: false, error: "Deprecated cron. Use /api/cron/delete-expired-posts." },
+    { success: false, error: "Deprecated cron. Use /api/cron/cleanup-expired-posts." },
     { status: 410 }
   );
 }

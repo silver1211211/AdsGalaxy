@@ -201,6 +201,13 @@ export async function POST(request: Request) {
       [mediationRequest.id]
     );
     await recordNetworkSuccess(conn, miniappId, INTERNAL_NETWORK_NAME);
+    console.info("[AdsGalaxy MiniApp mediation]", {
+      event: "final_displayed_provider",
+      miniapp_id: miniappId,
+      request_id: requestId,
+      final_displayed_provider: INTERNAL_NETWORK_NAME,
+      internal_campaign_id: Number(mediationRequest.internal_campaign_id),
+    });
     const quality = await recordInternalAdCompletionEvent({
       conn,
       requestId,

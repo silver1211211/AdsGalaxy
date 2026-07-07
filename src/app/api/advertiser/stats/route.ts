@@ -313,6 +313,7 @@ export async function GET(request: Request) {
 
   } catch (error: any) {
     console.error("Stats API Error:", error);
-    return NextResponse.json({ error: error.message }, { status: getAuthErrorStatus(error) });
+    const status = getAuthErrorStatus(error);
+    return NextResponse.json({ error: status === 500 ? "Failed to load advertiser stats" : "Unauthorized" }, { status });
   }
 }

@@ -3,13 +3,13 @@ import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 
 export async function GET(request: Request) {
-  const initData = request.headers.get("x-telegram-init-data");
-  const user = await getAuthenticatedUser(initData);
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
   try {
+    const initData = request.headers.get("x-telegram-init-data");
+    const user = await getAuthenticatedUser(initData);
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     // Fetch Click Settlements
     const [clickSettlements]: any = await pool.query(`
       SELECT 
@@ -75,6 +75,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ earnings: allEarnings });
   } catch (error: any) {
     console.error("Publisher Earnings Error:", error);
-    return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: getAuthErrorStatus(error) });
+    const status = getAuthErrorStatus(error);
+    return NextResponse.json({ error: status === 500 ? "Failed to fetch publisher earnings" : "Unauthorized" }, { status });
   }
 }

@@ -16,6 +16,26 @@ import { safeQueueAdvertiserOnboarding } from "@/lib/supportMessages";
 import { validateCampaignCpmBid } from "@/lib/campaignCpmSettings";
 import { hasRestrictedClickCreativeContent } from "@/lib/campaignCreative";
 
+function campaignCreateErrorResponse(error: any) {
+  const message = String(error?.message || "");
+  const lowerMessage = message.toLowerCase();
+
+  if (message === "Invalid campaign category. Please select a valid category and try again."
+    || (lowerMessage.includes("data truncated") && lowerMessage.includes("category"))) {
+    return NextResponse.json(
+      { error: "Invalid campaign category. Please select a valid category and try again." },
+      { status: 400 }
+    );
+  }
+
+  const authStatus = getAuthErrorStatus(error);
+  if (authStatus !== 500) {
+    return NextResponse.json({ error: message || "Authentication failed" }, { status: authStatus });
+  }
+
+  return NextResponse.json({ error: "Failed to create campaign. Please check your details and try again." }, { status: 500 });
+}
+
 export async function POST(request: Request) {
   try {
     const blocked = await requireUserWritesAllowed();
@@ -254,7 +274,7 @@ export async function POST(request: Request) {
 
   } catch (error: any) {
     console.error("Create Campaign Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to create campaign" }, { status: getAuthErrorStatus(error) });
+    return campaignCreateErrorResponse(error);
   }
 }
 

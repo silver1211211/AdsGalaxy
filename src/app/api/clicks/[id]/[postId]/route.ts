@@ -4,6 +4,7 @@ import crypto from "crypto";
 import { appendClickId, recordAdClick } from "@/lib/conversionTracking";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { debitChannelClick } from "@/lib/channelFastBilling";
+import { parsePositiveIntegerId } from "@/lib/routeIds";
 
 type CampaignPostRow = RowDataPacket & {
   id: number;
@@ -14,13 +15,6 @@ type CampaignPostRow = RowDataPacket & {
   post_id: number;
   channel_id: number | null;
 };
-
-function normalizePositiveId(value: string) {
-  const match = String(value || "").trim().match(/^\d+/);
-  if (!match) return null;
-  const id = Number(match[0]);
-  return Number.isSafeInteger(id) && id > 0 ? String(id) : null;
-}
 
 async function getCampaignClickColumns() {
   const [rows] = await pool.query<Array<RowDataPacket & { COLUMN_NAME: string }>>(`
@@ -34,8 +28,8 @@ async function getCampaignClickColumns() {
 }
 
 async function recordLegacyCampaignClick(input: {
-  campaignId: string;
-  postId: string;
+  campaignId: number;
+  postId: number;
   ip: string;
   userAgent: string;
   fingerprint: string;
@@ -63,7 +57,7 @@ async function recordLegacyCampaignClick(input: {
   }
 
   const insertColumns = ["campaign_id"];
-  const insertParams: Array<string | boolean> = [input.campaignId];
+  const insertParams: Array<number | string | boolean> = [input.campaignId];
 
   if (columns.has("post_id")) {
     insertColumns.push("post_id");
@@ -99,12 +93,13 @@ export async function GET(
   { params }: { params: Promise<{ id: string; postId: string }> }
 ) {
   const { id: rawCampaignId, postId: rawPostId } = await params;
-  const campaignId = normalizePositiveId(rawCampaignId);
-  const postId = normalizePositiveId(rawPostId);
+  const campaignId = parsePositiveIntegerId(rawCampaignId);
+  const postId = parsePositiveIntegerId(rawPostId);
   
   // 1. Validate both IDs are present
   if (!campaignId || !postId) {
     // If anything is missing, we still redirect for UX, but do NOT save
+    console.warn("Malformed campaign post click ids rejected", { campaign_id: rawCampaignId, post_id: rawPostId });
     return redirectToFallback();
   }
 

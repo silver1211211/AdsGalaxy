@@ -26,7 +26,7 @@ import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
 import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { botUserBroadcastEligibleCondition } from "@/lib/botAudience";
 import { composeCampaignCreativeText } from "@/lib/campaignCreative";
-import { ALL_CATEGORIES } from "@/lib/campaignCategories";
+import { campaignCategoryMatches } from "@/lib/campaignCategories";
 
 export const dynamic = 'force-dynamic';
 
@@ -354,7 +354,7 @@ export async function GET(req: NextRequest) {
       const suitableBots = rankInventoryForDelivery(healthyBots.filter((bot: any) => {
         // Category match
         const botCats = bot.categories ? (typeof bot.categories === 'string' ? JSON.parse(bot.categories) : bot.categories) : [];
-        if (campaign.category !== ALL_CATEGORIES && !botCats.includes(campaign.category)) return false;
+        if (!campaignCategoryMatches(campaign.category, botCats)) return false;
 
         // Continent match
         const campConts = campaign.continents ? (typeof campaign.continents === 'string' ? JSON.parse(campaign.continents) : campaign.continents) : [];

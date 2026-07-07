@@ -10,6 +10,7 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
   var DEFAULT_MINIAPP_ID=${JSON.stringify(defaultMiniappId)};
   var SCRIPT_ORIGIN=${JSON.stringify(requestOrigin)};
   var FALLBACK_ORIGIN=${JSON.stringify(fallbackOrigin)};
+  var DEFAULT_PROVIDER_TIMEOUT_MS=2000;
   var currentScript=document.currentScript||Array.prototype.slice.call(document.scripts).find(function(s){return /\\/sdk\\.js(\\?|$)/.test(s.src||"");});
   if(currentScript&&currentScript.src){try{var u=new URL(currentScript.src);SCRIPT_ORIGIN=u.origin;DEFAULT_MINIAPP_ID=u.searchParams.get("id")||DEFAULT_MINIAPP_ID;}catch(e){}}
   var apiOrigins=Array.from(new Set([SCRIPT_ORIGIN,FALLBACK_ORIGIN].filter(Boolean).map(function(v){return String(v).replace(/\\/$/,"");})));
@@ -83,7 +84,8 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
       });
     },Promise.reject()).catch(function(){throw normalizeError(lastError||sdkError("AdsGalaxy request failed","REQUEST_FAILED"));});
   }
-  function loadScript(src,globalName){
+  function providerTimeoutMs(options){var ms=Number(options&&options.timeoutMs||DEFAULT_PROVIDER_TIMEOUT_MS)||DEFAULT_PROVIDER_TIMEOUT_MS;return Math.min(DEFAULT_PROVIDER_TIMEOUT_MS,ms);}
+  function loadScript(src,globalName,timeoutMs){
     if(!src)return Promise.resolve();
     if(globalName&&window[globalName])return Promise.resolve();
     if(sdkLoads[src])return sdkLoads[src];
@@ -91,7 +93,7 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
       var existing=document.querySelector('script[data-adsgalaxy-asset="'+CSS.escape(src)+'"]');
       if(existing&&existing.dataset.loaded==="true"){resolve();return;}
       var s=existing||document.createElement("script");
-      var timer=setTimeout(function(){delete sdkLoads[src];reject(sdkError("Ad source timed out","TIMEOUT"));},15000);
+      var timer=setTimeout(function(){delete sdkLoads[src];reject(sdkError("Ad source timed out","TIMEOUT"));},timeoutMs||DEFAULT_PROVIDER_TIMEOUT_MS);
       s.async=true;s.src=src;s.dataset.adsgalaxyAsset=src;
       s.onload=function(){clearTimeout(timer);s.dataset.loaded="true";resolve();};
       s.onerror=function(){clearTimeout(timer);delete sdkLoads[src];reject(sdkError("Ad source failed to load","SDK_UNAVAILABLE"));};
@@ -103,7 +105,7 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
     if(!src)return Promise.reject(sdkError("Monetag SDK URL is not configured","SDK_NOT_CONFIGURED"));
     var globalName="show_"+zoneId;if(typeof window[globalName]==="function")return Promise.resolve(globalName);
     var key=src+":"+zoneId;if(sdkLoads[key])return sdkLoads[key].then(function(){return globalName;});
-    sdkLoads[key]=new Promise(function(resolve,reject){var s=document.createElement("script"),timer=setTimeout(function(){delete sdkLoads[key];s.remove();reject(sdkError("Monetag SDK load timed out","TIMEOUT"));},timeoutMs||15000);s.async=true;s.src=src;s.dataset.zone=String(zoneId);s.dataset.sdk=globalName;s.onload=function(){clearTimeout(timer);if(typeof window[globalName]!=="function"){delete sdkLoads[key];reject(sdkError("Monetag SDK loaded without "+globalName,"SDK_LOAD_FAILED"));return;}resolve();};s.onerror=function(){clearTimeout(timer);delete sdkLoads[key];reject(sdkError("Monetag SDK failed to load","SDK_LOAD_FAILED"));};document.head.appendChild(s);});
+    sdkLoads[key]=new Promise(function(resolve,reject){var s=document.createElement("script"),timer=setTimeout(function(){delete sdkLoads[key];s.remove();reject(sdkError("Monetag SDK load timed out","TIMEOUT"));},timeoutMs||DEFAULT_PROVIDER_TIMEOUT_MS);s.async=true;s.src=src;s.dataset.zone=String(zoneId);s.dataset.sdk=globalName;s.onload=function(){clearTimeout(timer);if(typeof window[globalName]!=="function"){delete sdkLoads[key];reject(sdkError("Monetag SDK loaded without "+globalName,"SDK_LOAD_FAILED"));return;}resolve();};s.onerror=function(){clearTimeout(timer);delete sdkLoads[key];reject(sdkError("Monetag SDK failed to load","SDK_LOAD_FAILED"));};document.head.appendChild(s);});
     return sdkLoads[key].then(function(){return globalName;});
   }
   function sdkError(message,code){return {code:code||"NETWORK_ERROR",message:message||"AdsGalaxy request failed"};}
@@ -119,13 +121,13 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
     function next(){
       if(i>=bases.length)return Promise.reject(lastError||sdkError("Ad source failed to load","SDK_LOAD_FAILED"));
       var base=bases[i++],src=base+(base.indexOf("?")>=0?"&":"?")+"id="+encodeURIComponent(projectId);
-      return loadScript(src,null).then(function(){
+      return loadScript(src,null,timeoutMs).then(function(){
         if(typeof window[displayFn]!=="function")throw sdkError("Ad source unavailable","SDK_LOAD_FAILED");
       }).catch(function(e){lastError=e;return next();});
     }
-    return timeout(next(),sdk.script_timeout_ms||15000);
+    return timeout(next(),timeoutMs||DEFAULT_PROVIDER_TIMEOUT_MS);
   }
-  function timeout(promise,ms){return new Promise(function(resolve,reject){var t=setTimeout(function(){reject(sdkError("Ad timed out","TIMEOUT"));},ms||30000);promise.then(function(v){clearTimeout(t);resolve(v);},function(e){clearTimeout(t);reject(e);});});}
+  function timeout(promise,ms){return new Promise(function(resolve,reject){var t=setTimeout(function(){reject(sdkError("Ad timed out","TIMEOUT"));},ms||DEFAULT_PROVIDER_TIMEOUT_MS);promise.then(function(v){clearTimeout(t);resolve(v);},function(e){clearTimeout(t);reject(e);});});}
   function showInternalAd(decision,options){
     var ad=decision.ad||{};
     if(!ad.title||!ad.landing_url)return Promise.reject(sdkError("Unable to load this advertisement. Please try again.","AD_UNAVAILABLE"));
@@ -160,13 +162,14 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
   }
   function showExternalAd(decision,options){
     var c=decision.config||{},sdk=c.sdk||{},globalName=c.global_name||sdk.global_name;
+    var providerTimeout=providerTimeoutMs(options);
     var env=environmentDetails(decision.adapter,null,options);
     if(!env.hasWebApp||!env.initDataLength){
       return Promise.reject(sdkError("Telegram.WebApp/initData is unavailable in this window context","INVALID_INIT_DATA"));
     }
     if(decision.adapter==="g"){
-      return loadProjectScript(sdk,c.placement_id,options.timeoutMs).then(function(){
-        return timeout(window["show"+"Giga"](),options.timeoutMs||30000);
+      return loadProjectScript(sdk,c.placement_id,providerTimeout).then(function(){
+        return timeout(window["show"+"Giga"](),providerTimeout);
       }).catch(function(e){
         var msg=e&&e.message||"Ad source unavailable";
         var lower=String(msg).toLowerCase();
@@ -176,7 +179,7 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
       });
     }
     if(decision.adapter==="x"){
-      return loadScript(c.script_url||sdk.script_url,globalName).then(function(){
+      return loadScript(c.script_url||sdk.script_url,globalName,providerTimeout).then(function(){
         if(typeof window.AdexiumWidget!=="function")throw sdkError("AdExium widget unavailable","SDK_UNAVAILABLE");
         var widget=new window.AdexiumWidget({wid:c.placement_id,adFormat:"interstitial",debug:false});
         return timeout(new Promise(function(resolve,reject){
@@ -191,28 +194,28 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
           };
           Object.keys(listeners).forEach(function(name){widget.on(name,listeners[name]);});
           try{widget.requestAd("interstitial");}catch(e){finish(reject,sdkError(e.message||"AdExium request failed","NETWORK_ERROR"));}
-        }),sdk.request_timeout_ms||options.timeoutMs||30000).finally(function(){try{if(typeof widget.destroy==="function")widget.destroy();}catch(e){}});
+        }),providerTimeout).finally(function(){try{if(typeof widget.destroy==="function")widget.destroy();}catch(e){}});
       }).then(function(result){
         return request("/api/sdk/miniapp/impression",{request_id:decision.request_id,miniapp_id:Number(options.miniappId),telegram_user_id:String(userId(options)),country:country(options)},options).then(function(data){return {request_id:decision.request_id,reward_eligible:Boolean(data.reward_eligible),status:data.status,raw_result:result};});
       });
     }
     if(decision.adapter==="m"){
-      return loadMonetagScript(c.script_url||sdk.script_url,c.placement_id,sdk.script_timeout_ms||15000).then(function(monetagGlobal){return timeout(window[monetagGlobal]({type:"end"}),sdk.request_timeout_ms||options.timeoutMs||30000);}).then(function(result){return request("/api/sdk/miniapp/impression",{request_id:decision.request_id,miniapp_id:Number(options.miniappId),telegram_user_id:String(userId(options)),country:country(options)},options).then(function(data){return {request_id:decision.request_id,reward_eligible:Boolean(data.reward_eligible),status:data.status,raw_result:result};});});
+      return loadMonetagScript(c.script_url||sdk.script_url,c.placement_id,providerTimeout).then(function(monetagGlobal){return timeout(window[monetagGlobal]({type:"end"}),providerTimeout);}).then(function(result){return request("/api/sdk/miniapp/impression",{request_id:decision.request_id,miniapp_id:Number(options.miniappId),telegram_user_id:String(userId(options)),country:country(options)},options).then(function(data){return {request_id:decision.request_id,reward_eligible:Boolean(data.reward_eligible),status:data.status,raw_result:result};});});
     }
     if(decision.adapter==="r"){
-      return loadScript(c.script_url||sdk.script_url,globalName).then(function(){
+      return loadScript(c.script_url||sdk.script_url,globalName,providerTimeout).then(function(){
         if(typeof window.TelegramAdsController!=="function")throw sdkError("RichAds controller unavailable","SDK_UNAVAILABLE");
         var controller=new window.TelegramAdsController();
         controller.initialize({pubId:sdk.richads_publisher_id,appId:sdk.richads_app_id});
         if(typeof controller.triggerInterstitialVideo!=="function")throw sdkError("RichAds Telegram Interstitial Video is unavailable","SDK_UNAVAILABLE");
-        return timeout(controller.triggerInterstitialVideo(),options.timeoutMs||30000);
+        return timeout(controller.triggerInterstitialVideo(),providerTimeout);
       }).then(function(result){
         return request("/api/sdk/miniapp/impression",{request_id:decision.request_id,miniapp_id:Number(options.miniappId),telegram_user_id:String(userId(options)),country:country(options)},options).then(function(data){return {request_id:decision.request_id,reward_eligible:Boolean(data.reward_eligible),status:data.status,raw_result:result};});
       });
     }
-    return loadScript(c.script_url||sdk.script_url,globalName).then(function(){
+    return loadScript(c.script_url||sdk.script_url,globalName,providerTimeout).then(function(){
       var g=globalName&&window[globalName];
-      var requestTimeout=sdk.request_timeout_ms||options.timeoutMs||30000;
+      var requestTimeout=providerTimeout;
       if(g&&typeof g.init==="function"){var controller=g.init({blockId:c.placement_id});if(controller&&typeof controller.show==="function")return timeout(controller.show(),requestTimeout);}
       if(typeof g==="function")return timeout(Promise.resolve(g(c.placement_id)).then(function(fn){return typeof fn==="function"?fn({type:"end"}):fn;}),requestTimeout);
       if(g&&typeof g.show==="function")return timeout(g.show({placementId:c.placement_id,projectId:c.placement_id}),requestTimeout);

@@ -28,7 +28,7 @@ import { apiFetch } from "@/lib/api";
 import { useHeader } from "@/context/HeaderContext";
 import { useRouter, useParams, useSearchParams } from "next/navigation";
 import Modal from "@/components/ui/Modal";
-import { CAMPAIGN_CATEGORIES } from "@/lib/campaignCategories";
+import { ALL_CATEGORIES, CAMPAIGN_CATEGORY_OPTIONS, campaignCategoryLabel } from "@/lib/campaignCategories";
 import { composeCampaignCreativeText, hasRestrictedClickCreativeContent } from "@/lib/campaignCreative";
 
 const BUTTON_TEXTS = ["Learn more", "Get started", "Join channel", "Join group", "Start bot", "Buy Now", "Sign Up", "Download", "Visit site", "Play now", "Shop now"];
@@ -86,7 +86,7 @@ export default function NewCampaignWizardPage() {
   const [formData, setFormData] = useState({
     name: "",
     campaign_title: "",
-    category: "",
+    category: ALL_CATEGORIES,
     type: defaultType,
     parse_mode: "markdown",
     message_text: "",
@@ -238,10 +238,6 @@ export default function NewCampaignWizardPage() {
 
     if (!hasValidCampaignObjective()) {
       setError(isBotCampaign ? "Bot campaign format is required" : "Please select View Campaign or Click Campaign");
-      return;
-    }
-    if (!formData.category) {
-      setError("Please select a campaign category");
       return;
     }
     if (!formData.button_text) {
@@ -588,7 +584,7 @@ export default function NewCampaignWizardPage() {
             {/* Category card */}
             <div className="rounded-2xl border border-slate-100 bg-white shadow-sm p-5 space-y-3">
               <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-                Category <span className="text-red-400">*</span>
+                Category
               </label>
               <div className="relative" ref={categoryDropdownRef}>
                 <Globe size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 z-10 pointer-events-none" />
@@ -598,36 +594,30 @@ export default function NewCampaignWizardPage() {
                   className={cn(
                     "w-full pl-10 pr-4 py-3 bg-slate-50 border rounded-xl text-sm font-semibold cursor-pointer flex items-center justify-between text-left transition-colors",
                     formData.category ? "text-slate-900 border-slate-200" : "text-slate-400 border-slate-200",
-                    !formData.category && formData.name.trim().length >= 3 ? "border-amber-300 bg-amber-50/40" : "",
                     categoryDropdownOpen ? "border-[#0c9de8]" : ""
                   )}
                 >
-                  {formData.category || "Select a category…"}
+                  {campaignCategoryLabel(formData.category)}
                   <ChevronDown size={16} className={cn("text-slate-400 transition-transform shrink-0", categoryDropdownOpen && "rotate-180")} />
                 </button>
                 {categoryDropdownOpen && (
                   <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-30 max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl">
-                    {CAMPAIGN_CATEGORIES.map((cat) => (
+                    {CAMPAIGN_CATEGORY_OPTIONS.map((cat) => (
                       <button
-                        key={cat}
+                        key={cat.value}
                         type="button"
-                        onClick={() => { setFormData({ ...formData, category: cat }); setCategoryDropdownOpen(false); }}
+                        onClick={() => { setFormData({ ...formData, category: cat.value }); setCategoryDropdownOpen(false); }}
                         className={cn(
                           "w-full px-4 py-2.5 text-left text-sm font-semibold transition-colors",
-                          formData.category === cat ? "bg-blue-50 text-[#0c9de8] font-bold" : "text-slate-700 hover:bg-slate-50"
+                          formData.category === cat.value ? "bg-blue-50 text-[#0c9de8] font-bold" : "text-slate-700 hover:bg-slate-50"
                         )}
                       >
-                        {cat}
+                        {cat.label}
                       </button>
                     ))}
                   </div>
                 )}
               </div>
-              {!formData.category && formData.name.trim().length >= 3 && (
-                <p className="text-[11px] font-bold text-amber-500 flex items-center gap-1">
-                  <AlertCircle size={11} /> Select a category to continue
-                </p>
-              )}
             </div>
 
             {/* Objective / format info card */}
@@ -654,11 +644,10 @@ export default function NewCampaignWizardPage() {
               onClick={() => setStep(2)}
               disabled={
                 formData.name.trim().length < 3 ||
-                !formData.category ||
                 !hasValidCampaignObjective()
               }
               className="w-full py-4 text-white rounded-2xl text-sm font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:bg-slate-100 disabled:text-slate-400 transition-all active:scale-[0.98]"
-              style={{ background: (formData.name.trim().length < 3 || !formData.category || !hasValidCampaignObjective()) ? undefined : "#0c9de8" }}
+              style={{ background: (formData.name.trim().length < 3 || !hasValidCampaignObjective()) ? undefined : "#0c9de8" }}
             >
               Next Step <ChevronRight size={18} />
             </button>

@@ -3,6 +3,7 @@ export const MINIAPP_NETWORKS = MINIAPP_FALLBACK_ORDER;
 export type MiniAppNetworkName = typeof MINIAPP_NETWORKS[number];
 export type MiniAppAdFormat = "rewarded" | "banner" | "interstitial";
 export const RICHADS_PRODUCTION_PLACEMENT = "telegram_interstitial_video" as const;
+export const MINIAPP_PROVIDER_TIMEOUT_MS = 2000;
 
 export type MiniAppSdkErrorCode =
   | "SDK_LOAD_FAILED"
@@ -86,8 +87,8 @@ const adapterDefinitions: Record<
     placement_id_key: "placement_id",
     sdk_script_url: "https://sad.adsgram.ai/js/sad.min.js",
     sdk_global_name: "Adsgram",
-    script_timeout_ms: 15000,
-    request_timeout_ms: 35000,
+    script_timeout_ms: MINIAPP_PROVIDER_TIMEOUT_MS,
+    request_timeout_ms: MINIAPP_PROVIDER_TIMEOUT_MS,
   },
   Monetag: {
     network_name: "Monetag",
@@ -98,8 +99,8 @@ const adapterDefinitions: Record<
     placement_id_key: "zone_id",
     sdk_script_url: monetagSdkUrl,
     sdk_global_name: null,
-    script_timeout_ms: 15000,
-    request_timeout_ms: 30000,
+    script_timeout_ms: MINIAPP_PROVIDER_TIMEOUT_MS,
+    request_timeout_ms: MINIAPP_PROVIDER_TIMEOUT_MS,
   },
   AdExium: {
     network_name: "AdExium",
@@ -110,8 +111,8 @@ const adapterDefinitions: Record<
     placement_id_key: "app_id",
     sdk_script_url: "https://cdn.techtg.space/assets/js/tg-ads-co-widget.min.js",
     sdk_global_name: "AdexiumWidget",
-    script_timeout_ms: 15000,
-    request_timeout_ms: 30000,
+    script_timeout_ms: MINIAPP_PROVIDER_TIMEOUT_MS,
+    request_timeout_ms: MINIAPP_PROVIDER_TIMEOUT_MS,
   },
   RichAds: {
     network_name: "RichAds",
@@ -124,8 +125,8 @@ const adapterDefinitions: Record<
     placement_id_key: "widget_id",
     sdk_script_url: "https://richinfo.co/richpartners/telegram/js/tg-ob.js",
     sdk_global_name: "TelegramAdsController",
-    script_timeout_ms: 15000,
-    request_timeout_ms: 35000,
+    script_timeout_ms: MINIAPP_PROVIDER_TIMEOUT_MS,
+    request_timeout_ms: MINIAPP_PROVIDER_TIMEOUT_MS,
     validateConfig: (networkPlacementId) => {
       if (!networkPlacementId.trim()) {
         return { valid: false, error: "Missing App ID" };
@@ -142,8 +143,8 @@ const adapterDefinitions: Record<
     placement_id_key: "project_id",
     sdk_script_url: `${gigaPubPrimaryOrigin}/script`,
     sdk_global_name: "showGiga",
-    script_timeout_ms: 15000,
-    request_timeout_ms: 45000,
+    script_timeout_ms: MINIAPP_PROVIDER_TIMEOUT_MS,
+    request_timeout_ms: MINIAPP_PROVIDER_TIMEOUT_MS,
     validateConfig: (networkPlacementId) => {
       if (!networkPlacementId.trim()) {
         return { valid: false, error: "GigaPub requires Project ID" };
@@ -161,7 +162,7 @@ const adapterDefinitions: Record<
     sdk_script_url: null,
     sdk_global_name: null,
     script_timeout_ms: 0,
-    request_timeout_ms: 16000,
+    request_timeout_ms: MINIAPP_PROVIDER_TIMEOUT_MS,
   },
 };
 
@@ -206,7 +207,7 @@ export function getMiniAppNetworkAdapter(networkName: MiniAppNetworkName) {
         request_timeout_ms: adapter.request_timeout_ms,
         ...(adapter.network_name === "GigaPub" ? {
           backup_script_url: `${gigaPubBackupOrigin}/script`,
-          script_timeout_ms: 15000,
+          script_timeout_ms: MINIAPP_PROVIDER_TIMEOUT_MS,
         } : {}),
       },
     },

@@ -4,6 +4,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { buildChannelAnalyticsReport, databaseToday, resolveChannelAnalyticsRange } from "@/lib/channelReports";
 import { logDeveloperApiRequest, validateDeveloperApiRequest } from "@/lib/developerPlatform";
+import { publicApiErrorMessage } from "@/lib/publicApiErrors";
 
 export const dynamic = "force-dynamic";
 
@@ -55,6 +56,6 @@ export async function POST(request: Request) {
   } catch (error: any) {
     const status = Number(error.statusCode || 400);
     await logDeveloperApiRequest(context, request, status, false, undefined, error.message);
-    return NextResponse.json({ error: error.message || "Channel analytics failed" }, { status });
+    return NextResponse.json({ error: publicApiErrorMessage(error, "Channel analytics failed", status) }, { status });
   }
 }

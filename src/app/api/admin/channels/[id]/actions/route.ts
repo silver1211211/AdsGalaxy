@@ -23,6 +23,43 @@ type ChannelRow = RowDataPacket & {
 const DANGEROUS = new Set(["delete", "adjust_trust", "reinstate", "settlement", "exclude_settlement", "include_settlement", "mark_false_positive"]);
 const REASON_REQUIRED = new Set(["adjust_trust", "reinstate", "exclude_settlement", "mark_false_positive"]);
 
+async function channelDeletionReadiness(channelId: number, postId?: number) {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT cp.id, cp.campaign_id, cp.message_id, cp.status, cp.created_at,
+       COALESCE(cp.delivery_confirmed_at, cp.created_at) deletion_clock_started_at,
+       cp.views, cp.settled_views, cp.settled_clicks, cp.deleted_at, cp.delivery_failed_at,
+       c.type campaign_type,
+       (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) click_count,
+       (SELECT COUNT(*) FROM channel_advertiser_debits cad WHERE cad.post_id = cp.id AND cad.publisher_status <> 'settled') pending_fast_debit_rows,
+       CASE
+         WHEN cp.status <> 'active' THEN 'not_active'
+         WHEN cp.deleted_at IS NOT NULL THEN 'already_deleted'
+         WHEN cp.delivery_failed_at IS NOT NULL THEN 'delivery_failed'
+         WHEN cp.message_id IS NULL OR TRIM(cp.message_id) = '' THEN 'missing_message_id'
+         WHEN COALESCE(cp.delivery_confirmed_at, cp.created_at) > DATE_SUB(NOW(), INTERVAL 24 HOUR) THEN 'not_expired_24h'
+         WHEN c.type = 'views' AND COALESCE(cp.views,0) > COALESCE(cp.settled_views,0) THEN 'unsettled_views'
+         WHEN c.type = 'clicks' AND (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) > COALESCE(cp.settled_clicks,0) THEN 'unsettled_clicks'
+         WHEN EXISTS (SELECT 1 FROM channel_advertiser_debits cad WHERE cad.post_id = cp.id AND cad.publisher_status <> 'settled') THEN 'pending_publisher_settlement'
+         ELSE 'ready'
+       END readiness
+     FROM campaign_posts cp
+     JOIN campaigns c ON c.id = cp.campaign_id
+     WHERE cp.channel_id = ?
+       AND (? IS NULL OR cp.id = ?)
+     ORDER BY cp.id DESC
+     LIMIT 50`,
+    [channelId, postId || null, postId || null]
+  );
+  const ready = rows.filter((row) => row.readiness === "ready").length;
+  return {
+    checked: rows.length,
+    ready,
+    blocked: rows.length - ready,
+    posts: rows,
+    note: "Read-only readiness check; no fake views, billing, settlement, or Telegram deletion was performed.",
+  };
+}
+
 async function audit(adminId: number | undefined, channel: ChannelRow, action: string, reason: string, oldValue: unknown, newValue: unknown) {
   await pool.query(
     `INSERT INTO channel_admin_action_audits(admin_id,action,channel_id,publisher_id,old_value,new_value,reason)
@@ -33,7 +70,7 @@ async function audit(adminId: number | undefined, channel: ChannelRow, action: s
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const body = await request.json() as { action?: string; reason?: string; value?: unknown; duration_hours?: unknown; fraud_event_id?: unknown };
+  const body = await request.json() as { action?: string; reason?: string; value?: unknown; duration_hours?: unknown; fraud_event_id?: unknown; post_id?: unknown };
   const action = body.action === "activate" ? "resume" : body.action || "";
   const permission = DANGEROUS.has(action) ? "dangerous" : "operate";
   const { admin, response } = await requireAdminPermission(permission);
@@ -105,6 +142,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   } else if (action === "view_refresh") {
     result = { success: true, refresh: await refreshChannelViews(channelId) };
     oldValue = { operation: "view_refresh" };
+    newValue = result;
+  } else if (action === "deletion_readiness") {
+    const postId = body.post_id === undefined || body.post_id === null || body.post_id === ""
+      ? undefined
+      : Number(body.post_id);
+    if (postId !== undefined && (!Number.isInteger(postId) || postId <= 0)) {
+      return NextResponse.json({ error: "Invalid post" }, { status: 400 });
+    }
+    result = { success: true, deletion_readiness: await channelDeletionReadiness(channelId, postId) };
+    oldValue = { operation: "deletion_readiness", post_id: postId || null };
     newValue = result;
   } else if (action === "settlement") {
     result = { success: true, settlement: await settleChannelCampaigns({ channelId }) };

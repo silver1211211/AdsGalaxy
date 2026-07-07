@@ -81,7 +81,9 @@ export async function GET(request: Request) {
     if (!ad) return NextResponse.json({ eligible: false, reason });
     return NextResponse.json({ eligible: true, ad: safePromoPayload(ad) });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Unauthorized" }, { status: getAuthErrorStatus(error) });
+    const status = getAuthErrorStatus(error);
+    console.error("Self-promotion lookup failed", { status, error: error instanceof Error ? error.message : "unknown_error" });
+    return NextResponse.json({ error: status === 500 ? "Failed to load promotion" : "Unauthorized" }, { status });
   }
 }
 
@@ -105,6 +107,8 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: result.affectedRows === 1 });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Unauthorized" }, { status: getAuthErrorStatus(error) });
+    const status = getAuthErrorStatus(error);
+    console.error("Self-promotion tracking failed", { status, error: error instanceof Error ? error.message : "unknown_error" });
+    return NextResponse.json({ error: status === 500 ? "Failed to record promotion event" : "Unauthorized" }, { status });
   }
 }

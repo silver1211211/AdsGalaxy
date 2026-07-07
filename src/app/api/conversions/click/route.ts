@@ -3,6 +3,7 @@ import pool from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth";
 import { appendClickId, recordAdClick } from "@/lib/conversionTracking";
 import { requireMiniappTrackingUser } from "@/lib/publicSdkAuth";
+import { parsePositiveIntegerId } from "@/lib/routeIds";
 
 export function OPTIONS() {
   return new Response(null, { status: 204 });
@@ -16,12 +17,12 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const campaignType = clean(body.campaign_type) === "miniapp" ? "miniapp" : "campaign";
-    const campaignId = Number(body.campaign_id);
+    const campaignId = parsePositiveIntegerId(body.campaign_id);
     const miniappId = Number(body.miniapp_id || 0);
     const requestId = clean(body.request_id);
     const sessionId = clean(body.session_id);
 
-    if (!Number.isInteger(campaignId) || campaignId <= 0) {
+    if (!campaignId) {
       return NextResponse.json({ error: "Valid campaign_id is required" }, { status: 400 });
     }
 
@@ -90,6 +91,7 @@ export async function POST(request: Request) {
     });
     return NextResponse.json({ success: true, click_id: clickId, url: appendClickId(rows[0].link, clickId) });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Failed to record click" }, { status: 400 });
+    console.error("Click conversion tracking failed", { error: error instanceof Error ? error.message : "unknown_error" });
+    return NextResponse.json({ error: "Failed to record click" }, { status: 400 });
   }
 }

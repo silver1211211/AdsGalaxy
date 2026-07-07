@@ -98,6 +98,23 @@ run_migration "$APP_DIR/db/migrations/20260626_0041_production_schema_fix.sql"
 # Step 1B: Re-run migrations 0012 onwards — they are all idempotent (IF NOT EXISTS).
 # Errors from "Duplicate key name" for indexes are silently ignored.
 for MIG in \
+  "20260619_0001_production_upgrade_preparation.sql" \
+  "20260619_0002_reviewed_channel_posting_times_backfill.sql" \
+  "20260620_0003_add_footer_settings.sql" \
+  "20260620_0004_add_user_ban_fields.sql" \
+  "20260620_0005_add_withdrawal_action_ledger_fields.sql" \
+  "20260620_0006_user_status_source_of_truth.sql" \
+  "20260621_0001_add_withdrawal_admin_action_columns.sql" \
+  "20260621_0002_create_miniapps_foundation.sql" \
+  "20260621_0003_create_miniapp_tracking_foundation.sql" \
+  "20260621_0004_create_miniapp_earnings_settlements.sql" \
+  "20260621_0005_create_miniapp_mediation_requests.sql" \
+  "20260621_0006_add_miniapp_impression_confirmation.sql" \
+  "20260621_0007_create_miniapp_network_frequency_state.sql" \
+  "20260622_0008_create_miniapp_mediation_health.sql" \
+  "20260622_0009_create_miniapp_internal_rewarded_ads.sql" \
+  "20260622_0010_create_miniapp_optimization_controls.sql" \
+  "20260622_0011_add_miniapp_beta_access.sql" \
   "20260622_0012_add_advertiser_targeting_fields.sql" \
   "20260622_0013_dynamic_miniapp_publisher_cpm.sql" \
   "20260622_0014_advertiser_trust_quality.sql" \
@@ -122,10 +139,23 @@ for MIG in \
   "20260623_0033_enterprise_deals.sql" \
   "20260623_0034_referral_growth_toggle_notifications.sql" \
   "20260624_0035_production_safety_controls.sql" \
+  "20260624_0036_critical_fix_sprint_1.sql" \
   "20260624_0037_cron_auth_residual_risks.sql" \
   "20260624_0038_suspicious_revenue_review_workflow.sql" \
+  "20260624_0039_admin_auth_security.sql" \
   "20260624_0040_self_promotion_ads.sql" \
+  "20260627_0042_referral_split_rewards.sql" \
+  "20260627_0043_referral_faqs.sql" \
+  "20260627_0044_recommended_cpm_settings.sql" \
+  "20260627_0045_publisher_advertiser_faqs.sql" \
+  "20260627_0046_private_channel_monetization.sql" \
   "20260628_0047_publisher_bot_webhooks.sql" \
+  "20260628_0048_referral_reward_settlement.sql" \
+  "20260629_0049_campaign_posting_mode.sql" \
+  "20260629_0050_temporary_channel_check_unlock.sql" \
+  "20260629_0051_private_tracking_account_onboarding.sql" \
+  "20260629_0052_private_channel_moderation_links.sql" \
+  "20260629_9999_launch_safe_migration.sql" \
   "20260630_0053_store_publisher_bot_webhook_urls.sql" \
   "20260701_0054_bot_forwarded_start_integration.sql" \
   "20260701_0055_channel_view_fetch_engine.sql" \
@@ -168,7 +198,9 @@ for MIG in \
   "20260707_0089_separate_campaign_cpm_settings.sql" \
   "20260707_0090_campaign_creative_title.sql" \
   "20260707_0091_campaign_category_normalization.sql" \
-  "20260707_0092_miniapp_mediation_randomization.sql"
+  "20260707_0092_miniapp_mediation_randomization.sql" \
+  "20260707_0093_channel_campaign_validation_schema_alignment.sql" \
+  "20260707_0094_channel_post_cleanup_lifecycle.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"

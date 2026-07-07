@@ -1,5 +1,6 @@
 import pool from "@/lib/db";
 import { deleteCampaignPosts, getConfiguredPostLifetimeHours, markStalePendingDeliveryPosts } from "@/lib/campaignPostDeletion";
+import { settlePendingChannelPublisherCredits } from "@/lib/channelFastBilling";
 import { settleChannelCampaigns } from "@/lib/channelSettlement";
 
 const MAX_POSTS_PER_RUN = Math.min(50, Math.max(1, Number.parseInt(process.env.DELETE_EXPIRED_POSTS_LIMIT || "30", 10) || 30));
@@ -11,6 +12,10 @@ export async function cleanupExpiredChannelPosts() {
   );
   const settlement = await settleChannelCampaigns({ skipGlobalMaintenance: true });
   if (settlement.failedPosts > 0) {
+    console.warn("Expired channel post cleanup stopped before deletion because settlement failed", {
+      failed_posts: settlement.failedPosts,
+      failed_details: settlement.failedDetails,
+    });
     return {
       success: false,
       status: 409,
@@ -22,6 +27,13 @@ export async function cleanupExpiredChannelPosts() {
       },
     };
   }
+  const fastDebitPublisherSettlement = await settlePendingChannelPublisherCredits();
+  console.info("Expired channel post cleanup settlement-before-delete complete", {
+    classic_candidates: settlement.candidates,
+    classic_settled_posts: settlement.settledPosts,
+    fast_debit_candidates: fastDebitPublisherSettlement.candidates,
+    fast_debit_settled: fastDebitPublisherSettlement.settled,
+  });
 
   const lifetimeHours = await getConfiguredPostLifetimeHours();
   const summary = await deleteCampaignPosts({
@@ -47,6 +59,7 @@ export async function cleanupExpiredChannelPosts() {
       failed_ids: summary.failedIds,
       pending_recovery: pendingRecovery,
       settlement,
+      fast_debit_publisher_settlement: fastDebitPublisherSettlement,
       details: summary.details,
     },
   };

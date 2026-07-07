@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { enqueueDeveloperWebhook, logDeveloperApiRequest, recordSandboxEvent, validateDeveloperApiRequest } from "@/lib/developerPlatform";
+import { publicApiErrorMessage } from "@/lib/publicApiErrors";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +29,6 @@ export async function POST(request: Request) {
   } catch (error: any) {
     const status = Number(error.statusCode || 400);
     await logDeveloperApiRequest(context, request, status, false, undefined, error.message);
-    return NextResponse.json({ error: error.message || "Bot campaign load failed" }, { status });
+    return NextResponse.json({ error: publicApiErrorMessage(error, "Bot campaign load failed", status) }, { status });
   }
 }

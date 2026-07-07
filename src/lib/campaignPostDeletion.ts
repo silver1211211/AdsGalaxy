@@ -12,6 +12,7 @@ type CampaignPostColumns = {
   hasDeleteAttempts: boolean;
   hasDeleteFailedReason: boolean;
   hasDeleteFailedAt: boolean;
+  hasCleanupAttemptedAt: boolean;
   hasDeliveryConfirmedAt: boolean;
 };
 
@@ -22,6 +23,7 @@ type ColumnRow = RowDataPacket & {
 type CleanupPostRow = RowDataPacket & {
   id: number;
   campaign_id: number;
+  campaign_type: string;
   message_id: number | null;
   channel_id: number | null;
   channel_username: string | null;
@@ -51,6 +53,9 @@ export type CampaignPostDeletionSummary = {
   failedIds: number[];
   details: Array<{
     id: number;
+    campaign_id?: number;
+    channel_id?: number | null;
+    message_id?: number | null;
     status: string;
     attempts?: number;
     already_deleted?: boolean;
@@ -69,13 +74,30 @@ function isAlreadyDeletedError(description?: string) {
     || normalized.includes("message not found");
 }
 
+function classifyTelegramDeleteFailure(description: string) {
+  const text = description.toLowerCase();
+  if (text.includes("too many requests") || text.includes("retry after")) return `rate_limited: ${description}`;
+  if (text.includes("chat not found") || text.includes("channel not found")) return `channel_not_found: ${description}`;
+  if (text.includes("not enough rights") || text.includes("not an administrator") || text.includes("can't delete")) {
+    return `permission_missing: ${description}`;
+  }
+  if (text.includes("message to delete not found") || text.includes("message not found")) return `message_not_found: ${description}`;
+  if (text.includes("forbidden") || text.includes("bot was kicked") || text.includes("bot is not a member")) {
+    return `bot_removed_or_forbidden: ${description}`;
+  }
+  if (text.includes("timeout") || text.includes("temporarily") || text.includes("internal server error") || text.includes("bad gateway")) {
+    return `telegram_temporary_error: ${description}`;
+  }
+  return `telegram_delete_failed: ${description}`;
+}
+
 export async function getCampaignPostDeletionColumns(): Promise<CampaignPostColumns> {
   const [rows] = await pool.query<ColumnRow[]>(`
     SELECT COLUMN_NAME
     FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA = DATABASE()
       AND TABLE_NAME = 'campaign_posts'
-      AND COLUMN_NAME IN ('deleted_at', 'delete_attempts', 'delete_failed_reason', 'delete_failed_at', 'delivery_confirmed_at')
+      AND COLUMN_NAME IN ('deleted_at', 'delete_attempts', 'delete_failed_reason', 'delete_failed_at', 'cleanup_attempted_at', 'delivery_confirmed_at')
   `);
 
   const columns = new Set(rows.map(row => row.COLUMN_NAME));
@@ -84,6 +106,7 @@ export async function getCampaignPostDeletionColumns(): Promise<CampaignPostColu
     hasDeleteAttempts: columns.has("delete_attempts"),
     hasDeleteFailedReason: columns.has("delete_failed_reason"),
     hasDeleteFailedAt: columns.has("delete_failed_at"),
+    hasCleanupAttemptedAt: columns.has("cleanup_attempted_at"),
     hasDeliveryConfirmedAt: columns.has("delivery_confirmed_at"),
   };
 }
@@ -96,7 +119,7 @@ async function fetchDeletionBatch(options: {
   hasDeliveryConfirmedAt: boolean;
   batchSize: number;
 }) {
-  const filters = [options.olderThan24Hours ? "cp.status = 'active'" : "cp.status IN ('active', 'posted', 'sent', 'delete_failed')"];
+  const filters = [options.olderThan24Hours ? "cp.status = 'active'" : "cp.status IN ('active', 'posted', 'sent', 'delete_failed', 'cleanup_pending')"];
   const params: Array<number | string> = [];
 
   if (options.olderThan24Hours) {
@@ -108,6 +131,15 @@ async function fetchDeletionBatch(options: {
     filters.push("cp.message_id IS NOT NULL AND TRIM(cp.message_id) <> ''");
     filters.push("cp.delivery_failed_at IS NULL");
     filters.push("(ch.chat_id IS NOT NULL OR (cp.channel_username IS NOT NULL AND TRIM(cp.channel_username) <> ''))");
+    filters.push(`((c.type = 'views' AND COALESCE(cp.views, 0) <= COALESCE(cp.settled_views, 0))
+      OR (c.type = 'clicks' AND (
+        SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id
+      ) <= COALESCE(cp.settled_clicks, 0))
+      OR c.type NOT IN ('views', 'clicks'))`);
+    filters.push(`NOT EXISTS (
+      SELECT 1 FROM channel_advertiser_debits cad
+      WHERE cad.post_id = cp.id AND cad.publisher_status <> 'settled'
+    )`);
   }
 
   if (options.hasDeletedAt) {
@@ -125,11 +157,13 @@ async function fetchDeletionBatch(options: {
     SELECT
       cp.id,
       cp.campaign_id,
+      c.type AS campaign_type,
       cp.message_id,
       cp.channel_id,
       cp.channel_username,
       ch.chat_id
     FROM campaign_posts cp
+    JOIN campaigns c ON c.id = cp.campaign_id
     LEFT JOIN channels ch ON ch.id = cp.channel_id
     WHERE ${filters.join(" AND ")}
     ORDER BY cp.created_at ASC
@@ -142,21 +176,43 @@ async function fetchDeletionBatch(options: {
 async function expiredPostCounts(lifetimeHours: number, columns: CampaignPostColumns) {
   const ageExpression = columns.hasDeliveryConfirmedAt ? "COALESCE(cp.delivery_confirmed_at, cp.created_at)" : "cp.created_at";
   const deletedFilter = columns.hasDeletedAt ? "AND cp.deleted_at IS NULL" : "";
-  const [rows] = await pool.query<Array<RowDataPacket & { total_expired: number | string; eligible: number | string }>>(
+  const [rows] = await pool.query<Array<RowDataPacket & { total_expired: number | string; eligible: number | string; settlement_safe_eligible: number | string }>>(
     `SELECT COUNT(*) total_expired,
        SUM(cp.message_id IS NOT NULL AND TRIM(cp.message_id)<>''
-         AND (ch.chat_id IS NOT NULL OR (cp.channel_username IS NOT NULL AND TRIM(cp.channel_username)<>''))) eligible
-     FROM campaign_posts cp LEFT JOIN channels ch ON ch.id=cp.channel_id
+         AND (ch.chat_id IS NOT NULL OR (cp.channel_username IS NOT NULL AND TRIM(cp.channel_username)<>''))) eligible,
+       SUM(cp.message_id IS NOT NULL AND TRIM(cp.message_id)<>''
+         AND (ch.chat_id IS NOT NULL OR (cp.channel_username IS NOT NULL AND TRIM(cp.channel_username)<>''))
+         AND ((c.type = 'views' AND COALESCE(cp.views,0) <= COALESCE(cp.settled_views,0))
+           OR (c.type = 'clicks' AND (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id=cp.id) <= COALESCE(cp.settled_clicks,0))
+           OR c.type NOT IN ('views','clicks'))
+         AND NOT EXISTS (
+           SELECT 1 FROM channel_advertiser_debits cad
+           WHERE cad.post_id = cp.id AND cad.publisher_status <> 'settled'
+         )) settlement_safe_eligible
+     FROM campaign_posts cp
+     JOIN campaigns c ON c.id=cp.campaign_id
+     LEFT JOIN channels ch ON ch.id=cp.channel_id
      WHERE cp.status='active' AND cp.delivery_failed_at IS NULL ${deletedFilter}
        AND ${ageExpression}<=DATE_SUB(NOW(),INTERVAL ? HOUR)`,
     [lifetimeHours]
   );
-  return { total: Number(rows[0]?.total_expired || 0), eligible: Number(rows[0]?.eligible || 0) };
+  return {
+    total: Number(rows[0]?.total_expired || 0),
+    eligible: Number(rows[0]?.eligible || 0),
+    settlementSafeEligible: Number(rows[0]?.settlement_safe_eligible || 0),
+  };
 }
 
-async function recordDeleteSuccess(postId: number, attemptsUsed: number, columns: CampaignPostColumns) {
-  const updates = ["status = 'deleted'"];
+async function markCleanupPending(postId: number, columns: CampaignPostColumns) {
+  const updates = ["status = 'cleanup_pending'"];
+  if (columns.hasCleanupAttemptedAt) updates.push("cleanup_attempted_at = NOW()");
+  await pool.query(`UPDATE campaign_posts SET ${updates.join(", ")} WHERE id = ?`, [postId]);
+}
+
+async function recordDeleteSuccess(postId: number, attemptsUsed: number, columns: CampaignPostColumns, status: "deleted" | "replaced" | "already_missing") {
+  const updates = ["status = ?"];
   const params: Array<number | string> = [];
+  params.push(status);
 
   if (columns.hasDeletedAt) {
     updates.push("deleted_at = NOW()");
@@ -172,6 +228,7 @@ async function recordDeleteSuccess(postId: number, attemptsUsed: number, columns
   }
 
   if (columns.hasDeleteFailedAt) updates.push("delete_failed_at = NULL");
+  if (columns.hasCleanupAttemptedAt) updates.push("cleanup_attempted_at = NOW()");
 
   params.push(postId);
   await pool.query(`UPDATE campaign_posts SET ${updates.join(", ")} WHERE id = ?`, params);
@@ -192,6 +249,7 @@ async function recordDeleteFailure(postId: number, attemptsUsed: number, reason:
   }
 
   if (columns.hasDeleteFailedAt) updates.push("delete_failed_at = NOW()");
+  if (columns.hasCleanupAttemptedAt) updates.push("cleanup_attempted_at = NOW()");
 
   params.push(postId);
   await pool.query(`UPDATE campaign_posts SET ${updates.join(", ")} WHERE id = ?`, params);
@@ -265,9 +323,10 @@ async function deletePostWithRetries(token: string | undefined, post: CleanupPos
         };
       }
 
-      lastReason = data.description || `Telegram API returned HTTP ${res.status}`;
+      lastReason = classifyTelegramDeleteFailure(data.description || `Telegram API returned HTTP ${res.status}`);
     } catch (err: unknown) {
-      lastReason = err instanceof Error ? err.message : "Telegram delete request failed";
+      const message = err instanceof Error ? err.message : "Telegram delete request failed";
+      lastReason = classifyTelegramDeleteFailure(message);
     }
 
     if (attempt < MAX_DELETE_ATTEMPTS) {
@@ -291,6 +350,7 @@ export async function deleteCampaignPosts(options: {
   batchSize?: number;
   batchDelayMs?: number;
   maxPostsPerRun?: number;
+  successStatus?: "deleted" | "replaced";
 }): Promise<CampaignPostDeletionSummary> {
   const token = process.env.BOT_TOKEN;
 
@@ -318,18 +378,40 @@ export async function deleteCampaignPosts(options: {
     hasDeliveryConfirmedAt: columns.hasDeliveryConfirmedAt,
     batchSize: maxPostsPerRun,
   });
-  if (expiredCounts) summary.skipped = Math.max(0, expiredCounts.total - posts.length);
+  if (expiredCounts) {
+    summary.skipped = Math.max(0, expiredCounts.total - posts.length);
+    console.info(JSON.stringify({
+      event: "expired_channel_post_cleanup_readiness",
+      lifetime_hours: lifetimeHours,
+      total_expired: expiredCounts.total,
+      telegram_eligible: expiredCounts.eligible,
+      settlement_safe_eligible: expiredCounts.settlementSafeEligible,
+      selected_for_delete: posts.length,
+      skipped: summary.skipped,
+    }));
+  }
 
   for (const post of posts) {
       summary.checked++;
       try {
+        await markCleanupPending(post.id, columns);
         const result = await deletePostWithRetries(token, post);
         summary.total++;
 
         if (result.success) {
-          await recordDeleteSuccess(post.id, result.attemptsUsed, columns);
+          const finalStatus = result.alreadyDeleted ? "already_missing" : (options.successStatus || "deleted");
+          await recordDeleteSuccess(post.id, result.attemptsUsed, columns, finalStatus);
           summary.deleted++;
-          summary.details.push({ id: post.id, status: "deleted", attempts: result.attemptsUsed, already_deleted: result.alreadyDeleted, telegram_response: result.telegramResponse });
+          summary.details.push({
+            id: post.id,
+            campaign_id: post.campaign_id,
+            channel_id: post.channel_id,
+            message_id: post.message_id,
+            status: finalStatus,
+            attempts: result.attemptsUsed,
+            already_deleted: result.alreadyDeleted,
+            telegram_response: result.telegramResponse,
+          });
           console.log(JSON.stringify({
             event: "telegram_post_delete_success",
             post_id: post.id,
@@ -343,7 +425,16 @@ export async function deleteCampaignPosts(options: {
           await recordDeleteFailure(post.id, result.attemptsUsed, result.reason, columns);
           summary.failed++;
           summary.failedIds.push(post.id);
-          summary.details.push({ id: post.id, status: "delete_failed", attempts: result.attemptsUsed, reason: result.reason, telegram_response: result.telegramResponse });
+          summary.details.push({
+            id: post.id,
+            campaign_id: post.campaign_id,
+            channel_id: post.channel_id,
+            message_id: post.message_id,
+            status: "delete_failed",
+            attempts: result.attemptsUsed,
+            reason: result.reason,
+            telegram_response: result.telegramResponse,
+          });
           console.warn(JSON.stringify({
             event: "telegram_post_delete_failed",
             message: `Failed after ${result.attemptsUsed} attempts`,
@@ -361,7 +452,7 @@ export async function deleteCampaignPosts(options: {
         summary.total++;
         summary.failed++;
         summary.failedIds.push(post.id);
-        summary.details.push({ id: post.id, status: "error", reason });
+        summary.details.push({ id: post.id, campaign_id: post.campaign_id, channel_id: post.channel_id, message_id: post.message_id, status: "error", reason });
         console.error(JSON.stringify({
           event: "telegram_post_delete_unexpected_error",
           post_id: post.id,

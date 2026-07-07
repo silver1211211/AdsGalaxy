@@ -209,11 +209,16 @@ export default function AdminCampaignsPage() {
         body: JSON.stringify({ mode, confirmation })
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || `${label} failed`);
+      if (!res.ok) {
+        const detail = data.reason
+          || data.settlement?.failedDetails?.slice?.(0, 3)?.map((item: any) => `post #${item.postId}: ${item.reason}`).join(", ")
+          || "";
+        throw new Error(`${data.error || `${label} failed`}${detail ? ` ${detail}` : ""}`);
+      }
       setToast({
         type: "success",
         title: `${label} complete`,
-        message: `Posted: ${data.posted || 0}, Failed: ${data.failed || 0}, Skipped: ${data.skipped || 0}`,
+        message: `Posted: ${data.posted || 0}, Failed: ${data.failed || 0}, Skipped: ${data.skipped || 0}${data.deleteSummary?.failed ? `, Cleanup failures: ${data.deleteSummary.failed}` : ""}`,
       });
       await fetchCampaigns(page, statusFilter, search, trustFilter);
     } catch (err: unknown) {

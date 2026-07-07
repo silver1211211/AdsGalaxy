@@ -11,7 +11,7 @@ import {
   recordChannelPostSuccess,
   markChannelHealthSuccess,
 } from "@/lib/channelLifecycle";
-import { ALL_CATEGORIES } from "@/lib/campaignCategories";
+import { campaignCategoryMatches } from "@/lib/campaignCategories";
 import { calculateCampaignScore, getWindowDominanceCap } from "@/lib/campaignPlacement";
 import { getAdvertiserTrustMultipliers } from "@/lib/advertiserTrust";
 import {
@@ -148,8 +148,7 @@ function normalizeTarget(value: string) {
 }
 
 function campaignMatchesChannel(campaign: CampaignRow, channel: ChannelRow) {
-  const categoryMatches = campaign.category === ALL_CATEGORIES
-    || parseJsonArray(channel.categories).includes(campaign.category);
+  const categoryMatches = campaignCategoryMatches(campaign.category, parseJsonArray(channel.categories));
 
   if (!categoryMatches) return false;
 

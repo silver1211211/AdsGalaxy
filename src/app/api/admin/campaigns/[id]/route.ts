@@ -37,6 +37,7 @@ export async function GET(
     const messageIdExpr = postColumns.has("message_id") ? "cp.message_id" : "NULL";
     const deleteAttemptsExpr = postColumns.has("delete_attempts") ? "cp.delete_attempts" : "NULL";
     const deleteFailedReasonExpr = postColumns.has("delete_failed_reason") ? "cp.delete_failed_reason" : "NULL";
+    const cleanupAttemptedAtExpr = postColumns.has("cleanup_attempted_at") ? "cp.cleanup_attempted_at" : "NULL";
 
     const [campaignRows]: any = await pool.query(`
       SELECT c.*, u.first_name, u.last_name, u.username, u.telegram_id
@@ -53,6 +54,10 @@ export async function GET(
       SELECT
         COUNT(*) as total_posts,
         SUM(CASE WHEN cp.status IN ('active', 'posted', 'sent') THEN 1 ELSE 0 END) as active_posts,
+        SUM(CASE WHEN cp.status = 'cleanup_pending' THEN 1 ELSE 0 END) as cleanup_pending_posts,
+        SUM(CASE WHEN cp.status = 'settlement_pending' THEN 1 ELSE 0 END) as settlement_pending_posts,
+        SUM(CASE WHEN cp.status = 'replaced' THEN 1 ELSE 0 END) as replaced_posts,
+        SUM(CASE WHEN cp.status = 'already_missing' THEN 1 ELSE 0 END) as already_missing_posts,
         ${deletedPostsExpr} as deleted_posts,
         ${deleteFailedExpr} as delete_failed_posts,
         ${totalViewsExpr} as total_views,
@@ -92,6 +97,7 @@ export async function GET(
         ${deletedAtExpr} as deleted_at,
         ${deleteAttemptsExpr} as delete_attempts,
         ${deleteFailedReasonExpr} as delete_failed_reason,
+        ${cleanupAttemptedAtExpr} as cleanup_attempted_at,
         (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) as clicks
       FROM campaign_posts cp
       WHERE cp.campaign_id = ?

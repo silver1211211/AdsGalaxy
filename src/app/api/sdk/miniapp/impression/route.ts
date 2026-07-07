@@ -141,6 +141,12 @@ export async function POST(request: Request) {
     }
     await conn.query("UPDATE miniapp_mediation_requests SET impression_confirmed = 1, impression_confirmed_at = NOW(), final_result = 'displayed' WHERE id = ?", [mediation.id]);
     await recordNetworkSuccess(conn, miniappId, mediation.selected_network);
+    console.info("[AdsGalaxy MiniApp mediation]", {
+      event: "final_displayed_provider",
+      miniapp_id: miniappId,
+      request_id: requestId,
+      final_displayed_provider: mediation.selected_network,
+    });
     await conn.commit();
     return NextResponse.json({ success: true, user_id: telegramUserId, request_id: requestId, reward_eligible: false, status: "pending_provider_confirmation" });
   } catch (error: any) {

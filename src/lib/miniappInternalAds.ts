@@ -16,6 +16,7 @@ export const INTERNAL_NETWORK_NAME = "AdsGalaxyInternal";
 type CampaignRow = RowDataPacket & {
   id: number;
   advertiser_id: number;
+  status: string;
   campaign_name: string;
   title: string;
   description: string;
@@ -43,6 +44,9 @@ type CampaignRow = RowDataPacket & {
   end_at: string | Date | null;
   daily_budget_limit: string | number | null;
   frequency_cap_per_user: string | number | null;
+  direct_placement_mode: string | null;
+  direct_inventory_scope: string | null;
+  creative_review_status: string | null;
 };
 
 type MiniAppInventoryRow = RowDataPacket & {
@@ -79,6 +83,19 @@ function dateIsAfterNow(value: string | Date | null) {
 function dateIsBeforeNow(value: string | Date | null) {
   if (!value) return false;
   return new Date(value).getTime() < Date.now();
+}
+
+function weightedRandomCampaign(campaigns: CampaignRow[]) {
+  const weights = campaigns.map((campaign) => Math.max(0, toNumber(campaign.advertiser_cpm_bid)));
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  if (total <= 0) return campaigns[0];
+
+  let cursor = Math.random() * total;
+  for (let index = 0; index < campaigns.length; index += 1) {
+    cursor -= weights[index];
+    if (cursor <= 0) return campaigns[index];
+  }
+  return campaigns[campaigns.length - 1];
 }
 
 export async function getInternalAdsMaxSharePercent() {
@@ -118,39 +135,53 @@ export async function selectInternalRewardedCampaign(input: {
   telegramUserId?: string | number;
   country: string | null;
 }) {
+  const startedAt = Date.now();
   const settings = await getMiniAppOptimizationSettings(input.conn);
   const deliverySettings = await getDeliveryOptimizationSettings(input.conn);
   const trustMultipliers = await getAdvertiserTrustMultipliers(input.conn);
+  const audit: {
+    considered_campaign_ids: number[];
+    eligible_campaign_ids: number[];
+    rejected: Array<{ campaign_id: number; reason: string; details?: Record<string, unknown> }>;
+    selected_campaign_id: number | null;
+  } = {
+    considered_campaign_ids: [],
+    eligible_campaign_ids: [],
+    rejected: [],
+    selected_campaign_id: null,
+  };
+  const reject = (row: Pick<CampaignRow, "id">, reason: string, details?: Record<string, unknown>) => {
+    audit.rejected.push({ campaign_id: Number(row.id), reason, ...(details ? { details } : {}) });
+  };
   const cap = await canServeInternalAd(input.miniappId, input.conn);
-  if (!cap.allowed) return { campaign: null, skip_reason: cap.reason };
+  if (!cap.allowed) {
+    return { campaign: null, skip_reason: cap.reason, diagnostics: { ...audit, share_cap: cap, duration_ms: Date.now() - startedAt } };
+  }
 
   const [[inventoryRow]] = await input.conn.query<MiniAppInventoryRow[]>(
     "SELECT COALESCE(inventory_score, 50) as inventory_score, COALESCE(inventory_rank, 'standard') as inventory_rank, COALESCE(inventory_override, 'none') as inventory_override FROM miniapps WHERE id = ?",
     [input.miniappId]
   );
   if (inventoryRow?.inventory_override === "blacklist" || inventoryRow?.inventory_override === "pause") {
-    return { campaign: null, skip_reason: "inventory_paused_by_admin" };
+    return { campaign: null, skip_reason: "inventory_paused_by_admin", diagnostics: { ...audit, inventory: inventoryRow, duration_ms: Date.now() - startedAt } };
   }
 
   const [campaigns] = await input.conn.query<CampaignRow[]>(`
     SELECT
-      c.id, c.advertiser_id, c.campaign_name, c.title, c.description, c.cta_text, c.title_color, c.body_color, c.categories, c.image_url, c.logo_url, c.landing_url, c.budget,
+      c.id, c.advertiser_id, c.status, c.campaign_name, c.title, c.description, c.cta_text, c.title_color, c.body_color, c.categories, c.image_url, c.logo_url, c.landing_url, c.budget,
       remaining_budget, total_spend, impressions, admin_cpm, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm,
       campaign_budget_mode, target_countries, countries, start_at,
       end_at, daily_budget_limit, frequency_cap_per_user, c.quality_score,
+      c.direct_placement_mode, c.direct_inventory_scope, c.creative_review_status,
       COALESCE(u.advertiser_trust_level, 'new') as advertiser_trust_level
     FROM miniapp_rewarded_campaigns c
     JOIN users u ON c.advertiser_id = u.id
-    WHERE c.status = 'approved'
-      AND c.remaining_budget > 0
-      AND COALESCE(u.advertiser_trust_level, 'new') != 'restricted'
-      AND c.advertiser_cpm_bid > 0
-      AND (c.start_at IS NULL OR c.start_at <= NOW())
-      AND (c.end_at IS NULL OR c.end_at >= NOW())
-    ORDER BY c.created_at ASC, c.id ASC
-    LIMIT 50
+    WHERE c.status IN ('approved', 'active')
+    ORDER BY c.advertiser_cpm_bid DESC, c.id ASC
+    LIMIT 100
     FOR UPDATE
   `);
+  audit.considered_campaign_ids = campaigns.map((campaign) => Number(campaign.id));
   campaigns.sort((a, b) => {
     const aTrust = trustMultipliers[normalizeAdvertiserTrustLevel(a.advertiser_trust_level)] || 1;
     const bTrust = trustMultipliers[normalizeAdvertiserTrustLevel(b.advertiser_trust_level)] || 1;
@@ -169,21 +200,34 @@ export async function selectInternalRewardedCampaign(input: {
 
   const country = input.country?.toUpperCase() || null;
   let skipReason = "no_internal_campaign";
-  let campaign: CampaignRow | undefined;
+  const eligibleCampaigns: CampaignRow[] = [];
   const [[miniappRow]] = await input.conn.query<RowDataPacket[]>("SELECT miniapp_username FROM miniapps WHERE id = ? LIMIT 1", [input.miniappId]);
   const miniappExclusions = await loadCampaignExclusions(input.conn, "miniapp", campaigns.map((item) => Number(item.id)), "miniapp");
 
   for (const row of campaigns) {
+    if (row.status !== "approved" && row.status !== "active") {
+      skipReason = "status_not_serving";
+      reject(row, skipReason, { status: row.status });
+      continue;
+    }
+    if (row.creative_review_status && row.creative_review_status !== "approved") {
+      skipReason = "creative_not_approved";
+      reject(row, skipReason, { creative_review_status: row.creative_review_status });
+      continue;
+    }
     if (campaignExcludesIdentifier(miniappExclusions, Number(row.id), miniappRow?.miniapp_username)) {
       skipReason = "advertiser_excluded_miniapp";
+      reject(row, skipReason, { miniapp_username: miniappRow?.miniapp_username || null });
       continue;
     }
     if (dateIsAfterNow(row.start_at)) {
       skipReason = "targeting_schedule_not_started";
+      reject(row, skipReason, { start_at: row.start_at });
       continue;
     }
     if (dateIsBeforeNow(row.end_at)) {
       skipReason = "targeting_schedule_ended";
+      reject(row, skipReason, { end_at: row.end_at });
       continue;
     }
 
@@ -191,21 +235,33 @@ export async function selectInternalRewardedCampaign(input: {
     const targets = jsonTargets.length > 0 ? jsonTargets : normalizeCountryList(row.target_countries);
     if (targets.length > 0 && country && !targets.includes(country)) {
       skipReason = "country_not_targeted";
+      reject(row, skipReason, { country, targets });
       continue;
     }
 
     const cpm = toNumber(row.advertiser_cpm_bid);
+    if (cpm <= 0) {
+      skipReason = "invalid_cpm";
+      reject(row, skipReason, { advertiser_cpm_bid: row.advertiser_cpm_bid });
+      continue;
+    }
     const cost = Number((cpm / 1000).toFixed(8));
+    if (toNumber(row.remaining_budget) <= 0) {
+      skipReason = "campaign_budget_exhausted";
+      reject(row, skipReason, { remaining_budget: row.remaining_budget, cost });
+      continue;
+    }
     const [[balanceRow]] = await input.conn.query<RowDataPacket[]>(
       "SELECT ad_balance FROM users WHERE id = ?",
       [row.advertiser_id]
     );
     if (toNumber(balanceRow?.ad_balance) < cost) {
       await input.conn.query(
-        "UPDATE miniapp_rewarded_campaigns SET status = 'paused', pause_reason = 'insufficient_balance' WHERE id = ? AND status = 'approved'",
+        "UPDATE miniapp_rewarded_campaigns SET status = 'paused', pause_reason = 'insufficient_balance' WHERE id = ? AND status IN ('approved', 'active')",
         [row.id]
       );
       skipReason = "insufficient_advertiser_balance";
+      reject(row, skipReason, { ad_balance: balanceRow?.ad_balance, cost });
       continue;
     }
 
@@ -222,6 +278,7 @@ export async function selectInternalRewardedCampaign(input: {
         );
         if (Number(frequencyRow?.seen || 0) >= frequencyCap) {
           skipReason = "targeting_frequency_cap";
+          reject(row, skipReason, { frequency_cap: frequencyCap, seen: frequencyRow?.seen });
           continue;
         }
       }
@@ -236,6 +293,7 @@ export async function selectInternalRewardedCampaign(input: {
       );
       if (Number(cooldownRow?.seen || 0) > 0) {
         skipReason = "internal_user_cooldown";
+        reject(row, skipReason, { cooldown_minutes: settings.internal_campaign_user_cooldown_minutes, seen: cooldownRow?.seen });
         continue;
       }
     }
@@ -244,6 +302,7 @@ export async function selectInternalRewardedCampaign(input: {
     const remainingBudget = toNumber(row.remaining_budget);
     if (remainingBudget + 1e-10 < cost) {
       skipReason = "campaign_budget_exhausted";
+      reject(row, skipReason, { remaining_budget: remainingBudget, cost });
       continue;
     }
     if (budget > 0) {
@@ -254,6 +313,7 @@ export async function selectInternalRewardedCampaign(input: {
       const miniappShare = toNumber(miniappSpendRow?.spend) / budget * 100;
       if (miniappShare >= settings.internal_campaign_miniapp_max_share_percent) {
         skipReason = "internal_campaign_miniapp_share_cap";
+        reject(row, skipReason, { miniapp_share_percent: miniappShare, max_share_percent: settings.internal_campaign_miniapp_max_share_percent });
         continue;
       }
     }
@@ -269,28 +329,37 @@ export async function selectInternalRewardedCampaign(input: {
     const dailyBudgetLimit = toNumber(row.daily_budget_limit);
     if (dailyBudgetLimit > 0 && toNumber(pacingRow?.daily_spend) + cost > dailyBudgetLimit) {
       skipReason = "daily_budget_limit";
+      reject(row, skipReason, { daily_spend: pacingRow?.daily_spend, daily_budget_limit: dailyBudgetLimit, cost });
       continue;
     }
     if (budget > 0) {
       if (toNumber(pacingRow?.daily_spend) >= budget * 0.3) {
         skipReason = "daily_campaign_pacing";
+        reject(row, skipReason, { daily_spend: pacingRow?.daily_spend, daily_limit: budget * 0.3 });
         continue;
       }
       if (toNumber(pacingRow?.hourly_spend) >= budget * 0.1) {
         skipReason = "hourly_campaign_pacing";
+        reject(row, skipReason, { hourly_spend: pacingRow?.hourly_spend, hourly_limit: budget * 0.1 });
         continue;
       }
       if (toNumber(pacingRow?.rolling_spend) >= budget * 0.05) {
         skipReason = "rolling_campaign_pacing";
+        reject(row, skipReason, { rolling_spend: pacingRow?.rolling_spend, rolling_limit: budget * 0.05 });
         continue;
       }
     }
 
-    campaign = row;
-    break;
+    eligibleCampaigns.push(row);
   }
 
-  if (!campaign) return { campaign: null, skip_reason: skipReason };
+  audit.eligible_campaign_ids = eligibleCampaigns.map((row) => Number(row.id));
+  const campaign = weightedRandomCampaign(eligibleCampaigns);
+
+  if (!campaign) {
+    return { campaign: null, skip_reason: skipReason, diagnostics: { ...audit, duration_ms: Date.now() - startedAt } };
+  }
+  audit.selected_campaign_id = Number(campaign.id);
 
   const cpm = toNumber(campaign.advertiser_cpm_bid);
   const cost = Number((cpm / 1000).toFixed(8));
@@ -312,6 +381,11 @@ export async function selectInternalRewardedCampaign(input: {
       estimated_cost: cost,
     },
     skip_reason: null,
+    diagnostics: {
+      ...audit,
+      cpm_weighted_selection: eligibleCampaigns.map((row) => ({ campaign_id: Number(row.id), cpm: toNumber(row.advertiser_cpm_bid) })),
+      duration_ms: Date.now() - startedAt,
+    },
   };
 }
 
@@ -331,7 +405,7 @@ export async function recordInternalAdImpression(input: {
     `SELECT id, advertiser_id, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm,
        remaining_budget, daily_budget_limit
      FROM miniapp_rewarded_campaigns
-     WHERE id = ? AND status = 'approved'
+     WHERE id = ? AND status IN ('approved', 'active')
      FOR UPDATE`,
     [input.campaignId]
   );
@@ -468,7 +542,7 @@ export async function recordInternalAdImpression(input: {
            WHEN remaining_budget - ? < ? THEN 'insufficient_budget_for_delivery'
            ELSE NULL END,
          status = CASE WHEN remaining_budget - ? < ? THEN 'paused' ELSE status END
-     WHERE id = ? AND status = 'approved' AND remaining_budget >= ?`,
+     WHERE id = ? AND status IN ('approved', 'active') AND remaining_budget >= ?`,
     [cost, cost, cost, cost, cost, cost, cost, input.campaignId, cost]
   );
   if (campaignUpdate.affectedRows !== 1) throw new Error("campaign_budget_exhausted");

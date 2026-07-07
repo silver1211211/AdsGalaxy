@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
-import { ALL_CATEGORIES } from "@/lib/campaignCategories";
+import { campaignCategoryMatches } from "@/lib/campaignCategories";
 import { deleteCampaignPosts, type CampaignPostDeletionSummary } from "@/lib/campaignPostDeletion";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
+import { settleChannelCampaigns } from "@/lib/channelSettlement";
+import { acquireCronLock, releaseCronLock } from "@/lib/cronSecurity";
 import { sendTelegramMessage } from "@/lib/telegram";
 import {
   autoPauseBot,
@@ -75,6 +77,8 @@ type EmergencySchema = {
   hasPostSlotColumns: boolean;
   hasPostPostingModeColumn: boolean;
   hasDeliveryConfirmedAtColumn: boolean;
+  hasDeliveryFailedAtColumn: boolean;
+  hasDeliveryFailureReasonColumn: boolean;
   hasCampaignDeliveryEvents: boolean;
 };
 
@@ -138,7 +142,7 @@ function normalizeFailureReason(value?: string) {
 
 function campaignMatchesChannel(campaign: CampaignRow, channel: ChannelRow) {
   const channelCategories = parseJsonArray(channel.categories);
-  const categoryMatches = campaign.category === ALL_CATEGORIES || channelCategories.includes(campaign.category);
+  const categoryMatches = campaignCategoryMatches(campaign.category, channelCategories);
 
   if (!categoryMatches) return false;
 
@@ -152,7 +156,7 @@ function campaignMatchesChannel(campaign: CampaignRow, channel: ChannelRow) {
 
 function campaignMatchesBot(campaign: CampaignRow, bot: BotRow) {
   const botCategories = parseJsonArray(bot.categories);
-  const categoryMatches = campaign.category === ALL_CATEGORIES || botCategories.includes(campaign.category);
+  const categoryMatches = campaignCategoryMatches(campaign.category, botCategories);
 
   if (!categoryMatches) return false;
 
@@ -170,7 +174,7 @@ async function getEmergencySchema(): Promise<EmergencySchema> {
     FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA = DATABASE()
       AND (
-        (TABLE_NAME = 'campaign_posts' AND COLUMN_NAME IN ('posting_slot_date', 'posting_slot_time', 'deleted_at', 'posting_mode', 'delivery_confirmed_at'))
+        (TABLE_NAME = 'campaign_posts' AND COLUMN_NAME IN ('posting_slot_date', 'posting_slot_time', 'deleted_at', 'posting_mode', 'delivery_confirmed_at', 'delivery_failed_at', 'delivery_failure_reason'))
         OR (TABLE_NAME = 'campaign_delivery_events')
       )
   `);
@@ -183,6 +187,8 @@ async function getEmergencySchema(): Promise<EmergencySchema> {
     hasPostSlotColumns: columns.has("campaign_posts.posting_slot_date") && columns.has("campaign_posts.posting_slot_time"),
     hasPostPostingModeColumn: columns.has("campaign_posts.posting_mode"),
     hasDeliveryConfirmedAtColumn: columns.has("campaign_posts.delivery_confirmed_at"),
+    hasDeliveryFailedAtColumn: columns.has("campaign_posts.delivery_failed_at"),
+    hasDeliveryFailureReasonColumn: columns.has("campaign_posts.delivery_failure_reason"),
     hasCampaignDeliveryEvents: tables.has("campaign_delivery_events"),
   };
 }
@@ -266,12 +272,12 @@ async function getEligibleChannels(campaign: CampaignRow, schema: EmergencySchem
           AND ${activeCondition}
       )`
     : "";
-  const duplicateCondition = `AND NOT EXISTS (
+  const duplicateCondition = mode === "fill_empty_slots" ? `AND NOT EXISTS (
         SELECT 1 FROM campaign_posts cp
         WHERE cp.campaign_id = ?
           AND cp.channel_id = c.id
           AND cp.created_at > NOW() - INTERVAL 24 HOUR
-      )`;
+      )` : "";
 
   const [channels] = await pool.query<ChannelRow[]>(`
     SELECT c.*
@@ -286,7 +292,7 @@ async function getEligibleChannels(campaign: CampaignRow, schema: EmergencySchem
     LIMIT ?
   `, mode === "fill_empty_slots"
     ? [ACTIVE_POST_STATUSES, campaign.id, MAX_EMERGENCY_CHANNELS + 1]
-    : [campaign.id, MAX_EMERGENCY_CHANNELS + 1]
+    : [MAX_EMERGENCY_CHANNELS + 1]
   );
 
   const filtered = channels.filter((channel) => {
@@ -371,7 +377,15 @@ async function postCampaignToChannel(options: {
     return { ok: true, postId, messageId: result.result.message_id };
   }
 
-  await pool.query("DELETE FROM campaign_posts WHERE id = ?", [postId]);
+  const failedUpdates = ["status = 'delivery_failed'"];
+  const failedParams: Array<string | number> = [];
+  if (schema.hasDeliveryFailedAtColumn) failedUpdates.push("delivery_failed_at = NOW()");
+  if (schema.hasDeliveryFailureReasonColumn) {
+    failedUpdates.push("delivery_failure_reason = ?");
+    failedParams.push((result?.description || "Telegram send failed").slice(0, 500));
+  }
+  failedParams.push(postId);
+  await pool.query(`UPDATE campaign_posts SET ${failedUpdates.join(", ")} WHERE id = ?`, failedParams);
   await recordDeliveryEvent(schema.hasCampaignDeliveryEvents, campaign.id, channel.id, postId, "emergency_send_failed", {
     reason: result?.description || "Telegram send failed",
   });
@@ -381,7 +395,7 @@ async function postCampaignToChannel(options: {
 
 async function deleteAllActivePostsSafely(): Promise<CampaignPostDeletionSummary> {
   try {
-    return await deleteCampaignPosts({});
+    return await deleteCampaignPosts({ successStatus: "replaced" });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Emergency global post deletion failed";
     console.warn("Emergency global post deletion failed", { error: message });
@@ -804,7 +818,15 @@ export async function POST(
     return NextResponse.json({ error: "Type CONFIRM to run Replace Everything" }, { status: 400 });
   }
 
+  let lock: { lockName: string; ownerToken: string } | null = null;
   try {
+    lock = await acquireCronLock(`admin-emergency-push-${id}`, 900);
+    if (!lock) {
+      return NextResponse.json({
+        error: "Emergency push is already running for this campaign. Please wait for it to finish.",
+      }, { status: 409 });
+    }
+
     const [campaignRows] = await pool.query<CampaignRow[]>("SELECT * FROM campaigns WHERE id = ?", [id]);
 
     if (campaignRows.length === 0) {
@@ -830,9 +852,35 @@ export async function POST(
     }
 
     const schema = await getEmergencySchema();
-    const deleteSummary = mode === "replace_everything"
-      ? await deleteAllActivePostsSafely()
-      : null;
+    let settlementSummary = null;
+    let deleteSummary = null;
+    const blockedReplacementChannels = new Set<number>();
+
+    if (mode === "replace_everything") {
+      const settlement = await settleChannelCampaigns({ skipGlobalMaintenance: true });
+      settlementSummary = {
+        settledPosts: settlement.settledPosts,
+        failedPosts: settlement.failedPosts,
+        failedDetails: settlement.failedDetails,
+        advertiserDebited: settlement.advertiserDebited,
+        publisherCredited: settlement.publisherCredited,
+      };
+
+      if (settlement.failedPosts > 0) {
+        return NextResponse.json({
+          success: false,
+          error: "Replace Everything stopped because some active posts could not be settled safely.",
+          settlement: settlementSummary,
+        }, { status: 409 });
+      }
+
+      deleteSummary = await deleteAllActivePostsSafely();
+      for (const detail of deleteSummary.details) {
+        if ((detail.status === "delete_failed" || detail.status === "error") && detail.channel_id) {
+          blockedReplacementChannels.add(Number(detail.channel_id));
+        }
+      }
+    }
     const { eligibleChannels, skippedByLimit } = await getEligibleChannels(campaign, schema, mode);
     const failedChannels: Array<{ channelId: number; reason: string }> = [];
     let attempted = 0;
@@ -840,6 +888,12 @@ export async function POST(
     let skipped = skippedByLimit;
 
     for (const channel of eligibleChannels) {
+      if (blockedReplacementChannels.has(channel.id)) {
+        skipped++;
+        failedChannels.push({ channelId: channel.id, reason: "old_post_cleanup_failed_replacement_skipped" });
+        continue;
+      }
+
       if (await hasActiveUndeletedPost(channel.id, schema)) {
         skipped++;
         failedChannels.push({ channelId: channel.id, reason: "active_undeleted_post_exists" });
@@ -882,6 +936,7 @@ export async function POST(
         failed,
         skipped,
         delete_summary: deleteSummary,
+        settlement_summary: settlementSummary,
         timestamp: new Date().toISOString(),
       },
     });
@@ -896,11 +951,18 @@ export async function POST(
       failed,
       skipped,
       deleteSummary,
+      settlementSummary,
       failedChannels,
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Internal Server Error";
     console.error("Admin Emergency Push Error:", error);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({
+      error: "Emergency push failed before completion.",
+      reason: message,
+      failedChannels: [],
+    }, { status: 500 });
+  } finally {
+    await releaseCronLock(lock);
   }
 }

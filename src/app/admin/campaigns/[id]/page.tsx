@@ -76,6 +76,7 @@ type PlacementRow = {
   deleted_at?: string | null;
   delete_attempts?: number | null;
   delete_failed_reason?: string | null;
+  cleanup_attempted_at?: string | null;
 };
 
 type CampaignDetailsData = {
@@ -389,6 +390,10 @@ export default function AdminCampaignDetailsPage() {
                 {[
                   ["Total Posts", metrics.total_posts],
                   ["Active Posts", metrics.active_posts],
+                  ["Cleanup Pending", metrics.cleanup_pending_posts],
+                  ["Settlement Pending", metrics.settlement_pending_posts],
+                  ["Replaced", metrics.replaced_posts],
+                  ["Already Missing", metrics.already_missing_posts],
                   ["Deleted Posts", metrics.deleted_posts],
                   ["Delete Failed", metrics.delete_failed_posts],
                   ["Total Views", metrics.total_views],
@@ -414,14 +419,14 @@ export default function AdminCampaignDetailsPage() {
                 <table className="w-full text-left text-sm whitespace-nowrap min-w-[1000px]">
                   <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
                     <tr>
-                      {["Post ID", "Channel", "Message", "Status", "Views", "Clicks", "Created", "Deleted", "Attempts", "Failure Reason"].map((heading) => (
+                      {["Post ID", "Channel", "Message", "Status", "Views", "Clicks", "Created", "Deleted", "Cleanup Attempt", "Attempts", "Failure Reason"].map((heading) => (
                         <th key={heading} className="px-4 py-3 font-medium">{heading}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {placements.length === 0 ? (
-                      <tr><td colSpan={10} className="p-8 text-center text-slate-500">No placements found.</td></tr>
+                      <tr><td colSpan={11} className="p-8 text-center text-slate-500">No placements found.</td></tr>
                     ) : placements.map((post) => (
                       <tr key={post.id} className="hover:bg-slate-50">
                         <td className="px-4 py-3">#{post.id}</td>
@@ -432,6 +437,7 @@ export default function AdminCampaignDetailsPage() {
                         <td className="px-4 py-3">{post.clicks || 0}</td>
                         <td className="px-4 py-3">{formatValue(post.created_at)}</td>
                         <td className="px-4 py-3">{formatValue(post.deleted_at)}</td>
+                        <td className="px-4 py-3">{formatValue(post.cleanup_attempted_at)}</td>
                         <td className="px-4 py-3">{formatValue(post.delete_attempts)}</td>
                         <td className="px-4 py-3 max-w-[220px] truncate" title={post.delete_failed_reason || ""}>{formatValue(post.delete_failed_reason)}</td>
                       </tr>

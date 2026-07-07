@@ -100,9 +100,11 @@ function parseJsonArray(value: unknown) {
   }
 }
 
-function isFuture(value: Date | string | null) {
-  if (!value) return false;
-  return new Date(value).getTime() > Date.now();
+function mediationDebug(event: string, details: Record<string, unknown>) {
+  console.info("[AdsGalaxy MiniApp mediation]", {
+    event,
+    ...details,
+  });
 }
 
 function supportsFormat(network: NetworkRow, adFormat: MiniAppAdFormat) {
@@ -164,7 +166,7 @@ export async function getMiniappNetworksForMediation(miniappId: number | string,
       mn.richads_app_id,
       mn.enabled,
       COALESCE(mn.monetag_test_mode, 0) as monetag_test_mode,
-      COALESCE(NULLIF(mn.priority_order, 0), FIELD(mn.network_name, 'AdsGalaxyInternal', 'AdsGram', 'GigaPub', 'AdExium', 'Monetag', 'RichAds')) as priority_order,
+      NULLIF(mn.priority_order, 0) as priority_order,
       mh.recent_failures,
       mh.temporarily_disabled_until
     FROM miniapp_ad_networks mn
@@ -172,7 +174,7 @@ export async function getMiniappNetworksForMediation(miniappId: number | string,
       ON mh.miniapp_id = mn.miniapp_id AND mh.network_name = mn.network_name
     WHERE mn.miniapp_id = ?
       AND mn.network_name IN (?)
-    ORDER BY priority_order ASC, FIELD(mn.network_name, 'AdsGalaxyInternal', 'AdsGram', 'GigaPub', 'AdExium', 'Monetag', 'RichAds')
+    ORDER BY mn.network_name ASC
   `, [miniappId, [...MINIAPP_NETWORKS]]);
 
   return rows;
@@ -225,11 +227,6 @@ export async function selectMediationNetwork(input: {
       continue;
     }
 
-    if (isFuture(network.temporarily_disabled_until) || Number(network.health_score ?? 100) <= 0) {
-      skipped.push({ network_name: network.network_name, reason: "unhealthy" });
-      continue;
-    }
-
     if (network.network_name === "Monetag") {
       const perMiniAppMonetagTestMode = Boolean(network.monetag_test_mode);
       if (monetagIsOnlyEnabledNetwork && !monetagTestModeEnabled && !perMiniAppMonetagTestMode) {
@@ -259,11 +256,21 @@ export async function selectMediationNetwork(input: {
       });
       if (!internalCampaign.campaign) {
         skipped.push({ network_name: INTERNAL_NETWORK_NAME, reason: internalCampaign.skip_reason || "no_internal_campaign" });
+        mediationDebug("internal_no_fill", {
+          miniapp_id: input.miniappId,
+          reason: internalCampaign.skip_reason || "no_internal_campaign",
+          diagnostics: internalCampaign.diagnostics || null,
+        });
         continue;
       }
       network.network_placement_id = String(internalCampaign.campaign.id);
       network.internal_campaign_id = internalCampaign.campaign.id;
       network.internal_ad = internalCampaign.campaign;
+      mediationDebug("internal_campaign_selected", {
+        miniapp_id: input.miniappId,
+        campaign_id: internalCampaign.campaign.id,
+        diagnostics: internalCampaign.diagnostics || null,
+      });
     } else {
       try {
         if (!supportsFormat(network, input.adFormat)) {
@@ -314,6 +321,15 @@ export async function selectMediationNetwork(input: {
       : "weighted_random_selected"
     : "no_eligible_network";
   const selectionOrder = randomizedCandidates.map((network) => network.network_name);
+  mediationDebug("provider_selected", {
+    miniapp_id: input.miniappId,
+    provider_pool: candidatePool.map((network) => network.network_name),
+    random_provider_chosen: selected?.network_name || null,
+    remaining_pool: selected ? selectionOrder.slice(1) : [],
+    attempted_networks: Array.from(attempted),
+    skipped_networks: skipped,
+    final_no_ad_reason: selected ? null : finalReason,
+  });
 
   return {
     selected,
@@ -321,13 +337,16 @@ export async function selectMediationNetwork(input: {
     candidate_networks: selectionOrder,
     skipped_networks: skipped,
     mediation_diagnostics: {
+      provider_pool: candidatePool.map((network) => network.network_name),
       initial_pool: initialEnabledPool,
       eligible_pool: candidatePool.map((network) => network.network_name),
       random_selection_order: selectionOrder,
       attempted_networks: Array.from(attempted),
       remaining_pool: selected ? selectionOrder.slice(1) : [],
       skipped_networks: skipped,
-      final_provider: selected?.network_name || null,
+      random_provider_chosen: selected?.network_name || null,
+      final_displayed_provider: selected?.network_name || null,
+      final_no_ad_reason: selected ? null : finalReason,
       final_reason: finalReason,
       monetag_test_mode_forced: Boolean(monetagTestCandidate),
       weighting: {
@@ -372,6 +391,15 @@ export async function createMediationAttempt(input: {
   const fallbackAttempts = input.fallbackAttempts || [];
 
   if (!decision.selected) {
+    mediationDebug("no_ad_available", {
+      miniapp_id: input.miniappId,
+      request_id: requestId,
+      enabled_providers: decision.enabled_networks,
+      attempted_providers: attemptedNetworks,
+      skipped_networks: decision.skipped_networks,
+      fallback_attempts: fallbackAttempts,
+      reason: "pool_exhausted",
+    });
     await input.conn.query(
       `INSERT INTO miniapp_mediation_requests
         (miniapp_id, telegram_user_id, country, ad_format, selected_network, internal_campaign_id, request_id, parent_request_id, root_request_id,
@@ -451,6 +479,16 @@ export async function createMediationAttempt(input: {
       }),
     ]
   );
+  mediationDebug(input.parentRequestId ? "fallback_provider_chosen" : "initial_provider_chosen", {
+    miniapp_id: input.miniappId,
+    request_id: requestId,
+    root_request_id: rootRequestId,
+    provider_pool: decision.mediation_diagnostics.provider_pool,
+    random_provider_chosen: decision.selected.network_name,
+    fallback_available: fallbackAvailable,
+    attempted_networks: attemptedNetworks,
+    fallback_attempts: fallbackAttempts,
+  });
 
   return {
     success: true,
@@ -515,15 +553,23 @@ export async function recordMiniappNetworkFailure(input: {
     [input.miniappId, input.networkName, (await getMiniAppOptimizationSettings(input.conn)).network_failure_window_minutes]
   );
 
-  const settings = await getMiniAppOptimizationSettings(input.conn);
   const recentFailures = Number(countRow?.recent_failures || 0);
-  const shouldDisable = recentFailures >= settings.network_failure_disable_threshold;
   const score = Math.max(0, 100 - (recentFailures * 12));
+  mediationDebug("provider_failed", {
+    miniapp_id: input.miniappId,
+    request_id: input.requestId,
+    provider: input.networkName,
+    error_code: input.errorCode,
+    timeout: input.errorCode === "TIMEOUT",
+    no_fill: input.errorCode === "NO_FILL",
+    recent_failures: recentFailures,
+    current_request_only_removal: true,
+  });
 
   await input.conn.query(
     `INSERT INTO miniapp_network_health
       (miniapp_id, network_name, health_score, recent_failures, no_fill_count, timeout_count, sdk_load_failure_count, last_failure_at, temporarily_disabled_until)
-     VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), CASE WHEN ? THEN DATE_ADD(NOW(), INTERVAL ? MINUTE) ELSE NULL END)
+     VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NULL)
      ON DUPLICATE KEY UPDATE
        health_score = VALUES(health_score),
        recent_failures = VALUES(recent_failures),
@@ -531,10 +577,7 @@ export async function recordMiniappNetworkFailure(input: {
        timeout_count = IF(timeout_count >= 18446744073709551614, 18446744073709551615, timeout_count + VALUES(timeout_count)),
        sdk_load_failure_count = IF(sdk_load_failure_count >= 18446744073709551614, 18446744073709551615, sdk_load_failure_count + VALUES(sdk_load_failure_count)),
        last_failure_at = NOW(),
-       temporarily_disabled_until = CASE
-         WHEN ? THEN DATE_ADD(NOW(), INTERVAL ? MINUTE)
-         ELSE temporarily_disabled_until
-       END`,
+       temporarily_disabled_until = NULL`,
     [
       input.miniappId,
       input.networkName,
@@ -543,14 +586,10 @@ export async function recordMiniappNetworkFailure(input: {
       input.errorCode === "NO_FILL" ? 1 : 0,
       input.errorCode === "TIMEOUT" ? 1 : 0,
       input.errorCode === "SDK_LOAD_FAILED" ? 1 : 0,
-      shouldDisable ? 1 : 0,
-      settings.network_disable_duration_minutes,
-      shouldDisable ? 1 : 0,
-      settings.network_disable_duration_minutes,
     ]
   );
 
-  return { recent_failures: recentFailures, temporarily_disabled: shouldDisable };
+  return { recent_failures: recentFailures, temporarily_disabled: false };
 }
 
 export function readAttemptState(row: RequestRow) {

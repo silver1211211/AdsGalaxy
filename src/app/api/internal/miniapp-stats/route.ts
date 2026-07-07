@@ -45,6 +45,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: true, stats: result });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Failed to record Mini App stats" }, { status: 400 });
+    console.error("Internal Mini App stats import failed", { error: error instanceof Error ? error.message : "unknown_error" });
+    return NextResponse.json({ error: "Failed to record Mini App stats" }, { status: 400 });
   }
 }
