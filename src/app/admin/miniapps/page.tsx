@@ -58,6 +58,32 @@ type NetworkConfig = {
   richads_publisher_id?: string;
   richads_app_id?: string;
   integration_status?: "Ready" | "Missing Publisher ID" | "Missing App ID" | "Disabled";
+  diagnostics?: {
+    enabled: boolean;
+    disabled: boolean;
+    globally_disabled: boolean;
+    configuration_loaded: boolean;
+    publisher_configuration_present: boolean;
+    production_ready: boolean;
+    sdk_loaded: string;
+    sdk_script_url_present: boolean;
+    required_configuration: string[];
+    last_successful_ad: string | null;
+    last_failed_request: string | null;
+    last_impression: string | null;
+    last_completion: string | null;
+    last_response_time_ms: number | null;
+    timeout_count: number;
+    no_fill_count: number;
+    failure_count: number;
+    request_count: number;
+    success_count: number;
+    success_rate: number;
+    average_response_time_ms: number | null;
+    average_fallback_duration_ms: number | null;
+    slow_provider: boolean;
+    temporarily_disabled_until: string | null;
+  } | null;
 };
 
 type MiniAppReport = {
@@ -179,6 +205,28 @@ function formatDate(value: string | null | undefined) {
   return new Date(value).toLocaleString();
 }
 
+function missingNetworkConfigWarnings(network: NetworkConfig) {
+  if (network.network_name === "AdsGalaxyInternal") return [];
+
+  const warnings: string[] = [];
+  const placementId = String(network.network_placement_id || "").trim();
+  const required = network.diagnostics?.required_configuration || [];
+
+  if (network.network_name === "AdsGram" && !placementId) warnings.push("Missing AdsGram Placement ID");
+  if (network.network_name === "GigaPub" && !placementId) warnings.push("Missing GigaPub Project ID");
+  if (network.network_name === "AdExium" && !placementId) warnings.push("Missing AdExium Widget ID");
+  if (network.network_name === "Monetag") {
+    if (!placementId) warnings.push("Missing Monetag Zone ID");
+    if (!network.diagnostics?.sdk_script_url_present || required.includes("SDK URL")) warnings.push("Missing Monetag SDK URL");
+  }
+  if (network.network_name === "RichAds") {
+    if (!network.richads_publisher_id?.trim()) warnings.push("Missing RichAds Publisher ID");
+    if (!network.richads_app_id?.trim()) warnings.push("Missing RichAds App ID");
+  }
+
+  return warnings;
+}
+
 function qualityLabel(value?: string) {
   return String(value || "good").replace(/_/g, " ");
 }
@@ -186,6 +234,36 @@ function qualityLabel(value?: string) {
 function miniAppBotUrl(miniapp: MiniApp) {
   const username = String(miniapp.miniapp_username || "").trim().replace(/^@/, "");
   return username ? `https://t.me/${username}` : "";
+}
+
+function formatNetworkTestStatus(data: any, result: { success: boolean; error_code?: string; error_message?: string }) {
+  const checks = (Array.isArray(data.checks) ? data.checks : []).map((check: any) => ({
+    label: String(check.label || check.name || "Check"),
+    passed: Boolean(check.passed),
+    reason: String(check.reason || ""),
+  }));
+  const sdkCheckIndex = checks.findIndex((check: any) => check.label === "SDK Loaded");
+  if (sdkCheckIndex >= 0) {
+    checks[sdkCheckIndex] = {
+      label: "SDK Loaded",
+      passed: result.success,
+      reason: result.success ? "" : result.error_message || result.error_code || "SDK initialization failed",
+    };
+  }
+  const testCheckIndex = checks.findIndex((check: any) => check.label === "Test Passed");
+  if (testCheckIndex >= 0) {
+    checks[testCheckIndex] = {
+      label: "Test Passed",
+      passed: result.success,
+      reason: result.success ? "" : result.error_message || result.error_code || "Adapter test failed",
+    };
+  }
+  const checkSummary = checks
+    .map((check: any) => `${check.passed ? "OK" : "FAIL"} ${check.label}${check.passed ? "" : `: ${check.reason || "No detail returned"}`}`)
+    .join(" | ");
+  return result.success
+    ? `${checkSummary}${data.test_mode ? " (isolated test mode)" : ""}`
+    : `${checkSummary || "FAIL Test Passed"} | ${result.error_code || "ERROR"}: ${result.error_message || "Adapter test failed"}`;
 }
 
 export default function AdminMiniAppsPage() {
@@ -207,6 +285,7 @@ export default function AdminMiniAppsPage() {
   const [networksLoading, setNetworksLoading] = useState(false);
   const [networkTestLoading, setNetworkTestLoading] = useState<string | null>(null);
   const [networkTestResult, setNetworkTestResult] = useState<Record<string, string>>({});
+  const [networkTestDetails, setNetworkTestDetails] = useState<Record<string, Record<string, unknown>>>({});
   const [reportMiniApp, setReportMiniApp] = useState<MiniApp | null>(null);
   const [report, setReport] = useState<MiniAppReport | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
@@ -327,9 +406,31 @@ export default function AdminMiniAppsPage() {
       const { testMiniAppNetworkInitialization } = await import("@/lib/miniappSdkRuntime");
       const result = await testMiniAppNetworkInitialization(data.test_config);
       const status = result.success
-        ? `Ready - SDK initialized${data.test_mode ? " in isolated test mode" : ""}`
+        ? `✓ Connected · ✓ SDK Loaded · ✓ Configuration Valid · ✓ Test Passed${data.test_mode ? " (isolated test mode)" : ""}`
         : `${result.error_code || "ERROR"} - ${result.error_message || "Adapter test failed"}`;
-      setNetworkTestResult((prev) => ({ ...prev, [networkName]: status }));
+      void status;
+      setNetworkTestResult((prev) => ({ ...prev, [networkName]: formatNetworkTestStatus(data, result) }));
+      setNetworkTestDetails((prev) => ({
+        ...prev,
+        [networkName]: {
+          raw_result: result,
+          parsed_result: result.diagnostics || {},
+          callback: {
+            registered: Boolean((result.diagnostics as any)?.sdk_validation),
+            status: "isolated_test_no_provider_callbacks_fired",
+          },
+          timing: {
+            duration_ms: (result.diagnostics as any)?.duration_ms ?? null,
+            request_timeout_ms: data.test_config?.sdk?.request_timeout_ms ?? null,
+            script_timeout_ms: data.test_config?.sdk?.script_timeout_ms ?? null,
+          },
+          failure_reason: result.success ? null : result.error_message || result.error_code || "Adapter test failed",
+          render_status: (result.diagnostics as any)?.render_status || "not_requested",
+          impression_status: (result.diagnostics as any)?.impression_status || "not_recorded_test_mode",
+          completion_status: (result.diagnostics as any)?.completion_status || "not_recorded_test_mode",
+          server_checks: data.checks || [],
+        },
+      }));
     } catch (err: any) {
       setNetworkTestResult((prev) => ({ ...prev, [networkName]: err.message || "Adapter test failed" }));
     } finally {
@@ -560,7 +661,9 @@ export default function AdminMiniAppsPage() {
             <div className="space-y-3 overflow-y-auto p-6">
               {networksLoading ? (
                 <div className="p-10 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={24} /></div>
-              ) : networks.map((network, index) => (
+              ) : networks.map((network, index) => {
+                const configWarnings = missingNetworkConfigWarnings(network);
+                return (
                 <div
                   key={network.network_name}
                   className={`rounded-xl border p-4 transition-colors ${network.enabled ? "border-blue-200 bg-blue-50/30" : "border-slate-200 bg-white"}`}
@@ -625,6 +728,38 @@ export default function AdminMiniAppsPage() {
                           className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
                         />
                       </div>
+                      {configWarnings.length > 0 && (
+                        <div className="col-span-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
+                          {configWarnings.join(" / ")}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {network.diagnostics && (
+                    <div className="mt-4 grid gap-2 rounded-lg border border-slate-200 bg-white p-3 text-[11px] text-slate-600 sm:grid-cols-2 lg:grid-cols-4">
+                      {[
+                        ["Production", network.diagnostics.production_ready ? "Ready" : "Not ready"],
+                        ["SDK", network.diagnostics.sdk_loaded.replace(/_/g, " ")],
+                        ["Config", network.diagnostics.publisher_configuration_present ? "Present" : `Missing ${network.diagnostics.required_configuration.join(", ") || "configuration"}`],
+                        ["Success", `${numberValue(network.diagnostics.success_rate)}% (${numberValue(network.diagnostics.success_count)}/${numberValue(network.diagnostics.request_count)})`],
+                        ["Last Success", formatDate(network.diagnostics.last_successful_ad)],
+                        ["Last Failure", formatDate(network.diagnostics.last_failed_request)],
+                        ["Last Impression", formatDate(network.diagnostics.last_impression)],
+                        ["Last Completion", formatDate(network.diagnostics.last_completion)],
+                        ["Avg Response", network.diagnostics.average_response_time_ms === null ? "No timing yet" : `${numberValue(network.diagnostics.average_response_time_ms)}ms`],
+                        ["Last Response", network.diagnostics.last_response_time_ms === null ? "No timing yet" : `${numberValue(network.diagnostics.last_response_time_ms)}ms`],
+                        ["Timeouts", numberValue(network.diagnostics.timeout_count)],
+                        ["No Fill", numberValue(network.diagnostics.no_fill_count)],
+                        ["Failures", numberValue(network.diagnostics.failure_count)],
+                        ["Disabled", network.diagnostics.disabled ? "Yes" : "No"],
+                        ["Global Flag", network.diagnostics.globally_disabled ? "Disabled" : "Enabled"],
+                        ["Slow", network.diagnostics.slow_provider ? "Yes" : "No"],
+                      ].map(([label, value]) => (
+                        <div key={`${network.network_name}-${label}`} className="min-w-0 rounded-md bg-slate-50 px-2.5 py-2">
+                          <div className="font-bold uppercase tracking-wide text-slate-400">{label}</div>
+                          <div className="mt-0.5 truncate font-semibold text-slate-800" title={String(value)}>{value}</div>
+                        </div>
+                      ))}
                     </div>
                   )}
                   <div className="mt-3 flex items-center gap-3">
@@ -640,15 +775,24 @@ export default function AdminMiniAppsPage() {
                     )}
                     {networkTestResult[network.network_name] && (
                       <span
-                        className={`min-w-0 truncate text-xs font-medium ${networkTestResult[network.network_name].startsWith("Ready") ? "text-emerald-600" : "text-red-600"}`}
+                        className={`min-w-0 text-xs font-medium ${networkTestResult[network.network_name].startsWith("OK") ? "text-emerald-600" : "text-red-600"}`}
                         title={networkTestResult[network.network_name]}
                       >
                         {networkTestResult[network.network_name]}
                       </span>
                     )}
                   </div>
+                  {networkTestDetails[network.network_name] && (
+                    <details className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs">
+                      <summary className="cursor-pointer font-bold text-slate-700">View Raw Result / Parsed Result / Timing</summary>
+                      <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 p-3 text-[11px] leading-5 text-slate-100">
+                        {JSON.stringify(networkTestDetails[network.network_name], null, 2)}
+                      </pre>
+                    </details>
+                  )}
                 </div>
-              ))}
+                );
+              })}
             </div>
             <div className="flex gap-3 border-t border-slate-200 px-6 py-4">
               <button onClick={() => setNetworkMiniApp(null)} className="flex-1 rounded-xl border border-slate-200 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50">

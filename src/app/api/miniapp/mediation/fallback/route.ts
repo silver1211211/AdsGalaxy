@@ -32,6 +32,7 @@ export async function POST(request: Request) {
     const failedNetwork = cleanText(body.failed_network);
     const errorCode = cleanText(body.error_code) || "NETWORK_ERROR";
     const errorMessage = cleanText(body.error_message) || "Network failed";
+    const durationMs = Math.max(0, Math.min(120000, Number(body.duration_ms) || 0));
 
     if (!requestId) {
       return NextResponse.json({ error: "request_id is required" }, { status: 400 });
@@ -99,7 +100,15 @@ export async function POST(request: Request) {
         network_name: failedNetwork,
         error_code: errorCode,
         error_message: errorMessage.slice(0, 160),
-        at: new Date().toISOString(),
+        started_at: cleanText(body.started_at) || null,
+        finished_at: cleanText(body.finished_at) || new Date().toISOString(),
+        duration_ms: durationMs,
+        result: "failed",
+        reason: errorMessage.slice(0, 160),
+        timeout: errorCode === "TIMEOUT",
+        no_fill: errorCode === "NO_FILL",
+        sdk_error: errorCode === "SDK_LOAD_FAILED" || errorCode === "SDK_UNAVAILABLE" || errorCode === "SDK_NOT_CONFIGURED",
+        render_failed: errorCode === "RENDER_FAILED",
       },
     ];
 

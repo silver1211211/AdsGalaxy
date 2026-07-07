@@ -136,6 +136,7 @@ export async function GET(_req: NextRequest) {
         AND ds.publisher_revenue > 0
         AND ds.date < CURDATE()
         AND ds.network_name <> 'AdsGalaxyInternal'
+        AND ds.reconciliation_status = 'reconciled'
         AND ${externalRevenueValidationCondition}
       ORDER BY ds.date ASC, ds.id ASC
       LIMIT 500
@@ -175,6 +176,7 @@ export async function GET(_req: NextRequest) {
               AND m.is_deleted = FALSE
               AND ds.date < CURDATE()
               AND ds.network_name <> 'AdsGalaxyInternal'
+              AND ds.reconciliation_status = 'reconciled'
               AND ${externalRevenueValidationCondition}
             FOR UPDATE
           `, [stat.id]);

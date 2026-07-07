@@ -6,6 +6,7 @@ import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { botTokenHash, encryptBotToken, ensureBotIntegration, isBotEncryptionError, publisherBotEncryptionErrorMessage, resolveBotIntegrationStatus } from "@/lib/botIntegration";
 import { notifyBotSubmitted } from "@/lib/publisherNotifications";
 import { botUserCountExpressions } from "@/lib/botAudience";
+import { safeQueuePublisherWelcome } from "@/lib/supportMessages";
 
 type ExistingBotRow = RowDataPacket & { id: number; user_id: number; is_deleted: boolean | number };
 
@@ -204,6 +205,7 @@ export async function POST(request: Request) {
 
       const integrationUrl = await ensureBotIntegration(pool, new URL(request.url).origin, bot.id);
       await notifyBotSubmitted(user.telegram_id, bot.id, bot_username);
+      await safeQueuePublisherWelcome(user.id);
       return NextResponse.json({ success: true, id: bot.id, bot_id: bot.id, integration_url: integrationUrl, message: "Bot reactivated and updated" });
     }
 
@@ -216,6 +218,7 @@ export async function POST(request: Request) {
 
     const integrationUrl = await ensureBotIntegration(pool, new URL(request.url).origin, result.insertId);
     await notifyBotSubmitted(user.telegram_id, result.insertId, bot_username);
+    await safeQueuePublisherWelcome(user.id);
     return NextResponse.json({ success: true, id: result.insertId, bot_id: result.insertId, integration_url: integrationUrl }, { status: 201 });
   } catch (error: unknown) {
     console.error("API Error:", error);

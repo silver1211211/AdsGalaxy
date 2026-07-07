@@ -69,6 +69,7 @@ echo "      Monetag: SDK/postbacks verified; no public pull reporting API wired.
 echo "      RichAds: publisher/widget JS tag verified; no public reporting API wired."
 echo "      GigaPub: SDK project ID support only; no verified reporting API wired."
 warn_env_any "AdExium reporting API token" "ADEXIUM_API_KEY" "ADEXIUM_API_TOKEN" "ADEXIUM_REPORTING_TOKEN"
+warn_env_any "Monetag browser SDK URL" "MONETAG_SDK_URL" "NEXT_PUBLIC_MONETAG_SDK_URL"
 echo "    Required environment variables are present."
 
 echo "==> [2/5] Applying database migrations..."
@@ -135,13 +136,19 @@ for MIG in \
   "20260703_0075_richads_telegram_configuration.sql" \
   "20260703_0076_remove_miniapp_beta_access.sql" \
   "20260703_0077_publisher_notifications_and_welcome_post.sql" \
+  "20260705_0076_miniapp_network_health_counter_safety.sql" \
+  "20260705_0077_miniapp_campaign_logo_remoderation.sql" \
   "20260704_0078_miniapp_telegram_bot_id.sql" \
   "20260705_0079_bot_monetization_integrity.sql" \
   "20260705_0080_miniapp_revenue_optimizer.sql" \
   "20260705_0081_phase_6b_campaign_budgets.sql" \
   "20260705_0082_phase_6c_fast_debit_ledgers.sql" \
   "20260705_0083_phase_6d_external_network_reconciliation.sql" \
-  "20260706_0084_phase_6f_performance_hardening.sql"
+  "20260706_0084_phase_6f_performance_hardening.sql" \
+  "20260706_0085_production_schema_repair.sql" \
+  "20260706_0086_user_negative_balance_guards.sql" \
+  "20260706_0087_support_account_messaging.sql" \
+  "20260706_0088_support_message_backfill_controls.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"
@@ -178,7 +185,7 @@ else
     $0 == begin { managed=1; next }
     $0 == end { managed=0; next }
     !managed
-  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|referral-sprint)([[:space:]?]|$)' || true)
+  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|process-support-messages|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|referral-sprint)([[:space:]?]|$)' || true)
 
   {
     printf '%s\n' "$CLEAN_CRONTAB"
@@ -201,6 +208,7 @@ else
     echo "12 * * * * $CRON_BASE/traffic-quality >/dev/null 2>&1"
     echo "35 2 * * * $CRON_BASE/inventory-optimization >/dev/null 2>&1"
     echo "42 * * * * $CRON_BASE/miniapp-revenue-optimizer >/dev/null 2>&1"
+    echo "*/10 * * * * $CRON_BASE/process-support-messages >/dev/null 2>&1"
     echo "45 3 * * * $CRON_BASE/system-logs-cleanup >/dev/null 2>&1"
     echo "*/15 * * * * $CRON_BASE/developer-webhooks >/dev/null 2>&1"
     echo "*/30 * * * * $CRON_BASE/cleanup-expired-posts >/dev/null 2>&1"

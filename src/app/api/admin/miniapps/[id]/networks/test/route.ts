@@ -10,8 +10,6 @@ import {
 } from "@/lib/miniappNetworkAdapters";
 import { getDisabledMiniappNetworks } from "@/lib/productionSafety";
 
-const ADEXIUM_TEST_WIDGET_ID = "00585dc9-3ed2-4ef1-afe8-8d06e0847e1a";
-
 type MiniAppRow = RowDataPacket & {
   id: number;
   status: string;
@@ -61,7 +59,7 @@ function hasRequiredPlacement(networkName: MiniAppNetworkName, network: NetworkR
 }
 
 function requiresBrowserSdkScript(networkName: MiniAppNetworkName) {
-  return networkName !== "Monetag" && networkName !== "AdsGalaxyInternal";
+  return networkName !== "AdsGalaxyInternal";
 }
 
 export async function POST(
@@ -118,9 +116,29 @@ export async function POST(
       });
     }
 
-    const testNetwork = networkName === "AdExium"
-      ? { ...network, network_placement_id: ADEXIUM_TEST_WIDGET_ID }
-      : network;
+    if (!Boolean(network.enabled)) {
+      return diagnosticResponse({
+        success: false,
+        network: networkName,
+        status: "Disabled",
+        error_code: "NETWORK_DISABLED",
+        error_message: `${networkName} is disabled for this Mini App.`,
+        checks: [{ name: "connected", label: "Connected", passed: false, reason: "Network disabled" }],
+      });
+    }
+
+    if (globallyDisabledNetworks.has(networkName)) {
+      return diagnosticResponse({
+        success: false,
+        network: networkName,
+        status: "Globally Disabled",
+        error_code: "NETWORK_DISABLED",
+        error_message: `${networkName} is disabled by the production network flag.`,
+        checks: [{ name: "connected", label: "Connected", passed: false, reason: "Production flag disabled" }],
+      });
+    }
+
+    const testNetwork = network;
 
     if (!hasRequiredPlacement(networkName, testNetwork)) {
       return diagnosticResponse({
@@ -154,7 +172,9 @@ export async function POST(
         network: networkName,
         status: "SDK Missing",
         error_code: "SDK_MISSING",
-        error_message: "Network SDK script is not configured.",
+        error_message: networkName === "Monetag"
+          ? "MONETAG_SDK_URL is missing. Set it to the exact SDK URL from the Monetag-generated script tag."
+          : "Network SDK script is not configured.",
       });
     }
 
@@ -176,10 +196,10 @@ export async function POST(
       network: networkName,
       status: "Test Successful",
       checks: [
-        { name: "miniapp_approved", passed: true },
-        { name: "network_enabled", passed: true },
-        { name: "placement_configured", passed: true },
-        { name: "sdk_available", passed: !requiresBrowserSdkScript(networkName) || Boolean(config.sdk_script_url) },
+        { name: "connected", label: "Connected", passed: true },
+        { name: "configuration_valid", label: "Configuration Valid", passed: true },
+        { name: "sdk_loaded", label: "SDK Loaded", passed: !requiresBrowserSdkScript(networkName) || Boolean(config.sdk_script_url) },
+        { name: "test_passed", label: "Test Passed", passed: true },
       ],
       extra: {
         readiness: "Ready",
@@ -194,6 +214,31 @@ export async function POST(
         monetag_protection: monetagProtection,
         test_config: testConfig,
         test_mode: true,
+        raw_result: {
+          server_config: testConfig,
+          live_ad_requested: false,
+          billing_isolated: true,
+        },
+        parsed_result: {
+          provider: networkName,
+          configuration_loaded: true,
+          publisher_configuration_present: true,
+          sdk_script_url_present: !requiresBrowserSdkScript(networkName) || Boolean(config.sdk_script_url),
+          production_ready: true,
+        },
+        callback_status: {
+          callbacks_registered: "validated_in_browser_runtime",
+          callback_invoked: false,
+          reason: "Provider test mode validates initialization only and does not render a live ad.",
+        },
+        timing: {
+          server_checked_at: new Date().toISOString(),
+          script_timeout_ms: testConfig.sdk?.script_timeout_ms || null,
+          request_timeout_ms: testConfig.sdk?.request_timeout_ms || null,
+        },
+        render_status: "not_requested_test_mode",
+        impression_status: "not_recorded_test_mode",
+        completion_status: "not_recorded_test_mode",
       },
     });
   } catch (error: unknown) {

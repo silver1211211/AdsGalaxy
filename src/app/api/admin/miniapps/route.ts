@@ -220,7 +220,7 @@ export async function GET(request: Request) {
         m.updated_at,
         COALESCE((SELECT COUNT(*) FROM miniapp_ad_networks mn WHERE mn.miniapp_id = m.id AND mn.enabled = TRUE AND mn.network_name IN ('AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub')), 0) as configured_network_count,
         COALESCE((SELECT COUNT(*) FROM miniapp_ad_networks mn WHERE mn.miniapp_id = m.id AND mn.enabled = TRUE), 0) as enabled_network_count,
-        COALESCE((SELECT GROUP_CONCAT(mn.network_name ORDER BY FIELD(mn.network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal') SEPARATOR ', ') FROM miniapp_ad_networks mn WHERE mn.miniapp_id = m.id AND mn.enabled = TRUE), '') as enabled_network_names,
+        COALESCE((SELECT GROUP_CONCAT(mn.network_name ORDER BY FIELD(mn.network_name, 'AdsGalaxyInternal', 'AdsGram', 'GigaPub', 'AdExium', 'Monetag', 'RichAds') SEPARATOR ', ') FROM miniapp_ad_networks mn WHERE mn.miniapp_id = m.id AND mn.enabled = TRUE), '') as enabled_network_names,
         COALESCE((SELECT SUM(ds.impressions) FROM miniapp_daily_stats ds WHERE ds.miniapp_id = m.id), 0) as total_impressions,
         COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = m.id), 0) as mediation_request_count,
         COALESCE((SELECT COUNT(*) FROM miniapp_mediation_requests mr WHERE mr.miniapp_id = m.id AND mr.final_result = 'no_fill'), 0) as no_fill_count,

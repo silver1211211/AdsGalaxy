@@ -39,6 +39,7 @@ export async function POST(request: Request) {
     const requestId = clean(body.request_id);
     const errorCode = clean(body.error_code) || "NETWORK_ERROR";
     const errorMessage = clean(body.error_message) || "Ad source failed";
+    const durationMs = Math.max(0, Math.min(120000, Number(body.duration_ms) || 0));
     if (!requestId) {
       return NextResponse.json({ success: false, error_code: "REQUEST_FAILED", message: "request_id is required" }, { status: 400 });
     }
@@ -91,7 +92,20 @@ export async function POST(request: Request) {
       parentRequestId: requestId,
       rootRequestId: state.rootRequestId || requestId,
       alreadyAttempted: attemptedNetworks,
-      fallbackAttempts: [...state.fallbackAttempts, { error_code: errorCode, at: new Date().toISOString() }],
+      fallbackAttempts: [...state.fallbackAttempts, {
+        network_name: mediationRequest.selected_network,
+        error_code: errorCode,
+        error_message: errorMessage.slice(0, 160),
+        started_at: clean(body.started_at) || null,
+        finished_at: clean(body.finished_at) || new Date().toISOString(),
+        duration_ms: durationMs,
+        result: "failed",
+        reason: errorMessage.slice(0, 160),
+        timeout: errorCode === "TIMEOUT",
+        no_fill: errorCode === "NO_FILL",
+        sdk_error: errorCode === "SDK_LOAD_FAILED" || errorCode === "SDK_UNAVAILABLE" || errorCode === "SDK_NOT_CONFIGURED",
+        render_failed: errorCode === "RENDER_FAILED",
+      }],
     });
     if (await isMiniappNetworkGloballyDisabled(nextDecision.selected_network, conn)) {
       await conn.commit();

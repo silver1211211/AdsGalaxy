@@ -13,6 +13,7 @@ import { normalizeMarketplaceType, publicSelectionMetadata, recordMarketplaceEve
 import { evaluateCampaignAutomation } from "@/lib/approvalAutomation";
 import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { validateTotalBudget } from "@/lib/campaignBudget";
+import { safeQueueAdvertiserOnboarding } from "@/lib/supportMessages";
 
 function cleanText(value: unknown) {
   return String(value || "").trim();
@@ -232,7 +233,8 @@ export async function GET(request: Request) {
     );
     return NextResponse.json(rows);
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Failed to load Mini App rewarded campaigns" }, { status: getAuthErrorStatus(error) });
+    console.error("Fetch Mini App Rewarded Campaigns Error:", error);
+    return NextResponse.json({ error: "Unable to load campaigns right now" }, { status: getAuthErrorStatus(error) });
   }
 }
 
@@ -407,6 +409,8 @@ export async function POST(request: Request) {
       destinationUrl: landingUrl,
       creativeText: description,
     }, conn);
+
+    await safeQueueAdvertiserOnboarding(user.id, conn);
 
     await conn.commit();
     return NextResponse.json({ success: true, id: result.insertId });

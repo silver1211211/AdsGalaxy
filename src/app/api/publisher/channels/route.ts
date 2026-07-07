@@ -20,6 +20,7 @@ import {
 } from "@/lib/privateChannelVerificationToken";
 import { logPrivateChannelDiagnostic } from "@/lib/privateChannelDiagnostics";
 import { notifyChannelSubmitted } from "@/lib/publisherNotifications";
+import { safeQueuePublisherWelcome } from "@/lib/supportMessages";
 
 type SettingRow = RowDataPacket & { value?: string | number | null };
 type ExistingChannelRow = RowDataPacket & { id: number; user_id: number; is_deleted: boolean | number };
@@ -488,6 +489,7 @@ export async function POST(request: Request) {
       }
 
       await notifyChannelSubmitted(user.telegram_id, channel.id, normalizedTitle);
+      await safeQueuePublisherWelcome(user.id);
 
       return NextResponse.json({
         success: true,
@@ -567,6 +569,7 @@ export async function POST(request: Request) {
     }
 
     await notifyChannelSubmitted(user.telegram_id, result.insertId, normalizedTitle);
+    await safeQueuePublisherWelcome(user.id);
 
     return NextResponse.json({ success: true, id: result.insertId });
   } catch (error: unknown) {

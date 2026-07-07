@@ -1,7 +1,8 @@
 "use client";
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, react-hooks/set-state-in-effect, react-hooks/exhaustive-deps -- legacy publisher monetize flow keeps large inline forms and loose API rows */
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import {
   Plus, Tv, Bot, Smartphone, CheckCircle2, Clock, XCircle, PauseCircle,
@@ -201,40 +202,85 @@ function getMaErrors(maName: string, maUsername: string, maBotId: string, maWebU
 
 function InfoTip({ text }: { text: string }) {
   const [open, setOpen] = useState(false);
+  const [style, setStyle] = useState<React.CSSProperties | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const tipRef = useRef<HTMLDivElement>(null);
+
+  // Measures the trigger + popup and picks whichever side actually has room,
+  // clamped so the popup can never render off the edge of the viewport.
+  const reposition = useCallback(() => {
+    const btn = btnRef.current;
+    const tip = tipRef.current;
+    if (!btn || !tip) return;
+    const margin = 8;
+    const btnRect = btn.getBoundingClientRect();
+    const tipRect = tip.getBoundingClientRect();
+
+    const maxLeft = window.innerWidth - tipRect.width - margin;
+    const left = Math.max(margin, Math.min(btnRect.left, maxLeft));
+
+    const spaceBelow = window.innerHeight - btnRect.bottom;
+    const fitsBelow = spaceBelow >= tipRect.height + margin;
+    const top = fitsBelow ? btnRect.bottom + 6 : Math.max(margin, btnRect.top - tipRect.height - 6);
+
+    setStyle({ position: "fixed", top, left, width: tipRect.width });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) { setStyle(null); return; }
+    reposition();
+  }, [open, reposition]);
 
   useEffect(() => {
     if (!open) return;
-    const close = () => setOpen(false);
-    // capture:true catches scroll/touchmove on any scrollable ancestor (e.g. the modal's
-    // own overflow-y-auto body), not just the window itself — scroll doesn't bubble.
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("touchmove", close, { passive: true });
+    // Any tap outside the icon or the popup itself closes it; taps inside are ignored
+    // so the toggle button's own onClick remains the single source of truth.
+    function handlePointerDown(e: PointerEvent) {
+      const target = e.target as Node;
+      if (btnRef.current?.contains(target) || tipRef.current?.contains(target)) return;
+      setOpen(false);
+    }
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    // capture:true catches scroll on any scrollable ancestor (e.g. the modal's own
+    // overflow-y-auto body), not just the window — scroll doesn't bubble.
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
     return () => {
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("touchmove", close);
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
     };
-  }, [open]);
+  }, [open, reposition]);
 
   return (
     <span className="relative inline-flex">
       <button
+        ref={btnRef}
         type="button"
         onClick={(e) => { e.stopPropagation(); setOpen(o => !o); }}
         title={text}
         aria-label="More information"
+        aria-expanded={open}
         className="relative flex h-4 w-4 items-center justify-center rounded-full text-sky-500 hover:text-sky-600"
       >
         {!open && <span className="absolute inset-0 -m-px rounded-full bg-sky-400/60 animate-infotip-ping" />}
         <span className="absolute inset-0 rounded-full bg-sky-100" />
         <Info size={12} className="relative" />
       </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 top-full z-50 mt-1.5 w-60 max-w-[80vw] rounded-xl border border-slate-200 bg-white p-3 text-[11px] font-medium normal-case leading-snug tracking-normal text-slate-600 shadow-xl">
-            {text}
-          </div>
-        </>
+      {open && typeof document !== "undefined" && createPortal(
+        <div
+          ref={tipRef}
+          style={style ?? { position: "fixed", top: -9999, left: -9999, width: 240, visibility: "hidden" }}
+          className="z-50 w-60 max-w-[calc(100vw-16px)] rounded-xl border border-slate-200 bg-white p-3 text-[11px] font-medium normal-case leading-snug tracking-normal text-slate-600 shadow-xl"
+        >
+          {text}
+        </div>,
+        document.body
       )}
     </span>
   );

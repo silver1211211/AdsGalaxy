@@ -16,9 +16,10 @@ import { cn } from "@/lib/utils";
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const CATEGORIES = [
-  "General", "Utilities", "Education", "AI", "Gaming",
+  "Utilities", "Education", "AI", "Gaming",
   "Finance", "Crypto", "Trading", "Shopping", "Entertainment", "Other",
 ];
+const MAX_CATEGORIES = 3;
 
 const COUNTRIES = [
   { code: "US", name: "United States", flag: "🇺🇸" },
@@ -270,7 +271,9 @@ export default function AdvertiserMiniAppRewardedPage() {
           cta_text: c.cta_text || "Learn More",
           title_color: c.title_color || "",
           body_color: c.body_color || "",
-          categories: parseList(c.categories),
+          categories: parseList(c.categories)
+            .filter(category => category !== "General" && category !== "All" && category !== "All Categories")
+            .slice(0, MAX_CATEGORIES),
           budget: c.budget ? String(parseFloat(c.budget)) : "",
           advertiser_cpm_bid: c.advertiser_cpm_bid ? String(parseFloat(c.advertiser_cpm_bid)) : "",
           campaign_budget_mode: c.campaign_budget_mode === "unlimited" || Number(c.budget || 0) === 0 ? "unlimited" : "custom",
@@ -334,6 +337,7 @@ export default function AdvertiserMiniAppRewardedPage() {
   const toggleCategory = (cat: string) => {
     setForm(prev => {
       const cats = Array.isArray(prev.categories) ? prev.categories : [];
+      if (!cats.includes(cat) && cats.length >= MAX_CATEGORIES) return prev;
       return {
         ...prev,
         categories: cats.includes(cat) ? cats.filter(c => c !== cat) : [...cats, cat],
@@ -416,7 +420,7 @@ export default function AdvertiserMiniAppRewardedPage() {
   };
 
   const isValidLandingUrl = form.landing_url.trim().length > 0 && /^https?:\/\/.+\..+/.test(form.landing_url.trim());
-  const step1Valid = form.campaign_name.trim().length >= 3 && form.campaign_name.length <= 15 && form.title.trim().length >= 3 && form.title.length <= 20 && form.description.trim().length > 0 && form.description.length <= 80 && isValidLandingUrl && !!form.image_url && !imageUploading && !imageError && !logoUploading && !logoError;
+  const step1Valid = form.campaign_name.trim().length >= 3 && form.campaign_name.length <= 15 && form.title.trim().length >= 3 && form.title.length <= 50 && form.description.trim().length > 0 && form.description.length <= 200 && isValidLandingUrl && !!form.image_url && !imageUploading && !imageError && !logoUploading && !logoError;
   const cpmOutsideRange = Number(form.advertiser_cpm_bid) < cpmMin || Number(form.advertiser_cpm_bid) > cpmMax;
   const step3Valid = !cpmOutsideRange && Number(form.advertiser_cpm_bid) > 0 && Number(form.budget) >= 10 &&
     (!form.daily_budget_limit || (Number(form.daily_budget_limit) >= 10 && Number(form.daily_budget_limit) <= Number(form.budget)));
@@ -434,7 +438,7 @@ export default function AdvertiserMiniAppRewardedPage() {
       }
       const payload = {
         ...form,
-        categories: form.categories.length ? form.categories : ["All"],
+        categories: form.categories,
         countries: selectedCountries.join(","),
         languages: selectedLanguages.join(","),
       };
@@ -562,7 +566,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                       "text-[10px] font-bold",
                       form.title.length > 0 && form.title.trim().length < 3 ? "text-red-400" : "text-slate-300"
                     )}>
-                      {form.title.length}/20
+                      {form.title.length}/50
                     </span>
                   </div>
                   <div className="relative">
@@ -572,7 +576,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                       value={form.title}
                       onChange={e => setForm(p => ({ ...p, title: e.target.value }))}
                       placeholder="Short attention-grabbing headline"
-                      maxLength={20}
+                      maxLength={50}
                       className={cn(
                         "w-full pl-10 pr-4 py-3 bg-slate-50 border rounded-2xl outline-none text-sm font-semibold text-slate-900 transition-all placeholder:font-normal placeholder:text-slate-400",
                         form.title.length > 0 && form.title.trim().length < 3
@@ -590,14 +594,14 @@ export default function AdvertiserMiniAppRewardedPage() {
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Description <span className="text-red-400">*</span></label>
-                    <span className="text-[10px] font-bold text-slate-300">{form.description.length}/80</span>
+                    <span className="text-[10px] font-bold text-slate-300">{form.description.length}/200</span>
                   </div>
                   <textarea
                     value={form.description}
                     onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
                     placeholder="Describe what this ad is about"
                     rows={3}
-                    maxLength={80}
+                    maxLength={200}
                     className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-semibold text-slate-900 outline-none focus:border-[#0c9de8] focus:bg-white transition-all placeholder:font-normal placeholder:text-slate-400 resize-none"
                   />
                 </div>
@@ -710,8 +714,8 @@ export default function AdvertiserMiniAppRewardedPage() {
                   <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Logo <span className="font-normal text-slate-300">(optional)</span></label>
                   <input ref={logoInputRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) handleLogoFile(file); }} />
                   <button type="button" onClick={() => logoInputRef.current?.click()} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-left">
-                    {logoPreview ? <img src={logoPreview} alt="Logo preview" className="h-14 w-14 rounded-xl object-contain bg-white" /> : <ImageIcon className="m-3 text-slate-300" size={24} />}
-                    <span className="text-xs font-bold text-slate-600">{logoUploading ? "Uploading..." : "Square PNG, JPG, or WEBP · max 500 KB"}</span>
+                    <img src={logoPreview || "/logo.svg"} alt="Logo preview" className="h-14 w-14 rounded-xl object-contain bg-white" />
+                    <span className="text-xs font-bold text-slate-600">{logoUploading ? "Uploading..." : "Optional · AdsGalaxy logo is used by default"}</span>
                   </button>
                   {logoError && <p className="text-[11px] font-bold text-red-500">{logoError}</p>}
                 </div>
@@ -720,7 +724,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                   {imagePreview && <img src={imagePreview} alt="Live ad preview" className="aspect-video w-full object-contain bg-slate-50" />}
                   <div className="space-y-2 p-4">
                     <div className="flex items-center gap-2">
-                      {logoPreview && <img src={logoPreview} alt="" className="h-9 w-9 rounded-lg object-contain" />}
+                      <img src={logoPreview || "/logo.svg"} alt="" className="h-9 w-9 rounded-lg object-contain" />
                       <h3 className="text-sm font-black text-slate-900">{form.title || "Ad title"}</h3>
                     </div>
                     <p className="text-xs text-slate-600">{form.description || "Your ad description will appear here."}</p>
@@ -736,14 +740,20 @@ export default function AdvertiserMiniAppRewardedPage() {
                 <div className="flex flex-wrap gap-2">
                   {CATEGORIES.map(cat => {
                     const active = Array.isArray(form.categories) && form.categories.includes(cat);
+                    const limitReached = !active && form.categories.length >= MAX_CATEGORIES;
                     return (
                       <button
                         key={cat}
                         type="button"
                         onClick={() => toggleCategory(cat)}
+                        disabled={limitReached}
                         className={cn(
                           "px-3 py-2 rounded-xl text-[11px] font-black border transition-all",
-                          active ? "bg-[#0c9de8] border-[#0c9de8] text-white" : "bg-slate-50 border-slate-200 text-slate-500 hover:border-[#0c9de8]"
+                          active
+                            ? "bg-[#0c9de8] border-[#0c9de8] text-white"
+                            : limitReached
+                              ? "bg-slate-50 border-slate-100 text-slate-300 cursor-not-allowed"
+                              : "bg-slate-50 border-slate-200 text-slate-500 hover:border-[#0c9de8]"
                         )}
                       >
                         {cat}
@@ -751,7 +761,9 @@ export default function AdvertiserMiniAppRewardedPage() {
                     );
                   })}
                 </div>
-                <p className="text-[10px] font-semibold text-slate-400">Leave empty to show across all categories.</p>
+                <p className="text-[10px] font-semibold text-slate-400">
+                  Select up to {MAX_CATEGORIES}. Leave empty to use General by default.
+                </p>
               </div>
             </div>
           )}
@@ -968,7 +980,18 @@ export default function AdvertiserMiniAppRewardedPage() {
                   { label: "End Date",   key: "end_at"   as const },
                 ].map(({ label, key }) => (
                   <div key={key} className="space-y-1.5">
-                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label} <span className="text-slate-300 font-normal">(optional)</span></label>
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label} <span className="text-slate-300 font-normal">(optional)</span></label>
+                      {form[key] && (
+                        <button
+                          type="button"
+                          onClick={() => setForm(previous => ({ ...previous, [key]: "" }))}
+                          className="text-[10px] font-black text-slate-400 transition-colors hover:text-red-500"
+                        >
+                          Reset
+                        </button>
+                      )}
+                    </div>
                     <div className="relative">
                       <Calendar size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                       <input

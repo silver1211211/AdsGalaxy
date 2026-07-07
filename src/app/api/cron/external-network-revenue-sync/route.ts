@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 import { runExternalNetworkRevenueReconciliation } from "@/lib/externalNetworkRevenueReconciliation";
+import { runFinancialIntegrityAudit } from "@/lib/financialIntegrityAudit";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +38,8 @@ export async function GET(request: NextRequest) {
       sinceDate: searchParams.get("since") || undefined,
       untilDate: searchParams.get("until") || undefined,
     });
-    return NextResponse.json(result);
+    const financialAudit = await runFinancialIntegrityAudit();
+    return NextResponse.json({ ...result, financial_audit: financialAudit });
   } finally {
     await releaseCronLock(lock);
   }

@@ -12,6 +12,7 @@ import { columnExists } from "@/lib/schemaGuards";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { validateTotalBudget } from "@/lib/campaignBudget";
+import { safeQueueAdvertiserOnboarding } from "@/lib/supportMessages";
 
 export async function POST(request: Request) {
   try {
@@ -228,6 +229,8 @@ export async function POST(request: Request) {
         [user.id, budget, `Campaign Creation: ${name}`]
       );
 
+      await safeQueueAdvertiserOnboarding(user.id, conn);
+
       await conn.commit();
       return NextResponse.json({ success: true, id: result.insertId });
     } catch (err) {
@@ -247,6 +250,7 @@ export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
+    const hasCampaignUpdatedAt = await columnExists(pool, "campaigns", "updated_at");
     const hasCampaignPostViews = await columnExists(pool, "campaign_posts", "views");
     const hasBroadcastDeliveryCost = await columnExists(pool, "broadcast_deliveries", "cost");
     const campaignPostImpressionsExpr = hasCampaignPostViews
@@ -266,6 +270,7 @@ export async function GET(request: Request) {
       : "0";
     const channelTodaySpendExpr = `(COALESCE((SELECT SUM(l.advertiser_debit) FROM channel_settlement_ledger l WHERE l.campaign_id=c.id AND l.created_at>=CURDATE()),0)
       + COALESCE((SELECT SUM(d.advertiser_debit) FROM channel_advertiser_debits d WHERE d.campaign_id=c.id AND d.created_at>=CURDATE()),0))`;
+    const campaignUpdatedAtExpr = hasCampaignUpdatedAt ? "c.updated_at" : "c.created_at";
 
     const [rows]: any = await pool.query(
       `SELECT id, name, parse_mode, message_text, image_url, link, postback_url, button_text, rejection_reason,
@@ -274,7 +279,7 @@ export async function GET(request: Request) {
          frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
          direct_inventory_metadata, status, paused_at, resume_locked_until,
          completed_at, budget_exhausted_at, pause_reason, auto_reactivate,
-         created_at, updated_at,
+         created_at, ${campaignUpdatedAtExpr} AS updated_at,
          budget as remaining_budget,
          CASE
            WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)
@@ -373,6 +378,6 @@ export async function GET(request: Request) {
     return NextResponse.json(rows, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
   } catch (error: any) {
     console.error("Fetch Campaigns Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to fetch campaigns" }, { status: getAuthErrorStatus(error) });
+    return NextResponse.json({ error: "Unable to load campaigns right now" }, { status: getAuthErrorStatus(error) });
   }
 }

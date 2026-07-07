@@ -129,20 +129,31 @@ export default function MyCampaignsPage() {
 
   const fetchCampaigns = async (silent = false) => {
     if (!silent) setIsLoading(true);
+    setError("");
     try {
       const [regularRes, miniappRes] = await Promise.all([
         apiFetch("/api/advertiser/campaigns"),
         apiFetch("/api/advertiser/miniapp-rewarded-campaigns"),
       ]);
-      const regularData = regularRes.ok ? await regularRes.json() : [];
-      const miniappData = miniappRes.ok ? await miniappRes.json() : [];
+      const regularData = await regularRes.json().catch(() => null);
+      const miniappData = await miniappRes.json().catch(() => null);
 
-      const regular = (Array.isArray(regularData) ? regularData : []).map((c: any) => ({
+      const failures: string[] = [];
+      if (!regularRes.ok) {
+        failures.push("channel_or_bot");
+        console.error("Failed to load channel/bot campaigns", regularData || regularRes.status);
+      }
+      if (!miniappRes.ok) {
+        failures.push("miniapp");
+        console.error("Failed to load Mini App campaigns", miniappData || miniappRes.status);
+      }
+
+      const regular = (regularRes.ok && Array.isArray(regularData) ? regularData : []).map((c: any) => ({
         ...c,
         kind: c.type === "broadcast" ? "bot" : "channel",
       }));
 
-      const miniapp = (Array.isArray(miniappData) ? miniappData : []).map((c: any) => ({
+      const miniapp = (miniappRes.ok && Array.isArray(miniappData) ? miniappData : []).map((c: any) => ({
         id: c.id,
         name: c.campaign_name,
         kind: "miniapp" as const,
@@ -163,12 +174,17 @@ export default function MyCampaignsPage() {
         rejection_reason: c.creative_review_notes || null,
       }));
 
+      if (failures.length > 0) {
+        setError("We couldn't load all campaigns right now. Please refresh or try again shortly.");
+      }
+
       const all = [...regular, ...miniapp].sort(
         (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
       );
       setCampaigns(all);
     } catch (error) {
       console.error("Error fetching campaigns:", error);
+      setError("We couldn't load your campaigns right now. Please refresh or try again shortly.");
     } finally {
       setIsLoading(false);
     }
@@ -412,9 +428,11 @@ export default function MyCampaignsPage() {
               <Target size={40} />
             </div>
             <div className="space-y-2">
-              <h3 className="text-lg font-black text-slate-900 uppercase">No Active Ads</h3>
+              <h3 className="text-lg font-black text-slate-900 uppercase">
+                {error ? "Ads Could Not Load" : "No Campaigns Yet"}
+              </h3>
               <p className="text-slate-400 text-sm max-w-[240px] mx-auto font-medium">
-                Create your first advertising campaign to reach thousands of Telegram users.
+                {error || "Create your first advertising campaign to reach thousands of Telegram users."}
               </p>
             </div>
             <button

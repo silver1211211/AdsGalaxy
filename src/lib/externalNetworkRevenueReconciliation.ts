@@ -43,12 +43,15 @@ type ProviderCapability = {
   supported: boolean;
   sdk_only: boolean;
   api_reporting: boolean;
+  callback_postback_only: boolean;
+  hourly_reporting: boolean;
+  daily_reporting: boolean;
   needs_credentials: boolean;
   needs_account_id: boolean;
   needs_widget_id: boolean;
   credentials_scope: "publisher" | "platform" | "none";
   reporting_frequency: "unknown" | "hourly_or_better" | "daily";
-  status: "supported" | "not_supported" | "sdk_only";
+  status: "supported" | "not_supported" | "sdk_only" | "callback_postback_only";
   notes: string;
   sources: string[];
 };
@@ -78,6 +81,8 @@ type SettlementRow = RowDataPacket & {
   status: string;
   impressions: string | number;
   publisher_revenue: string | number;
+  balance_locked: string | number;
+  balance_available: string | number;
 };
 
 type RunSummary = {
@@ -96,6 +101,9 @@ const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapability> = {
     supported: false,
     sdk_only: true,
     api_reporting: false,
+    callback_postback_only: false,
+    hourly_reporting: false,
+    daily_reporting: false,
     needs_credentials: false,
     needs_account_id: false,
     needs_widget_id: false,
@@ -112,12 +120,15 @@ const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapability> = {
     supported: false,
     sdk_only: true,
     api_reporting: false,
+    callback_postback_only: true,
+    hourly_reporting: false,
+    daily_reporting: false,
     needs_credentials: false,
     needs_account_id: false,
     needs_widget_id: false,
     credentials_scope: "publisher",
     reporting_frequency: "unknown",
-    status: "sdk_only",
+    status: "callback_postback_only",
     notes: "Public TMA docs verify SDK zone IDs and reward postbacks, but not a pull reporting API.",
     sources: [
       "https://docs.monetag.com/docs/sdk-reference/",
@@ -128,11 +139,14 @@ const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapability> = {
     supported: true,
     sdk_only: false,
     api_reporting: true,
+    callback_postback_only: false,
+    hourly_reporting: false,
+    daily_reporting: true,
     needs_credentials: true,
     needs_account_id: false,
     needs_widget_id: true,
     credentials_scope: "platform",
-    reporting_frequency: "unknown",
+    reporting_frequency: "daily",
     status: "supported",
     notes: "Public publisher docs verify Bearer-token stats by widget ID.",
     sources: ["https://docs.adexium.io/publisher/api-stats.html"],
@@ -141,6 +155,9 @@ const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapability> = {
     supported: false,
     sdk_only: true,
     api_reporting: false,
+    callback_postback_only: false,
+    hourly_reporting: false,
+    daily_reporting: false,
     needs_credentials: false,
     needs_account_id: true,
     needs_widget_id: true,
@@ -154,6 +171,9 @@ const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapability> = {
     supported: false,
     sdk_only: true,
     api_reporting: false,
+    callback_postback_only: false,
+    hourly_reporting: false,
+    daily_reporting: false,
     needs_credentials: false,
     needs_account_id: false,
     needs_widget_id: true,
@@ -202,6 +222,17 @@ function wholeMetric(value: unknown) {
 
 function cleanId(value: unknown) {
   return String(value || "").trim();
+}
+
+function parseJsonObject(value: unknown) {
+  if (!value) return {};
+  if (typeof value === "object") return value as Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
 }
 
 function envValue(prefix: string, suffixes: string[]) {
@@ -430,7 +461,11 @@ async function findOrCreateDailyStat(conn: PoolConnection, miniappId: number, ne
 
 async function hasSettlement(conn: PoolConnection, dailyStatId: number) {
   const [rows] = await conn.query<SettlementRow[]>(
-    "SELECT id, user_id, status, impressions, publisher_revenue FROM miniapp_earnings_settlements WHERE daily_stat_id = ? FOR UPDATE",
+    `SELECT s.id, s.user_id, s.status, s.impressions, s.publisher_revenue, u.balance_locked, u.balance_available
+     FROM miniapp_earnings_settlements s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.daily_stat_id = ?
+     FOR UPDATE`,
     [dailyStatId]
   );
   return rows[0] || null;
@@ -450,8 +485,14 @@ async function applySettlementAdjustment(
   }
 
   const balanceColumn = settlement.status === "locked" ? "balance_locked" : "balance_available";
+  if (delta < 0) {
+    const currentBalance = metricNumber(settlement.status === "locked" ? settlement.balance_locked : settlement.balance_available);
+    if (currentBalance + delta < -0.00000001) {
+      return { adjusted: false, delta: 0, blocked: true, reason: `${balanceColumn}_insufficient_for_reconciliation_adjustment` };
+    }
+  }
   await conn.query(
-    `UPDATE users SET ${balanceColumn} = ${balanceColumn} + ? WHERE id = ?`,
+    `UPDATE users SET ${balanceColumn} = GREATEST(0, ${balanceColumn} + ?) WHERE id = ?`,
     [delta, settlement.user_id]
   );
   await conn.query(
@@ -460,7 +501,7 @@ async function applySettlementAdjustment(
      WHERE id = ?`,
     [reconciledPublisherRevenue, nextImpressions, settlement.id]
   );
-  return { adjusted: true, delta };
+  return { adjusted: true, delta, blocked: false, reason: "adjusted" };
 }
 
 async function reconcileRecord(conn: PoolConnection, adapter: ProviderAdapter, record: ProviderReportRecord, configs: NetworkConfigRow[], feePercent: number) {
@@ -473,8 +514,9 @@ async function reconcileRecord(conn: PoolConnection, adapter: ProviderAdapter, r
   const settlement = await hasSettlement(conn, Number(stat.id));
   const previousPublisherRevenue = metricNumber(stat.publisher_revenue);
   const previousGrossRevenue = metricNumber(stat.gross_revenue);
-  const reconciledPublisherRevenue = record.publisherEarnings;
-  const reconciledGrossRevenue = record.grossEarnings ?? (feePercent >= 100 ? reconciledPublisherRevenue : reconciledPublisherRevenue / (1 - feePercent / 100));
+  const providerGrossRevenue = record.grossEarnings ?? (feePercent >= 100 ? record.publisherEarnings : record.publisherEarnings / (1 - feePercent / 100));
+  const reconciledGrossRevenue = Math.max(0, providerGrossRevenue);
+  const reconciledPublisherRevenue = Math.min(Math.max(0, record.publisherEarnings), reconciledGrossRevenue);
   const publisherRevenueDelta = reconciledPublisherRevenue - previousPublisherRevenue;
   const grossRevenueDelta = reconciledGrossRevenue - previousGrossRevenue;
   const impressions = record.impressions ?? Math.floor(metricNumber(stat.impressions));
@@ -498,6 +540,53 @@ async function reconcileRecord(conn: PoolConnection, adapter: ProviderAdapter, r
 
   if (settlement) {
     const adjustment = await applySettlementAdjustment(conn, settlement, impressions, reconciledPublisherRevenue);
+    if (adjustment.blocked) {
+      await conn.query(
+        `INSERT INTO miniapp_external_revenue_reconciliations
+          (provider, provider_record_id, miniapp_id, daily_stat_id, network_name, date,
+           previous_gross_revenue, previous_publisher_revenue, reconciled_gross_revenue, reconciled_publisher_revenue,
+           gross_revenue_delta, publisher_revenue_delta, impressions, clicks, completed_views, fill_rate, effective_cpm,
+           settlement_status, action, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'blocked_negative_balance', ?)
+         ON DUPLICATE KEY UPDATE
+           previous_gross_revenue = VALUES(previous_gross_revenue),
+           previous_publisher_revenue = VALUES(previous_publisher_revenue),
+           reconciled_gross_revenue = VALUES(reconciled_gross_revenue),
+           reconciled_publisher_revenue = VALUES(reconciled_publisher_revenue),
+           gross_revenue_delta = VALUES(gross_revenue_delta),
+           publisher_revenue_delta = VALUES(publisher_revenue_delta),
+           impressions = VALUES(impressions),
+           clicks = VALUES(clicks),
+           completed_views = VALUES(completed_views),
+           fill_rate = VALUES(fill_rate),
+           effective_cpm = VALUES(effective_cpm),
+           settlement_status = VALUES(settlement_status),
+           action = VALUES(action),
+           metadata = VALUES(metadata)`,
+        [
+          adapter.provider,
+          record.providerRecordId,
+          stat.miniapp_id,
+          stat.id,
+          adapter.networkName,
+          record.date,
+          previousGrossRevenue,
+          previousPublisherRevenue,
+          reconciledGrossRevenue,
+          reconciledPublisherRevenue,
+          grossRevenueDelta,
+          publisherRevenueDelta,
+          record.impressions ?? null,
+          record.clicks ?? null,
+          record.completedViews ?? null,
+          record.fillRate ?? null,
+          effectivePublisherCpm,
+          settlement.status,
+          JSON.stringify({ ...metadata, settlement_id: settlement.id, blocked_reason: adjustment.reason }),
+        ]
+      );
+      return { updated: false, reason: adjustment.reason || "blocked_negative_balance" };
+    }
     await conn.query(
       `UPDATE miniapp_daily_stats
        SET impressions = ?,
@@ -714,7 +803,15 @@ async function reconcileProvider(adapter: ProviderAdapter, sinceDate: string, un
         records_updated: 0,
         records_skipped: 0,
       };
-      await recordProviderRun(summary, { reason: result.reason, ...result.metadata });
+      await recordProviderRun(summary, {
+        reason: result.reason,
+        skipped_reason: result.reason,
+        report_window: { since_date: sinceDate, until_date: untilDate },
+        report_dates: datesBetween(sinceDate, untilDate),
+        revenue_returned: 0,
+        reporting_frequency: adapter.support.reporting_frequency,
+        ...result.metadata,
+      });
       console.info("External network reconciliation skipped", summary);
       return summary;
     }
@@ -746,7 +843,14 @@ async function reconcileProvider(adapter: ProviderAdapter, sinceDate: string, un
       records_updated: updated,
       records_skipped: skipped,
     };
-    await recordProviderRun(summary, result.metadata);
+    await recordProviderRun(summary, {
+      ...result.metadata,
+      report_window: { since_date: sinceDate, until_date: untilDate },
+      report_dates: datesBetween(sinceDate, untilDate),
+      revenue_returned: result.records.reduce((sum, record) => sum + Math.max(0, record.publisherEarnings), 0),
+      reporting_frequency: adapter.support.reporting_frequency,
+      skipped_reason: null,
+    });
     console.info("External network reconciliation completed", summary);
     return summary;
   } catch (error: any) {
@@ -760,7 +864,13 @@ async function reconcileProvider(adapter: ProviderAdapter, sinceDate: string, un
       records_skipped: skipped,
       error: error?.message || "Provider reconciliation failed",
     };
-    await recordProviderRun(summary);
+    await recordProviderRun(summary, {
+      report_window: { since_date: sinceDate, until_date: untilDate },
+      report_dates: datesBetween(sinceDate, untilDate),
+      revenue_returned: 0,
+      reporting_frequency: adapter.support.reporting_frequency,
+      failure_reason: summary.error,
+    });
     console.error("External network reconciliation failed", summary);
     return summary;
   }
@@ -787,7 +897,7 @@ export async function runExternalNetworkRevenueReconciliation(input: { sinceDate
 
 export async function getExternalNetworkReconciliationReport(limit = 20) {
   const [providerRows]: any = await pool.query(
-    `SELECT r.*, success.finished_at as last_successful_finished_at
+    `SELECT r.*, success.finished_at as last_successful_finished_at, failed.finished_at as last_failed_finished_at
      FROM miniapp_external_reconciliation_runs r
      JOIN (
        SELECT provider, MAX(id) as id
@@ -800,14 +910,22 @@ export async function getExternalNetworkReconciliationReport(limit = 20) {
        WHERE status = 'success'
        GROUP BY provider
      ) success ON success.provider = r.provider
+     LEFT JOIN (
+       SELECT provider, MAX(finished_at) as finished_at
+       FROM miniapp_external_reconciliation_runs
+       WHERE status = 'failed'
+       GROUP BY provider
+     ) failed ON failed.provider = r.provider
      ORDER BY FIELD(r.provider, 'AdsGram', 'Monetag', 'AdExium', 'RichAds', 'GigaPub'), r.provider`
   );
   const [[latest]]: any = await pool.query(
     "SELECT * FROM miniapp_external_reconciliation_runs ORDER BY started_at DESC LIMIT 1"
   );
   const [historyRows]: any = await pool.query(
-    `SELECT provider, network_name, date, action, settlement_status, publisher_revenue_delta,
-       effective_cpm, created_at
+    `SELECT provider, network_name, date, action, settlement_status,
+       previous_publisher_revenue, reconciled_publisher_revenue, publisher_revenue_delta,
+       previous_gross_revenue, reconciled_gross_revenue, gross_revenue_delta,
+       impressions, effective_cpm, metadata, created_at
      FROM miniapp_external_revenue_reconciliations
      ORDER BY created_at DESC
      LIMIT ?`,
@@ -816,23 +934,55 @@ export async function getExternalNetworkReconciliationReport(limit = 20) {
 
   return {
     last_reconciliation: latest || null,
-    provider_status: providerRows.map((row: any) => ({
-      provider: row.provider,
-      status: row.status,
-      success: row.status !== "failed",
-      last_sync: row.started_at,
-      last_successful_sync: row.last_successful_finished_at || null,
-      duration_ms: metricNumber(row.duration_ms),
-      records_updated: metricNumber(row.records_updated),
-      records_skipped: metricNumber(row.records_skipped),
-      errors: row.error_message || null,
-      capability: PROVIDER_CAPABILITIES[row.provider as ProviderName] || null,
-    })),
-    recent_adjustments: historyRows.map((row: any) => ({
-      ...row,
-      publisher_revenue_delta: metricNumber(row.publisher_revenue_delta),
-      effective_cpm: metricNumber(row.effective_cpm),
-    })),
+    provider_status: providerRows.map((row: any) => {
+      const metadata = parseJsonObject(row.metadata);
+      const reportWindow = parseJsonObject(metadata.report_window);
+      return {
+        provider: row.provider,
+        status: row.status,
+        success: row.status !== "failed",
+        last_sync: row.started_at,
+        last_successful_sync: row.last_successful_finished_at || null,
+        last_failed_sync: row.last_failed_finished_at || null,
+        last_report_date: Array.isArray(metadata.report_dates) ? metadata.report_dates[metadata.report_dates.length - 1] || null : null,
+        report_window: {
+          since_date: reportWindow.since_date || null,
+          until_date: reportWindow.until_date || null,
+        },
+        revenue_returned: metricNumber(metadata.revenue_returned),
+        duration_ms: metricNumber(row.duration_ms),
+        records_updated: metricNumber(row.records_updated),
+        records_skipped: metricNumber(row.records_skipped),
+        skipped_reason: metadata.skipped_reason || metadata.reason || null,
+        errors: row.error_message || null,
+        capability: PROVIDER_CAPABILITIES[row.provider as ProviderName] || null,
+      };
+    }),
+    recent_adjustments: historyRows.map((row: any) => {
+      const metadata = parseJsonObject(row.metadata);
+      const cpmBefore = metricNumber(row.previous_publisher_revenue) > 0 && metricNumber(row.impressions) > 0
+        ? cpm(metricNumber(row.previous_publisher_revenue), metricNumber(row.impressions))
+        : null;
+      return {
+        provider: row.provider,
+        network_name: row.network_name,
+        date: row.date,
+        action: row.action,
+        settlement_status: row.settlement_status,
+        publisher_earnings_before: metricNumber(row.previous_publisher_revenue),
+        publisher_earnings_after: metricNumber(row.reconciled_publisher_revenue),
+        publisher_revenue_delta: metricNumber(row.publisher_revenue_delta),
+        provider_revenue_before: metricNumber(row.previous_gross_revenue),
+        provider_revenue_after: metricNumber(row.reconciled_gross_revenue),
+        gross_revenue_delta: metricNumber(row.gross_revenue_delta),
+        cpm_before: cpmBefore,
+        cpm_after: metricNumber(row.effective_cpm),
+        adjustments_made: row.action,
+        skipped_reason: row.action === "blocked_negative_balance" ? metadata.blocked_reason || "blocked_negative_balance" : null,
+        execution_time: row.created_at,
+        metadata,
+      };
+    }),
   };
 }
 

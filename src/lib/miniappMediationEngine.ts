@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import {
   MINIAPP_NETWORKS,
+  MINIAPP_FALLBACK_ORDER,
   buildMiniAppNetworkClientConfig,
   isMiniAppNetworkName,
   type MiniAppAdFormat,
@@ -18,11 +19,15 @@ import { getDisabledMiniappNetworks, isMonetagTestModeEnabled } from "@/lib/prod
 
 const FALLBACK_ERROR_CODES = new Set([
   "SDK_LOAD_FAILED",
+  "SDK_UNAVAILABLE",
+  "SDK_NOT_CONFIGURED",
   "AD_UNAVAILABLE",
   "TIMEOUT",
   "INVALID_CONFIG",
   "NETWORK_ERROR",
   "NO_FILL",
+  "INVALID_RESPONSE",
+  "RENDER_FAILED",
 ]);
 
 type NetworkRow = RowDataPacket & {
@@ -47,8 +52,8 @@ type RequestRow = RowDataPacket & {
   ad_format: string;
   selected_network: string;
   root_request_id: string | null;
-  attempted_networks: string | null;
-  fallback_attempts: string | null;
+  attempted_networks: unknown;
+  fallback_attempts: unknown;
   final_result: string | null;
 };
 
@@ -83,10 +88,11 @@ export type MediationDecision = {
   error_code?: "NO_FILL";
 };
 
-function parseJsonArray(value: string | null | undefined) {
+function parseJsonArray(value: unknown) {
   if (!value) return [];
+  if (Array.isArray(value)) return value;
   try {
-    const parsed = JSON.parse(value);
+    const parsed = JSON.parse(String(value));
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
@@ -111,11 +117,15 @@ function supportsFormat(network: NetworkRow, adFormat: MiniAppAdFormat) {
 
 function rankCandidatePool(candidates: NetworkRow[]) {
   return [...candidates].sort((a, b) => {
+    if (a.network_name === INTERNAL_NETWORK_NAME && b.network_name !== INTERNAL_NETWORK_NAME) return -1;
+    if (b.network_name === INTERNAL_NETWORK_NAME && a.network_name !== INTERNAL_NETWORK_NAME) return 1;
     const priorityA = Number(a.priority_order || 99);
     const priorityB = Number(b.priority_order || 99);
     const scoreA = Number(a.health_score ?? 100);
     const scoreB = Number(b.health_score ?? 100);
-    return priorityA - priorityB || scoreB - scoreA;
+    const fallbackA = MINIAPP_FALLBACK_ORDER.indexOf(a.network_name as MiniAppNetworkName);
+    const fallbackB = MINIAPP_FALLBACK_ORDER.indexOf(b.network_name as MiniAppNetworkName);
+    return priorityA - priorityB || scoreB - scoreA || fallbackA - fallbackB;
   });
 }
 
@@ -131,7 +141,7 @@ export async function getMiniappNetworksForMediation(miniappId: number | string,
       mn.richads_publisher_id,
       mn.richads_app_id,
       mn.enabled,
-      COALESCE(NULLIF(mn.priority_order, 0), FIELD(mn.network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')) as priority_order,
+      COALESCE(NULLIF(mn.priority_order, 0), FIELD(mn.network_name, 'AdsGalaxyInternal', 'AdsGram', 'GigaPub', 'AdExium', 'Monetag', 'RichAds')) as priority_order,
       mh.recent_failures,
       mh.temporarily_disabled_until
     FROM miniapp_ad_networks mn
@@ -139,7 +149,7 @@ export async function getMiniappNetworksForMediation(miniappId: number | string,
       ON mh.miniapp_id = mn.miniapp_id AND mh.network_name = mn.network_name
     WHERE mn.miniapp_id = ?
       AND mn.network_name IN (?)
-    ORDER BY priority_order ASC, FIELD(mn.network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')
+    ORDER BY priority_order ASC, FIELD(mn.network_name, 'AdsGalaxyInternal', 'AdsGram', 'GigaPub', 'AdExium', 'Monetag', 'RichAds')
   `, [miniappId, [...MINIAPP_NETWORKS]]);
 
   return rows;

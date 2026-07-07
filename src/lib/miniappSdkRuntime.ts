@@ -16,6 +16,7 @@ type NetworkClientConfig = {
         global_name?: string | null;
         backup_script_url?: string | null;
         script_timeout_ms?: number;
+        request_timeout_ms?: number;
         richads_publisher_id?: string;
         richads_app_id?: string;
         richads_placement_type?: typeof RICHADS_PRODUCTION_PLACEMENT;
@@ -83,6 +84,7 @@ export type MiniAppSdkResult = {
   raw_result?: unknown;
   reward_eligible?: boolean;
   status?: string;
+  diagnostics?: Record<string, unknown>;
 };
 
 type AdapterRequest = {
@@ -162,6 +164,63 @@ function withFriendlyError(result: MiniAppSdkResult): MiniAppSdkResult {
   return { ...result, error_message: friendlySdkMessage(result.error_code) };
 }
 
+function validateLoadedSdk(config: NetworkClientConfig) {
+  const sdk = config.client_config?.sdk || {};
+  const checks: Array<{ name: string; passed: boolean; reason?: string }> = [];
+  const check = (name: string, passed: boolean, reason?: string) => checks.push({ name, passed, ...(reason ? { reason } : {}) });
+
+  if (config.network_name === "AdsGalaxyInternal") {
+    check("internal_renderer_available", true);
+  } else if (config.network_name === "AdsGram") {
+    check("global_object_available", Boolean(window.Adsgram), "window.Adsgram is missing");
+    check("init_method_available", typeof window.Adsgram?.init === "function", "window.Adsgram.init is missing");
+  } else if (config.network_name === "GigaPub") {
+    check("display_method_available", typeof window.showGiga === "function", "window.showGiga is missing");
+  } else if (config.network_name === "AdExium") {
+    const available = typeof window.AdexiumWidget === "function";
+    check("widget_constructor_available", available, "window.AdexiumWidget is missing");
+    if (available) {
+      try {
+        const widget = new window.AdexiumWidget!({ wid: config.network_placement_id, adFormat: "interstitial", debug: true });
+        check("callback_registration_available", typeof widget.on === "function", "widget.on is missing");
+        check("request_method_available", typeof widget.requestAd === "function", "widget.requestAd is missing");
+        check("render_method_available", typeof widget.displayAd === "function", "widget.displayAd is missing");
+        try {
+          if (typeof (widget as unknown as { destroy?: () => void }).destroy === "function") {
+            (widget as unknown as { destroy: () => void }).destroy();
+          }
+        } catch {
+          // Cleanup best effort only for isolated diagnostics.
+        }
+      } catch (error) {
+        check("widget_instantiation_available", false, error instanceof Error ? error.message : "AdExium widget could not be constructed");
+      }
+    }
+  } else if (config.network_name === "Monetag") {
+    const globalName = sdk.global_name || `show_${config.network_placement_id}`;
+    check("zone_global_available", typeof window[globalName as keyof Window] === "function", `${globalName} is missing`);
+  } else if (config.network_name === "RichAds") {
+    const available = typeof window.TelegramAdsController === "function";
+    check("controller_constructor_available", available, "window.TelegramAdsController is missing");
+    if (available) {
+      try {
+        const controller = new window.TelegramAdsController!();
+        check("initialize_method_available", typeof controller.initialize === "function", "initialize is missing");
+        check("interstitial_method_available", typeof controller.triggerInterstitialVideo === "function", "triggerInterstitialVideo is missing");
+      } catch (error) {
+        check("controller_instantiation_available", false, error instanceof Error ? error.message : "RichAds controller could not be constructed");
+      }
+    }
+  }
+
+  const failed = checks.find((item) => !item.passed);
+  return {
+    success: !failed,
+    checks,
+    failure_reason: failed?.reason || null,
+  };
+}
+
 function successResult(network: MiniAppNetworkName, requestId: string, rawResult?: unknown): MiniAppSdkResult {
   return { success: true, network, request_id: requestId, raw_result: rawResult };
 }
@@ -172,7 +231,15 @@ function isRetryableSdkError(errorCode: string | undefined) {
     || errorCode === "TIMEOUT"
     || errorCode === "INVALID_CONFIG"
     || errorCode === "NETWORK_ERROR"
+    || errorCode === "SDK_UNAVAILABLE"
+    || errorCode === "SDK_NOT_CONFIGURED"
+    || errorCode === "INVALID_RESPONSE"
+    || errorCode === "RENDER_FAILED"
     || errorCode === "NO_FILL";
+}
+
+function sdkErrorReason(error: MiniAppSdkResult) {
+  return error.error_message || error.error_code || "Network failed";
 }
 
 function timeout<T>(promise: Promise<T>, timeoutMs: number, message = "Ad request timed out") {
@@ -184,6 +251,10 @@ function timeout<T>(promise: Promise<T>, timeoutMs: number, message = "Ad reques
   return Promise.race([promise, timeoutPromise]).finally(() => {
     if (timer !== undefined) window.clearTimeout(timer);
   });
+}
+
+function providerTimeoutMs(config: NetworkClientConfig, requestedTimeoutMs?: number) {
+  return requestedTimeoutMs || config.client_config?.sdk?.request_timeout_ms || 30000;
 }
 
 function loadScriptOnce(src: string, options: { globalName?: string | null; timeoutMs?: number; attrs?: Record<string, string> } = {}) {
@@ -206,7 +277,11 @@ function loadScriptOnce(src: string, options: { globalName?: string | null; time
     }
 
     const script = existing || document.createElement("script");
-    const timer = window.setTimeout(() => reject(new Error("SDK load timed out")), timeoutMs);
+    const timer = window.setTimeout(() => {
+      sdkLoads.delete(key);
+      if (!existing) script.remove();
+      reject(new Error("SDK load timed out"));
+    }, timeoutMs);
 
     script.dataset.miniappSdkKey = key;
     script.async = true;
@@ -314,7 +389,7 @@ const adsGramAdapter: RuntimeAdapter = {
 
     try {
       const controller = window.Adsgram!.init({ blockId: config.network_placement_id });
-      const result = await timeout(controller.show(), timeout_ms || 30000);
+      const result = await timeout(controller.show(), providerTimeoutMs(config, timeout_ms));
       return successResult("AdsGram", request_id, result);
     } catch (error: any) {
       return errorResult("AdsGram", error?.message?.includes("timed out") ? "TIMEOUT" : "AD_UNAVAILABLE", error?.message || "AdsGram ad was not completed");
@@ -363,7 +438,8 @@ const monetagAdapter: RuntimeAdapter = {
     try {
       const monetagModule = await monetagModulePromise!;
       const handler = monetagModule.default(Number(config.network_placement_id));
-      const result = await timeout(handler({ type: "end", timeout: Math.ceil((timeout_ms || 30000) / 1000) }), timeout_ms || 30000);
+      const requestTimeout = providerTimeoutMs(config, timeout_ms);
+      const result = await timeout(handler({ type: "end", timeout: Math.ceil(requestTimeout / 1000) }), requestTimeout);
       return successResult("Monetag", request_id, result);
     } catch (error: any) {
       return errorResult("Monetag", error?.message?.includes("timed out") ? "TIMEOUT" : "AD_UNAVAILABLE", error?.message || "Monetag ad was not completed");
@@ -417,8 +493,15 @@ const adExiumAdapter: RuntimeAdapter = {
         const onAdReceived = (ad?: unknown) => {
           widget.off?.("adReceived", onAdReceived);
           widget.off?.("noAdFound", onNoAdFound);
-          widget.displayAd(ad);
-          resolve(ad);
+          try {
+            widget.displayAd(ad);
+            resolve(ad);
+          } catch (error: any) {
+            networkLog("AdExium", "failed", { reason: "render_failed", error: error?.message || "displayAd failed" });
+            const renderError = new Error(error?.message || "AdExium render failed") as Error & { code?: MiniAppSdkErrorCode };
+            renderError.code = "RENDER_FAILED";
+            reject(renderError);
+          }
         };
         const onNoAdFound = () => {
           widget.off?.("adReceived", onAdReceived);
@@ -429,10 +512,13 @@ const adExiumAdapter: RuntimeAdapter = {
         widget.on("adReceived", onAdReceived);
         widget.on("noAdFound", onNoAdFound);
         widget.requestAd("interstitial");
-      }), timeout_ms || 30000);
+      }), providerTimeoutMs(config, timeout_ms));
 
       return successResult("AdExium", request_id, result);
     } catch (error: any) {
+      if (error?.code === "RENDER_FAILED") {
+        return errorResult("AdExium", "RENDER_FAILED", error?.message || "AdExium render failed");
+      }
       return errorResult("AdExium", error?.message?.includes("timed out") ? "TIMEOUT" : "AD_UNAVAILABLE", error?.message || "AdExium ad was not available");
     }
   },
@@ -491,7 +577,7 @@ const richAdsAdapter: RuntimeAdapter = {
         appId: config.client_config!.sdk!.richads_app_id!,
         debug: Boolean(config.client_config?.sdk?.debug),
       });
-      const result = await timeout(controller.triggerInterstitialVideo(), timeout_ms || 30000);
+      const result = await timeout(controller.triggerInterstitialVideo(), providerTimeoutMs(config, timeout_ms));
       return successResult("RichAds", request_id, result);
     } catch (error: any) {
       return errorResult("RichAds", error?.message?.includes("timed out") ? "TIMEOUT" : "AD_UNAVAILABLE", error?.message || "RichAds video ad was not available");
@@ -530,7 +616,7 @@ const gigaPubAdapter: RuntimeAdapter = {
       if (typeof window.showGiga !== "function") {
         return errorResult("GigaPub", "SDK_LOAD_FAILED", "GigaPub showGiga is unavailable");
       }
-      const result = await timeout(window.showGiga(), timeout_ms || 30000);
+      const result = await timeout(window.showGiga(), providerTimeoutMs(config, timeout_ms));
       return successResult("GigaPub", request_id, result);
     } catch (error: any) {
       const message = error?.message || "GigaPub ad was not available";
@@ -711,10 +797,11 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
       if (autoCloseTimer !== undefined) window.clearTimeout(autoCloseTimer);
     };
 
-    const displayTitle = String(ad.title || "").trim().slice(0, 20);
-    const displayDescription = String(ad.description || "").trim().slice(0, 80);
+    const displayTitle = String(ad.title || "").trim().slice(0, 50);
+    const displayDescription = String(ad.description || "").trim().slice(0, 200);
     const displayCta = String(ad.cta_text || "Learn More").trim().slice(0, 24) || "Learn More";
-    const logoUrl = String(ad.advertiser_logo_url || ad.logo_url || "").trim();
+    const defaultLogoUrl = new URL("/logo.svg", window.location.origin).toString();
+    const logoUrl = String(ad.advertiser_logo_url || ad.logo_url || defaultLogoUrl).trim();
     const overlay = document.createElement("div");
     overlay.className = "agx-rewarded-overlay";
     const style = document.createElement("style");
@@ -730,6 +817,10 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
       .agx-rewarded-close:hover{background:rgba(255,255,255,.14)}
       .agx-rewarded-media{display:flex;align-items:center;justify-content:center;width:100%;min-height:150px;max-height:min(45dvh,300px);border-radius:18px;background:linear-gradient(135deg,rgba(15,23,42,.92),rgba(30,41,59,.74));border:1px solid rgba(203,213,225,.12);box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 18px 42px rgba(0,0,0,.22);overflow:hidden;cursor:pointer}
       .agx-rewarded-hero{display:block;width:100%;height:100%;max-height:min(45dvh,300px);object-fit:contain;background:#eaf5ff}
+      .agx-rewarded-placeholder{display:flex;min-height:150px;width:100%;height:100%;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:linear-gradient(135deg,#0f172a,#1e3a8a 54%,#0ea5e9);color:#fff;font-weight:950;letter-spacing:0;text-align:center}
+      .agx-rewarded-placeholder-mark{position:relative;width:52px;height:52px;border-radius:16px;background:rgba(255,255,255,.13);box-shadow:inset 0 1px 0 rgba(255,255,255,.2)}
+      .agx-rewarded-placeholder-mark:before{content:"";position:absolute;inset:14px;border:4px solid #fff;border-right-color:transparent;border-radius:999px;transform:rotate(-24deg)}
+      .agx-rewarded-placeholder-text{font-size:15px}
       .agx-rewarded-body{padding:16px 2px 0;text-align:center}
       .agx-rewarded-advertiser{display:flex;align-items:center;justify-content:center;margin-bottom:10px}
       .agx-rewarded-logo{width:34px;height:34px;border-radius:10px;object-fit:cover;border:1px solid rgba(255,255,255,.16);background:#0f172a}
@@ -790,22 +881,31 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
       image.loading = "eager";
       image.decoding = "async";
       image.className = "agx-rewarded-hero";
+      image.onerror = () => {
+        image.remove();
+        const placeholder = document.createElement("div");
+        placeholder.className = "agx-rewarded-placeholder";
+        placeholder.setAttribute("aria-label", "AdsGalaxy ad creative");
+        placeholder.innerHTML = `<span class="agx-rewarded-placeholder-mark" aria-hidden="true"></span><span class="agx-rewarded-placeholder-text">AdsGalaxy</span>`;
+        media.appendChild(placeholder);
+      };
       media.appendChild(image);
       panel.appendChild(media);
     }
 
     const body = document.createElement("div");
     body.className = "agx-rewarded-body";
-    if (logoUrl) {
-      const advertiser = document.createElement("div");
-      advertiser.className = "agx-rewarded-advertiser";
-      const logo = document.createElement("img");
-      logo.src = logoUrl;
-      logo.alt = "";
-      logo.className = "agx-rewarded-logo";
-      advertiser.appendChild(logo);
-      body.appendChild(advertiser);
-    }
+    const advertiser = document.createElement("div");
+    advertiser.className = "agx-rewarded-advertiser";
+    const logo = document.createElement("img");
+    logo.src = logoUrl;
+    logo.alt = "";
+    logo.className = "agx-rewarded-logo";
+    logo.onerror = () => {
+      if (logo.src !== defaultLogoUrl) logo.src = defaultLogoUrl;
+    };
+    advertiser.appendChild(logo);
+    body.appendChild(advertiser);
     const title = document.createElement("div");
     title.textContent = displayTitle;
     title.className = "agx-rewarded-title";
@@ -908,13 +1008,48 @@ export async function testMiniAppNetworkInitialization(config: NetworkClientConf
   const adapter = runtimeAdapters[config.network_name];
   if (!adapter) return errorResult(null, "INVALID_CONFIG", "Unsupported ad network.");
 
+  const startedAt = Date.now();
+  const consoleErrors: string[] = [];
+  const originalConsoleError = console.error;
+  console.error = (...args: unknown[]) => {
+    consoleErrors.push(args.map((arg) => typeof arg === "string" ? arg : JSON.stringify(arg)).join(" ").slice(0, 300));
+    originalConsoleError(...args);
+  };
   networkLog(config.network_name, "test_started", { test_mode: true });
-  const result = await adapter.loadSdk(config, timeoutMs);
-  networkLog(config.network_name, result.success ? "initialized" : "failed", {
-    test_mode: true,
-    error_code: result.error_code,
-  });
-  return withFriendlyError(result);
+  try {
+    const result = await adapter.loadSdk(config, timeoutMs);
+    const sdkValidation = result.success ? validateLoadedSdk(config) : { success: false, checks: [], failure_reason: result.error_message || result.error_code || null };
+    const durationMs = Date.now() - startedAt;
+    networkLog(config.network_name, result.success && sdkValidation.success ? "initialized" : "failed", {
+      test_mode: true,
+      error_code: result.error_code,
+      duration_ms: durationMs,
+      sdk_validation: sdkValidation,
+      console_error_count: consoleErrors.length,
+    });
+    if (!result.success) {
+      return withFriendlyError({
+        ...result,
+        diagnostics: { duration_ms: durationMs, sdk_validation: sdkValidation, console_errors: consoleErrors },
+      });
+    }
+    if (!sdkValidation.success) {
+      return withFriendlyError(errorResult(config.network_name, "SDK_UNAVAILABLE", sdkValidation.failure_reason || "SDK loaded but required methods are unavailable"));
+    }
+    return {
+      ...result,
+      diagnostics: {
+        duration_ms: durationMs,
+        sdk_validation: sdkValidation,
+        console_errors: consoleErrors,
+        render_status: "not_requested",
+        impression_status: "not_recorded_test_mode",
+        completion_status: "not_recorded_test_mode",
+      },
+    };
+  } finally {
+    console.error = originalConsoleError;
+  }
 }
 
 export async function requestMiniAppAd(input: MediationRequestInput): Promise<MiniAppSdkResult> {
@@ -1042,13 +1177,28 @@ export async function requestMiniAppAd(input: MediationRequestInput): Promise<Mi
       timeout_ms: input.timeout_ms,
     };
 
+    const providerStartedAt = Date.now();
+    networkLog(selectedNetwork, "request_started", {
+      request_id: currentDecision.request_id,
+      ad_format: adFormat,
+      timeout_ms: providerTimeoutMs(networkConfig, input.timeout_ms),
+    });
     const adResult = adFormat === "banner"
       ? await adapter.requestBannerAd(requestInput)
       : adFormat === "interstitial"
         ? await adapter.requestInterstitialAd(requestInput)
         : await adapter.requestRewardedAd(requestInput);
+    const providerDurationMs = Date.now() - providerStartedAt;
 
     if (!adResult.success) {
+      networkLog(selectedNetwork, "failed", {
+        request_id: currentDecision.request_id,
+        duration_ms: providerDurationMs,
+        result: adResult.error_code || "NETWORK_ERROR",
+        reason: sdkErrorReason(adResult),
+        timeout: adResult.error_code === "TIMEOUT",
+        no_fill: adResult.error_code === "NO_FILL",
+      });
       if (!isRetryableSdkError(adResult.error_code) || !currentDecision.fallback_available) {
         return withFriendlyError(adResult);
       }
@@ -1057,13 +1207,25 @@ export async function requestMiniAppAd(input: MediationRequestInput): Promise<Mi
         input,
         currentDecision,
         adResult.error_code || "NETWORK_ERROR",
-        adResult.error_message || "Network failed"
+        sdkErrorReason(adResult),
+        {
+          started_at: new Date(providerStartedAt).toISOString(),
+          finished_at: new Date().toISOString(),
+          duration_ms: providerDurationMs,
+        }
       );
       continue;
     }
 
     try {
       const confirmation = await confirmImpression(input, selectedNetwork, currentDecision.request_id);
+      networkLog(selectedNetwork, "completed", {
+        request_id: currentDecision.request_id,
+        duration_ms: providerDurationMs,
+        result: "render_success",
+        impression_success: true,
+        completion_success: Boolean(confirmation?.reward_eligible),
+      });
       return {
         ...adResult,
         reward_eligible: Boolean(confirmation?.reward_eligible),
@@ -1093,7 +1255,8 @@ async function requestFallback(
   input: MediationRequestInput,
   decision: MediationResponse,
   errorCode: string,
-  errorMessage: string
+  errorMessage: string,
+  diagnostics: { started_at?: string; finished_at?: string; duration_ms?: number } = {}
 ): Promise<MediationResponse> {
   if (!decision.request_id || !decision.selected_network) {
     return { success: false, error_code: "NO_FILL", message: "No advertisements are available at the moment. Please try again shortly." };
@@ -1110,6 +1273,7 @@ async function requestFallback(
       failed_network: decision.selected_network,
       error_code: errorCode,
       error_message: errorMessage,
+      ...diagnostics,
     }), signal: AbortSignal.timeout(12000),
   });
 

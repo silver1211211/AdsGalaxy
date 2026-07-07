@@ -69,8 +69,8 @@ export async function GET(request: Request) {
         AND enabled = TRUE
         AND network_name IN (?)
         ${networkFilter}
-      ORDER BY COALESCE(NULLIF(priority_order, 0), FIELD(network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')),
-        FIELD(network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')
+      ORDER BY COALESCE(NULLIF(priority_order, 0), FIELD(network_name, 'AdsGalaxyInternal', 'AdsGram', 'GigaPub', 'AdExium', 'Monetag', 'RichAds')),
+        FIELD(network_name, 'AdsGalaxyInternal', 'AdsGram', 'GigaPub', 'AdExium', 'Monetag', 'RichAds')
     `, params);
 
     const globallyDisabledNetworks = await getDisabledMiniappNetworks();

@@ -3,8 +3,11 @@ import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
+import { getMiniAppProviderDiagnostics } from "@/lib/miniappProviderDiagnostics";
+import type { MiniAppNetworkName } from "@/lib/miniappNetworkAdapters";
+import { getMiniAppNetworkAdapter } from "@/lib/miniappNetworkAdapters";
 
-const NETWORKS = ["AdsGram", "Monetag", "RichAds", "AdExium", "GigaPub", "AdsGalaxyInternal"];
+const NETWORKS = ["AdsGalaxyInternal", "AdsGram", "GigaPub", "AdExium", "Monetag", "RichAds"];
 
 type NetworkRow = RowDataPacket & {
   network_name: string;
@@ -29,13 +32,37 @@ type SubmittedNetwork = {
   richads_app_id?: unknown;
 };
 
+function missingProviderConfiguration(networkName: string, submitted: SubmittedNetwork) {
+  if (!Boolean(submitted.enabled) || networkName === "AdsGalaxyInternal") return [];
+
+  const placementId = String(submitted.network_placement_id || "").trim();
+  const richAdsPublisherId = String(submitted.richads_publisher_id || "").trim();
+  const richAdsAppId = String(submitted.richads_app_id || "").trim();
+  const errors: string[] = [];
+
+  if (networkName === "AdsGram" && !placementId) errors.push("Missing AdsGram Placement ID");
+  if (networkName === "GigaPub" && !placementId) errors.push("Missing GigaPub Project ID");
+  if (networkName === "AdExium" && !placementId) errors.push("Missing AdExium Widget ID");
+  if (networkName === "Monetag") {
+    if (!placementId) errors.push("Missing Monetag Zone ID");
+    const monetagSdkUrl = getMiniAppNetworkAdapter("Monetag").client_config_shape.sdk.script_url;
+    if (!monetagSdkUrl?.trim()) errors.push("Missing Monetag SDK URL");
+  }
+  if (networkName === "RichAds") {
+    if (!richAdsPublisherId) errors.push("Missing RichAds Publisher ID");
+    if (!richAdsAppId) errors.push("Missing RichAds App ID");
+  }
+
+  return errors;
+}
+
 async function getNetworkState(miniappId: string) {
   const [rows] = await pool.query<NetworkRow[]>(
     `SELECT network_name, network_placement_id, enabled, priority_order, richads_publisher_id, richads_app_id
      FROM miniapp_ad_networks
      WHERE miniapp_id = ?
-     ORDER BY COALESCE(NULLIF(priority_order, 0), FIELD(network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal')),
-       FIELD(network_name, 'AdsGram', 'Monetag', 'RichAds', 'AdExium', 'GigaPub', 'AdsGalaxyInternal'), network_name`,
+     ORDER BY COALESCE(NULLIF(priority_order, 0), FIELD(network_name, 'AdsGalaxyInternal', 'AdsGram', 'GigaPub', 'AdExium', 'Monetag', 'RichAds')),
+       FIELD(network_name, 'AdsGalaxyInternal', 'AdsGram', 'GigaPub', 'AdExium', 'Monetag', 'RichAds'), network_name`,
     [miniappId]
   );
 
@@ -56,6 +83,18 @@ async function getNetworkState(miniappId: string) {
   }).sort((a, b) => a.priority_order - b.priority_order);
 }
 
+async function getNetworkStateWithDiagnostics(miniappId: string) {
+  const [networks, diagnostics] = await Promise.all([
+    getNetworkState(miniappId),
+    getMiniAppProviderDiagnostics(miniappId, pool),
+  ]);
+  const diagnosticsByProvider = new Map(diagnostics.map((item) => [item.provider, item]));
+  return networks.map((network) => ({
+    ...network,
+    diagnostics: diagnosticsByProvider.get(network.network_name as MiniAppNetworkName) || null,
+  }));
+}
+
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -74,7 +113,7 @@ export async function GET(
       return NextResponse.json({ error: "Mini App not found" }, { status: 404 });
     }
 
-    return NextResponse.json({ networks: await getNetworkState(id) });
+    return NextResponse.json({ networks: await getNetworkStateWithDiagnostics(id) });
   } catch (error: unknown) {
     console.error("Admin Mini App Networks GET Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
@@ -104,15 +143,17 @@ export async function PUT(
     }
 
     const previousState = await getNetworkState(id);
+    const validationErrors: string[] = [];
+    for (const networkName of NETWORKS) {
+      const submitted = submittedNetworks.find((item) => item?.network_name === networkName) || {};
+      validationErrors.push(...missingProviderConfiguration(networkName, submitted));
+    }
 
-    const submittedRichAds = submittedNetworks.find((item) => item?.network_name === "RichAds");
-    if (Boolean(submittedRichAds?.enabled)) {
-      if (!String(submittedRichAds?.richads_publisher_id || "").trim()) {
-        return NextResponse.json({ error: "RichAds cannot be enabled: Missing Publisher ID" }, { status: 400 });
-      }
-      if (!String(submittedRichAds?.richads_app_id || "").trim()) {
-        return NextResponse.json({ error: "RichAds cannot be enabled: Missing App ID" }, { status: 400 });
-      }
+    if (validationErrors.length > 0) {
+      return NextResponse.json({
+        error: `Cannot enable provider: ${validationErrors.join("; ")}`,
+        validation_errors: validationErrors,
+      }, { status: 400 });
     }
 
     for (const networkName of NETWORKS) {

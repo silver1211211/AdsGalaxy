@@ -5,6 +5,7 @@ import { MiniAppSubmissionValidationError, validateMiniAppSubmission } from "@/l
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import { notifyMiniAppSubmitted } from "@/lib/publisherNotifications";
 import { getMiniAppAggregateStatsByIds } from "@/lib/miniappReports";
+import { safeQueuePublisherWelcome } from "@/lib/supportMessages";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
 type ExistingMiniAppRow = RowDataPacket & {
@@ -108,6 +109,7 @@ export async function POST(request: Request) {
       );
 
       await notifyMiniAppSubmitted(user.telegram_id, existing[0].id, input.miniapp_name);
+      await safeQueuePublisherWelcome(user.id);
 
       return NextResponse.json({ success: true, id: existing[0].id });
     }
@@ -119,6 +121,7 @@ export async function POST(request: Request) {
     );
 
     await notifyMiniAppSubmitted(user.telegram_id, result.insertId, input.miniapp_name);
+    await safeQueuePublisherWelcome(user.id);
 
     return NextResponse.json({ success: true, id: result.insertId });
   } catch (error: unknown) {
