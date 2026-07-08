@@ -7,12 +7,18 @@ const MAX_DELETE_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 5000;
 const BATCH_DELAY_MS = 500;
 
+type CleanupStatus = "pending" | "success" | "failed" | "retry";
+
 type CampaignPostColumns = {
   hasDeletedAt: boolean;
   hasDeleteAttempts: boolean;
   hasDeleteFailedReason: boolean;
   hasDeleteFailedAt: boolean;
   hasCleanupAttemptedAt: boolean;
+  hasCleanupStatus: boolean;
+  hasCleanupCompletedAt: boolean;
+  hasCleanupError: boolean;
+  hasCleanupRetryCount: boolean;
   hasDeliveryConfirmedAt: boolean;
 };
 
@@ -37,8 +43,11 @@ type TelegramDeleteResponse = {
 
 type DeleteResult = {
   success: boolean;
+  cleanupStatus: CleanupStatus;
   attemptsUsed: number;
   reason: string;
+  code: string;
+  retryable: boolean;
   alreadyDeleted: boolean;
   telegramResponse: string;
 };
@@ -48,6 +57,7 @@ export type CampaignPostDeletionSummary = {
   total: number;
   deleted: number;
   failed: number;
+  retry: number;
   skipped: number;
   lifetimeHours?: number;
   failedIds: number[];
@@ -59,6 +69,9 @@ export type CampaignPostDeletionSummary = {
     status: string;
     attempts?: number;
     already_deleted?: boolean;
+    cleanup_status?: CleanupStatus;
+    error_code?: string;
+    retryable?: boolean;
     reason?: string;
     telegram_response?: string;
   }>;
@@ -74,21 +87,52 @@ function isAlreadyDeletedError(description?: string) {
     || normalized.includes("message not found");
 }
 
-function classifyTelegramDeleteFailure(description: string) {
+export function classifyTelegramDeleteError(description: string, httpStatus?: number): {
+  code: string;
+  retryable: boolean;
+  nonFatal: boolean;
+  reason: string;
+} {
   const text = description.toLowerCase();
-  if (text.includes("too many requests") || text.includes("retry after")) return `rate_limited: ${description}`;
-  if (text.includes("chat not found") || text.includes("channel not found")) return `channel_not_found: ${description}`;
-  if (text.includes("not enough rights") || text.includes("not an administrator") || text.includes("can't delete")) {
-    return `permission_missing: ${description}`;
-  }
-  if (text.includes("message to delete not found") || text.includes("message not found")) return `message_not_found: ${description}`;
-  if (text.includes("forbidden") || text.includes("bot was kicked") || text.includes("bot is not a member")) {
-    return `bot_removed_or_forbidden: ${description}`;
+  const statusText = httpStatus ? `HTTP ${httpStatus}: ${description}` : description;
+
+  if (text.includes("too many requests") || text.includes("retry after")) {
+    return { code: "RATE_LIMITED", retryable: true, nonFatal: true, reason: `RATE_LIMITED: ${statusText}` };
   }
   if (text.includes("timeout") || text.includes("temporarily") || text.includes("internal server error") || text.includes("bad gateway")) {
-    return `telegram_temporary_error: ${description}`;
+    return { code: "TELEGRAM_TEMPORARY_ERROR", retryable: true, nonFatal: true, reason: `TELEGRAM_TEMPORARY_ERROR: ${statusText}` };
   }
-  return `telegram_delete_failed: ${description}`;
+  if (text.includes("message_id_invalid") || text.includes("message id invalid") || text.includes("message identifier is not valid")) {
+    return { code: "MESSAGE_ID_INVALID", retryable: false, nonFatal: true, reason: `MESSAGE_ID_INVALID: ${statusText}` };
+  }
+  if (text.includes("message can't be deleted") || text.includes("message cannot be deleted") || text.includes("can't delete")) {
+    return { code: "MESSAGE_CANT_BE_DELETED", retryable: false, nonFatal: true, reason: `MESSAGE_CANT_BE_DELETED: ${statusText}` };
+  }
+  if (text.includes("message to delete not found") || text.includes("message not found") || (httpStatus === 400 && text.includes("not found"))) {
+    return { code: "MESSAGE_NOT_FOUND", retryable: false, nonFatal: true, reason: `MESSAGE_NOT_FOUND: ${statusText}` };
+  }
+  if (text.includes("channel_invalid") || text.includes("channel invalid")) {
+    return { code: "CHANNEL_INVALID", retryable: false, nonFatal: true, reason: `CHANNEL_INVALID: ${statusText}` };
+  }
+  if (text.includes("peer_id_invalid") || text.includes("peer id invalid")) {
+    return { code: "PEER_ID_INVALID", retryable: false, nonFatal: true, reason: `PEER_ID_INVALID: ${statusText}` };
+  }
+  if (text.includes("chat not found") || text.includes("channel not found")) {
+    return { code: "CHAT_NOT_FOUND", retryable: false, nonFatal: true, reason: `CHAT_NOT_FOUND: ${statusText}` };
+  }
+  if (text.includes("not enough rights") || text.includes("not an administrator") || text.includes("administrator rights")) {
+    return { code: "CHAT_ADMIN_REQUIRED", retryable: false, nonFatal: true, reason: `CHAT_ADMIN_REQUIRED: ${statusText}` };
+  }
+  if (text.includes("bot was kicked") || text.includes("bot was blocked") || text.includes("bot removed")) {
+    return { code: "BOT_REMOVED", retryable: false, nonFatal: true, reason: `BOT_REMOVED: ${statusText}` };
+  }
+  if (text.includes("bot is not a member") || text.includes("bot is not member")) {
+    return { code: "BOT_IS_NOT_MEMBER", retryable: false, nonFatal: true, reason: `BOT_IS_NOT_MEMBER: ${statusText}` };
+  }
+  if (httpStatus === 403 || text.includes("403 forbidden") || text.includes("forbidden")) {
+    return { code: "403_FORBIDDEN", retryable: false, nonFatal: true, reason: `403_FORBIDDEN: ${statusText}` };
+  }
+  return { code: "TELEGRAM_DELETE_FAILED", retryable: false, nonFatal: true, reason: `TELEGRAM_DELETE_FAILED: ${statusText}` };
 }
 
 export async function getCampaignPostDeletionColumns(): Promise<CampaignPostColumns> {
@@ -97,7 +141,11 @@ export async function getCampaignPostDeletionColumns(): Promise<CampaignPostColu
     FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA = DATABASE()
       AND TABLE_NAME = 'campaign_posts'
-      AND COLUMN_NAME IN ('deleted_at', 'delete_attempts', 'delete_failed_reason', 'delete_failed_at', 'cleanup_attempted_at', 'delivery_confirmed_at')
+      AND COLUMN_NAME IN (
+        'deleted_at', 'delete_attempts', 'delete_failed_reason', 'delete_failed_at',
+        'cleanup_attempted_at', 'cleanup_status', 'cleanup_completed_at',
+        'cleanup_error', 'cleanup_retry_count', 'delivery_confirmed_at'
+      )
   `);
 
   const columns = new Set(rows.map(row => row.COLUMN_NAME));
@@ -107,6 +155,10 @@ export async function getCampaignPostDeletionColumns(): Promise<CampaignPostColu
     hasDeleteFailedReason: columns.has("delete_failed_reason"),
     hasDeleteFailedAt: columns.has("delete_failed_at"),
     hasCleanupAttemptedAt: columns.has("cleanup_attempted_at"),
+    hasCleanupStatus: columns.has("cleanup_status"),
+    hasCleanupCompletedAt: columns.has("cleanup_completed_at"),
+    hasCleanupError: columns.has("cleanup_error"),
+    hasCleanupRetryCount: columns.has("cleanup_retry_count"),
     hasDeliveryConfirmedAt: columns.has("delivery_confirmed_at"),
   };
 }
@@ -114,12 +166,20 @@ export async function getCampaignPostDeletionColumns(): Promise<CampaignPostColu
 async function fetchDeletionBatch(options: {
   campaignId?: number | string;
   olderThan24Hours?: boolean;
+  retryOnly?: boolean;
   lifetimeHours?: number;
   hasDeletedAt: boolean;
+  hasCleanupStatus: boolean;
   hasDeliveryConfirmedAt: boolean;
   batchSize: number;
 }) {
-  const filters = [options.olderThan24Hours ? "cp.status = 'active'" : "cp.status IN ('active', 'posted', 'sent', 'delete_failed', 'cleanup_pending')"];
+  const filters = [
+    options.retryOnly
+      ? (options.hasCleanupStatus ? "(cp.cleanup_status = 'retry' OR cp.status = 'delete_failed')" : "cp.status = 'delete_failed'")
+      : options.olderThan24Hours
+        ? "cp.status = 'active'"
+        : "cp.status IN ('active', 'posted', 'sent', 'delete_failed', 'cleanup_pending')",
+  ];
   const params: Array<number | string> = [];
 
   if (options.olderThan24Hours) {
@@ -206,6 +266,7 @@ async function expiredPostCounts(lifetimeHours: number, columns: CampaignPostCol
 async function markCleanupPending(postId: number, columns: CampaignPostColumns) {
   const updates = ["status = 'cleanup_pending'"];
   if (columns.hasCleanupAttemptedAt) updates.push("cleanup_attempted_at = NOW()");
+  if (columns.hasCleanupStatus) updates.push("cleanup_status = 'pending'");
   await pool.query(`UPDATE campaign_posts SET ${updates.join(", ")} WHERE id = ?`, [postId]);
 }
 
@@ -229,12 +290,21 @@ async function recordDeleteSuccess(postId: number, attemptsUsed: number, columns
 
   if (columns.hasDeleteFailedAt) updates.push("delete_failed_at = NULL");
   if (columns.hasCleanupAttemptedAt) updates.push("cleanup_attempted_at = NOW()");
+  if (columns.hasCleanupStatus) updates.push("cleanup_status = 'success'");
+  if (columns.hasCleanupCompletedAt) updates.push("cleanup_completed_at = NOW()");
+  if (columns.hasCleanupError) updates.push("cleanup_error = NULL");
 
   params.push(postId);
   await pool.query(`UPDATE campaign_posts SET ${updates.join(", ")} WHERE id = ?`, params);
 }
 
-async function recordDeleteFailure(postId: number, attemptsUsed: number, reason: string, columns: CampaignPostColumns) {
+async function recordDeleteFailure(
+  postId: number,
+  attemptsUsed: number,
+  reason: string,
+  columns: CampaignPostColumns,
+  cleanupStatus: "failed" | "retry" = "failed"
+) {
   const updates = ["status = 'delete_failed'"];
   const params: Array<number | string> = [];
 
@@ -250,6 +320,17 @@ async function recordDeleteFailure(postId: number, attemptsUsed: number, reason:
 
   if (columns.hasDeleteFailedAt) updates.push("delete_failed_at = NOW()");
   if (columns.hasCleanupAttemptedAt) updates.push("cleanup_attempted_at = NOW()");
+  if (columns.hasCleanupStatus) {
+    updates.push("cleanup_status = ?");
+    params.push(cleanupStatus);
+  }
+  if (columns.hasCleanupError) {
+    updates.push("cleanup_error = ?");
+    params.push(reason.slice(0, 2000));
+  }
+  if (columns.hasCleanupRetryCount && cleanupStatus === "retry") {
+    updates.push("cleanup_retry_count = COALESCE(cleanup_retry_count, 0) + 1");
+  }
 
   params.push(postId);
   await pool.query(`UPDATE campaign_posts SET ${updates.join(", ")} WHERE id = ?`, params);
@@ -259,8 +340,11 @@ async function deletePostWithRetries(token: string | undefined, post: CleanupPos
   if (!post.message_id) {
     return {
       success: true,
+      cleanupStatus: "success",
       attemptsUsed: 0,
       reason: "Missing message_id; marked deleted locally.",
+      code: "MESSAGE_ID_INVALID",
+      retryable: false,
       alreadyDeleted: true,
       telegramResponse: "missing_message_id",
     };
@@ -275,8 +359,11 @@ async function deletePostWithRetries(token: string | undefined, post: CleanupPos
   if (!chatId) {
     return {
       success: false,
+      cleanupStatus: "failed",
       attemptsUsed: 0,
       reason: "Missing chat_id and channel_username.",
+      code: "CHAT_NOT_FOUND",
+      retryable: false,
       alreadyDeleted: false,
       telegramResponse: "missing_chat_id_and_username",
     };
@@ -285,16 +372,23 @@ async function deletePostWithRetries(token: string | undefined, post: CleanupPos
   if (!token) {
     return {
       success: false,
+      cleanupStatus: "retry",
       attemptsUsed: 0,
       reason: "BOT_TOKEN is missing; Telegram delete skipped.",
+      code: "MISSING_BOT_TOKEN",
+      retryable: true,
       alreadyDeleted: false,
       telegramResponse: "missing_bot_token",
     };
   }
 
   let lastReason = "Unknown Telegram delete failure";
+  let lastCode = "TELEGRAM_DELETE_FAILED";
+  let lastRetryable = false;
+  let attemptsUsed = 0;
 
   for (let attempt = 1; attempt <= MAX_DELETE_ATTEMPTS; attempt++) {
+    attemptsUsed = attempt;
     console.log(JSON.stringify({
       event: "telegram_post_delete_attempt",
       message: `Deleting campaign post ${post.id}`,
@@ -314,19 +408,30 @@ async function deletePostWithRetries(token: string | undefined, post: CleanupPos
       const data = await res.json() as TelegramDeleteResponse;
 
       if (data.ok || isAlreadyDeletedError(data.description)) {
+        const code = data.ok ? "OK" : "MESSAGE_NOT_FOUND";
         return {
           success: true,
+          cleanupStatus: "success",
           attemptsUsed: attempt,
-          reason: data.ok ? "Deleted successfully." : (data.description || "Message already deleted."),
+          reason: data.ok ? "Deleted successfully." : `MESSAGE_NOT_FOUND: ${data.description || "Message already deleted."}`,
+          code,
+          retryable: false,
           alreadyDeleted: !data.ok,
           telegramResponse: data.ok ? "ok" : String(data.description || "message_already_deleted"),
         };
       }
 
-      lastReason = classifyTelegramDeleteFailure(data.description || `Telegram API returned HTTP ${res.status}`);
+      const classification = classifyTelegramDeleteError(data.description || `Telegram API returned HTTP ${res.status}`, res.status);
+      lastReason = classification.reason;
+      lastCode = classification.code;
+      lastRetryable = classification.retryable;
+      if (!classification.retryable) break;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Telegram delete request failed";
-      lastReason = classifyTelegramDeleteFailure(message);
+      const classification = classifyTelegramDeleteError(message);
+      lastReason = classification.reason;
+      lastCode = classification.code;
+      lastRetryable = classification.retryable;
     }
 
     if (attempt < MAX_DELETE_ATTEMPTS) {
@@ -336,8 +441,11 @@ async function deletePostWithRetries(token: string | undefined, post: CleanupPos
 
   return {
     success: false,
-    attemptsUsed: MAX_DELETE_ATTEMPTS,
+    cleanupStatus: lastRetryable ? "retry" : "failed",
+    attemptsUsed,
     reason: lastReason,
+    code: lastCode,
+    retryable: lastRetryable,
     alreadyDeleted: false,
     telegramResponse: lastReason,
   };
@@ -346,6 +454,7 @@ async function deletePostWithRetries(token: string | undefined, post: CleanupPos
 export async function deleteCampaignPosts(options: {
   campaignId?: number | string;
   olderThan24Hours?: boolean;
+  retryOnly?: boolean;
   lifetimeHours?: number;
   batchSize?: number;
   batchDelayMs?: number;
@@ -360,6 +469,7 @@ export async function deleteCampaignPosts(options: {
     total: 0,
     deleted: 0,
     failed: 0,
+    retry: 0,
     skipped: 0,
     failedIds: [],
     details: [],
@@ -373,8 +483,10 @@ export async function deleteCampaignPosts(options: {
   const posts = await fetchDeletionBatch({
     campaignId: options.campaignId,
     olderThan24Hours: options.olderThan24Hours,
+    retryOnly: options.retryOnly,
     lifetimeHours,
     hasDeletedAt: columns.hasDeletedAt,
+    hasCleanupStatus: columns.hasCleanupStatus,
     hasDeliveryConfirmedAt: columns.hasDeliveryConfirmedAt,
     batchSize: maxPostsPerRun,
   });
@@ -408,8 +520,11 @@ export async function deleteCampaignPosts(options: {
             channel_id: post.channel_id,
             message_id: post.message_id,
             status: finalStatus,
+            cleanup_status: "success",
             attempts: result.attemptsUsed,
             already_deleted: result.alreadyDeleted,
+            error_code: result.code,
+            retryable: false,
             telegram_response: result.telegramResponse,
           });
           console.log(JSON.stringify({
@@ -422,8 +537,9 @@ export async function deleteCampaignPosts(options: {
             telegram_response: result.telegramResponse,
           }));
         } else {
-          await recordDeleteFailure(post.id, result.attemptsUsed, result.reason, columns);
-          summary.failed++;
+          await recordDeleteFailure(post.id, result.attemptsUsed, result.reason, columns, result.cleanupStatus === "retry" ? "retry" : "failed");
+          if (result.cleanupStatus === "retry") summary.retry++;
+          else summary.failed++;
           summary.failedIds.push(post.id);
           summary.details.push({
             id: post.id,
@@ -431,7 +547,10 @@ export async function deleteCampaignPosts(options: {
             channel_id: post.channel_id,
             message_id: post.message_id,
             status: "delete_failed",
+            cleanup_status: result.cleanupStatus,
             attempts: result.attemptsUsed,
+            error_code: result.code,
+            retryable: result.retryable,
             reason: result.reason,
             telegram_response: result.telegramResponse,
           });
@@ -442,17 +561,30 @@ export async function deleteCampaignPosts(options: {
             campaign_id: post.campaign_id,
             channel_id: post.channel_id,
             attempts: result.attemptsUsed,
+            cleanup_status: result.cleanupStatus,
+            error_code: result.code,
+            retryable: result.retryable,
             reason: result.reason,
             telegram_response: result.telegramResponse,
           }));
         }
       } catch (postErr: unknown) {
         const reason = postErr instanceof Error ? postErr.message : "Unexpected cleanup error";
-        await recordDeleteFailure(post.id, 0, reason, columns);
+        await recordDeleteFailure(post.id, 0, reason, columns, "retry");
         summary.total++;
-        summary.failed++;
+        summary.retry++;
         summary.failedIds.push(post.id);
-        summary.details.push({ id: post.id, campaign_id: post.campaign_id, channel_id: post.channel_id, message_id: post.message_id, status: "error", reason });
+        summary.details.push({
+          id: post.id,
+          campaign_id: post.campaign_id,
+          channel_id: post.channel_id,
+          message_id: post.message_id,
+          status: "error",
+          cleanup_status: "retry",
+          error_code: "INTERNAL_CLEANUP_ERROR",
+          retryable: true,
+          reason,
+        });
         console.error(JSON.stringify({
           event: "telegram_post_delete_unexpected_error",
           post_id: post.id,
@@ -469,6 +601,10 @@ export async function deleteCampaignPosts(options: {
 
 export async function deleteActiveCampaignPosts(campaignId: number | string) {
   return deleteCampaignPosts({ campaignId, batchSize: 100, maxPostsPerRun: 500 });
+}
+
+export async function retryCampaignPostCleanup(campaignId?: number | string) {
+  return deleteCampaignPosts({ campaignId, retryOnly: true, batchSize: 100, maxPostsPerRun: 500 });
 }
 
 export async function getConfiguredPostLifetimeHours() {

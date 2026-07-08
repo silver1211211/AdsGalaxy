@@ -81,7 +81,7 @@ export async function refreshCampaignViews(campaignId: number, limit = 50) {
        AND cp.delivery_failed_at IS NULL AND cp.delivery_confirmed_at IS NOT NULL
        AND cp.message_id IS NOT NULL AND ch.is_deleted=FALSE
      ORDER BY cp.last_views_update IS NULL DESC,cp.last_views_update ASC LIMIT ?`,
-    [campaignId, Math.min(50, Math.max(1, limit))]
+    [campaignId, Math.min(500, Math.max(1, limit))]
   );
   let updated = 0;
   let failed = 0;

@@ -404,6 +404,7 @@ async function deleteAllActivePostsSafely(): Promise<CampaignPostDeletionSummary
       total: 0,
       deleted: 0,
       failed: 1,
+      retry: 0,
       skipped: 0,
       failedIds: [],
       details: [{ id: 0, status: "error", reason: message }],

@@ -83,9 +83,20 @@ export async function debitConfirmedChannelViews(postId: number, confirmedViews:
   } catch (error) { await conn.rollback(); throw error; } finally { conn.release(); }
 }
 
-export async function settlePendingChannelPublisherCredits(limit = 500) {
+export async function settlePendingChannelPublisherCredits(options: number | { limit?: number; campaignId?: number } = 500) {
+  const limit = typeof options === "number" ? options : (options.limit ?? 500);
+  const campaignId = typeof options === "number" ? undefined : options.campaignId;
+  const filters = ["publisher_status='pending'"];
+  const params: Array<number> = [];
+  if (campaignId !== undefined) {
+    filters.push("campaign_id=?");
+    params.push(campaignId);
+  }
+  params.push(limit);
   const [ids] = await pool.query<Array<RowDataPacket & { id: number }>>(
-    "SELECT id FROM channel_advertiser_debits WHERE publisher_status='pending' ORDER BY id LIMIT ?", [limit]);
+    `SELECT id FROM channel_advertiser_debits WHERE ${filters.join(" AND ")} ORDER BY id LIMIT ?`,
+    params
+  );
   let settled = 0; let credited = 0;
   for (const candidate of ids) {
     const conn = await pool.getConnection();

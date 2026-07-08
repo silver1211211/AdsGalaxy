@@ -1,4 +1,5 @@
 import pool from "@/lib/db";
+import type { ResultSetHeader } from "mysql2/promise";
 import { deleteCampaignPosts, getConfiguredPostLifetimeHours, markStalePendingDeliveryPosts } from "@/lib/campaignPostDeletion";
 import { settlePendingChannelPublisherCredits } from "@/lib/channelFastBilling";
 import { settleChannelCampaigns } from "@/lib/channelSettlement";
@@ -55,6 +56,7 @@ export async function cleanupExpiredChannelPosts() {
       checked: summary.checked,
       deleted: summary.deleted,
       failed: summary.failed,
+      retry: summary.retry,
       skipped: summary.skipped,
       failed_ids: summary.failedIds,
       pending_recovery: pendingRecovery,
@@ -80,7 +82,7 @@ export async function cleanupExpiredChannelViewRuns() {
   }
 
   const retentionDays = Math.max(7, Number.parseInt(process.env.CHANNEL_VIEW_FETCH_RUN_RETENTION_DAYS || "30", 10) || 30);
-  const [result]: any = await pool.query(
+  const [result] = await pool.query<ResultSetHeader>(
     "DELETE FROM channel_view_fetch_runs WHERE created_at < DATE_SUB(NOW(), INTERVAL ? DAY)",
     [retentionDays]
   );

@@ -13,6 +13,7 @@ import { enforcePublisherTrust, type PublisherTrustEnforcementResult } from "@/l
 import { applyChannelFraudBillingPolicy } from "@/lib/channelFraudBilling";
 import { refreshCampaignViews } from "@/lib/channelAdminViewRefresh";
 import { createSystemLog } from "@/lib/systemLogs";
+import { settlePendingChannelPublisherCredits } from "@/lib/channelFastBilling";
 
 type SettlementKind = "view" | "click";
 type ChannelPayoutPolicy = {
@@ -170,9 +171,16 @@ async function countOutstandingCampaignEngagement(campaignId: number) {
   return Number(rows[0]?.outstanding_count || 0);
 }
 
-export async function settleChannelCampaigns(options: { channelId?: number; campaignId?: number; skipGlobalMaintenance?: boolean } = {}): Promise<ChannelSettlementResult> {
+export async function settleChannelCampaigns(options: {
+  channelId?: number;
+  campaignId?: number;
+  skipGlobalMaintenance?: boolean;
+  campaignStatuses?: Array<"active" | "paused">;
+} = {}): Promise<ChannelSettlementResult> {
   await ensureClassicSettlementColumns();
   const payoutPolicy = await channelPayoutPolicy();
+  const campaignStatuses = options.campaignStatuses?.length ? options.campaignStatuses : ["active", "paused"];
+  const campaignStatusPlaceholders = campaignStatuses.map(() => "?").join(",");
   let fraudDetection: ChannelSettlementResult["fraudDetection"];
   let fraudBilling: ChannelSettlementResult["fraudBilling"];
   if (options.skipGlobalMaintenance) {
@@ -214,7 +222,7 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
      JOIN campaigns c ON c.id = cp.campaign_id
      JOIN channels ch ON ch.id = cp.channel_id
      JOIN users publisher ON publisher.id = ch.user_id
-     WHERE c.status = 'active'
+     WHERE c.status IN (${campaignStatusPlaceholders})
        AND ch.status = 'active'
        AND ch.is_deleted = FALSE
        AND (ch.settlement_excluded_until IS NULL OR ch.settlement_excluded_until <= NOW())
@@ -229,7 +237,14 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
        AND ((c.type = 'views' AND COALESCE(cp.views, 0) > COALESCE(cp.settled_views, 0))
          OR (c.type = 'clicks' AND (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) > COALESCE(cp.settled_clicks, 0)))
      ORDER BY cp.id ASC LIMIT ${MAX_POSTS_PER_RUN}`,
-    [lastCandidatePostId, options.channelId || null, options.channelId || null, options.campaignId || null, options.campaignId || null]
+    [
+      ...campaignStatuses,
+      lastCandidatePostId,
+      options.channelId || null,
+      options.channelId || null,
+      options.campaignId || null,
+      options.campaignId || null,
+    ]
   );
 
   while (batchCount < MAX_SETTLEMENT_BATCHES_PER_RUN) {
@@ -244,7 +259,7 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
       try {
         await connection.beginTransaction();
         const post = await lockedPost(connection, candidate.post_id);
-        if (!post || post.campaign_status !== "active" || post.channel_status !== "active"
+        if (!post || !campaignStatuses.includes(post.campaign_status as "active" | "paused") || post.channel_status !== "active"
           || Number(post.publisher_is_banned) === 1 || post.publisher_status === "banned"
           || (post.settlement_excluded_until && new Date(post.settlement_excluded_until).getTime() > Date.now())) {
           await connection.rollback();
@@ -346,8 +361,8 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
              channel_publisher_earnings = channel_publisher_earnings + ?,
              channel_platform_revenue = channel_platform_revenue + ?,
              channel_reserve_amount = channel_reserve_amount + ?
-           WHERE id = ? AND status = 'active'`,
-          [remaining, debit, publisherCredit, platform, reserve, post.campaign_id]
+           WHERE id = ? AND status IN (${campaignStatusPlaceholders})`,
+          [remaining, debit, publisherCredit, platform, reserve, post.campaign_id, ...campaignStatuses]
         );
         if (!("affectedRows" in campaignUpdate) || campaignUpdate.affectedRows !== 1) throw new Error("campaign_debit_failed");
 
@@ -391,7 +406,7 @@ export async function settleChannelCampaigns(options: { channelId?: number; camp
         );
         await connection.query("UPDATE channels SET last_successful_settlement_at=NOW() WHERE id=?", [post.channel_id]);
 
-        if (isExhausted) {
+        if (isExhausted && post.campaign_status === "active") {
           await markCampaignBudgetExhausted(post.campaign_id, connection);
           exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
         }
@@ -510,14 +525,15 @@ type SettlementCampaignRow = RowDataPacket & { id: number; type: string; status:
 // or delete, so a publisher is not silently unpaid for engagement the advertiser
 // already received. Reuses the exact same locked, idempotent, budget- and
 // quality-aware settlement transaction as the regular settlement cron
-// (settleChannelCampaigns) — it does not introduce a second accounting path.
+// (settleChannelCampaigns). It does not introduce a second accounting path.
 //
 // This intentionally does not touch bot broadcast campaigns, Mini App campaigns,
 // PQI/fraud scoring, or the periodic settlement cron itself; callers are expected
 // to only invoke this for channel-type (views/clicks) campaigns.
 export async function settleCampaignEngagementBeforeDeletion(
   campaignId: number,
-  actionType: CampaignSettlementBeforeDeletionAction
+  actionType: CampaignSettlementBeforeDeletionAction,
+  options: { includePausedCampaign?: boolean } = {}
 ): Promise<CampaignSettlementBeforeDeletionResult> {
   const [rows] = await pool.query<SettlementCampaignRow[]>(
     "SELECT id, type, status FROM campaigns WHERE id = ?",
@@ -539,8 +555,8 @@ export async function settleCampaignEngagementBeforeDeletion(
       const refreshed = await refreshCampaignViews(campaignId);
       viewRefresh = { checked: refreshed.checked, updated: refreshed.updated, failed: refreshed.failed };
     } catch (error) {
-      // Best-effort only: a failed live view refresh must not block settlement —
-      // settlement simply proceeds with whatever view count the last successful
+      // Best-effort only: a failed live view refresh must not block settlement.
+      // Settlement proceeds with whatever view count the last successful
       // cron run already recorded.
       console.warn("Pre-deletion view refresh failed; settling with last known views", {
         campaign_id: campaignId,
@@ -550,9 +566,22 @@ export async function settleCampaignEngagementBeforeDeletion(
   }
 
   let result: ChannelSettlementResult | null = null;
+  let pendingCredits: Awaited<ReturnType<typeof settlePendingChannelPublisherCredits>> | null = null;
   let settlementError: string | undefined;
   try {
-    result = await settleChannelCampaigns({ campaignId, skipGlobalMaintenance: true });
+    pendingCredits = await settlePendingChannelPublisherCredits({ campaignId, limit: 5000 });
+    const [[remainingFastDebits]] = await pool.query<Array<RowDataPacket & { pending_count: number | string }>>(
+      "SELECT COUNT(*) AS pending_count FROM channel_advertiser_debits WHERE campaign_id=? AND publisher_status='pending'",
+      [campaignId]
+    );
+    if (Number(remainingFastDebits?.pending_count || 0) > 0) {
+      throw new Error("pending_fast_debit_publisher_credit_failed");
+    }
+    result = await settleChannelCampaigns({
+      campaignId,
+      skipGlobalMaintenance: true,
+      campaignStatuses: options.includePausedCampaign ? ["active", "paused"] : ["active"],
+    });
   } catch (error) {
     settlementError = error instanceof Error ? error.message : "channel_settlement_failed";
     console.error("Pre-deletion campaign settlement failed", { campaign_id: campaignId, action_type: actionType, error: settlementError });
@@ -583,6 +612,7 @@ export async function settleCampaignEngagementBeforeDeletion(
       posts_settled: postsSettled,
       amount_debited: amountDebited,
       publisher_credited: publisherCredited,
+      pending_fast_debit_credits: pendingCredits,
       view_refresh: viewRefresh,
       error: settlementError || null,
       failed_details: failedDetails,

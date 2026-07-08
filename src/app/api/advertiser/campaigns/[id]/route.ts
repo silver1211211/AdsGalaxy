@@ -4,6 +4,7 @@ import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { assertCampaignLifecycleColumns } from "@/lib/campaignLifecycle";
 import { deleteActiveCampaignPosts } from "@/lib/campaignPostDeletion";
 import { settleCampaignEngagementBeforeDeletion } from "@/lib/channelSettlement";
+import { columnExists } from "@/lib/schemaGuards";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
 export async function GET(
@@ -152,15 +153,6 @@ export async function PATCH(
 
       if (campaign.status === "active") {
         await assertCampaignLifecycleColumns();
-        if (!process.env.BOT_TOKEN) {
-          return NextResponse.json({ error: "BOT_TOKEN is missing; cannot delete active posts safely" }, { status: 500 });
-        }
-
-        // Settle any already-delivered but not-yet-billed views/clicks for this
-        // campaign's channel posts before they're deleted, so the publisher isn't
-        // left unpaid for engagement the advertiser already received. Must run
-        // while status is still 'active' (the settlement engine only considers
-        // active campaigns). No-ops safely for broadcast (bot) campaigns.
         const settlement = await settleCampaignEngagementBeforeDeletion(Number(id), "advertiser_pause");
         if (!settlement.ok) {
           return NextResponse.json({
@@ -178,7 +170,22 @@ export async function PATCH(
           WHERE id = ? AND user_id = ?
         `, [id, user.id]);
 
-        const deletion = await deleteActiveCampaignPosts(id);
+        if (await columnExists(pool, "campaigns", "channel_settlement_finalized_at")) {
+          await pool.query(
+            "UPDATE campaigns SET channel_settlement_finalized_at = COALESCE(channel_settlement_finalized_at, NOW()) WHERE id = ? AND user_id = ?",
+            [id, user.id]
+          );
+        }
+
+        let deletion: Awaited<ReturnType<typeof deleteActiveCampaignPosts>> | null = null;
+        try {
+          deletion = await deleteActiveCampaignPosts(id);
+        } catch (cleanupError) {
+          console.warn("Advertiser pause Telegram cleanup failed after settlement", {
+            campaign_id: id,
+            error: cleanupError instanceof Error ? cleanupError.message : "unknown_cleanup_error",
+          });
+        }
         return NextResponse.json({ success: true, status: "paused", deletion, settlement });
       }
 

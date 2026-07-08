@@ -200,7 +200,9 @@ for MIG in \
   "20260707_0091_campaign_category_normalization.sql" \
   "20260707_0092_miniapp_mediation_randomization.sql" \
   "20260707_0093_channel_campaign_validation_schema_alignment.sql" \
-  "20260707_0094_channel_post_cleanup_lifecycle.sql"
+  "20260707_0094_channel_post_cleanup_lifecycle.sql" \
+  "20260708_0095_channel_campaign_lifecycle_split.sql" \
+  "20260708_0097_best_effort_telegram_cleanup_states.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"
@@ -237,7 +239,7 @@ else
     $0 == begin { managed=1; next }
     $0 == end { managed=0; next }
     !managed
-  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|process-support-messages|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|referral-sprint)([[:space:]?]|$)' || true)
+  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|process-support-messages|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|retry-telegram-cleanup|referral-sprint)([[:space:]?]|$)' || true)
 
   {
     printf '%s\n' "$CLEAN_CRONTAB"
@@ -265,6 +267,7 @@ else
     echo "*/15 * * * * $CRON_BASE/developer-webhooks >/dev/null 2>&1"
     echo "*/30 * * * * $CRON_BASE/cleanup-expired-posts >/dev/null 2>&1"
     echo "*/30 * * * * $CRON_BASE/cleanup-expired-channel-views >/dev/null 2>&1"
+    echo "11-59/20 * * * * $CRON_BASE/retry-telegram-cleanup >/dev/null 2>&1"
     echo "2 0 * * * $CRON_BASE/referral-sprint >/dev/null 2>&1"
     echo "$CRON_END"
   } | sed '/^[[:space:]]*$/d' | crontab -
