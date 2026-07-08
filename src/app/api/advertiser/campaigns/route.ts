@@ -8,7 +8,7 @@ import { validatePostbackUrl } from "@/lib/conversionTracking";
 import { normalizeMarketplaceType, publicSelectionMetadata, recordMarketplaceEvent, validateDirectPlacementTargets } from "@/lib/publisherMarketplace";
 import { evaluateCampaignAutomation } from "@/lib/approvalAutomation";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
-import { columnExists } from "@/lib/schemaGuards";
+import { columnExists, ensureClassicSettlementColumns } from "@/lib/schemaGuards";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { validateTotalBudget } from "@/lib/campaignBudget";
@@ -48,14 +48,17 @@ export async function POST(request: Request) {
     
     const name = String(formData.get("name") || "").trim();
     const campaignTitle = String(formData.get("campaign_title") || "").trim();
-    const parse_mode = formData.get("parse_mode") as string;
+    const parse_mode = "none";
     const message_text = String(formData.get("message_text") || "");
     const link = formData.get("link") as string;
     const postbackUrl = validatePostbackUrl(formData.get("postback_url"));
     const button_text = formData.get("button_text") as string;
     const type = formData.get("type") as string;
     const budget = validateTotalBudget(formData.get("budget"));
-    const cpm = parseFloat(formData.get("cpm") as string);
+    const submittedCpm = parseFloat(String(formData.get("cpm") || "0"));
+    const submittedCpc = parseFloat(String(formData.get("cpc") || formData.get("cpm") || "0"));
+    const cpc = type === "clicks" ? submittedCpc : 0;
+    const cpm = type === "clicks" ? cpc : submittedCpm;
     const category = normalizeCampaignCategory(formData.get("category"));
     const continents = formData.get("continents") as string;
     const imageFile = formData.get("image") as File | null;
@@ -99,7 +102,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Message text exceeds 1000 characters" }, { status: 400 });
     }
 
-    await validateCampaignCpmBid(type, cpm);
+    await validateCampaignCpmBid(type, type === "clicks" ? cpc : cpm);
 
     // Click-type restriction: No usernames or links in text
     if (type === "clicks") {
@@ -140,6 +143,7 @@ export async function POST(request: Request) {
     // 3. Create Campaign (Transaction)
     const conn = await pool.getConnection();
     try {
+      await ensureClassicSettlementColumns(conn);
       await conn.beginTransaction();
 
       const [balanceResult] = await conn.query<ResultSetHeader>(
@@ -184,13 +188,13 @@ export async function POST(request: Request) {
       const [result]: any = await conn.query(
         `INSERT INTO campaigns (
           user_id, name, campaign_title, parse_mode, message_text, image_url, link, postback_url, button_text, type,
-          budget, total_budget, cpm, category, quality_score, quality_tier, quality_metadata,
+          budget, total_budget, cpm, cpc, category, quality_score, quality_tier, quality_metadata,
           continents, countries, languages, vpn_policy,
           device_policy, os_policy, start_at, end_at, daily_budget_limit,
           frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
           direct_inventory_metadata, status
         )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
         [
           user.id,
           name,
@@ -205,6 +209,7 @@ export async function POST(request: Request) {
           budget,
           budget,
           cpm,
+          cpc,
           category,
           quality.score,
           quality.tier,
@@ -306,7 +311,7 @@ export async function GET(request: Request) {
 
     const [rows]: any = await pool.query(
       `SELECT id, name, campaign_title, parse_mode, message_text, image_url, link, postback_url, button_text, rejection_reason,
-         type, budget, total_budget, cpm, category, continents, countries, languages, vpn_policy,
+         type, budget, total_budget, cpm, cpc, category, continents, countries, languages, vpn_policy,
          device_policy, os_policy, start_at, end_at, daily_budget_limit,
          frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
          direct_inventory_metadata, status, paused_at, resume_locked_until,

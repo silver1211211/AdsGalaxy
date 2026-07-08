@@ -30,7 +30,6 @@ export default function Sidebar({ type, isOpen, onClose }: SidebarProps) {
   const publisherLinks = [
     { name: "Dashboard", href: "/publisher", icon: LayoutDashboard },
     { name: "Monetize", href: "/publisher/monetize", icon: DollarSign },
-    { name: "Earnings", href: "/publisher/earnings", icon: Wallet },
     { name: "Withdraw", href: "/publisher/withdraw", icon: ArrowUpRight },
     { name: "Referral", href: "/publisher/referral", icon: Users },
     { name: "FAQs", href: "/publisher/faqs", icon: HelpCircle },

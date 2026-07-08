@@ -18,7 +18,6 @@ const sections: DocsSection[] = [
       "Campaign Name: internal dashboard name.",
       "Category: topic used for matching and review.",
       "Message Text: broadcast copy.",
-      "Parse Mode: Markdown, HTML, or None.",
       "Ad Image: optional image for the message.",
       "Campaign Link: destination URL for the action button.",
       "Button Text: call-to-action label.",

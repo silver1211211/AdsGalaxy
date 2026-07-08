@@ -117,6 +117,14 @@ function aggregateSummary(row: Record<string, unknown>, clicks = 0, requests = 0
   };
 }
 
+export function averageSelectedDailyCpm(rows: Array<{ total_impressions?: unknown; total_revenue?: unknown; net_cpm?: unknown }>) {
+  const selectedDailyCpms = rows
+    .filter((row) => metricNumber(row.total_impressions) > 0 && metricNumber(row.total_revenue) > 0)
+    .map((row) => metricNumber(row.net_cpm));
+  if (selectedDailyCpms.length === 0) return 0;
+  return fixedMetric(selectedDailyCpms.reduce((sum, value) => sum + value, 0) / selectedDailyCpms.length, 8);
+}
+
 export async function getMiniAppAggregateStatsByIds(miniappIds: Array<number | string>) {
   const ids = [...new Set(miniappIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))];
   if (ids.length === 0) return new Map<number, ReturnType<typeof aggregateSummary> & { last_activity_at: unknown }>();
@@ -383,6 +391,7 @@ export async function buildMiniAppReport(miniappId: number | string, startDate: 
         ...reconcileRevenue({ ...row, miniapp_id: miniappId, date }),
       };
     });
+  const selectedAverageCpm = averageSelectedDailyCpm(daily);
 
   return {
     range: { startDate, endDate, dateSearch },
@@ -393,6 +402,7 @@ export async function buildMiniAppReport(miniappId: number | string, startDate: 
       today_revenue: metricNumber(todayRows[0]?.today_earnings),
       yesterday_revenue: metricNumber(yesterdayRows[0]?.yesterday_earnings),
       ...totalSummary,
+      average_cpm: selectedAverageCpm,
       lifetime_impressions: metricNumber(lifetimeRows[0]?.lifetime_impressions),
       lifetime_revenue: metricNumber(lifetimeRows[0]?.lifetime_revenue),
       total_settled_earnings: totalSettledEarnings,

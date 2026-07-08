@@ -6,7 +6,7 @@ import { ChartColumn } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
 import { SkeletonChart, SkeletonStatGrid } from "@/components/ui/Skeleton";
-import { hasMinimumCpcSample, hasMinimumCpmSample } from "@/lib/statFormulas";
+import { hasMinimumCpcSample } from "@/lib/statFormulas";
 
 type DateMode = "today" | "yesterday" | "7d" | "30d";
 
@@ -66,7 +66,7 @@ function formatMoney(value: number) {
 }
 
 function formatRate(value: number, sample: number, kind: "cpm" | "cpc") {
-  const confident = kind === "cpm" ? hasMinimumCpmSample(sample) : hasMinimumCpcSample(sample);
+  const confident = kind === "cpm" ? sample > 0 && value > 0 : hasMinimumCpcSample(sample);
   return confident ? formatMoney(value) : "--";
 }
 

@@ -3,6 +3,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
+import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
 
 type ColumnRow = RowDataPacket & { COLUMN_NAME: string };
 type GenericRow = RowDataPacket & Record<string, unknown>;
@@ -51,6 +52,7 @@ export async function GET(
   }
 
   try {
+    await ensureClassicSettlementColumns();
     const { id } = await params;
     const postColumns = await getCampaignPostColumns();
     const deletedAtExpr = postColumns.has("deleted_at") ? "cp.deleted_at" : "NULL";
@@ -185,6 +187,7 @@ export async function PATCH(
   if (response) return response;
 
   try {
+    await ensureClassicSettlementColumns();
     const { id } = await params;
     const body = await request.json() as Record<string, unknown>;
     const fields = Object.keys(body);

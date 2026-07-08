@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { sendTelegramMessage } from "@/lib/telegram";
+import { SAFE_TELEGRAM_PARSE_MODE, sendTelegramMessage } from "@/lib/telegram";
 import { getCurrentPostingSlot } from "@/lib/postingTimes";
 import {
   autoPauseChannel,
@@ -26,6 +26,8 @@ import { requireAdServingAllowed, upsertAdminAlert } from "@/lib/productionSafet
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { composeCampaignCreativeText } from "@/lib/campaignCreative";
+import { getChannelUnitPrice } from "@/lib/channelBilling";
+import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
 
 export const dynamic = 'force-dynamic';
 
@@ -35,6 +37,7 @@ interface CampaignRow {
   name: string;
   budget: string | number;
   cpm?: string | number;
+  cpc?: string | number;
   daily_budget_limit?: string | number | null;
   category: string;
   continents: string;
@@ -226,6 +229,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    await ensureClassicSettlementColumns();
     const blocked = await requireAdServingAllowed();
     if (blocked) return blocked;
 
@@ -297,14 +301,14 @@ export async function GET(req: NextRequest) {
               WHEN c.type = 'views' THEN GREATEST(COALESCE(cp.views, 0) - COALESCE(cp.settled_views, 0), 0)
               WHEN c.type = 'clicks' THEN GREATEST((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) - COALESCE(cp.settled_clicks, 0), 0)
               ELSE 0
-            END * (COALESCE(c.cpm, 0) / 1000)
+            END * (CASE WHEN c.type = 'clicks' THEN COALESCE(c.cpc, 0) ELSE COALESCE(c.cpm, 0) END / 1000)
           ), 0) AS unsettled_liability,
           COALESCE(SUM(
             CASE
               WHEN cp.status IN ('active','posted','sent','pending_delivery')
                 AND cp.delivery_failed_at IS NULL
                 ${activePostDeleteFilter}
-              THEN COALESCE(c.cpm, 0) / 1000
+              THEN CASE WHEN c.type = 'clicks' THEN COALESCE(c.cpc, 0) ELSE COALESCE(c.cpm, 0) END / 1000
               ELSE 0
             END
           ), 0) AS active_post_buffer,
@@ -346,7 +350,7 @@ export async function GET(req: NextRequest) {
           };
         })
         .filter((campaign) => {
-          const unitPrice = Number(campaign.cpm || 0) / 1000;
+          const unitPrice = getChannelUnitPrice({ type: campaign.type, cpm: campaign.cpm, cpc: campaign.cpc });
           return Number.isFinite(unitPrice) && unitPrice > 0 && Number(campaign.available_budget_for_placement || 0) >= unitPrice;
         });
     }
@@ -634,10 +638,10 @@ export async function GET(req: NextRequest) {
       try {
         await conn.beginTransaction();
         const [[lockedCampaign]]: any = await conn.query(
-          "SELECT status, budget, cpm, daily_budget_limit FROM campaigns WHERE id = ? FOR UPDATE",
+          "SELECT status, budget, cpm, cpc, type, daily_budget_limit FROM campaigns WHERE id = ? FOR UPDATE",
           [campaign.id]
         );
-        const unitLiability = Number(lockedCampaign?.cpm || 0) / 1000;
+        const unitLiability = getChannelUnitPrice({ type: lockedCampaign?.type || campaign.type, cpm: lockedCampaign?.cpm, cpc: lockedCampaign?.cpc });
         const [[lockedLiability]]: any = await conn.query(`
           SELECT
             COALESCE(SUM(CASE
@@ -682,8 +686,6 @@ export async function GET(req: NextRequest) {
       }
       conn.release();
 
-      const parseModeMap: any = { html: "HTML", markdown: "MarkdownV2", none: undefined };
-      const parseMode = parseModeMap[campaign.parse_mode] || "HTML";
       const domain = process.env.DOMAIN;
       const host = domain ? `https://${domain}` : (process.env.NEXT_PUBLIC_APP_URL || req.nextUrl.origin);
       const buttonUrl = campaign.type === "clicks"
@@ -701,7 +703,7 @@ export async function GET(req: NextRequest) {
       attemptedPosts++;
       const result = await sendTelegramMessageWithRetries(channel.chat_id, composeCampaignCreativeText(campaign.campaign_title, campaign.message_text), {
         photo: campaign.image_url,
-        parse_mode: parseMode,
+        parse_mode: SAFE_TELEGRAM_PARSE_MODE,
         reply_markup: replyMarkup
       });
 

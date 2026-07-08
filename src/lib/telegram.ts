@@ -1,3 +1,5 @@
+export const SAFE_TELEGRAM_PARSE_MODE = undefined;
+
 export async function sendTelegramMessage(chatId: string | number, text: string, options: any = {}) {
   const token = options.token || process.env.BOT_TOKEN;
   if (!token) {
@@ -5,7 +7,7 @@ export async function sendTelegramMessage(chatId: string | number, text: string,
     return;
   }
 
-  const { parse_mode = "HTML", reply_markup, photo } = options;
+  const { parse_mode = SAFE_TELEGRAM_PARSE_MODE, reply_markup, photo } = options;
 
   try {
     const endpoint = photo ? "sendPhoto" : "sendMessage";
@@ -31,10 +33,10 @@ export async function sendTelegramMessage(chatId: string | number, text: string,
     // Default JSON for text or URL-based photos
     const body: any = {
       chat_id: chatId,
-      parse_mode,
       ...(photo ? { photo, caption: text } : { text }),
       ...(reply_markup ? { reply_markup } : {}),
     };
+    if (parse_mode) body.parse_mode = parse_mode;
 
     const res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
       method: "POST",

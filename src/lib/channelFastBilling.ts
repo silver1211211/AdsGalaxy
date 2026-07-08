@@ -3,12 +3,12 @@ import pool from "@/lib/db";
 import { creditUserLockedBalance } from "@/lib/earnings";
 import { getPublisherQuality } from "@/lib/publisherQuality";
 import { recordPayoutSafetyCheck } from "@/lib/revenueProtection";
-
-const money = (value: number) => Number(Math.max(0, value).toFixed(8));
+import { getChannelUnitPrice, money } from "@/lib/channelBilling";
+import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
 
 type LockedPost = RowDataPacket & {
   campaign_id: number; channel_id: number; publisher_id: number; campaign_type: string;
-  campaign_status: string; post_status: string; budget: string | number; cpm: string | number; daily_budget_limit: string | number | null;
+  campaign_status: string; post_status: string; budget: string | number; cpm: string | number; cpc: string | number; daily_budget_limit: string | number | null;
   views: string | number; settled_views: string | number; settled_clicks: string | number;
 };
 
@@ -16,7 +16,7 @@ async function lockedPost(conn: PoolConnection, postId: number) {
   const [rows] = await conn.query<LockedPost[]>(`
     SELECT cp.campaign_id, cp.channel_id, cp.views, cp.settled_views, cp.settled_clicks,
       c.type campaign_type, c.status campaign_status, cp.status post_status,
-      c.budget, c.cpm, c.daily_budget_limit,
+      c.budget, c.cpm, c.cpc, c.daily_budget_limit,
       ch.user_id publisher_id
     FROM campaign_posts cp JOIN campaigns c ON c.id=cp.campaign_id
     JOIN channels ch ON ch.id=cp.channel_id WHERE cp.id=? FOR UPDATE`, [postId]);
@@ -30,7 +30,7 @@ async function fastDebit(input: { conn: PoolConnection; postId: number; type: "c
   if (!post || post.campaign_status !== "active" || post.post_status !== "active" || post.campaign_type !== `${input.type}s`) {
     return { debited: false, duplicate: false, units: 0 };
   }
-  const unitPrice = Number(post.cpm || 0) / 1000;
+  const unitPrice = getChannelUnitPrice({ type: post.campaign_type, cpm: post.cpm, cpc: post.cpc });
   if (!(unitPrice > 0)) return { debited: false, duplicate: false, units: 0 };
   const [[today]] = await input.conn.query<Array<RowDataPacket & { spend: string | number }>>(
     `SELECT
@@ -69,12 +69,14 @@ async function fastDebit(input: { conn: PoolConnection; postId: number; type: "c
 }
 
 export async function debitChannelClick(postId: number, clickId: number) {
+  await ensureClassicSettlementColumns();
   const conn = await pool.getConnection();
   try { await conn.beginTransaction(); const result = await fastDebit({ conn, postId, type: "click", sourceKey: `click:${clickId}`, requestedUnits: 1 }); await conn.commit(); return result; }
   catch (error) { await conn.rollback(); throw error; } finally { conn.release(); }
 }
 
 export async function debitConfirmedChannelViews(postId: number, confirmedViews: number) {
+  await ensureClassicSettlementColumns();
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();

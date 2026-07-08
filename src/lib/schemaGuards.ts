@@ -22,6 +22,7 @@ async function addColumnIfMissing(db: Db, table: string, column: string, definit
 }
 
 export async function ensureClassicSettlementColumns(db: Db = pool) {
+  await addColumnIfMissing(db, "campaigns", "cpc", "DECIMAL(18,8) NOT NULL DEFAULT 0");
   await addColumnIfMissing(db, "campaign_posts", "settled_clicks", "INT NOT NULL DEFAULT 0");
   await addColumnIfMissing(db, "campaign_posts", "settled_views", "INT NOT NULL DEFAULT 0");
   await addColumnIfMissing(db, "campaign_clicks", "post_id", "INT NULL");

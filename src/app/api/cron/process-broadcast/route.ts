@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { sendTelegramMessage } from "@/lib/telegram";
+import { SAFE_TELEGRAM_PARSE_MODE, sendTelegramMessage } from "@/lib/telegram";
 import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
 import { getAdvertiserTrustMultipliers, normalizeAdvertiserTrustLevel, qualityMultiplier } from "@/lib/advertiserTrust";
 import {
@@ -442,9 +442,6 @@ export async function GET(req: NextRequest) {
     const workerCount = Math.min(requestedWorkerCount, maxWorkerCount);
     const results = await processBoundedQueue(dispatches, workerCount, async ({ campaign, bot, user }) => {
       try {
-        const parseModeMap: any = { 'html': 'HTML', 'markdown': 'MarkdownV2', 'none': undefined };
-        const parseMode = parseModeMap[campaign.parse_mode] || 'HTML';
-        
         const replyMarkup = {
           inline_keyboard: [[
             { text: campaign.button_text, url: campaign.link }
@@ -466,7 +463,7 @@ export async function GET(req: NextRequest) {
         try {
           sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, composeCampaignCreativeText(campaign.campaign_title, campaign.message_text), {
             photo: campaign.image_url,
-            parse_mode: parseMode,
+            parse_mode: SAFE_TELEGRAM_PARSE_MODE,
             reply_markup: replyMarkup,
             token: bot.bot_token
           }));
@@ -495,7 +492,7 @@ export async function GET(req: NextRequest) {
                 const [advertiser]: any = await pool.query("SELECT chat_id FROM users WHERE id = ?", [campaign.user_id]);
                 if (advertiser[0]?.chat_id) {
                   await sendTelegramMessage(advertiser[0].chat_id, `Campaign Budget Exhausted\n\nYour broadcast campaign "${campaign.name || 'Untitled'}" has exhausted its budget.\n\nPlease top up your budget to resume the broadcast.`, {
-                    parse_mode: 'Markdown'
+                    parse_mode: SAFE_TELEGRAM_PARSE_MODE
                   });
                 }
               } catch (notifyErr) {

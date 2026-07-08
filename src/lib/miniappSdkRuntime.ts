@@ -812,20 +812,20 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
       .agx-rewarded-card{position:relative;z-index:1;width:min(520px,92vw);max-height:calc(100dvh - 36px);overflow:auto;border-radius:24px;padding:18px 18px 14px;background:linear-gradient(180deg,rgba(17,24,39,.98),rgba(5,11,23,.98));border:1px solid rgba(203,213,225,.16);box-shadow:0 30px 100px rgba(0,0,0,.66),0 0 0 1px rgba(99,102,241,.08),0 0 48px rgba(79,70,229,.2),inset 0 1px 0 rgba(255,255,255,.08);text-align:center;animation:agxRewardedPop .24s cubic-bezier(.2,.8,.2,1);overscroll-behavior:contain}
       .agx-rewarded-top{position:relative;display:flex;align-items:center;justify-content:center;min-height:36px;margin-bottom:12px}
       .agx-rewarded-heading{font-size:18px;line-height:1.1;font-weight:900;color:#f8fafc}
-      .agx-rewarded-close{position:absolute;right:0;top:50%;width:36px;height:36px;transform:translateY(-50%);border-radius:999px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:28px;line-height:1;font-weight:300;box-shadow:0 10px 24px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.12);cursor:pointer;transition:background .16s ease}
+      .agx-rewarded-close{position:absolute;right:0;top:50%;width:36px;height:36px;transform:translateY(-50%);border-radius:999px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:#fff;display:none;align-items:center;justify-content:center;font-size:28px;line-height:1;font-weight:300;box-shadow:0 10px 24px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.12);cursor:pointer;transition:background .16s ease}
       .agx-rewarded-close[hidden]{display:none}
       .agx-rewarded-close:hover{background:rgba(255,255,255,.14)}
-      .agx-rewarded-media{display:flex;align-items:center;justify-content:center;width:100%;min-height:150px;max-height:min(45dvh,300px);border-radius:18px;background:linear-gradient(135deg,rgba(15,23,42,.92),rgba(30,41,59,.74));border:1px solid rgba(203,213,225,.12);box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 18px 42px rgba(0,0,0,.22);overflow:hidden;cursor:pointer}
-      .agx-rewarded-hero{display:block;width:100%;height:100%;max-height:min(45dvh,300px);object-fit:contain;background:#eaf5ff}
+      .agx-rewarded-media{display:block;width:min(100%,420px);aspect-ratio:1/1;max-height:min(45dvh,420px);margin:0 auto;border-radius:18px;background:transparent;border:0;box-shadow:none;overflow:hidden;cursor:pointer}
+      .agx-rewarded-hero{display:block;width:100%;height:100%;max-height:min(45dvh,420px);object-fit:cover;background:transparent}
       .agx-rewarded-placeholder{display:flex;min-height:150px;width:100%;height:100%;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:linear-gradient(135deg,#0f172a,#1e3a8a 54%,#0ea5e9);color:#fff;font-weight:950;letter-spacing:0;text-align:center}
       .agx-rewarded-placeholder-mark{position:relative;width:52px;height:52px;border-radius:16px;background:rgba(255,255,255,.13);box-shadow:inset 0 1px 0 rgba(255,255,255,.2)}
       .agx-rewarded-placeholder-mark:before{content:"";position:absolute;inset:14px;border:4px solid #fff;border-right-color:transparent;border-radius:999px;transform:rotate(-24deg)}
       .agx-rewarded-placeholder-text{font-size:15px}
-      .agx-rewarded-body{padding:16px 2px 0;text-align:center}
+      .agx-rewarded-body{padding:16px 0 0;text-align:center}
       .agx-rewarded-advertiser{display:flex;align-items:center;justify-content:center;margin-bottom:10px}
       .agx-rewarded-logo{width:34px;height:34px;border-radius:10px;object-fit:cover;border:1px solid rgba(255,255,255,.16);background:#0f172a}
       .agx-rewarded-title{margin:0 auto 8px;max-width:100%;font-size:21px;line-height:1.2;font-weight:950;color:#fff;overflow-wrap:anywhere}
-      .agx-rewarded-desc{margin:0 auto 16px;max-width:380px;color:#b9c3d5;font-size:14px;line-height:1.45;font-weight:650;overflow-wrap:anywhere}
+      .agx-rewarded-desc{margin:0 auto 16px;width:min(100%,420px);max-width:100%;color:#b9c3d5;font-size:14px;line-height:1.45;font-weight:650;overflow-wrap:anywhere}
       .agx-rewarded-cta{width:100%;min-height:52px;border:0;border-radius:15px;background:linear-gradient(135deg,#5b5cff 0%,#2563eb 52%,#14b8a6 100%);color:#fff;font-size:16px;font-weight:950;padding:14px 18px;cursor:pointer;box-shadow:0 16px 34px rgba(37,99,235,.34),inset 0 1px 0 rgba(255,255,255,.18);transition:transform .16s ease,filter .16s ease}
       .agx-rewarded-cta:hover{transform:translateY(-1px);filter:saturate(1.08)}
       .agx-rewarded-sponsored{display:flex;align-items:center;justify-content:center;gap:9px;margin:18px 0 14px;padding-top:14px;border-top:1px solid rgba(148,163,184,.12);text-decoration:none;font-size:14px;font-weight:800;color:#818ca1}
@@ -847,7 +847,7 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
       .agx-rewarded-close:focus-visible,.agx-rewarded-cta:focus-visible,.agx-rewarded-sponsored:focus-visible{outline:3px solid rgba(96,165,250,.55);outline-offset:3px}
       @keyframes agxRewardedFade{from{opacity:0}to{opacity:1}}
       @keyframes agxRewardedPop{from{opacity:0;transform:translate3d(0,10px,0) scale(.975)}to{opacity:1;transform:translate3d(0,0,0) scale(1)}}
-      @media (orientation:landscape) and (max-height:560px){.agx-rewarded-card{width:min(640px,92vw);max-height:calc(100dvh - 24px);padding:14px}.agx-rewarded-media,.agx-rewarded-hero{max-height:36dvh}.agx-rewarded-body{padding-top:10px}.agx-rewarded-desc{margin-bottom:10px}.agx-rewarded-sponsored{margin:12px 0 10px}}
+      @media (orientation:landscape) and (max-height:560px){.agx-rewarded-card{width:min(640px,92vw);max-height:calc(100dvh - 24px);padding:14px}.agx-rewarded-media,.agx-rewarded-hero{max-height:40dvh}.agx-rewarded-body{padding-top:10px}.agx-rewarded-desc{margin-bottom:10px}.agx-rewarded-sponsored{margin:12px 0 10px}}
       @media (max-width:380px){.agx-rewarded-overlay{padding:14px}.agx-rewarded-card{border-radius:22px;padding:14px}.agx-rewarded-media{border-radius:16px}.agx-rewarded-title{font-size:19px}.agx-rewarded-desc{font-size:13px}.agx-rewarded-countdown-label{font-size:14px}.agx-rewarded-ring-wrap,.agx-rewarded-ring{width:46px;height:46px}}
     `;
 

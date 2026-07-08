@@ -14,6 +14,7 @@ import { applyChannelFraudBillingPolicy } from "@/lib/channelFraudBilling";
 import { refreshCampaignViews } from "@/lib/channelAdminViewRefresh";
 import { createSystemLog } from "@/lib/systemLogs";
 import { settlePendingChannelPublisherCredits } from "@/lib/channelFastBilling";
+import { getChannelUnitPrice, money } from "@/lib/channelBilling";
 
 type SettlementKind = "view" | "click";
 type ChannelPayoutPolicy = {
@@ -42,7 +43,8 @@ type LockedPost = RowDataPacket & {
   campaign_status: string;
   budget: string | number;
   daily_budget_limit: string | number | null;
-  price_per_thousand: string | number;
+  cpm: string | number;
+  cpc: string | number;
   views: string | number;
   settled_views: string | number;
   current_clicks: string | number;
@@ -101,9 +103,7 @@ export type ChannelSettlementResult = {
 const MAX_POSTS_PER_RUN = Math.min(500, Math.max(1, Number.parseInt(process.env.CHANNEL_SETTLEMENT_BATCH_SIZE || "200", 10) || 200));
 const MAX_SETTLEMENT_BATCHES_PER_RUN = Math.max(1, Number.parseInt(process.env.CHANNEL_SETTLEMENT_MAX_BATCHES || "50", 10) || 50);
 
-function amount(value: number) {
-  return Number(Math.max(0, value).toFixed(8));
-}
+const amount = money;
 
 function percent(value: unknown, fallback: number) {
   const parsed = Number(value);
@@ -138,7 +138,7 @@ async function lockedPost(connection: PoolConnection, postId: number) {
   const [rows] = await connection.query<LockedPost[]>(
     `SELECT cp.id AS post_id, cp.campaign_id, cp.channel_id, cp.views, cp.settled_views, cp.settled_clicks,
        c.type AS campaign_type, c.name AS campaign_name, c.user_id AS advertiser_id,
-       c.status AS campaign_status, c.budget, c.daily_budget_limit, c.cpm AS price_per_thousand,
+       c.status AS campaign_status, c.budget, c.daily_budget_limit, c.cpm, c.cpc,
        ch.user_id AS publisher_id, ch.status AS channel_status, ch.settlement_excluded_until,
        publisher.status AS publisher_status, publisher.is_banned AS publisher_is_banned,
        u.telegram_id AS advertiser_telegram_id,
@@ -272,7 +272,7 @@ export async function settleChannelCampaigns(options: {
         const oldClicks = Number(post.settled_clicks || 0);
         const totalClicks = Number(post.current_clicks || 0);
         const dueUnits = kind === "view" ? totalViews - oldViews : totalClicks - oldClicks;
-        const unitPrice = Number(post.price_per_thousand || 0) / 1000;
+        const unitPrice = getChannelUnitPrice({ type: post.campaign_type, cpm: post.cpm, cpc: post.cpc });
         const currentBudget = Number(post.budget || 0);
 
         if (dueUnits <= 0) {

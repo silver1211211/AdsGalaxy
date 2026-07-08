@@ -7,7 +7,7 @@ import { deleteCampaignPosts, type CampaignPostDeletionSummary } from "@/lib/cam
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { settleChannelCampaigns } from "@/lib/channelSettlement";
 import { acquireCronLock, releaseCronLock } from "@/lib/cronSecurity";
-import { sendTelegramMessage } from "@/lib/telegram";
+import { SAFE_TELEGRAM_PARSE_MODE, sendTelegramMessage } from "@/lib/telegram";
 import {
   autoPauseBot,
   checkBotHealth,
@@ -342,8 +342,6 @@ async function postCampaignToChannel(options: {
   );
 
   const postId = insertPost.insertId;
-  const parseModeMap: Record<string, string | undefined> = { html: "HTML", markdown: "MarkdownV2", none: undefined };
-  const parseMode = parseModeMap[campaign.parse_mode] || "HTML";
   const domain = process.env.DOMAIN;
   const host = domain ? `https://${domain}` : (process.env.NEXT_PUBLIC_APP_URL || requestOrigin);
   const buttonUrl = campaign.type === "clicks"
@@ -360,7 +358,7 @@ async function postCampaignToChannel(options: {
 
   const result = await sendTelegramMessage(channel.chat_id, composeCampaignCreativeText(campaign.campaign_title, campaign.message_text), {
     photo: campaign.image_url,
-    parse_mode: parseMode,
+    parse_mode: SAFE_TELEGRAM_PARSE_MODE,
     reply_markup: replyMarkup,
   }) as TelegramSendResponse | undefined;
 
@@ -393,12 +391,12 @@ async function postCampaignToChannel(options: {
   return { ok: false, postId, reason: result?.description || "Telegram send failed" };
 }
 
-async function deleteAllActivePostsSafely(): Promise<CampaignPostDeletionSummary> {
+async function deleteActivePostsForReplacementSafely(campaignId: number): Promise<CampaignPostDeletionSummary> {
   try {
-    return await deleteCampaignPosts({ successStatus: "replaced" });
+    return await deleteCampaignPosts({ campaignId, successStatus: "replaced" });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Emergency global post deletion failed";
-    console.warn("Emergency global post deletion failed", { error: message });
+    const message = error instanceof Error ? error.message : "Emergency campaign post deletion failed";
+    console.warn("Emergency campaign post deletion failed", { campaign_id: campaignId, error: message });
     return {
       checked: 0,
       total: 0,
@@ -657,8 +655,6 @@ async function postBroadcastToBotUser(options: {
   rewardPercentage: number;
 }) {
   const { campaign, bot, user, schema } = options;
-  const parseModeMap: Record<string, string | undefined> = { html: "HTML", markdown: "MarkdownV2", none: undefined };
-  const parseMode = parseModeMap[campaign.parse_mode] || "HTML";
   const replyMarkup = {
     inline_keyboard: [[
       { text: campaign.button_text, url: campaign.link },
@@ -673,7 +669,7 @@ async function postBroadcastToBotUser(options: {
   try {
     sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, composeCampaignCreativeText(campaign.campaign_title, campaign.message_text), {
       photo: campaign.image_url,
-      parse_mode: parseMode,
+      parse_mode: SAFE_TELEGRAM_PARSE_MODE,
       reply_markup: replyMarkup,
       token: bot.bot_token,
     }) as Promise<TelegramSendResponse | undefined>);
@@ -855,10 +851,13 @@ export async function POST(
     const schema = await getEmergencySchema();
     let settlementSummary = null;
     let deleteSummary = null;
-    const blockedReplacementChannels = new Set<number>();
 
     if (mode === "replace_everything") {
-      const settlement = await settleChannelCampaigns({ skipGlobalMaintenance: true });
+      const settlement = await settleChannelCampaigns({
+        campaignId: campaign.id,
+        skipGlobalMaintenance: true,
+        campaignStatuses: ["active"],
+      });
       settlementSummary = {
         settledPosts: settlement.settledPosts,
         failedPosts: settlement.failedPosts,
@@ -875,12 +874,7 @@ export async function POST(
         }, { status: 409 });
       }
 
-      deleteSummary = await deleteAllActivePostsSafely();
-      for (const detail of deleteSummary.details) {
-        if ((detail.status === "delete_failed" || detail.status === "error") && detail.channel_id) {
-          blockedReplacementChannels.add(Number(detail.channel_id));
-        }
-      }
+      deleteSummary = await deleteActivePostsForReplacementSafely(campaign.id);
     }
     const { eligibleChannels, skippedByLimit } = await getEligibleChannels(campaign, schema, mode);
     const failedChannels: Array<{ channelId: number; reason: string }> = [];
@@ -889,12 +883,6 @@ export async function POST(
     let skipped = skippedByLimit;
 
     for (const channel of eligibleChannels) {
-      if (blockedReplacementChannels.has(channel.id)) {
-        skipped++;
-        failedChannels.push({ channelId: channel.id, reason: "old_post_cleanup_failed_replacement_skipped" });
-        continue;
-      }
-
       if (await hasActiveUndeletedPost(channel.id, schema)) {
         skipped++;
         failedChannels.push({ channelId: channel.id, reason: "active_undeleted_post_exists" });
@@ -915,10 +903,20 @@ export async function POST(
           posted++;
         } else {
           failedChannels.push({ channelId: channel.id, reason: result.reason || "Telegram send failed" });
+          console.warn("Emergency push channel send failed", {
+            campaign_id: campaign.id,
+            channel_id: channel.id,
+            reason: result.reason || "Telegram send failed",
+          });
         }
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : "Emergency post failed";
         failedChannels.push({ channelId: channel.id, reason: message });
+        console.warn("Emergency push channel processing failed", {
+          campaign_id: campaign.id,
+          channel_id: channel.id,
+          reason: message,
+        });
       }
     }
 

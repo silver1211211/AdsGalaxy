@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
-import { sendTelegramMessage } from "@/lib/telegram";
+import { SAFE_TELEGRAM_PARSE_MODE, sendTelegramMessage } from "@/lib/telegram";
 
 export async function POST(request: Request) {
   try {
@@ -8,19 +8,17 @@ export async function POST(request: Request) {
     const user = await getAuthenticatedUser(initData);
 
     const contentType = request.headers.get("content-type") || "";
-    let text, parse_mode, link, button_text, image;
+    let text, link, button_text, image;
 
     if (contentType.includes("multipart/form-data")) {
       const formData = await request.formData();
       text = formData.get("text") as string;
-      parse_mode = formData.get("parse_mode") as string;
       link = formData.get("link") as string;
       button_text = formData.get("button_text") as string;
       image = formData.get("image") as File;
     } else {
       const body = await request.json();
       text = body.text;
-      parse_mode = body.parse_mode;
       link = body.link;
       button_text = body.button_text;
     }
@@ -48,7 +46,7 @@ export async function POST(request: Request) {
     }
 
     const result = await sendTelegramMessage(user.telegram_id, text, {
-      parse_mode: parse_mode === "none" ? undefined : (parse_mode === "html" ? "HTML" : "MarkdownV2"),
+      parse_mode: SAFE_TELEGRAM_PARSE_MODE,
       reply_markup,
       ...(photoData && { photo: photoData })
     });

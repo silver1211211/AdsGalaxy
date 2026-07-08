@@ -1,102 +1,57 @@
 "use client";
 
 import { useState } from "react";
-import { Eye, Loader2, Play, RotateCcw, ShieldCheck, X } from "lucide-react";
+import { Eye, Loader2, RotateCcw, ShieldCheck } from "lucide-react";
 import { previewInternalRewardedAd, type InternalAdPayload } from "@/lib/miniappSdkRuntime";
 
-type PreviewProvider = "Auto Mediation" | "Internal Ads" | "AdsGram" | "GigaPub" | "AdExium" | "Monetag" | "RichAds";
-
-const providers: PreviewProvider[] = ["Auto Mediation", "Internal Ads", "AdsGram", "GigaPub", "AdExium", "Monetag", "RichAds"];
+const previewDescription =
+  "Preview a compact Mini App ad with polished creative, clear message, balanced spacing, trusted AdsGalaxy attribution, and a direct call to action before launching the real rewarded display experience.";
 
 const mockAds: InternalAdPayload[] = [
   {
     id: 900001,
-    title: "AdsGalaxy Demo",
-    description: "Preview the real rewarded ad viewer before production.",
+    title: "AdsGalaxy Rewarded Ad Preview For Mini Apps Today!",
+    description: previewDescription,
     cta_text: "Open Demo",
     landing_url: "https://t.me/Ads_Galaxy_bot",
-    image_url: "https://images.unsplash.com/photo-1614728263952-84ea256f9679?auto=format&fit=crop&w=900&q=80",
+    image_url: "https://images.unsplash.com/photo-1614728263952-84ea256f9679?auto=format&fit=crop&w=1024&h=1024&q=80",
     advertiser_logo_url: "/logo.svg",
     admin_cpm: 0,
   },
   {
     id: 900002,
-    title: "Mini App Boost",
-    description: "A fake creative for testing copy, image, timing, and CTA layout.",
+    title: "AdsGalaxy Rewarded Ad Preview For Mini Apps Today!",
+    description: previewDescription,
     cta_text: "View Offer",
     landing_url: "https://t.me/Ads_Galaxy_bot",
-    image_url: "https://images.unsplash.com/photo-1497366754035-f200968a6e72?auto=format&fit=crop&w=900&q=80",
+    image_url: "https://images.unsplash.com/photo-1497366754035-f200968a6e72?auto=format&fit=crop&w=1024&h=1024&q=80",
     advertiser_logo_url: "/logo.svg",
     admin_cpm: 0,
   },
   {
     id: 900003,
-    title: "Game Reward",
-    description: "Test the normal countdown flow exactly as users see it.",
+    title: "AdsGalaxy Rewarded Ad Preview For Mini Apps Today!",
+    description: previewDescription,
     cta_text: "Play Now",
     landing_url: "https://t.me/Ads_Galaxy_bot",
-    image_url: "https://images.unsplash.com/photo-1511512578047-dfb367046420?auto=format&fit=crop&w=900&q=80",
+    image_url: "https://images.unsplash.com/photo-1511512578047-dfb367046420?auto=format&fit=crop&w=1024&h=1024&q=80",
     advertiser_logo_url: "/logo.svg",
     admin_cpm: 0,
   },
 ];
 
-function ExternalProviderPreview({ provider, onClose }: { provider: PreviewProvider; onClose: () => void }) {
-  return (
-    <div className="fixed inset-0 z-[2147483647] flex items-center justify-center bg-slate-950/92 p-5 text-white">
-      <div className="w-full max-w-md overflow-hidden rounded-3xl border border-white/15 bg-slate-900 shadow-2xl">
-        <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
-          <div>
-            <div className="text-xs font-black uppercase tracking-[0.18em] text-cyan-300">{provider}</div>
-            <div className="mt-1 text-lg font-black">Provider render preview</div>
-          </div>
-          <button type="button" onClick={onClose} aria-label="Close preview" className="grid h-9 w-9 place-items-center rounded-full bg-white/10 text-white">
-            <X size={18} />
-          </button>
-        </div>
-        <div className="p-5">
-          <div className="grid min-h-56 place-items-center rounded-2xl border border-dashed border-cyan-300/30 bg-slate-950">
-            <div className="px-8 text-center">
-              <div className="mx-auto grid h-16 w-16 place-items-center rounded-2xl bg-cyan-300 text-slate-950">
-                <Play size={28} fill="currentColor" />
-              </div>
-              <div className="mt-5 text-xl font-black">{provider} creative surface</div>
-              <p className="mt-2 text-sm font-semibold leading-6 text-slate-300">
-                Isolated visual QA. No provider display call, AdsGalaxy impression, reward, debit, credit, statistic, or settlement is created.
-              </p>
-            </div>
-          </div>
-          <div className="mt-4 grid grid-cols-2 gap-2 text-xs font-bold text-slate-300">
-            <div className="rounded-xl bg-white/5 p-3">Render Status: preview only</div>
-            <div className="rounded-xl bg-white/5 p-3">Impression: not recorded</div>
-            <div className="rounded-xl bg-white/5 p-3">Completion: not recorded</div>
-            <div className="rounded-xl bg-white/5 p-3">Billing: isolated</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default function AdsPreviewPage() {
   const [selectedAd, setSelectedAd] = useState(0);
-  const [selectedProvider, setSelectedProvider] = useState<PreviewProvider>("Auto Mediation");
   const [displaying, setDisplaying] = useState(false);
-  const [externalPreview, setExternalPreview] = useState<PreviewProvider | null>(null);
-  const [lastResult, setLastResult] = useState<"completed" | "closed" | "previewed" | null>(null);
+  const [lastResult, setLastResult] = useState<"completed" | "closed" | null>(null);
 
   async function displayAd() {
     if (displaying) return;
     setDisplaying(true);
     setLastResult(null);
     try {
-      if (selectedProvider === "Internal Ads" || selectedProvider === "Auto Mediation") {
-        await previewInternalRewardedAd(mockAds[selectedAd]);
-        setLastResult("completed");
-      } else {
-        setExternalPreview(selectedProvider);
-        setLastResult("previewed");
-      }
+      await previewInternalRewardedAd(mockAds[selectedAd]);
+      setLastResult("completed");
     } catch {
       setLastResult("closed");
     } finally {
@@ -105,48 +60,118 @@ export default function AdsPreviewPage() {
   }
 
   return (
-    <main className="min-h-screen bg-[#eef6ff] px-4 py-8 text-slate-950">
-      {externalPreview && <ExternalProviderPreview provider={externalPreview} onClose={() => setExternalPreview(null)} />}
-      <section className="mx-auto w-full max-w-5xl rounded-2xl border border-blue-100 bg-white p-5 shadow-xl shadow-blue-100/60">
-        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+    <main className="min-h-screen bg-[#eef6ff] px-3 py-3 text-slate-950">
+      <style>{`
+        .agx-rewarded-overlay {
+          padding: 14px !important;
+        }
+
+        .agx-rewarded-card {
+          max-height: calc(100dvh - 28px) !important;
+          overflow: hidden !important;
+          padding: 14px !important;
+        }
+
+        .agx-rewarded-top,
+        .agx-rewarded-advertiser,
+        .agx-rewarded-close {
+          display: none !important;
+        }
+
+        .agx-rewarded-media {
+          width: min(100%, 420px) !important;
+          aspect-ratio: 1 / 1 !important;
+          max-height: min(42dvh, 420px) !important;
+          margin: 0 auto !important;
+          background: transparent !important;
+          border: 0 !important;
+          box-shadow: none !important;
+        }
+
+        .agx-rewarded-hero {
+          max-height: min(42dvh, 420px) !important;
+          object-fit: cover !important;
+          background: transparent !important;
+        }
+
+        .agx-rewarded-body {
+          padding: 12px 0 0 !important;
+        }
+
+        .agx-rewarded-title {
+          display: block !important;
+          width: min(100%, 420px) !important;
+          max-width: 100% !important;
+          margin: 0 auto 8px !important;
+          font-size: 15px !important;
+          line-height: 1.25 !important;
+          font-weight: 950 !important;
+        }
+
+        .agx-rewarded-desc {
+          display: block !important;
+          width: min(100%, 420px) !important;
+          max-width: 100% !important;
+          margin: 0 auto 12px !important;
+          font-size: 13px !important;
+          line-height: 1.35 !important;
+        }
+
+        .agx-rewarded-cta {
+          min-height: 48px !important;
+          padding: 12px 16px !important;
+        }
+
+        .agx-rewarded-sponsored {
+          margin: 12px 0 10px !important;
+          padding-top: 10px !important;
+        }
+
+        .agx-rewarded-countdown {
+          padding: 10px 12px !important;
+          min-height: 64px !important;
+        }
+
+        .agx-rewarded-ring-wrap,
+        .agx-rewarded-ring {
+          width: 44px !important;
+          height: 44px !important;
+        }
+
+        .agx-rewarded-watermark {
+          margin-top: 8px !important;
+        }
+      `}</style>
+      <section className="mx-auto w-full max-w-5xl rounded-xl border border-blue-100 bg-white p-3 shadow-xl shadow-blue-100/60">
+        <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
           <div>
             <p className="text-xs font-black uppercase tracking-[0.18em] text-[#0c7ec7]">Visual QA only</p>
-            <h1 className="mt-1 text-2xl font-black">AdsGalaxy Provider Preview</h1>
+            <h1 className="mt-1 text-lg font-black">AdsGalaxy Ads Preview</h1>
           </div>
-          <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700">
-            <ShieldCheck size={19} />
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
+            <ShieldCheck size={17} />
           </div>
         </div>
 
-        <div className="mt-5 grid gap-5 lg:grid-cols-[240px_1fr]">
+        <div className="mt-3 grid gap-3">
           <div>
-            <div className="mb-2 text-xs font-black uppercase tracking-widest text-slate-400">Provider</div>
-            <div className="grid gap-2">
-              {providers.map((provider) => (
-                <button
-                  type="button"
-                  key={provider}
-                  onClick={() => setSelectedProvider(provider)}
-                  className={`rounded-xl border px-4 py-3 text-left text-sm font-black transition-colors ${selectedProvider === provider ? "border-[#0c9de8] bg-blue-50 text-blue-700" : "border-slate-100 bg-white text-slate-700 hover:bg-slate-50"}`}
-                >
-                  {provider}
-                </button>
-              ))}
+            <div className="rounded-lg border border-[#0c9de8] bg-blue-50 px-3 py-2 text-sm font-black text-blue-700">
+              AdsGalaxy
             </div>
           </div>
 
           <div>
-            <div className="mb-2 text-xs font-black uppercase tracking-widest text-slate-400">Creative</div>
+            <div className="mb-1 text-xs font-black uppercase tracking-widest text-slate-400">Creative</div>
             <div className="grid gap-2 md:grid-cols-3">
               {mockAds.map((ad, index) => (
                 <button
                   type="button"
                   key={ad.id}
                   onClick={() => setSelectedAd(index)}
-                  className={`rounded-2xl border px-4 py-3 text-left transition-colors ${selectedAd === index ? "border-[#0c9de8] bg-blue-50" : "border-slate-100 bg-white hover:bg-slate-50"}`}
+                  className={`rounded-xl border px-3 py-2 text-left transition-colors ${selectedAd === index ? "border-[#0c9de8] bg-blue-50" : "border-slate-100 bg-white hover:bg-slate-50"}`}
                 >
                   <span className="block text-sm font-black text-slate-900">{ad.title}</span>
-                  <span className="mt-1 block text-xs font-semibold leading-5 text-slate-500">{ad.description}</span>
+                  <span className="mt-1 block max-h-10 overflow-hidden text-xs font-semibold leading-5 text-slate-500">{ad.description}</span>
                 </button>
               ))}
             </div>
@@ -157,23 +182,23 @@ export default function AdsPreviewPage() {
           type="button"
           onClick={displayAd}
           disabled={displaying}
-          className="mt-5 flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl bg-[#0c9de8] px-5 py-3 text-sm font-black text-white shadow-lg shadow-[#0c9de8]/25 transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+          className="mt-3 flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-[#0c9de8] px-5 py-2 text-sm font-black text-white shadow-lg shadow-[#0c9de8]/25 transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {displaying ? <Loader2 size={17} className="animate-spin" /> : <Eye size={17} />}
-          {displaying ? "Displaying..." : `Display ${selectedProvider}`}
+          {displaying ? "Displaying..." : "Display AdsGalaxy"}
         </button>
 
         {lastResult && (
-          <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3 text-xs font-bold text-slate-600">
-            <span>{lastResult === "completed" ? "Countdown completed." : lastResult === "previewed" ? "Provider preview opened." : "Preview closed."}</span>
+          <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50 px-4 py-2 text-xs font-bold text-slate-600">
+            <span>{lastResult === "completed" ? "Countdown completed." : "Preview closed."}</span>
             <button type="button" onClick={() => setLastResult(null)} aria-label="Clear result" className="flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-500">
               <RotateCcw size={14} />
             </button>
           </div>
         )}
 
-        <p className="mt-4 text-xs font-semibold leading-5 text-slate-500">
-          This page is visual QA only. It never sends mediation, impression, reward, credit, settlement, statistic, debit, or provider display requests.
+        <p className="mt-2 text-xs font-semibold leading-5 text-slate-500">
+          This page is visual QA only. It never sends mediation, impression, reward, credit, settlement, statistic, debit, or display requests.
         </p>
       </section>
     </main>

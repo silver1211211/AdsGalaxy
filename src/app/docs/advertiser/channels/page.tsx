@@ -27,7 +27,6 @@ const sections: DocsSection[] = [
       "Category: topic used to match campaigns with relevant publisher audiences.",
       "Campaign Objective: View Campaign or Click Campaign.",
       "Message Text: the ad copy that appears in the channel post.",
-      "Parse Mode: Markdown, HTML, or None for message formatting.",
       "Ad Image: optional image, limited by the upload rules in the form.",
       "Campaign Link: the destination URL used by the action button.",
       "Button Text: the call-to-action label shown to users.",

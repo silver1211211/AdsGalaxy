@@ -88,13 +88,14 @@ export default function NewCampaignWizardPage() {
     campaign_title: "",
     category: ALL_CATEGORIES,
     type: defaultType,
-    parse_mode: "markdown",
+    parse_mode: "none",
     message_text: "",
     link: "",
     postback_url: "",
     button_text: "",
     budget: "",
     cpm: "",
+    cpc: "",
     continents: CONTINENTS.map(c => c.id),
     countries: "",
     languages: "",
@@ -151,6 +152,7 @@ export default function NewCampaignWizardPage() {
         setFormData(prev => ({
           ...prev,
           cpm: defaultCpm,
+          cpc: presetType === "clicks" ? recClicks.toString() : "",
           budget: data.min_campaign_budget || "10.0"
         }));
       })
@@ -749,23 +751,6 @@ export default function NewCampaignWizardPage() {
                 </div>
               )}
 
-              {/* Parse mode */}
-              <div className="flex items-center gap-2 flex-wrap">
-                <p className="text-[10px] font-black uppercase tracking-widest text-slate-300 mr-1">Format:</p>
-                {(["markdown", "html", "none"] as const).map(mode => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => setFormData({ ...formData, parse_mode: mode })}
-                    className={cn(
-                      "px-3 py-1.5 rounded-lg text-[10px] font-black uppercase border transition-colors",
-                      formData.parse_mode === mode ? "bg-[#0c9de8] border-[#0c9de8] text-white" : "bg-white border-slate-200 text-slate-400 hover:border-slate-300"
-                    )}
-                  >
-                    {mode}
-                  </button>
-                ))}
-              </div>
             </div>
 
             {/* ── Image upload ── */}
@@ -889,7 +874,10 @@ export default function NewCampaignWizardPage() {
           const cpmMin = formData.type === 'views' ? limits.min_cpm_views : formData.type === 'clicks' ? limits.min_cpm_clicks : limits.min_cpm_broadcast;
           const cpmMax = formData.type === 'views' ? limits.max_cpm_views : formData.type === 'clicks' ? limits.max_cpm_clicks : limits.max_cpm_broadcast;
           const recCpm = formData.type === 'views' ? limits.recommended_cpm_views : formData.type === 'clicks' ? limits.recommended_cpm_clicks : limits.recommended_cpm_broadcast;
-          const cpmVal = parseFloat(formData.cpm || "0");
+          const bidField = formData.type === "clicks" ? "cpc" : "cpm";
+          const bidLabel = formData.type === "clicks" ? "CPC" : "CPM";
+          const bidValue = formData.type === "clicks" ? (formData.cpc || formData.cpm) : formData.cpm;
+          const cpmVal = parseFloat(bidValue || "0");
           const cpmPct = Math.min(100, Math.max(0, ((cpmVal - cpmMin) / Math.max(0.01, cpmMax - cpmMin)) * 100));
           const recPct = Math.min(100, Math.max(0, ((recCpm - cpmMin) / Math.max(0.01, cpmMax - cpmMin)) * 100));
           const isAboveRec = cpmVal >= recCpm;
@@ -910,7 +898,7 @@ export default function NewCampaignWizardPage() {
               {/* CPM value + recommended badge */}
               <div className="px-5 pt-5 pb-3 text-center">
                 <div className="flex items-center justify-center gap-2 mb-2">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Your Bid (CPM)</p>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Your Bid ({bidLabel})</p>
                   {isAboveRec ? (
                     <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-emerald-700 bg-emerald-50 border border-emerald-200">
                       ⭐ Recommended
@@ -924,7 +912,7 @@ export default function NewCampaignWizardPage() {
                 <div className="flex items-baseline justify-center gap-1">
                   <span className="text-lg font-semibold text-slate-400">$</span>
                   <span className="text-4xl font-bold text-slate-800 tabular-nums leading-none">
-                    {parseFloat(formData.cpm || "0").toFixed(2)}
+                    {parseFloat(bidValue || "0").toFixed(2)}
                   </span>
                 </div>
                 <p className="text-[11px] font-medium text-slate-400 mt-1.5">
@@ -962,8 +950,8 @@ export default function NewCampaignWizardPage() {
                     min={cpmMin}
                     max={cpmMax}
                     step="0.05"
-                    value={formData.cpm}
-                    onChange={(e) => setFormData({ ...formData, cpm: e.target.value })}
+                    value={bidValue}
+                    onChange={(e) => setFormData({ ...formData, [bidField]: e.target.value, ...(formData.type === "clicks" ? { cpm: e.target.value } : {}) })}
                     className="cpm-range absolute inset-x-0 w-full"
                     style={{ height: 10 }}
                   />
@@ -1079,9 +1067,9 @@ export default function NewCampaignWizardPage() {
               </button>
               <button
                 onClick={handleSubmit}
-                disabled={isLoading || !formData.budget || !formData.cpm}
+                disabled={isLoading || !formData.budget || !bidValue}
                 className="flex-1 py-3.5 text-white rounded-2xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:bg-slate-100 disabled:text-slate-400 transition-colors"
-                style={{ background: (isLoading || !formData.budget || !formData.cpm) ? undefined : "#0c9de8" }}
+                style={{ background: (isLoading || !formData.budget || !bidValue) ? undefined : "#0c9de8" }}
               >
                 {isLoading ? <Loader2 size={16} className="animate-spin" /> : <PlusCircle size={16} />}
                 {isLoading ? "Creating…" : "Launch Campaign"}

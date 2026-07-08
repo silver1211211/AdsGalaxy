@@ -647,7 +647,7 @@ export default function AdminCampaignDetailsPage() {
                   ["Continents", renderContinents(campaign.continents)],
                   ["Budget Remaining", `$${campaign.budget}`],
                   ["Lifetime Spend", `$${campaign.spend || 0}`],
-                  ["CPM", `$${campaign.cpm}`],
+                  [campaign.type === "clicks" ? "CPC" : "CPM", `$${campaign.type === "clicks" ? (campaign.cpc || campaign.cpm) : campaign.cpm}`],
                   ["Impressions", metrics.total_views || 0],
                   ["Clicks", metrics.total_clicks || 0],
                   ["Approved Count", campaign.approved_count || 0],

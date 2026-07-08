@@ -1,19 +1,20 @@
 import type { Pool, PoolConnection, ResultSetHeader } from "mysql2/promise";
 import pool from "@/lib/db";
-import { sendTelegramMessage } from "@/lib/telegram";
+import { SAFE_TELEGRAM_PARSE_MODE, sendTelegramMessage } from "@/lib/telegram";
 
 const ADSGALAXY_REF_LINK = "https://t.me/Ads_Galaxy_bot?startapp=REF770190998629F";
 
 // Plain-text URL (no <a> tag) so Telegram auto-links it instead of rendering
 // custom link text — this is a system welcome post, not a paid ad, so it must
 // never carry an inline keyboard, CTA button, tracking, or watermark.
-const WELCOME_CAPTION =
+const WELCOME_CAPTION = (
   `🎉 <b>Welcome to AdsGalaxy Publisher Network</b>\n\n` +
   `Your channel has been successfully added to the AdsGalaxy advertising network.\n\n` +
   `You're now eligible to receive sponsored campaigns from advertisers around the world and begin earning from your Telegram audience.\n\n` +
   `As your channel grows, you'll gain access to more campaigns, higher-quality advertisers, and better earning opportunities.\n\n` +
   `Thank you for publishing with AdsGalaxy.\n\n` +
-  `Start monetizing today:\n${ADSGALAXY_REF_LINK}`;
+  `Start monetizing today:\n${ADSGALAXY_REF_LINK}`
+).replace(/<\/?b>/g, "");
 
 async function logWelcomePostAttempt(channelId: number | string, status: "sent" | "failed", failureReason: string | null, telegramChatId: unknown, db: Pool | PoolConnection) {
   try {
@@ -62,7 +63,7 @@ export async function sendChannelWelcomePostIfNeeded(
   try {
     const result = await sendTelegramMessage(chatId, WELCOME_CAPTION, {
       photo: imageUrl,
-      parse_mode: "HTML",
+      parse_mode: SAFE_TELEGRAM_PARSE_MODE,
     });
 
     if (result && result.ok) {
