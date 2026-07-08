@@ -26,6 +26,26 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       [id, user.id]
     );
     if (!rows.length) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
+    const [[stats]]: any = await pool.query(
+      `SELECT
+         COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = ?), 0) as impressions,
+         COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = ?), 0) as spend,
+         COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = ?), 0) as clicks,
+         CASE WHEN COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = ?), 0) > 0
+           THEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = ?), 0)
+             / COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = ?), 1) * 100
+           ELSE 0
+         END as ctr`,
+      [id, id, id, id, id, id]
+    );
+    const [chartData]: any = await pool.query(
+      `SELECT DATE(created_at) as date, COUNT(*) as count
+       FROM miniapp_internal_ad_impressions
+       WHERE campaign_id = ? AND created_at > NOW() - INTERVAL 7 DAY
+       GROUP BY DATE(created_at)
+       ORDER BY date ASC`,
+      [id]
+    );
     try {
       const [exclusions]: any = await pool.query(
         "SELECT normalized_identifier FROM campaign_inventory_exclusions WHERE campaign_type = 'miniapp' AND campaign_id = ? AND inventory_type = 'miniapp' ORDER BY id",
@@ -36,7 +56,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
       rows[0].excluded_inventory = [];
     }
-    return NextResponse.json(rows[0]);
+    return NextResponse.json({ ...rows[0], ...stats, chart_data: chartData });
   } catch (error: any) {
     console.error("Miniapp campaign GET error:", error);
     const status = getAuthErrorStatus(error);

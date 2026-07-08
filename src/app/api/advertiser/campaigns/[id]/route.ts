@@ -6,6 +6,45 @@ import { deleteActiveCampaignPosts } from "@/lib/campaignPostDeletion";
 import { settleCampaignEngagementBeforeDeletion } from "@/lib/channelSettlement";
 import { columnExists } from "@/lib/schemaGuards";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import { normalizeCampaignCategory } from "@/lib/campaignCategories";
+import { normalizeAdvertiserTargeting, targetingDbParams } from "@/lib/advertiserTargeting";
+import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
+import { validatePostbackUrl } from "@/lib/conversionTracking";
+import { hasRestrictedClickCreativeContent } from "@/lib/campaignCreative";
+import { sendTelegramMessage } from "@/lib/telegram";
+
+async function safeNotify(telegramId: unknown, message: string) {
+  if (!telegramId) return;
+  try {
+    await sendTelegramMessage(String(telegramId), message);
+  } catch {
+    // Best-effort notification.
+  }
+}
+
+function cleanString(value: unknown) {
+  return String(value ?? "").trim();
+}
+
+async function uploadCampaignImage(imageFile: File | null) {
+  if (!imageFile || imageFile.size === 0) return null;
+  if (imageFile.size > 1024 * 1024) {
+    throw new Error("Image size cannot exceed 1MB");
+  }
+  const endpoint = process.env.IMG_API_ENDPOINT;
+  if (!endpoint) throw new Error("Image upload is not configured");
+
+  const imgApiFormData = new FormData();
+  imgApiFormData.append("action", "upload");
+  imgApiFormData.append("image", imageFile);
+
+  const imgRes = await fetch(endpoint, { method: "POST", body: imgApiFormData });
+  const imgData = await imgRes.json().catch(() => ({}));
+  if (!imgData.success || !imgData.data?.url) {
+    throw new Error(imgData.message || "Image upload failed");
+  }
+  return String(imgData.data.url);
+}
 
 export async function GET(
   request: Request,
@@ -33,6 +72,16 @@ export async function GET(
     }
 
     const campaign = campaignRows[0];
+    try {
+      const [exclusions] = await pool.query<Array<RowDataPacket & { normalized_identifier: string }>>(
+        "SELECT normalized_identifier FROM campaign_inventory_exclusions WHERE campaign_type = 'campaign' AND campaign_id = ? AND inventory_type = ? ORDER BY id",
+        [id, campaign.type === "broadcast" ? "bot" : "channel"]
+      );
+      campaign.excluded_inventory = exclusions.map((row) => row.normalized_identifier);
+    } catch (error: any) {
+      if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
+      campaign.excluded_inventory = [];
+    }
 
     // Stats based on campaign type
     let extraData: any = {};
@@ -131,12 +180,21 @@ export async function PATCH(
     const { id } = await params;
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
-    const body = await request.json();
+    const contentType = request.headers.get("content-type") || "";
+    const isMultipart = contentType.includes("multipart/form-data");
+    const formData = isMultipart ? await request.formData() : null;
+    const body = formData ? Object.fromEntries(formData.entries()) : await request.json();
     const { action } = body;
 
     const [campaignRows]: any = await pool.query(
-      `SELECT id, name, status, budget, cpm, pause_reason, resume_locked_until, auto_reactivate
-       FROM campaigns WHERE id = ? AND user_id = ?`,
+      `SELECT c.id, c.user_id, c.name, c.campaign_title, c.status, c.budget, c.total_budget, c.cpm, c.cpc,
+          c.pause_reason, c.resume_locked_until, c.auto_reactivate, c.type, c.message_text, c.image_url,
+          c.link, c.postback_url, c.button_text, c.category, c.continents, c.countries, c.languages,
+          c.vpn_policy, c.device_policy, c.os_policy, c.start_at, c.end_at, c.daily_budget_limit,
+          c.frequency_cap_per_user, u.telegram_id
+       FROM campaigns c
+       LEFT JOIN users u ON u.id = c.user_id
+       WHERE c.id = ? AND c.user_id = ?`,
       [id, user.id]
     );
 
@@ -145,6 +203,120 @@ export async function PATCH(
     }
 
     const campaign = campaignRows[0];
+
+    if (action === "edit") {
+      if (["deleted", "completed", "budget_exhausted"].includes(String(campaign.status))) {
+        return NextResponse.json({ error: "This campaign cannot be edited in its current status" }, { status: 400 });
+      }
+
+      const nextName = cleanString(body.name || campaign.name);
+      const nextTitle = cleanString(body.campaign_title || campaign.campaign_title);
+      const nextMessage = String(body.message_text ?? campaign.message_text ?? "");
+      const nextLink = cleanString(body.link || campaign.link);
+      const nextPostbackUrl = validatePostbackUrl(body.postback_url ?? campaign.postback_url);
+      const nextButtonText = cleanString(body.button_text || campaign.button_text);
+      const nextCategory = normalizeCampaignCategory(body.category ?? campaign.category);
+      const nextContinents = cleanString(body.continents || campaign.continents || "[]");
+      const imageFile = formData?.get("image") instanceof File ? formData.get("image") as File : null;
+      const uploadedImageUrl = await uploadCampaignImage(imageFile);
+      const nextImageUrl = uploadedImageUrl || cleanString(body.image_url || campaign.image_url || "");
+      const targeting = normalizeAdvertiserTargeting({
+        countries: body.countries ?? campaign.countries,
+        languages: body.languages ?? campaign.languages,
+        vpn_policy: body.vpn_policy ?? campaign.vpn_policy,
+        device_policy: body.device_policy ?? campaign.device_policy,
+        os_policy: body.os_policy ?? campaign.os_policy,
+        start_at: body.start_at ?? campaign.start_at,
+        end_at: body.end_at ?? campaign.end_at,
+        daily_budget_limit: body.daily_budget_limit ?? campaign.daily_budget_limit,
+        frequency_cap_per_user: body.frequency_cap_per_user ?? campaign.frequency_cap_per_user,
+      }, Number(campaign.total_budget || campaign.budget || 0));
+
+      if (nextName.length < 3 || nextName.length > 50) {
+        return NextResponse.json({ error: "Campaign name must be 3-50 characters" }, { status: 400 });
+      }
+      if (nextTitle.length < 3 || nextTitle.length > 255) {
+        return NextResponse.json({ error: "Campaign title must be 3-255 characters" }, { status: 400 });
+      }
+      if (!nextMessage.trim() || nextMessage.length > 1000) {
+        return NextResponse.json({ error: "Message text must be 1-1000 characters" }, { status: 400 });
+      }
+      if (!nextButtonText || nextButtonText.length > 64) {
+        return NextResponse.json({ error: "Button text is required" }, { status: 400 });
+      }
+      try {
+        const parsed = new URL(nextLink);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("invalid_protocol");
+      } catch {
+        return NextResponse.json({ error: "Promotion URL must be a valid HTTP or HTTPS URL" }, { status: 400 });
+      }
+      if (campaign.type === "clicks" && (hasRestrictedClickCreativeContent(nextTitle) || hasRestrictedClickCreativeContent(nextMessage))) {
+        return NextResponse.json({
+          error: "Click campaigns cannot contain usernames (@) or links in the campaign title or message text. Use the button for your link.",
+        }, { status: 400 });
+      }
+
+      const sensitiveChanged = [
+        String(campaign.campaign_title || "") !== nextTitle,
+        String(campaign.message_text || "") !== nextMessage,
+        String(campaign.image_url || "") !== nextImageUrl,
+        String(campaign.link || "") !== nextLink,
+        String(campaign.button_text || "") !== nextButtonText,
+      ].some(Boolean);
+
+      const updates = [
+        "name = ?",
+        "campaign_title = ?",
+        "message_text = ?",
+        "image_url = ?",
+        "link = ?",
+        "postback_url = ?",
+        "button_text = ?",
+        "category = ?",
+        "continents = ?",
+        "countries = ?",
+        "languages = ?",
+        "vpn_policy = ?",
+        "device_policy = ?",
+        "os_policy = ?",
+        "start_at = ?",
+        "end_at = ?",
+        "daily_budget_limit = ?",
+        "frequency_cap_per_user = ?",
+        "updated_at = NOW()",
+      ];
+      const values: unknown[] = [
+        nextName,
+        nextTitle,
+        nextMessage,
+        nextImageUrl || null,
+        nextLink,
+        nextPostbackUrl,
+        nextButtonText,
+        nextCategory,
+        nextContinents,
+        ...targetingDbParams(targeting),
+      ];
+
+      if (sensitiveChanged) {
+        updates.push("status = 'pending'", "rejection_reason = NULL");
+      }
+
+      values.push(id, user.id);
+      await pool.query(`UPDATE campaigns SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`, values);
+      await replaceCampaignExclusions(pool, {
+        campaignType: "campaign",
+        campaignId: Number(id),
+        inventoryType: campaign.type === "broadcast" ? "bot" : "channel",
+        identifiers: body.excluded_inventory,
+      });
+
+      if (sensitiveChanged) {
+        await safeNotify(campaign.telegram_id, `Your campaign "${nextName}" was updated and sent for review. Delivery will resume after approval.`);
+      }
+
+      return NextResponse.json({ success: true, resubmitted: sensitiveChanged, status: sensitiveChanged ? "pending" : campaign.status });
+    }
 
     if (action === "toggle") {
       if (campaign.status === "pending") {

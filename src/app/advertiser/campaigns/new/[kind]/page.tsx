@@ -63,6 +63,8 @@ export default function NewCampaignWizardPage() {
   const searchParams = useSearchParams();
   const isBotCampaign = params.kind === "bot";
   const presetType = searchParams.get("type");
+  const editId = searchParams.get("edit");
+  const isEditMode = Boolean(editId);
   const defaultType = isBotCampaign ? "broadcast" : (presetType === "clicks" ? "clicks" : "views");
 
   const [step, setStep] = useState(1);
@@ -124,7 +126,7 @@ export default function NewCampaignWizardPage() {
   const [selectedInventoryIds, setSelectedInventoryIds] = useState<number[]>([]);
 
   useEffect(() => {
-    setTitle(isBotCampaign ? "Bot Campaign" : "Channel Campaign");
+    setTitle(isEditMode ? "Edit Campaign" : isBotCampaign ? "Bot Campaign" : "Channel Campaign");
     let cancelled = false;
 
     apiFetch("/api/settings")
@@ -149,19 +151,77 @@ export default function NewCampaignWizardPage() {
         const defaultCpm = isBotCampaign
           ? recBroadcast.toString()
           : presetType === "clicks" ? recClicks.toString() : recViews.toString();
-        setFormData(prev => ({
-          ...prev,
-          cpm: defaultCpm,
-          cpc: presetType === "clicks" ? recClicks.toString() : "",
-          budget: data.min_campaign_budget || "10.0"
-        }));
+        if (!isEditMode) {
+          setFormData(prev => ({
+            ...prev,
+            cpm: defaultCpm,
+            cpc: presetType === "clicks" ? recClicks.toString() : "",
+            budget: data.min_campaign_budget || "10.0"
+          }));
+        }
       })
       .catch((err) => console.error("Failed to fetch settings:", err));
 
     return () => {
       cancelled = true;
     };
-  }, [isBotCampaign, setTitle]);
+  }, [isBotCampaign, isEditMode, setTitle]);
+
+  useEffect(() => {
+    if (!isEditMode || !editId) return;
+    let cancelled = false;
+    setIsLoading(true);
+    apiFetch(`/api/advertiser/campaigns/${editId}`)
+      .then((res) => res.json().then((data) => ({ data, ok: res.ok })))
+      .then(({ data, ok }) => {
+        if (cancelled) return;
+        if (!ok) {
+          setError(data.error || "Failed to load campaign");
+          return;
+        }
+        const continents = (() => {
+          try {
+            const parsed = JSON.parse(String(data.continents || "[]"));
+            return Array.isArray(parsed) ? parsed : CONTINENTS.map((continent) => continent.id);
+          } catch {
+            return CONTINENTS.map((continent) => continent.id);
+          }
+        })();
+        setFormData((previous) => ({
+          ...previous,
+          name: data.name || "",
+          campaign_title: data.campaign_title || "",
+          category: data.category || ALL_CATEGORIES,
+          type: data.type || defaultType,
+          message_text: data.message_text || "",
+          link: data.link || "",
+          postback_url: data.postback_url || "",
+          button_text: data.button_text || "",
+          budget: String(data.total_budget || data.budget || ""),
+          cpm: String(data.cpm || ""),
+          cpc: String(data.cpc || data.cpm || ""),
+          continents,
+          countries: Array.isArray(data.countries) ? data.countries.join(",") : String(data.countries || ""),
+          languages: Array.isArray(data.languages) ? data.languages.join(",") : String(data.languages || ""),
+          vpn_policy: data.vpn_policy || "allow_all",
+          device_policy: data.device_policy || "all",
+          os_policy: data.os_policy || "all",
+          start_at: data.start_at ? String(data.start_at).slice(0, 16) : "",
+          end_at: data.end_at ? String(data.end_at).slice(0, 16) : "",
+          daily_budget_limit: data.daily_budget_limit ? String(data.daily_budget_limit) : "",
+          frequency_cap_per_user: data.frequency_cap_per_user ? String(data.frequency_cap_per_user) : "",
+          excluded_inventory: Array.isArray(data.excluded_inventory) ? data.excluded_inventory.join("\n") : "",
+        }));
+        setImagePreview(data.image_url || null);
+      })
+      .catch(() => setError("Failed to load campaign"))
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [defaultType, editId, isEditMode]);
 
   useEffect(() => {
     if (!categoryDropdownOpen) return;
@@ -246,7 +306,7 @@ export default function NewCampaignWizardPage() {
       setError("Please select a button text");
       return;
     }
-    if (!Number.isFinite(Number(formData.budget)) || Number(formData.budget) < 10) {
+    if (!isEditMode && (!Number.isFinite(Number(formData.budget)) || Number(formData.budget) < 10)) {
       setError("Total budget must be at least $10.");
       return;
     }
@@ -283,6 +343,7 @@ export default function NewCampaignWizardPage() {
     setError("");
 
     const submitData = new FormData();
+    if (isEditMode) submitData.append("action", "edit");
     Object.entries(formData).forEach(([key, value]) => {
       if (key === "continents") {
         submitData.append(key, JSON.stringify(value));
@@ -300,8 +361,8 @@ export default function NewCampaignWizardPage() {
     submitData.append("direct_inventory_ids", JSON.stringify([]));
 
     try {
-      const res = await apiFetch("/api/advertiser/campaigns", {
-        method: "POST",
+      const res = await apiFetch(isEditMode ? `/api/advertiser/campaigns/${editId}` : "/api/advertiser/campaigns", {
+        method: isEditMode ? "PATCH" : "POST",
         body: submitData,
       });
       const data = await res.json();
@@ -387,10 +448,10 @@ export default function NewCampaignWizardPage() {
             {isBotCampaign ? "Bot Campaign" : "Channel Campaign"}
           </div>
           <h1 className="text-3xl font-black uppercase tracking-tight text-slate-900">
-            {isBotCampaign ? "Create Bot Ad" : "Create Channel Ad"}
+            {isEditMode ? "Edit Campaign" : isBotCampaign ? "Create Bot Ad" : "Create Channel Ad"}
           </h1>
           <p className="text-sm font-semibold text-slate-500">
-            Build your campaign creative, targeting, and budget.
+            {isEditMode ? "Update creative, targeting, and exclusions. Sensitive creative changes go back to review." : "Build your campaign creative, targeting, and budget."}
           </p>
         </div>
 
@@ -951,8 +1012,9 @@ export default function NewCampaignWizardPage() {
                     max={cpmMax}
                     step="0.05"
                     value={bidValue}
+                    disabled={isEditMode}
                     onChange={(e) => setFormData({ ...formData, [bidField]: e.target.value, ...(formData.type === "clicks" ? { cpm: e.target.value } : {}) })}
-                    className="cpm-range absolute inset-x-0 w-full"
+                    className="cpm-range absolute inset-x-0 w-full disabled:cursor-not-allowed disabled:opacity-50"
                     style={{ height: 10 }}
                   />
                 </div>

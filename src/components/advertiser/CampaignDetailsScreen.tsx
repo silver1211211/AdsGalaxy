@@ -13,6 +13,7 @@ import { composeCampaignCreativeText } from "@/lib/campaignCreative";
 interface Campaign {
   id: number;
   name: string;
+  kind?: "channel" | "bot" | "miniapp";
   type: string;
   status: string;
   budget: string | number;
@@ -36,6 +37,10 @@ interface Campaign {
   created_at: string;
   total_clicks?: number;
   total_views?: number;
+  impressions?: number;
+  clicks?: number;
+  spend?: number;
+  ctr?: number;
   total_deliveries?: number;
   total_spent?: number;
   posts?: any[];
@@ -88,8 +93,9 @@ function formatMoney(value: unknown) {
 }
 
 function computeCtr(campaign: Campaign) {
-  const clicks = Number(campaign.total_clicks || 0);
-  const views = Number(campaign.total_views || 0);
+  if (campaign.kind === "miniapp" && campaign.ctr !== undefined) return Number(campaign.ctr);
+  const clicks = Number(campaign.total_clicks ?? campaign.clicks ?? 0);
+  const views = Number(campaign.total_views ?? campaign.impressions ?? 0);
   if (views <= 0) return null;
   return (clicks / views) * 100;
 }
@@ -173,9 +179,30 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
   const fetchFullDetails = async () => {
     setIsLoading(true);
     try {
-      const res = await apiFetch(`/api/advertiser/campaigns/${initialCampaign.id}`);
+      const endpoint = initialCampaign.kind === "miniapp"
+        ? `/api/advertiser/miniapp-rewarded-campaigns/${initialCampaign.id}`
+        : `/api/advertiser/campaigns/${initialCampaign.id}`;
+      const res = await apiFetch(endpoint);
       const data = await res.json();
-      if (res.ok) setCampaign(data);
+      if (res.ok) {
+        setCampaign(initialCampaign.kind === "miniapp"
+          ? {
+            ...initialCampaign,
+            ...data,
+            name: data.campaign_name || initialCampaign.name,
+            type: "rewarded",
+            campaign_title: data.title || initialCampaign.campaign_title || data.campaign_name || initialCampaign.name,
+            message_text: data.description || "",
+            button_text: data.cta_text || "",
+            link: data.landing_url || "",
+            cpm: data.advertiser_cpm_bid || initialCampaign.cpm,
+            budget: data.remaining_budget ?? data.budget ?? initialCampaign.budget,
+            total_views: Number(data.impressions || initialCampaign.impressions || 0),
+            total_clicks: Number(data.clicks || initialCampaign.clicks || 0),
+            total_spent: Number(data.spend || initialCampaign.spend || 0),
+          }
+          : data);
+      }
     } catch (err) {
       console.error("Fetch Details Error:", err);
     } finally {
@@ -200,7 +227,9 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
   const ctr = computeCtr(campaign);
   const cpc = computeCpc(campaign);
   const progress = computeProgress(campaign);
-  const spentDisplay = campaign.type === "broadcast" ? formatMoney(campaign.total_spent) : "—";
+  const spentDisplay = campaign.type === "broadcast" || campaign.kind === "miniapp"
+    ? formatMoney(campaign.total_spent ?? campaign.spend)
+    : "—";
 
   return (
     <motion.div
@@ -259,7 +288,27 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
         <div className="space-y-4">
           <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">Performance</h3>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-6">
-            {campaign.type === 'broadcast' ? (
+            {campaign.kind === "miniapp" ? (
+              <>
+                <StatCard
+                  icon={Eye}
+                  label="Impressions"
+                  tone="indigo"
+                  value={isLoading ? <SkeletonBlock className="h-6 w-10" /> : Number(campaign.total_views ?? campaign.impressions ?? 0).toLocaleString()}
+                />
+                <StatCard
+                  icon={MousePointer2}
+                  label="Clicks"
+                  tone="blue"
+                  value={isLoading ? <SkeletonBlock className="h-6 w-10" /> : Number(campaign.total_clicks ?? campaign.clicks ?? 0).toLocaleString()}
+                />
+                <StatCard
+                  icon={TrendingUp}
+                  label="CTR"
+                  value={isLoading ? <SkeletonBlock className="h-6 w-10" /> : (ctr !== null ? `${ctr.toFixed(2)}%` : "—")}
+                />
+              </>
+            ) : campaign.type === 'broadcast' ? (
               <StatCard
                 icon={Send}
                 label="Total Sent"

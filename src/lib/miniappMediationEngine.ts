@@ -16,6 +16,9 @@ import {
 } from "@/lib/miniappOptimization";
 import { getDisabledMiniappNetworks, isMonetagTestModeEnabled } from "@/lib/productionSafety";
 
+const INTERNAL_SHARE_WITH_EXTERNAL = 0.3;
+const EXTERNAL_SHARE_WITH_INTERNAL = 0.7;
+
 const FALLBACK_ERROR_CODES = new Set([
   "SDK_LOAD_FAILED",
   "SDK_UNAVAILABLE",
@@ -122,9 +125,9 @@ function weightedNetworkWeight(network: NetworkRow, remaining: NetworkRow[]) {
   const internalRemaining = remaining.some((item) => item.network_name === INTERNAL_NETWORK_NAME);
   const externalRemaining = remaining.filter((item) => item.network_name !== INTERNAL_NETWORK_NAME);
   if (network.network_name === INTERNAL_NETWORK_NAME) {
-    return externalRemaining.length > 0 ? 0.18 : 1;
+    return externalRemaining.length > 0 ? INTERNAL_SHARE_WITH_EXTERNAL : 1;
   }
-  if (internalRemaining) return 0.82 / Math.max(1, externalRemaining.length);
+  if (internalRemaining) return EXTERNAL_SHARE_WITH_INTERNAL / Math.max(1, externalRemaining.length);
   return 1 / Math.max(1, externalRemaining.length);
 }
 
@@ -356,8 +359,8 @@ export async function selectMediationNetwork(input: {
       final_reason: finalReason,
       monetag_test_mode_forced: Boolean(monetagTestCandidate),
       weighting: {
-        internal_target_share_when_external_available: 0.18,
-        external_target_share_when_internal_available: 0.82,
+        internal_target_share_when_external_available: INTERNAL_SHARE_WITH_EXTERNAL,
+        external_target_share_when_internal_available: EXTERNAL_SHARE_WITH_INTERNAL,
       },
       duration_ms: Date.now() - startedAt,
     },

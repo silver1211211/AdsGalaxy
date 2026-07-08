@@ -288,12 +288,12 @@ export async function selectInternalRewardedCampaign(input: {
          FROM miniapp_internal_ad_impressions
          WHERE campaign_id = ?
            AND telegram_user_id = ?
-           AND created_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
-        [row.id, input.telegramUserId, settings.internal_campaign_user_cooldown_minutes]
+           AND created_at >= DATE_SUB(NOW(), INTERVAL ? SECOND)`,
+        [row.id, input.telegramUserId, settings.internal_campaign_user_cooldown_seconds]
       );
       if (Number(cooldownRow?.seen || 0) > 0) {
         skipReason = "internal_user_cooldown";
-        reject(row, skipReason, { cooldown_minutes: settings.internal_campaign_user_cooldown_minutes, seen: cooldownRow?.seen });
+        reject(row, skipReason, { cooldown_seconds: settings.internal_campaign_user_cooldown_seconds, seen: cooldownRow?.seen });
         continue;
       }
     }

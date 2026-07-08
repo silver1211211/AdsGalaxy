@@ -4,6 +4,7 @@ import pool from "@/lib/db";
 import { requireMiniappTrackingUser } from "@/lib/publicSdkAuth";
 import { recordMiniappAdOpportunity } from "@/lib/miniappMonetagProtection";
 import { createMediationAttempt } from "@/lib/miniappMediationEngine";
+import { INTERNAL_NETWORK_NAME } from "@/lib/miniappInternalAds";
 import type { MiniAppAdFormat } from "@/lib/miniappNetworkAdapters";
 import { isMiniappNetworkGloballyDisabled, requireAdServingAllowed } from "@/lib/productionSafety";
 
@@ -106,10 +107,15 @@ export async function POST(request: Request) {
     await conn.commit();
 
     if (!decision.success) {
+      const internalCooldownNoFill = decision.skipped_networks.some(
+        (network) => network.network_name === INTERNAL_NETWORK_NAME && network.reason === "internal_user_cooldown"
+      ) && !decision.candidate_networks.some((network) => network !== INTERNAL_NETWORK_NAME);
       return NextResponse.json({
         success: false,
         error_code: decision.error_code,
-        message: "No advertisements are available at the moment. Please try again shortly.",
+        message: internalCooldownNoFill
+          ? "You’re requesting ads too quickly. Please wait a moment and try again."
+          : "No advertisements are available at the moment. Please try again shortly.",
         request_id: decision.request_id,
         fallback_available: false,
         ad_format: decision.ad_format,

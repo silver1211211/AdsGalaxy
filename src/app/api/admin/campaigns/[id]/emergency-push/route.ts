@@ -21,6 +21,7 @@ import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
 import { createSystemLog } from "@/lib/systemLogs";
 import { botUserBroadcastEligibleCondition } from "@/lib/botAudience";
 import { composeCampaignCreativeText } from "@/lib/campaignCreative";
+import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 
 export const dynamic = "force-dynamic";
 
@@ -60,6 +61,7 @@ type ChannelRow = RowDataPacket & {
 type BotRow = RowDataPacket & {
   id: number;
   user_id: number;
+  bot_username: string | null;
   bot_token: string;
   bot_token_encrypted: string | null;
   categories: string | string[] | null;
@@ -288,9 +290,13 @@ async function getEligibleChannels(campaign: CampaignRow, schema: EmergencySchem
     : [campaign.user_id, MAX_EMERGENCY_CHANNELS + 1]
   );
 
+  const channelExclusions = await loadCampaignExclusions(pool, "campaign", [Number(campaign.id)], "channel");
+  const eligibleChannels = channels.filter((channel) => !campaignExcludesIdentifier(channelExclusions, Number(campaign.id), channel.username));
+
   return {
-    eligibleChannels: channels.slice(0, MAX_EMERGENCY_CHANNELS),
-    skippedByLimit: Math.max(0, channels.length - MAX_EMERGENCY_CHANNELS),
+    eligibleChannels: eligibleChannels.slice(0, MAX_EMERGENCY_CHANNELS),
+    skippedByExclusion: channels.length - eligibleChannels.length,
+    skippedByLimit: Math.max(0, eligibleChannels.length - MAX_EMERGENCY_CHANNELS),
   };
 }
 
@@ -433,7 +439,9 @@ async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: Bro
     if (health.ok) healthyBots.push(bot);
   }
 
-  const eligibleBots = healthyBots.filter((bot) => campaignMatchesBot(campaign, bot));
+  const botExclusions = await loadCampaignExclusions(pool, "campaign", [Number(campaign.id)], "bot");
+  const exclusionFilteredBots = healthyBots.filter((bot) => !campaignExcludesIdentifier(botExclusions, Number(campaign.id), bot.bot_username));
+  const eligibleBots = exclusionFilteredBots.filter((bot) => campaignMatchesBot(campaign, bot));
   const dispatches: Array<{ bot: BotRow; user: BroadcastUserRow }> = [];
 
   for (const bot of eligibleBots) {
@@ -466,6 +474,7 @@ async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: Bro
 
   return {
     dispatches: dispatches.slice(0, MAX_EMERGENCY_BROADCAST_USERS),
+    skippedByExclusion: healthyBots.length - exclusionFilteredBots.length,
     skippedByLimit: Math.max(0, dispatches.length - MAX_EMERGENCY_BROADCAST_USERS),
   };
 }
@@ -719,7 +728,7 @@ async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode
   const schema = await getBroadcastSchema();
   requireBillableBroadcastSchema(schema);
   const rewardPercentage = await getBroadcastRewardPercentage();
-  const { dispatches, skippedByLimit } = await getEligibleBroadcastDispatches(campaign, schema);
+  const { dispatches, skippedByLimit, skippedByExclusion } = await getEligibleBroadcastDispatches(campaign, schema);
   const failedUsers: Array<{ botId: number; userId: number; reason: string }> = [];
   let attempted = 0;
   let posted = 0;
@@ -748,7 +757,7 @@ async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode
   }
 
   const failed = failedUsers.length;
-  const skipped = skippedByLimit;
+  const skipped = skippedByLimit + skippedByExclusion;
 
   await recordAdminActionAudit({
     action: "emergency_push",
@@ -864,11 +873,11 @@ export async function POST(
 
       deleteSummary = await deleteActivePostsForReplacementSafely(campaign.id);
     }
-    const { eligibleChannels, skippedByLimit } = await getEligibleChannels(campaign, schema, mode);
+    const { eligibleChannels, skippedByLimit, skippedByExclusion } = await getEligibleChannels(campaign, schema, mode);
     const failedChannels: Array<{ channelId: number; reason: string }> = [];
     let attempted = 0;
     let posted = 0;
-    let skipped = skippedByLimit;
+    let skipped = skippedByLimit + skippedByExclusion;
 
     for (const channel of eligibleChannels) {
       if (mode === "fill_empty_slots" && await hasActiveUndeletedPost(channel.id, schema)) {

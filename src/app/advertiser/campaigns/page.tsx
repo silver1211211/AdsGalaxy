@@ -351,7 +351,11 @@ export default function MyCampaignsPage() {
 
   const openEdit = (campaign: Campaign) => {
     setMenuOpenId(null);
-    router.push(`/advertiser/miniapp-rewarded?edit=${campaign.id}`);
+    if (campaign.kind === "miniapp") {
+      router.push(`/advertiser/miniapp-rewarded?edit=${campaign.id}`);
+      return;
+    }
+    router.push(`/advertiser/campaigns/new/${campaign.kind}?edit=${campaign.id}`);
   };
 
   const getStatusIcon = (status: string) => {
@@ -499,8 +503,14 @@ export default function MyCampaignsPage() {
                           {campaign.kind === 'miniapp' ? (
                             <>
                               <button
-                                onClick={() => openEdit(campaign)}
+                                onClick={() => { setViewingCampaign(campaign); setMenuOpenId(null); }}
                                 className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all"
+                              >
+                                <FileText size={16} /> View Details
+                              </button>
+                              <button
+                                onClick={() => openEdit(campaign)}
+                                className="mt-1 w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all"
                               >
                                 <Edit2 size={16} /> Edit Campaign
                               </button>
@@ -526,6 +536,12 @@ export default function MyCampaignsPage() {
                                 className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all"
                               >
                                 <FileText size={16} /> View Details
+                              </button>
+                              <button
+                                onClick={() => openEdit(campaign)}
+                                className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all mt-1"
+                              >
+                                <Edit2 size={16} /> Edit Campaign
                               </button>
                               <button
                                 onClick={() => { setFundingCampaign(campaign); setMenuOpenId(null); }}

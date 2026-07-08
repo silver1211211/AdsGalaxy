@@ -6,6 +6,7 @@ import { getDisabledMiniappNetworks } from "@/lib/productionSafety";
 export type MiniAppOptimizationSettings = {
   internal_ads_max_share_percent: number;
   internal_campaign_user_cooldown_minutes: number;
+  internal_campaign_user_cooldown_seconds: number;
   internal_campaign_miniapp_max_share_percent: number;
   network_failure_disable_threshold: number;
   network_failure_window_minutes: number;
@@ -56,6 +57,7 @@ type NetworkHealthAggregate = {
 const DEFAULTS: MiniAppOptimizationSettings = {
   internal_ads_max_share_percent: 20,
   internal_campaign_user_cooldown_minutes: 30,
+  internal_campaign_user_cooldown_seconds: 5,
   internal_campaign_miniapp_max_share_percent: 30,
   network_failure_disable_threshold: 5,
   network_failure_window_minutes: 10,
@@ -91,6 +93,7 @@ export async function getMiniAppOptimizationSettings(conn?: PoolConnection): Pro
   return {
     internal_ads_max_share_percent: clamp(toNumber(values.get("internal_ads_max_share_percent"), DEFAULTS.internal_ads_max_share_percent), 0, 100),
     internal_campaign_user_cooldown_minutes: Math.max(1, toNumber(values.get("internal_campaign_user_cooldown_minutes"), DEFAULTS.internal_campaign_user_cooldown_minutes)),
+    internal_campaign_user_cooldown_seconds: Math.max(1, toNumber(values.get("internal_campaign_user_cooldown_seconds"), DEFAULTS.internal_campaign_user_cooldown_seconds)),
     internal_campaign_miniapp_max_share_percent: clamp(toNumber(values.get("internal_campaign_miniapp_max_share_percent"), DEFAULTS.internal_campaign_miniapp_max_share_percent), 0, 100),
     network_failure_disable_threshold: Math.max(1, Math.floor(toNumber(values.get("network_failure_disable_threshold"), DEFAULTS.network_failure_disable_threshold))),
     network_failure_window_minutes: Math.max(1, Math.floor(toNumber(values.get("network_failure_window_minutes"), DEFAULTS.network_failure_window_minutes))),

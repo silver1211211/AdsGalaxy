@@ -14,7 +14,7 @@ const mockAds: InternalAdPayload[] = [
     description: previewDescription,
     cta_text: "Open Demo",
     landing_url: "https://t.me/Ads_Galaxy_bot",
-    image_url: "https://images.unsplash.com/photo-1614728263952-84ea256f9679?auto=format&fit=crop&w=1024&h=1024&q=80",
+    image_url: "https://images.unsplash.com/photo-1614728263952-84ea256f9679?auto=format&fit=crop&w=1080&h=1350&q=80",
     advertiser_logo_url: "/logo.svg",
     admin_cpm: 0,
   },
@@ -24,7 +24,7 @@ const mockAds: InternalAdPayload[] = [
     description: previewDescription,
     cta_text: "View Offer",
     landing_url: "https://t.me/Ads_Galaxy_bot",
-    image_url: "https://images.unsplash.com/photo-1497366754035-f200968a6e72?auto=format&fit=crop&w=1024&h=1024&q=80",
+    image_url: "https://images.unsplash.com/photo-1497366754035-f200968a6e72?auto=format&fit=crop&w=1080&h=1350&q=80",
     advertiser_logo_url: "/logo.svg",
     admin_cpm: 0,
   },
@@ -34,7 +34,7 @@ const mockAds: InternalAdPayload[] = [
     description: previewDescription,
     cta_text: "Play Now",
     landing_url: "https://t.me/Ads_Galaxy_bot",
-    image_url: "https://images.unsplash.com/photo-1511512578047-dfb367046420?auto=format&fit=crop&w=1024&h=1024&q=80",
+    image_url: "https://images.unsplash.com/photo-1511512578047-dfb367046420?auto=format&fit=crop&w=1080&h=1350&q=80",
     advertiser_logo_url: "/logo.svg",
     admin_cpm: 0,
   },
@@ -61,87 +61,6 @@ export default function AdsPreviewPage() {
 
   return (
     <main className="min-h-screen bg-[#eef6ff] px-3 py-3 text-slate-950">
-      <style>{`
-        .agx-rewarded-overlay {
-          padding: 14px !important;
-        }
-
-        .agx-rewarded-card {
-          max-height: calc(100dvh - 28px) !important;
-          overflow: hidden !important;
-          padding: 14px !important;
-        }
-
-        .agx-rewarded-top,
-        .agx-rewarded-advertiser,
-        .agx-rewarded-close {
-          display: none !important;
-        }
-
-        .agx-rewarded-media {
-          width: min(100%, 420px) !important;
-          aspect-ratio: 1 / 1 !important;
-          max-height: min(42dvh, 420px) !important;
-          margin: 0 auto !important;
-          background: transparent !important;
-          border: 0 !important;
-          box-shadow: none !important;
-        }
-
-        .agx-rewarded-hero {
-          max-height: min(42dvh, 420px) !important;
-          object-fit: cover !important;
-          background: transparent !important;
-        }
-
-        .agx-rewarded-body {
-          padding: 12px 0 0 !important;
-        }
-
-        .agx-rewarded-title {
-          display: block !important;
-          width: min(100%, 420px) !important;
-          max-width: 100% !important;
-          margin: 0 auto 8px !important;
-          font-size: 15px !important;
-          line-height: 1.25 !important;
-          font-weight: 950 !important;
-        }
-
-        .agx-rewarded-desc {
-          display: block !important;
-          width: min(100%, 420px) !important;
-          max-width: 100% !important;
-          margin: 0 auto 12px !important;
-          font-size: 13px !important;
-          line-height: 1.35 !important;
-        }
-
-        .agx-rewarded-cta {
-          min-height: 48px !important;
-          padding: 12px 16px !important;
-        }
-
-        .agx-rewarded-sponsored {
-          margin: 12px 0 10px !important;
-          padding-top: 10px !important;
-        }
-
-        .agx-rewarded-countdown {
-          padding: 10px 12px !important;
-          min-height: 64px !important;
-        }
-
-        .agx-rewarded-ring-wrap,
-        .agx-rewarded-ring {
-          width: 44px !important;
-          height: 44px !important;
-        }
-
-        .agx-rewarded-watermark {
-          margin-top: 8px !important;
-        }
-      `}</style>
       <section className="mx-auto w-full max-w-5xl rounded-xl border border-blue-100 bg-white p-3 shadow-xl shadow-blue-100/60">
         <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
           <div>
