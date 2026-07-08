@@ -287,6 +287,7 @@ export default function AdminMiniAppsPage() {
   const [networkTestLoading, setNetworkTestLoading] = useState<string | null>(null);
   const [networkTestResult, setNetworkTestResult] = useState<Record<string, string>>({});
   const [networkTestDetails, setNetworkTestDetails] = useState<Record<string, Record<string, unknown>>>({});
+  const [showNetworkDiagnostics, setShowNetworkDiagnostics] = useState(false);
   const [reportMiniApp, setReportMiniApp] = useState<MiniApp | null>(null);
   const [report, setReport] = useState<MiniAppReport | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
@@ -346,6 +347,8 @@ export default function AdminMiniAppsPage() {
     setApprovalEnabled(Boolean(miniapp.admin_approved_at) || miniapp.status === "approved");
     setNetworksLoading(true);
     setNetworkTestResult({});
+    setNetworkTestDetails({});
+    setShowNetworkDiagnostics(false);
     try {
       const res = await fetch(`/api/admin/miniapps/${miniapp.id}/networks`);
       const data = await res.json().catch(() => ({}));
@@ -621,8 +624,8 @@ export default function AdminMiniAppsPage() {
       {/* Network Configuration Modal */}
       {networkMiniApp && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 p-4">
-          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl border border-slate-200 bg-white shadow-2xl">
-            <div className="flex items-start justify-between border-b border-slate-200 px-6 py-5">
+          <div className="flex max-h-[92vh] w-full max-w-2xl flex-col rounded-xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
               <div>
                 <h3 className="text-base font-bold text-slate-900">Network Configuration</h3>
                 <p className="mt-0.5 text-sm text-slate-500">{networkMiniApp.miniapp_name}</p>
@@ -637,7 +640,14 @@ export default function AdminMiniAppsPage() {
                   </span>
                 </div>
               </div>
-              <div className="flex items-center gap-4">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowNetworkDiagnostics((visible) => !visible)}
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                >
+                  {showNetworkDiagnostics ? "Hide diagnostics" : "Show diagnostics"}
+                </button>
                 <div className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
                   <div className="text-right">
                     <div className={`text-xs font-bold ${approvalEnabled ? "text-emerald-700" : "text-slate-600"}`}>Approval</div>
@@ -654,12 +664,12 @@ export default function AdminMiniAppsPage() {
                     <span className={`inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${approvalEnabled ? "translate-x-6" : "translate-x-1"}`} />
                   </button>
                 </div>
-                <button onClick={() => setNetworkMiniApp(null)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+                <button onClick={() => { setNetworkMiniApp(null); setShowNetworkDiagnostics(false); }} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
                   <X size={18} />
                 </button>
               </div>
             </div>
-            <div className="space-y-3 overflow-y-auto p-6">
+            <div className="space-y-2.5 overflow-y-auto p-4">
               {networksLoading ? (
                 <div className="p-10 text-center"><Loader2 className="mx-auto animate-spin text-blue-600" size={24} /></div>
               ) : networks.map((network, index) => {
@@ -690,9 +700,9 @@ export default function AdminMiniAppsPage() {
                     </div>
                   </div>
                   {network.network_name !== "AdsGalaxyInternal" && (
-                    <div className="mt-4 grid grid-cols-3 gap-3">
+                    <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
                       {network.network_name === "RichAds" ? (
-                        <div className="col-span-2 space-y-3 rounded-lg border border-slate-200 bg-white p-3">
+                        <div className="space-y-3 rounded-lg border border-slate-200 bg-white p-3 sm:col-span-2">
                           <div>
                             <label className="mb-1.5 block text-xs font-semibold text-slate-600">Publisher ID</label>
                             <input value={network.richads_publisher_id || ""} onChange={(e) => setNetworks((prev) => prev.map((item, i) => i === index ? { ...item, richads_publisher_id: e.target.value } : item))} className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-500" placeholder="Your RichAds Publisher ID" />
@@ -708,7 +718,7 @@ export default function AdminMiniAppsPage() {
                           </p>
                         </div>
                       ) : (
-                        <div className="col-span-2">
+                        <div className="sm:col-span-2">
                           <label className="mb-1.5 block text-xs font-semibold text-slate-600">{placementLabels[network.network_name] || "Placement ID"}</label>
                           <input
                             value={network.network_placement_id}
@@ -730,7 +740,7 @@ export default function AdminMiniAppsPage() {
                         />
                       </div>
                       {network.network_name === "Monetag" && (
-                        <div className="col-span-3 flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2">
+                        <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2 sm:col-span-3">
                           <div>
                             <div className="text-xs font-semibold text-slate-700">Monetag Test Mode</div>
                             <div className="text-[11px] text-slate-400">Force Monetag for this Mini App while enabled.</div>
@@ -747,14 +757,28 @@ export default function AdminMiniAppsPage() {
                         </div>
                       )}
                       {configWarnings.length > 0 && (
-                        <div className="col-span-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
+                        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700 sm:col-span-3">
                           {configWarnings.join(" / ")}
                         </div>
                       )}
                     </div>
                   )}
-                  {network.diagnostics && (
+                  {network.network_name === "AdsGalaxyInternal" && (
+                    <div className="mt-3 max-w-32">
+                      <label className="mb-1.5 block text-xs font-semibold text-slate-600">Priority</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={6}
+                        value={network.priority_order || index + 1}
+                        onChange={(e) => setNetworks((prev) => prev.map((item, i) => i === index ? { ...item, priority_order: Number(e.target.value) || index + 1 } : item))}
+                        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                      />
+                    </div>
+                  )}
+                  {showNetworkDiagnostics && network.diagnostics && (
                     <div className="mt-4 grid gap-2 rounded-lg border border-slate-200 bg-white p-3 text-[11px] text-slate-600 sm:grid-cols-2 lg:grid-cols-4">
+                      <div className="font-bold uppercase tracking-wide text-slate-400 sm:col-span-2 lg:col-span-4">Advanced diagnostics</div>
                       {[
                         ["Production", network.diagnostics.production_ready ? "Ready" : "Not ready"],
                         ["SDK", network.diagnostics.sdk_loaded.replace(/_/g, " ")],
@@ -780,40 +804,44 @@ export default function AdminMiniAppsPage() {
                       ))}
                     </div>
                   )}
-                  <div className="mt-3 flex items-center gap-3">
-                    {network.network_name !== "AdsGalaxyInternal" && (
-                      <button
-                        onClick={() => testNetwork(network.network_name)}
-                        disabled={networkTestLoading === network.network_name || networksLoading}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-                      >
-                        {networkTestLoading === network.network_name && <Loader2 className="animate-spin" size={13} />}
-                        Test Init
-                      </button>
-                    )}
-                    {networkTestResult[network.network_name] && (
-                      <span
-                        className={`min-w-0 text-xs font-medium ${networkTestResult[network.network_name].startsWith("OK") ? "text-emerald-600" : "text-red-600"}`}
-                        title={networkTestResult[network.network_name]}
-                      >
-                        {networkTestResult[network.network_name]}
-                      </span>
-                    )}
-                  </div>
-                  {networkTestDetails[network.network_name] && (
-                    <details className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs">
-                      <summary className="cursor-pointer font-bold text-slate-700">View Raw Result / Parsed Result / Timing</summary>
-                      <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 p-3 text-[11px] leading-5 text-slate-100">
-                        {JSON.stringify(networkTestDetails[network.network_name], null, 2)}
-                      </pre>
-                    </details>
+                  {showNetworkDiagnostics && (
+                    <>
+                      <div className="mt-3 flex items-center gap-3">
+                        {network.network_name !== "AdsGalaxyInternal" && (
+                          <button
+                            onClick={() => testNetwork(network.network_name)}
+                            disabled={networkTestLoading === network.network_name || networksLoading}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                          >
+                            {networkTestLoading === network.network_name && <Loader2 className="animate-spin" size={13} />}
+                            Test Init
+                          </button>
+                        )}
+                        {networkTestResult[network.network_name] && (
+                          <span
+                            className={`min-w-0 text-xs font-medium ${networkTestResult[network.network_name].startsWith("OK") ? "text-emerald-600" : "text-red-600"}`}
+                            title={networkTestResult[network.network_name]}
+                          >
+                            {networkTestResult[network.network_name]}
+                          </span>
+                        )}
+                      </div>
+                      {networkTestDetails[network.network_name] && (
+                        <details className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs">
+                          <summary className="cursor-pointer font-bold text-slate-700">View Raw Result / Parsed Result / Timing</summary>
+                          <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 p-3 text-[11px] leading-5 text-slate-100">
+                            {JSON.stringify(networkTestDetails[network.network_name], null, 2)}
+                          </pre>
+                        </details>
+                      )}
+                    </>
                   )}
                 </div>
                 );
               })}
             </div>
-            <div className="flex gap-3 border-t border-slate-200 px-6 py-4">
-              <button onClick={() => setNetworkMiniApp(null)} className="flex-1 rounded-xl border border-slate-200 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50">
+            <div className="sticky bottom-0 z-10 flex shrink-0 gap-3 border-t border-slate-200 bg-white px-5 py-4">
+              <button onClick={() => { setNetworkMiniApp(null); setShowNetworkDiagnostics(false); }} className="flex-1 rounded-xl border border-slate-200 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50">
                 Cancel
               </button>
               <button onClick={saveNetworks} disabled={networksLoading} className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-blue-600 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400">

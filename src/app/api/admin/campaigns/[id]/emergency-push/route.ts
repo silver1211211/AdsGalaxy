@@ -140,20 +140,6 @@ function normalizeFailureReason(value?: string) {
   return "unknown_error";
 }
 
-function campaignMatchesChannel(campaign: CampaignRow, channel: ChannelRow) {
-  const channelCategories = parseJsonArray(channel.categories);
-  const categoryMatches = campaignCategoryMatches(campaign.category, channelCategories);
-
-  if (!categoryMatches) return false;
-
-  const campaignContinents = parseJsonArray(campaign.continents).map(normalizeTarget);
-  const channelContinents = parseJsonArray(channel.audience_continents).map(normalizeTarget);
-
-  return campaignContinents.includes("global")
-    || channelContinents.includes("global")
-    || campaignContinents.some((continent) => channelContinents.includes(continent));
-}
-
 function campaignMatchesBot(campaign: CampaignRow, bot: BotRow) {
   const botCategories = parseJsonArray(bot.categories);
   const categoryMatches = campaignCategoryMatches(campaign.category, botCategories);
@@ -263,6 +249,19 @@ async function hasActiveUndeletedPost(channelId: number, schema: EmergencySchema
   return rows.length > 0;
 }
 
+async function hasActiveUndeletedCampaignPost(campaignId: number, channelId: number, schema: EmergencySchema) {
+  const [rows] = await pool.query<IdRow[]>(`
+    SELECT id
+    FROM campaign_posts cp
+    WHERE cp.campaign_id = ?
+      AND cp.channel_id = ?
+      AND ${getActiveUndeletedCondition(schema)}
+    LIMIT 1
+  `, [campaignId, channelId, ACTIVE_POST_STATUSES]);
+
+  return rows.length > 0;
+}
+
 async function getEligibleChannels(campaign: CampaignRow, schema: EmergencySchema, mode: EmergencyMode) {
   const activeCondition = getActiveUndeletedCondition(schema);
   const emptySlotCondition = mode === "fill_empty_slots"
@@ -272,37 +271,26 @@ async function getEligibleChannels(campaign: CampaignRow, schema: EmergencySchem
           AND ${activeCondition}
       )`
     : "";
-  const duplicateCondition = mode === "fill_empty_slots" ? `AND NOT EXISTS (
-        SELECT 1 FROM campaign_posts cp
-        WHERE cp.campaign_id = ?
-          AND cp.channel_id = c.id
-          AND cp.created_at > NOW() - INTERVAL 24 HOUR
-      )` : "";
 
   const [channels] = await pool.query<ChannelRow[]>(`
     SELECT c.*
     FROM channels c
     WHERE c.status = 'active'
       AND c.is_deleted = FALSE
+      AND c.user_id != ?
       AND c.chat_id IS NOT NULL
       AND c.chat_id != ''
       ${emptySlotCondition}
-      ${duplicateCondition}
     ORDER BY c.id ASC
     LIMIT ?
   `, mode === "fill_empty_slots"
-    ? [ACTIVE_POST_STATUSES, campaign.id, MAX_EMERGENCY_CHANNELS + 1]
-    : [MAX_EMERGENCY_CHANNELS + 1]
+    ? [campaign.user_id, ACTIVE_POST_STATUSES, MAX_EMERGENCY_CHANNELS + 1]
+    : [campaign.user_id, MAX_EMERGENCY_CHANNELS + 1]
   );
 
-  const filtered = channels.filter((channel) => {
-    if (campaign.user_id === channel.user_id) return false;
-    return campaignMatchesChannel(campaign, channel);
-  });
-
   return {
-    eligibleChannels: filtered.slice(0, MAX_EMERGENCY_CHANNELS),
-    skippedByLimit: Math.max(0, filtered.length - MAX_EMERGENCY_CHANNELS),
+    eligibleChannels: channels.slice(0, MAX_EMERGENCY_CHANNELS),
+    skippedByLimit: Math.max(0, channels.length - MAX_EMERGENCY_CHANNELS),
   };
 }
 
@@ -883,9 +871,15 @@ export async function POST(
     let skipped = skippedByLimit;
 
     for (const channel of eligibleChannels) {
-      if (await hasActiveUndeletedPost(channel.id, schema)) {
+      if (mode === "fill_empty_slots" && await hasActiveUndeletedPost(channel.id, schema)) {
         skipped++;
         failedChannels.push({ channelId: channel.id, reason: "active_undeleted_post_exists" });
+        continue;
+      }
+
+      if (mode === "replace_everything" && await hasActiveUndeletedCampaignPost(campaign.id, channel.id, schema)) {
+        skipped++;
+        failedChannels.push({ channelId: channel.id, reason: "active_same_campaign_post_exists" });
         continue;
       }
 
@@ -920,7 +914,7 @@ export async function POST(
       }
     }
 
-    const failed = failedChannels.filter((channel) => channel.reason !== "active_undeleted_post_exists").length;
+    const failed = failedChannels.filter((channel) => !["active_undeleted_post_exists", "active_same_campaign_post_exists"].includes(channel.reason)).length;
 
     await recordAdminActionAudit({
       action: "emergency_push",

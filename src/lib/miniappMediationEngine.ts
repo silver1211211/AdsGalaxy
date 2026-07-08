@@ -208,6 +208,17 @@ export async function selectMediationNetwork(input: {
   const initialEnabledPool = networks
     .filter((network) => Boolean(network.enabled) && isMiniAppNetworkName(network.network_name))
     .map((network) => network.network_name);
+  const trafficRiskLevel = String(miniapp?.traffic_risk_level || "low");
+  const trafficQualityScore = miniapp?.traffic_quality_score ?? null;
+
+  if (trafficRiskLevel === "critical") {
+    mediationDebug("critical_traffic_risk_allowed", {
+      miniapp_id: input.miniappId,
+      traffic_risk_level: trafficRiskLevel,
+      traffic_quality_score: trafficQualityScore,
+      reason: "risk_monitoring_only_ads_allowed",
+    });
+  }
 
   for (const network of networks) {
     if (!isMiniAppNetworkName(network.network_name)) {
@@ -291,11 +302,6 @@ export async function selectMediationNetwork(input: {
 
     if (miniapp.inventory_override === "pause" || miniapp.inventory_override === "blacklist") {
       skipped.push({ network_name: network.network_name, reason: "publisher_inventory_protected" });
-      continue;
-    }
-
-    if (String(miniapp.traffic_risk_level || "low") === "critical") {
-      skipped.push({ network_name: network.network_name, reason: "traffic_quality_ineligible" });
       continue;
     }
 

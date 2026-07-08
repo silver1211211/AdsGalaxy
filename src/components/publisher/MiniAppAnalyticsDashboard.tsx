@@ -65,9 +65,19 @@ function formatMoney(value: number) {
   return `$${value.toFixed(abs > 0 && abs < 1 ? 4 : 2)}`;
 }
 
+function roundedDisplayMoneyValue(value: number) {
+  const abs = Math.abs(value);
+  return Number(value.toFixed(abs > 0 && abs < 1 ? 4 : 2));
+}
+
 function formatRate(value: number, sample: number, kind: "cpm" | "cpc") {
   const confident = kind === "cpm" ? sample > 0 && value > 0 : hasMinimumCpcSample(sample);
   return confident ? formatMoney(value) : "--";
+}
+
+function formatDisplayedCpmFromRevenue(revenue: number, impressions: number) {
+  if (impressions <= 0 || revenue <= 0) return "--";
+  return formatMoney((roundedDisplayMoneyValue(revenue) / impressions) * 1000);
 }
 
 function formatNumber(value: number) {
@@ -243,7 +253,7 @@ export default function MiniAppAnalyticsDashboard({ miniappId }: MiniAppAnalytic
                         <td className="whitespace-nowrap px-3 py-2.5 font-bold text-slate-700">{formatFullDate(row.date)}</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatNumber(row.impressions)}</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatNumber(row.clicks || 0)}</td>
-                        <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatRate(row.net_cpm, row.impressions, "cpm")}</td>
+                        <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatDisplayedCpmFromRevenue(row.publisher_revenue, row.impressions)}</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">{formatRate(row.cpc || 0, row.clicks || 0, "cpc")}</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">{(row.ctr || 0).toFixed(1)}%</td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-900">

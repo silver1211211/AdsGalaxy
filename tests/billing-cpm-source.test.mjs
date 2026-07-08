@@ -14,6 +14,9 @@ const miniappReports = readFileSync("src/lib/miniappReports.ts", "utf8");
 const miniappDashboard = readFileSync("src/components/publisher/MiniAppAnalyticsDashboard.tsx", "utf8");
 const sidebar = readFileSync("src/components/layout/Sidebar.tsx", "utf8");
 const cpcMigration = readFileSync("db/migrations/20260708_0098_campaign_cpc_billing.sql", "utf8");
+const adminDeposits = readFileSync("src/app/api/admin/deposits/route.ts", "utf8");
+const emergencyPush = readFileSync("src/app/api/admin/campaigns/[id]/emergency-push/route.ts", "utf8");
+const modal = readFileSync("src/components/ui/Modal.tsx", "utf8");
 
 function debit(units, bidPerThousand) {
   return Number((Math.floor(units) * (bidPerThousand / 1000)).toFixed(8));
@@ -58,10 +61,24 @@ test("Mini App CPM display and selected average use daily CPM values", () => {
   assert.match(miniappReports, /averageSelectedDailyCpm/);
   assert.match(miniappReports, /metricNumber\(row\.total_impressions\) > 0 && metricNumber\(row\.total_revenue\) > 0/);
   assert.match(miniappDashboard, /kind === "cpm" \? sample > 0 && value > 0 : hasMinimumCpcSample\(sample\)/);
+  assert.match(miniappDashboard, /formatDisplayedCpmFromRevenue\(row\.publisher_revenue, row\.impressions\)/);
+  assert.match(miniappDashboard, /roundedDisplayMoneyValue\(revenue\) \/ impressions\) \* 1000/);
 });
 
 test("publisher Earnings sidebar item is removed", () => {
   const publisherLinksBlock = sidebar.match(/const publisherLinks = \[[\s\S]*?\];/)?.[0] || "";
   assert.doesNotMatch(publisherLinksBlock, /name: "Earnings"/);
   assert.doesNotMatch(publisherLinksBlock, /\/publisher\/earnings/);
+});
+
+test("admin production blockers stay fixed", () => {
+  assert.match(modal, /max-h-\[calc\(100dvh-2rem\)\]/);
+  assert.match(modal, /overflow-y-auto/);
+  assert.doesNotMatch(adminDeposits, /d\.tx_hash/);
+  assert.match(adminDeposits, /d\.txn_id LIKE \?/);
+  assert.match(adminDeposits, /d\.status LIKE \?/);
+  assert.match(emergencyPush, /hasActiveUndeletedCampaignPost/);
+  assert.match(emergencyPush, /mode === "fill_empty_slots" && await hasActiveUndeletedPost/);
+  assert.match(emergencyPush, /mode === "replace_everything" && await hasActiveUndeletedCampaignPost/);
+  assert.doesNotMatch(emergencyPush, /return campaignMatchesChannel\(campaign, channel\)/);
 });

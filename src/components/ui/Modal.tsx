@@ -85,7 +85,7 @@ export default function Modal({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 16 }}
             transition={{ type: "spring", damping: 28, stiffness: 340 }}
-            className="relative w-full max-w-sm bg-white rounded-3xl shadow-[0_20px_60px_rgba(15,23,42,0.16)] overflow-hidden"
+            className="relative flex max-h-[calc(100dvh-2rem)] w-full max-w-sm flex-col overflow-hidden rounded-3xl bg-white shadow-[0_20px_60px_rgba(15,23,42,0.16)]"
           >
             {/* Close button */}
             <button
@@ -97,7 +97,7 @@ export default function Modal({
               <X size={16} />
             </button>
 
-            <div className="p-6 space-y-5">
+            <div className="min-h-0 overflow-y-auto p-6 space-y-5">
               {/* Header */}
               <div className="flex items-start gap-4 pr-10">
                 <div

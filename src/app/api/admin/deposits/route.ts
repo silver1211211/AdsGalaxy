@@ -37,15 +37,16 @@ export async function GET(request: Request) {
 
     if (search) {
       whereClause += ` AND (
-        d.tx_hash LIKE ? OR 
+        d.txn_id LIKE ? OR 
         d.amount LIKE ? OR 
+        d.status LIKE ? OR
         u.first_name LIKE ? OR 
         u.last_name LIKE ? OR 
         u.username LIKE ? OR 
         u.telegram_id LIKE ?
       )`;
       const searchVal = `%${search}%`;
-      queryParams.push(searchVal, searchVal, searchVal, searchVal, searchVal, searchVal);
+      queryParams.push(searchVal, searchVal, searchVal, searchVal, searchVal, searchVal, searchVal);
     }
 
     query += whereClause + " ORDER BY d.id DESC LIMIT ? OFFSET ?";
