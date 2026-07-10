@@ -105,13 +105,13 @@ export async function POST(
     for (let i = 0; i < newChatIds.length; i += 1000) {
       const values = newChatIds.slice(i, i + 1000).map((id) => (
         hasBotUserSource
-          ? [botId, id, id, "manual_publisher", false, "pending_verification"]
-          : [botId, id, id, false, "pending_verification"]
+          ? [botId, id, "manual_publisher", false, "pending_verification"]
+          : [botId, id, false, "pending_verification"]
       ));
       const [insert] = await pool.query<import("mysql2/promise").ResultSetHeader>(
         hasBotUserSource
-          ? "INSERT IGNORE INTO bot_users (bot_id, user_id, chat_id, source, is_active, status) VALUES ?"
-          : "INSERT IGNORE INTO bot_users (bot_id, user_id, chat_id, is_active, status) VALUES ?",
+          ? "INSERT IGNORE INTO bot_users (bot_id, chat_id, source, is_active, status) VALUES ?"
+          : "INSERT IGNORE INTO bot_users (bot_id, chat_id, is_active, status) VALUES ?",
         [values]
       );
       newlyAddedCount += insert.affectedRows;
