@@ -6,6 +6,8 @@ const sdk = readFileSync("src/app/sdk.js/route.ts", "utf8");
 const previewRuntime = readFileSync("src/lib/miniappSdkRuntime.ts", "utf8");
 
 test("internal CTA uses Telegram link APIs and one pending click request", () => {
+  assert.ok(sdk.includes(String.raw`/^https?:\\/\\/(?:www\\.)?(?:t\\.me|telegram\\.me)\\//i`));
+  assert.ok(sdk.includes(String.raw`/^https?:\\/\\//i`));
   assert.match(sdk, /webApp\.openTelegramLink\(url\)/);
   assert.match(sdk, /webApp\.openLink\(url\)/);
   assert.match(sdk, /window\.open\(url,"_blank","noopener,noreferrer"\)/);
