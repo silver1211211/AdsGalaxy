@@ -309,12 +309,11 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
                 />
               </>
             ) : campaign.type === 'broadcast' ? (
-              <StatCard
-                icon={Send}
-                label="Total Sent"
-                tone="blue"
-                value={isLoading ? <SkeletonBlock className="h-6 w-10" /> : campaign.total_deliveries || 0}
-              />
+              <>
+                <StatCard icon={Eye} label="Impressions" tone="indigo" value={isLoading ? <SkeletonBlock className="h-6 w-10" /> : Number(campaign.total_deliveries || 0).toLocaleString()} />
+                <StatCard icon={DollarSign} label="Spend" tone="emerald" value={isLoading ? <SkeletonBlock className="h-6 w-10" /> : `$${Number(campaign.total_spent || 0).toFixed(4)}`} />
+                <StatCard icon={TrendingUp} label="Effective CPM" value={isLoading ? <SkeletonBlock className="h-6 w-10" /> : (Number(campaign.total_deliveries || 0) > 0 ? `$${(Number(campaign.total_spent || 0) / Number(campaign.total_deliveries || 0) * 1000).toFixed(4)}` : "—")} />
+              </>
             ) : (
               <>
                 <StatCard
@@ -356,7 +355,7 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
         {/* Recent Activity Chart */}
         <div className="space-y-4">
           <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">
-            {campaign.type === "broadcast" ? "Daily Deliveries (7 Days)" : "Daily Clicks (7 Days)"}
+            {campaign.type === "broadcast" ? "Daily Impressions (7 Days)" : "Daily Clicks (7 Days)"}
           </h3>
           {isLoading ? (
             <SkeletonBlock className="h-32 w-full" />
@@ -364,7 +363,7 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
             <MiniBarChart
               data={campaign.chart_data || []}
               color="#0c9de8"
-              label={campaign.type === "broadcast" ? "Deliveries per day" : "Clicks per day"}
+              label={campaign.type === "broadcast" ? "Impressions per day" : "Clicks per day"}
             />
           )}
         </div>
@@ -434,7 +433,7 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
                         <div className="flex items-center gap-1.5">
                           <Send size={12} className="text-blue-500" />
                           <span className="text-[10px] font-black text-slate-600">
-                            {stat.delivery_count} Messages
+                            {stat.delivery_count} Impressions
                           </span>
                         </div>
                         <div className="flex items-center gap-1.5 ml-auto pr-2">

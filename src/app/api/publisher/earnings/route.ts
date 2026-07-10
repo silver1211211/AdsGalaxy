@@ -66,9 +66,28 @@ export async function GET(request: Request) {
       ORDER BY mes.created_at DESC
     `, [user.id]);
 
+    const [botBroadcastEarnings]: any = await pool.query(`
+      SELECT
+        MIN(bd.id) as id,
+        NULL as post_id,
+        FLOOR(COUNT(*) / 5) as count,
+        SUM(bd.publisher_reward) as amount,
+        MAX(bd.created_at) as created_at,
+        'sent' as status,
+        'bot' as type,
+        c.name as campaign_name,
+        b.bot_username as channel_username
+      FROM broadcast_deliveries bd
+      JOIN bots b ON b.id = bd.bot_id
+      JOIN campaigns c ON c.id = bd.campaign_id
+      WHERE b.user_id = ? AND bd.status = 'sent'
+      GROUP BY bd.campaign_id, bd.bot_id, DATE(bd.created_at), c.name, b.bot_username
+      ORDER BY created_at DESC
+    `, [user.id]);
+
     // Merge and sort. Deposits, manual credits, refunds, and admin balance
     // adjustments are intentionally not included here.
-    const allEarnings = [...clickSettlements, ...viewSettlements, ...miniappSettlements].sort((a, b) => {
+    const allEarnings = [...clickSettlements, ...viewSettlements, ...miniappSettlements, ...botBroadcastEarnings].sort((a, b) => {
       return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
     });
 

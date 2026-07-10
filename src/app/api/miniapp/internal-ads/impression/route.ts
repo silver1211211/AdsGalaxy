@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { INTERNAL_NETWORK_NAME, recordInternalAdImpression } from "@/lib/miniappInternalAds";
+import { INTERNAL_NETWORK_NAME, internalAdCooldownLockName, recordInternalAdImpression } from "@/lib/miniappInternalAds";
 import { recordNetworkSuccess } from "@/lib/miniappOptimization";
 import { requireMiniappTrackingUser } from "@/lib/publicSdkAuth";
 import {
@@ -42,12 +42,16 @@ function cleanOptionalText(value: unknown) {
 
 export async function POST(request: Request) {
   const conn = await pool.getConnection();
+  let miniappIdForLock = 0;
+  let telegramUserIdForLock = "";
 
   try {
     const body = await request.json();
     const requestId = cleanText(body.request_id);
     const miniappId = Number(body.miniapp_id);
     const telegramUserId = cleanText(body.telegram_user_id);
+    miniappIdForLock = miniappId;
+    telegramUserIdForLock = telegramUserId;
     const eventType = isCompletionEvent(body.event_type) ? body.event_type : "impression_recorded";
     const completed = Boolean(body.completed) || eventType === "completed";
     const watchDurationSeconds = normalizeWatchDuration(body.watch_duration_seconds ?? (completed ? 15 : 1.5));
@@ -182,6 +186,16 @@ export async function POST(request: Request) {
       completionStatus: completed ? "completed" : "impression_recorded",
     });
 
+    if ("cooldown" in result && result.cooldown) {
+      await conn.rollback();
+      return NextResponse.json({
+        success: false,
+        error: "Please wait before viewing another internal ad in this Mini App.",
+        error_code: "INTERNAL_USER_COOLDOWN",
+        request_id: requestId,
+      }, { status: 409 });
+    }
+
     if (result.insufficient_balance) {
       await conn.query(
         "UPDATE miniapp_mediation_requests SET final_result = 'insufficient_balance' WHERE id = ?",
@@ -248,6 +262,16 @@ export async function POST(request: Request) {
         : 400;
     return NextResponse.json({ error: message }, { status });
   } finally {
+    // The impression helper holds this connection-scoped lock through the transaction commit/rollback.
+    // Releasing a lock that was never acquired is harmless and prevents pooled connections retaining it.
+    try {
+      await conn.query("SELECT RELEASE_LOCK(?)", [internalAdCooldownLockName(
+        miniappIdForLock,
+        telegramUserIdForLock
+      )]);
+    } catch {
+      // Connection release remains safe if lock cleanup is unavailable.
+    }
     conn.release();
   }
 }

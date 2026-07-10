@@ -13,6 +13,10 @@ import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campai
 
 export const INTERNAL_NETWORK_NAME = "AdsGalaxyInternal";
 
+export function internalAdCooldownLockName(miniappId: number, telegramUserId: string) {
+  return `adsgalaxy:internal-cooldown:${miniappId}:${telegramUserId}`;
+}
+
 type CampaignRow = RowDataPacket & {
   id: number;
   advertiser_id: number;
@@ -134,6 +138,7 @@ export async function selectInternalRewardedCampaign(input: {
   miniappId: number;
   telegramUserId?: string | number;
   country: string | null;
+  ignoreNetworkShareCap?: boolean;
 }) {
   const startedAt = Date.now();
   const settings = await getMiniAppOptimizationSettings(input.conn);
@@ -154,7 +159,8 @@ export async function selectInternalRewardedCampaign(input: {
     audit.rejected.push({ campaign_id: Number(row.id), reason, ...(details ? { details } : {}) });
   };
   const cap = await canServeInternalAd(input.miniappId, input.conn);
-  if (!cap.allowed) {
+  const bypassingReachedNetworkShareCap = input.ignoreNetworkShareCap === true && cap.reason === "internal_share_cap_reached";
+  if (!cap.allowed && !bypassingReachedNetworkShareCap) {
     return { campaign: null, skip_reason: cap.reason, diagnostics: { ...audit, share_cap: cap, duration_ms: Date.now() - startedAt } };
   }
 
@@ -164,6 +170,31 @@ export async function selectInternalRewardedCampaign(input: {
   );
   if (inventoryRow?.inventory_override === "blacklist" || inventoryRow?.inventory_override === "pause") {
     return { campaign: null, skip_reason: "inventory_paused_by_admin", diagnostics: { ...audit, inventory: inventoryRow, duration_ms: Date.now() - startedAt } };
+  }
+
+  if (input.telegramUserId) {
+    const [[cooldownRow]] = await input.conn.query<RowDataPacket[]>(
+      `SELECT COUNT(*) as seen
+       FROM miniapp_internal_ad_impressions
+       WHERE miniapp_id = ?
+         AND telegram_user_id = ?
+         AND created_at >= DATE_SUB(NOW(), INTERVAL ? SECOND)`,
+      [input.miniappId, input.telegramUserId, settings.internal_campaign_user_cooldown_seconds]
+    );
+    if (Number(cooldownRow?.seen || 0) > 0) {
+      return {
+        campaign: null,
+        skip_reason: "internal_user_cooldown",
+        diagnostics: {
+          ...audit,
+          cooldown: {
+            cooldown_seconds: settings.internal_campaign_user_cooldown_seconds,
+            seen: cooldownRow?.seen,
+          },
+          duration_ms: Date.now() - startedAt,
+        },
+      };
+    }
   }
 
   const [campaigns] = await input.conn.query<CampaignRow[]>(`
@@ -283,19 +314,6 @@ export async function selectInternalRewardedCampaign(input: {
         }
       }
 
-      const [[cooldownRow]] = await input.conn.query<RowDataPacket[]>(
-        `SELECT COUNT(*) as seen
-         FROM miniapp_internal_ad_impressions
-         WHERE campaign_id = ?
-           AND telegram_user_id = ?
-           AND created_at >= DATE_SUB(NOW(), INTERVAL ? SECOND)`,
-        [row.id, input.telegramUserId, settings.internal_campaign_user_cooldown_seconds]
-      );
-      if (Number(cooldownRow?.seen || 0) > 0) {
-        skipReason = "internal_user_cooldown";
-        reject(row, skipReason, { cooldown_seconds: settings.internal_campaign_user_cooldown_seconds, seen: cooldownRow?.seen });
-        continue;
-      }
     }
 
     const budget = toNumber(row.budget);
@@ -357,7 +375,7 @@ export async function selectInternalRewardedCampaign(input: {
   const campaign = weightedRandomCampaign(eligibleCampaigns);
 
   if (!campaign) {
-    return { campaign: null, skip_reason: skipReason, diagnostics: { ...audit, duration_ms: Date.now() - startedAt } };
+    return { campaign: null, skip_reason: skipReason, diagnostics: { ...audit, ...(bypassingReachedNetworkShareCap ? { share_cap: cap, network_share_cap_bypassed: true } : {}), duration_ms: Date.now() - startedAt } };
   }
   audit.selected_campaign_id = Number(campaign.id);
 
@@ -384,6 +402,7 @@ export async function selectInternalRewardedCampaign(input: {
     diagnostics: {
       ...audit,
       cpm_weighted_selection: eligibleCampaigns.map((row) => ({ campaign_id: Number(row.id), cpm: toNumber(row.advertiser_cpm_bid) })),
+      ...(bypassingReachedNetworkShareCap ? { share_cap: cap, network_share_cap_bypassed: true } : {}),
       duration_ms: Date.now() - startedAt,
     },
   };
@@ -401,6 +420,13 @@ export async function recordInternalAdImpression(input: {
   completionQualityScore?: number;
   completionStatus?: string;
 }) {
+  const cooldownLockName = internalAdCooldownLockName(input.miniappId, input.telegramUserId);
+  const [[cooldownLock]] = await input.conn.query<Array<RowDataPacket & { acquired: number }>>(
+    "SELECT GET_LOCK(?, 5) AS acquired",
+    [cooldownLockName]
+  );
+  if (Number(cooldownLock?.acquired || 0) !== 1) throw new Error("internal_cooldown_lock_unavailable");
+
   const [campaignRows] = await input.conn.query<CampaignRow[]>(
     `SELECT id, advertiser_id, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm,
        remaining_budget, daily_budget_limit
@@ -432,6 +458,20 @@ export async function recordInternalAdImpression(input: {
       publisher_revenue: toNumber(existing.publisher_revenue),
       publisher_cpm: toNumber(existing.publisher_cpm),
     };
+  }
+
+  await input.conn.query("SELECT id FROM miniapps WHERE id = ? FOR UPDATE", [input.miniappId]);
+  const settings = await getMiniAppOptimizationSettings(input.conn);
+  const [[cooldownRow]] = await input.conn.query<RowDataPacket[]>(
+    `SELECT COUNT(*) as seen
+     FROM miniapp_internal_ad_impressions
+     WHERE miniapp_id = ?
+       AND telegram_user_id = ?
+       AND created_at >= DATE_SUB(NOW(), INTERVAL ? SECOND)`,
+    [input.miniappId, input.telegramUserId, settings.internal_campaign_user_cooldown_seconds]
+  );
+  if (Number(cooldownRow?.seen || 0) > 0) {
+    return { duplicate: false, insufficient_balance: false, cooldown: true };
   }
 
   const [[billingMiniapp]] = await input.conn.query<RowDataPacket[]>("SELECT miniapp_username FROM miniapps WHERE id = ? LIMIT 1", [input.miniappId]);

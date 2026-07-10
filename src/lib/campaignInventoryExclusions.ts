@@ -14,7 +14,7 @@ export function normalizeTelegramInventoryIdentifier(value: unknown): string | n
   const link = text.match(/^(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me)\/([^/]+)(?:\/.*)?$/i);
   if (link) text = link[1];
   text = text.replace(/^@+/, "");
-  return /^[a-z0-9_]{5,32}$/.test(text) ? text : null;
+  return /^[a-z0-9_]{5,32}$/.test(text) || /^[a-f0-9]{64}$/.test(text) ? text : null;
 }
 
 export function parseCampaignExclusions(value: unknown): string[] {
@@ -70,4 +70,13 @@ export async function loadCampaignExclusions(db: Db, campaignType: ExclusionCamp
 export function campaignExcludesIdentifier(exclusions: Map<number, Set<string>>, campaignId: number, identifier: unknown) {
   const normalized = normalizeTelegramInventoryIdentifier(identifier);
   return !!normalized && exclusions.get(Number(campaignId))?.has(normalized) === true;
+}
+
+export function campaignExcludesChannel(
+  exclusions: Map<number, Set<string>>,
+  campaignId: number,
+  channel: { username?: unknown; invite_link_hash?: unknown }
+) {
+  return [channel.username, channel.invite_link_hash]
+    .some((identifier) => campaignExcludesIdentifier(exclusions, campaignId, identifier));
 }

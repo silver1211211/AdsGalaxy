@@ -139,11 +139,13 @@ export default function AdminBroadcastsPage() {
 
       <div className="space-y-4">
         {/* Header Stats - Compact */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
           {[
             { label: "Total Deliveries", val: totalItems.toLocaleString(), icon: Radio, color: "blue" },
             { label: "Total Revenue", val: `$${deliveries.reduce((acc, d) => acc + parseFloat(d.cost), 0).toFixed(2)}`, icon: DollarSign, color: "emerald" },
             { label: "Pub Rewards", val: `$${deliveries.reduce((acc, d) => acc + parseFloat(d.publisher_reward), 0).toFixed(2)}`, icon: Activity, color: "purple" },
+            { label: "Reserve", val: `$${deliveries.reduce((acc, d) => acc + parseFloat(d.reserve_amount || 0), 0).toFixed(2)}`, icon: Activity, color: "blue" },
+            { label: "Platform", val: `$${deliveries.reduce((acc, d) => acc + parseFloat(d.platform_revenue || 0), 0).toFixed(2)}`, icon: DollarSign, color: "orange" },
             { label: "Unique Users", val: new Set(deliveries.map(d => d.chat_id)).size, icon: Users, color: "orange" },
           ].map((stat, i) => (
             <div key={i} className="bg-white px-3 py-2.5 rounded-lg border border-slate-200 flex items-center gap-3">
@@ -192,6 +194,8 @@ export default function AdminBroadcastsPage() {
                     <th className="px-4 py-2 font-bold text-slate-500 uppercase tracking-wider">Publisher</th>
                     <th className="px-4 py-2 font-bold text-slate-500 uppercase tracking-wider text-right">Cost</th>
                     <th className="px-4 py-2 font-bold text-slate-500 uppercase tracking-wider text-right">Reward</th>
+                    <th className="px-4 py-2 font-bold text-slate-500 uppercase tracking-wider text-right">Reserve</th>
+                    <th className="px-4 py-2 font-bold text-slate-500 uppercase tracking-wider text-right">Platform</th>
                     <th className="px-4 py-2 font-bold text-slate-500 uppercase tracking-wider text-right">Time</th>
                   </tr>
                 </thead>
@@ -228,6 +232,8 @@ export default function AdminBroadcastsPage() {
                       <td className="px-4 py-2 text-slate-700">@{d.publisher_username}</td>
                       <td className="px-4 py-2 text-right font-medium text-slate-900">${parseFloat(d.cost).toFixed(4)}</td>
                       <td className="px-4 py-2 text-right font-medium text-emerald-600">${parseFloat(d.publisher_reward).toFixed(4)}</td>
+                      <td className="px-4 py-2 text-right font-medium text-blue-600">${parseFloat(d.reserve_amount || 0).toFixed(4)}</td>
+                      <td className="px-4 py-2 text-right font-medium text-orange-600">${parseFloat(d.platform_revenue || 0).toFixed(4)}</td>
                       <td className="px-4 py-2 text-right">
                         <p className="font-medium text-slate-600">{new Date(d.created_at).toLocaleDateString()}</p>
                         <p className="text-[10px] text-slate-400 leading-none">{new Date(d.created_at).toLocaleTimeString()}</p>

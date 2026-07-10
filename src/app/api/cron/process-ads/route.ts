@@ -24,7 +24,7 @@ import {
 import { createSystemLog, logStatus } from "@/lib/systemLogs";
 import { requireAdServingAllowed, upsertAdminAlert } from "@/lib/productionSafety";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
-import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
+import { campaignExcludesChannel, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { composeCampaignCreativeText } from "@/lib/campaignCreative";
 import { getChannelUnitPrice } from "@/lib/channelBilling";
 import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
@@ -62,6 +62,7 @@ interface ChannelRow {
   user_id: number;
   chat_id: string;
   username: string;
+  invite_link_hash?: string | null;
   title?: string;
   categories: string | string[] | null;
   audience_continents: string | string[] | null;
@@ -556,7 +557,7 @@ export async function GET(req: NextRequest) {
       await markChannelHealthSuccess(channel.id);
 
       const eligibleCampaigns = (campaigns as CampaignRow[]).filter((campaign) => {
-        if (campaignExcludesIdentifier(channelExclusions, campaign.id, channel.username)) {
+        if (campaignExcludesChannel(channelExclusions, campaign.id, channel)) {
           incrementSkip("advertiser_excluded_channel");
           return false;
         }

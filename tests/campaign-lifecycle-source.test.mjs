@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
+const statusMigration = readFileSync("db/migrations/20260710_0100_campaign_status_compatibility.sql", "utf8");
+const deploymentScript = readFileSync("deploy-vps.sh", "utf8");
+
 const actionSpec = readFileSync("src/lib/campaignLifecycleActions.ts", "utf8");
 const adminActionRoute = readFileSync("src/app/api/admin/campaigns/[id]/actions/route.ts", "utf8");
 const settlement = readFileSync("src/lib/channelSettlement.ts", "utf8");
@@ -51,6 +54,14 @@ test("admin resume allows paused campaigns, blocks terminal statuses, and preser
   assert.doesNotMatch(adminActionRoute, /channel_settlement_finalized_at = NULL/);
 });
 
+test("campaign status compatibility migration widens only legacy ENUM schemas while preserving the default", () => {
+  assert.match(statusMigration, /INFORMATION_SCHEMA\.COLUMNS/);
+  assert.match(statusMigration, /@campaign_status_type LIKE 'enum%'/);
+  assert.match(statusMigration, /@campaign_status_default/);
+  assert.match(statusMigration, /MODIFY COLUMN status VARCHAR\(40\)/);
+  assert.match(deploymentScript, /20260710_0100_campaign_status_compatibility\.sql/);
+});
+
 test("paused campaigns with live posts remain settlement eligible", () => {
   assert.match(settlement, /campaignStatuses\?: Array<"active" \| "paused">/);
   assert.match(settlement, /options\.campaignStatuses\?\.length \? options\.campaignStatuses : \["active", "paused"\]/);
@@ -63,6 +74,12 @@ test("settlement keeps click accounting and idempotency source-key protections",
   assert.match(settlement, /channel_settlement_ledger/);
   assert.match(settlement, /old_settled_count/);
   assert.match(settlement, /settled_through/);
+  assert.match(settlement, /creditUserLockedBalance/);
+  assert.match(settlement, /ad_settlements_views/);
+  assert.match(settlement, /channel_settlement_ledger/);
+  const exhaustionIndex = settlement.indexOf("await markCampaignBudgetExhausted(post.campaign_id, connection)");
+  assert.ok(exhaustionIndex >= 0);
+  assert.ok(settlement.indexOf("await connection.commit()", exhaustionIndex) > exhaustionIndex);
 });
 
 test("cleanup retry surfaces do not run settlement or financial writes", () => {

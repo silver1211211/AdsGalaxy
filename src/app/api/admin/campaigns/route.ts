@@ -46,7 +46,7 @@ export async function GET(request: Request) {
           ELSE COALESCE(c.channel_spend, 0)
         END AS spend,
         CASE WHEN c.type = 'broadcast'
-          THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
+          THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
           ELSE COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.campaign_id = c.id), 0)
         END AS impressions,
         CASE WHEN c.type = 'broadcast' THEN 0

@@ -55,15 +55,27 @@ export async function GET(
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
 
+    const [campaignKinds]: any = await pool.query(
+      "SELECT type FROM campaigns WHERE id = ? AND user_id = ? LIMIT 1",
+      [id, user.id]
+    );
+    if (campaignKinds.length === 0) {
+      return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
+    }
+    const isBotCampaign = campaignKinds[0].type === "broadcast";
     const [campaignRows]: any = await pool.query(
-      `SELECT id, name, campaign_title, parse_mode, message_text, image_url, link, postback_url, button_text,
-         type, budget, cpm, category, continents, countries, languages, vpn_policy,
-         device_policy, os_policy, start_at, end_at, daily_budget_limit,
-         frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
-         direct_inventory_metadata, status, paused_at, resume_locked_until,
-         completed_at, budget_exhausted_at, pause_reason, auto_reactivate,
-         created_at, updated_at
-       FROM campaigns WHERE id = ? AND user_id = ?`,
+      isBotCampaign
+        ? `SELECT id, name, campaign_title, message_text, image_url, link, button_text,
+             type, budget, cpm, category, continents, status, created_at, updated_at
+           FROM campaigns WHERE id = ? AND user_id = ?`
+        : `SELECT id, name, campaign_title, parse_mode, message_text, image_url, link, postback_url, button_text,
+             type, budget, cpm, category, continents, countries, languages, vpn_policy,
+             device_policy, os_policy, start_at, end_at, daily_budget_limit,
+             frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
+             direct_inventory_metadata, status, paused_at, resume_locked_until,
+             completed_at, budget_exhausted_at, pause_reason, auto_reactivate,
+             created_at, updated_at
+           FROM campaigns WHERE id = ? AND user_id = ?`,
       [id, user.id]
     );
 
@@ -89,14 +101,14 @@ export async function GET(
     if (campaign.type === 'broadcast') {
       // Get broadcast summary
       const [broadcastSummary]: any = await pool.query(
-        "SELECT COUNT(*) as count, SUM(cost) as total_cost FROM broadcast_deliveries WHERE campaign_id = ? AND status = 'sent'",
+        "SELECT FLOOR(COUNT(*) / 5) as count, SUM(cost) as total_cost FROM broadcast_deliveries WHERE campaign_id = ? AND status = 'sent'",
         [id]
       );
       
       // Get stats by bot
       const [botStats]: any = await pool.query(
         `SELECT b.bot_name, b.bot_username, 
-         COUNT(*) as delivery_count, 
+         FLOOR(COUNT(*) / 5) as delivery_count,
          SUM(bd.cost) as total_spent
          FROM broadcast_deliveries bd
          JOIN bots b ON bd.bot_id = b.id
@@ -154,9 +166,9 @@ export async function GET(
     // Get click/broadcast chart data (last 7 days)
     const chartTable = campaign.type === 'broadcast' ? 'broadcast_deliveries' : 'campaign_clicks';
     const [chartData]: any = await pool.query(
-      `SELECT DATE(created_at) as date, COUNT(*) as count 
+      `SELECT DATE(created_at) as date, FLOOR(COUNT(*) / 5) as count
        FROM ${chartTable}
-       WHERE campaign_id = ? AND created_at > NOW() - INTERVAL 7 DAY
+       WHERE campaign_id = ? ${campaign.type === 'broadcast' ? "AND status = 'sent'" : ""} AND created_at > NOW() - INTERVAL 7 DAY
        GROUP BY DATE(created_at)
        ORDER BY date ASC`,
       [id]

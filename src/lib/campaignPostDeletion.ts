@@ -171,6 +171,7 @@ async function fetchDeletionBatch(options: {
   hasDeletedAt: boolean;
   hasCleanupStatus: boolean;
   hasDeliveryConfirmedAt: boolean;
+  excludedChannelIds?: number[];
   batchSize: number;
 }) {
   const filters = [
@@ -180,7 +181,7 @@ async function fetchDeletionBatch(options: {
         ? "cp.status = 'active'"
         : "cp.status IN ('active', 'posted', 'sent', 'delete_failed', 'cleanup_pending')",
   ];
-  const params: Array<number | string> = [];
+  const params: Array<number | string | number[]> = [];
 
   if (options.olderThan24Hours) {
     const ageExpression = options.hasDeliveryConfirmedAt
@@ -209,6 +210,11 @@ async function fetchDeletionBatch(options: {
   if (options.campaignId !== undefined) {
     filters.push("cp.campaign_id = ?");
     params.push(options.campaignId);
+  }
+
+  if (options.excludedChannelIds?.length) {
+    filters.push("(cp.channel_id IS NULL OR cp.channel_id NOT IN (?))");
+    params.push(options.excludedChannelIds);
   }
 
   params.push(options.batchSize);
@@ -460,6 +466,7 @@ export async function deleteCampaignPosts(options: {
   batchDelayMs?: number;
   maxPostsPerRun?: number;
   successStatus?: "deleted" | "replaced";
+  excludedChannelIds?: number[];
 }): Promise<CampaignPostDeletionSummary> {
   const token = process.env.BOT_TOKEN;
 
@@ -488,6 +495,7 @@ export async function deleteCampaignPosts(options: {
     hasDeletedAt: columns.hasDeletedAt,
     hasCleanupStatus: columns.hasCleanupStatus,
     hasDeliveryConfirmedAt: columns.hasDeliveryConfirmedAt,
+    excludedChannelIds: options.excludedChannelIds,
     batchSize: maxPostsPerRun,
   });
   if (expiredCounts) {

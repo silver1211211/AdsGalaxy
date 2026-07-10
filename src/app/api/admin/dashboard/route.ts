@@ -127,10 +127,11 @@ export async function GET() {
     `);
     const [[botPlatformStats]]: any = await pool.query(`
       SELECT
-        COUNT(*) as impressions,
+        FLOOR(COUNT(*) / 5) as impressions,
         COALESCE(SUM(cost), 0) as revenue,
         COALESCE(SUM(publisher_reward), 0) as publisher_earnings,
-        GREATEST(COALESCE(SUM(cost), 0) - COALESCE(SUM(publisher_reward), 0), 0) as platform_earnings
+        COALESCE(SUM(platform_revenue), 0) as platform_earnings,
+        COALESCE(SUM(reserve_amount), 0) as reserve
       FROM broadcast_deliveries
       WHERE status = 'sent'
     `);
@@ -143,7 +144,9 @@ export async function GET() {
     const platformEarnings = Number(channelPlatformStats?.platform_earnings || 0)
       + Number(botPlatformStats?.platform_earnings || 0)
       + Number(miniappStats.lifetime.ads_galaxy_revenue || 0);
-    const reserve = Number(channelPlatformStats?.reserve || 0) + Number(miniappStats.lifetime.reserve_revenue || 0);
+    const reserve = Number(channelPlatformStats?.reserve || 0)
+      + Number(botPlatformStats?.reserve || 0)
+      + Number(miniappStats.lifetime.reserve_revenue || 0);
     const platformImpressions = Number(channelPlatformStats?.impressions || 0)
       + Number(botPlatformStats?.impressions || 0)
       + Number(miniappStats.lifetime.total_impressions || 0);

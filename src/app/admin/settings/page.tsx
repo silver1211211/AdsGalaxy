@@ -70,6 +70,7 @@ const CPM_GROUPS: CpmGroup[] = [
 ];
 
 const GROUPED_CPM_KEYS = new Set(CPM_GROUPS.flatMap((group) => [group.minKey, group.recommendedKey, group.maxKey]));
+const BOT_REVENUE_SPLIT_KEYS = new Set(["broadcast_publisher_share_percent", "broadcast_reserve_percent"]);
 
 const defaultSelfPromotionForm: SelfPromotionForm = {
   enabled: true,
@@ -104,6 +105,8 @@ export default function AdminSettingsPage() {
   const [editValue, setEditValue] = useState("");
   const [editingCpmGroup, setEditingCpmGroup] = useState<CpmGroup | null>(null);
   const [cpmGroupValues, setCpmGroupValues] = useState({ min: "", recommended: "", max: "" });
+  const [editingBotRevenueSplit, setEditingBotRevenueSplit] = useState(false);
+  const [botRevenueSplitValues, setBotRevenueSplitValues] = useState({ publisher: "30", reserve: "10" });
   const [submitting, setSubmitting] = useState(false);
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [logoUploading, setLogoUploading] = useState(false);
@@ -176,6 +179,14 @@ export default function AdminSettingsPage() {
     });
   };
 
+  const openBotRevenueSplitModal = () => {
+    setBotRevenueSplitValues({
+      publisher: settingValue("broadcast_publisher_share_percent", "30"),
+      reserve: settingValue("broadcast_reserve_percent", "10"),
+    });
+    setEditingBotRevenueSplit(true);
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSetting) return;
@@ -223,6 +234,31 @@ export default function AdminSettingsPage() {
       fetchSettings();
     } catch (err: any) {
       setError(err.message || "Failed to save CPM settings");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleBotRevenueSplitSave = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/admin/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            broadcast_publisher_share_percent: botRevenueSplitValues.publisher,
+            broadcast_reserve_percent: botRevenueSplitValues.reserve,
+          },
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to save Bot revenue settings");
+      setEditingBotRevenueSplit(false);
+      fetchSettings();
+    } catch (err: any) {
+      setError(err.message || "Failed to save Bot revenue settings");
     } finally {
       setSubmitting(false);
     }
@@ -427,6 +463,25 @@ export default function AdminSettingsPage() {
         </div>
       )}
 
+      {editingBotRevenueSplit && (
+        <div className="fixed inset-0 z-[100] bg-slate-900/50 flex items-center justify-center p-4">
+          <div className="w-full max-w-lg overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
+            <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+              <h3 className="text-lg font-bold text-slate-900">Bot Broadcast Revenue Split</h3>
+              <p className="text-xs font-semibold text-slate-500">The platform remainder is calculated automatically.</p>
+            </div>
+            <form onSubmit={handleBotRevenueSplitSave} className="space-y-4 p-6">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <label className="space-y-1"><span className="text-xs font-bold text-slate-600">Publisher share %</span><input type="number" min="0" max="100" step="0.01" required value={botRevenueSplitValues.publisher} onChange={(e) => setBotRevenueSplitValues((current) => ({ ...current, publisher: e.target.value }))} className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" /></label>
+                <label className="space-y-1"><span className="text-xs font-bold text-slate-600">Reserve %</span><input type="number" min="0" max="100" step="0.01" required value={botRevenueSplitValues.reserve} onChange={(e) => setBotRevenueSplitValues((current) => ({ ...current, reserve: e.target.value }))} className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" /></label>
+                <div className="space-y-1"><span className="text-xs font-bold text-slate-600">Platform remainder</span><div className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-mono font-bold text-slate-700">{Math.max(0, 100 - (Number(botRevenueSplitValues.publisher) || 0) - (Number(botRevenueSplitValues.reserve) || 0)).toFixed(2)}%</div></div>
+              </div>
+              <div className="flex gap-3 pt-4"><button type="button" onClick={() => setEditingBotRevenueSplit(false)} className="flex-1 rounded-md border border-slate-200 py-2 text-sm font-medium text-slate-600">Cancel</button><button type="submit" disabled={submitting} className="flex-1 rounded-md bg-blue-600 py-2 text-sm font-medium text-white disabled:opacity-50">{submitting ? "Saving..." : "Save revenue split"}</button></div>
+            </form>
+          </div>
+        </div>
+      )}
+
       <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden flex flex-col h-[calc(100vh-100px)]">
         <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between shrink-0">
           <h2 className="text-sm font-semibold text-slate-900">System Settings</h2>
@@ -616,6 +671,13 @@ export default function AdminSettingsPage() {
             </div>
           )}
 
+          {!loading && (
+            <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="mb-3 flex items-start justify-between gap-2"><div><h3 className="text-sm font-bold text-slate-900">Bot Broadcast Revenue Split</h3><p className="mt-1 text-xs text-slate-500">Applies to successful Bot broadcasts only.</p></div><button onClick={openBotRevenueSplitModal} className="rounded p-1.5 text-slate-400 hover:bg-blue-50 hover:text-blue-600" title="Edit Bot revenue split"><Edit2 size={16} /></button></div>
+              <div className="grid grid-cols-3 gap-2"><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Publisher</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{settingValue("broadcast_publisher_share_percent", "30")}%</p></div><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Reserve</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{settingValue("broadcast_reserve_percent", "10")}%</p></div><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Platform</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{Math.max(0, 100 - Number(settingValue("broadcast_publisher_share_percent", "30")) - Number(settingValue("broadcast_reserve_percent", "10"))).toFixed(2)}%</p></div></div>
+            </div>
+          )}
+
           {loading ? (
             <div className="flex justify-center p-12"><Loader2 className="animate-spin text-blue-600" size={24} /></div>
           ) : settings.length === 0 ? (
@@ -623,7 +685,7 @@ export default function AdminSettingsPage() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {settings
-                .filter((s) => s.key !== "last_broadcast_cron_run" && !GROUPED_CPM_KEYS.has(s.key))
+                .filter((s) => s.key !== "last_broadcast_cron_run" && !GROUPED_CPM_KEYS.has(s.key) && !BOT_REVENUE_SPLIT_KEYS.has(s.key))
                 .map((setting) => (
                 <div key={setting.key} className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm flex flex-col justify-between">
                   <div>

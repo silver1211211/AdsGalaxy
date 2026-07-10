@@ -208,6 +208,9 @@ export async function selectMediationNetwork(input: {
   const attempted = new Set((input.alreadyAttempted || []).filter(Boolean));
   const skipped: SkippedNetwork[] = [];
   const candidatePool: NetworkRow[] = [];
+  let internalShareCapSkipIndex = -1;
+  let internalLastResortUsed = false;
+  let internalLastResortUnavailableReason: string | null = null;
   const initialEnabledPool = networks
     .filter((network) => Boolean(network.enabled) && isMiniAppNetworkName(network.network_name))
     .map((network) => network.network_name);
@@ -270,6 +273,9 @@ export async function selectMediationNetwork(input: {
       });
       if (!internalCampaign.campaign) {
         skipped.push({ network_name: INTERNAL_NETWORK_NAME, reason: internalCampaign.skip_reason || "no_internal_campaign" });
+        if (internalCampaign.skip_reason === "internal_share_cap_reached") {
+          internalShareCapSkipIndex = skipped.length - 1;
+        }
         mediationDebug("internal_no_fill", {
           miniapp_id: input.miniappId,
           reason: internalCampaign.skip_reason || "no_internal_campaign",
@@ -316,8 +322,51 @@ export async function selectMediationNetwork(input: {
     candidatePool.push(network);
   }
 
+  const externalCandidatePoolEmpty = !candidatePool.some((network) => network.network_name !== INTERNAL_NETWORK_NAME);
+  const internalNetwork = networks.find((network) => network.network_name === INTERNAL_NETWORK_NAME);
+  const internalLastResortAllowed = internalShareCapSkipIndex >= 0
+    && externalCandidatePoolEmpty
+    && input.adFormat === "rewarded"
+    && !attempted.has(INTERNAL_NETWORK_NAME)
+    && Boolean(internalNetwork)
+    && Boolean(miniapp && (miniapp.status === "approved" || miniapp.status === "monetized"))
+    && miniapp.inventory_override !== "pause"
+    && miniapp.inventory_override !== "blacklist";
+
+  if (internalLastResortAllowed && internalNetwork) {
+    const internalCampaign = await selectInternalRewardedCampaign({
+      conn: input.conn,
+      miniappId: input.miniappId,
+      telegramUserId: input.telegramUserId,
+      country: input.country || null,
+      ignoreNetworkShareCap: true,
+    });
+    if (internalCampaign.campaign) {
+      internalNetwork.network_placement_id = String(internalCampaign.campaign.id);
+      internalNetwork.internal_campaign_id = internalCampaign.campaign.id;
+      internalNetwork.internal_ad = internalCampaign.campaign;
+      candidatePool.push(internalNetwork);
+      internalLastResortUsed = true;
+      mediationDebug("internal_last_resort_selected", {
+        miniapp_id: input.miniappId,
+        reason: "external_pool_empty_after_share_cap",
+        diagnostics: internalCampaign.diagnostics || null,
+      });
+    } else {
+      internalLastResortUnavailableReason = internalCampaign.skip_reason || "no_internal_campaign";
+      skipped[internalShareCapSkipIndex] = { network_name: INTERNAL_NETWORK_NAME, reason: internalLastResortUnavailableReason };
+      mediationDebug("internal_last_resort_unavailable", {
+        miniapp_id: input.miniappId,
+        reason: internalLastResortUnavailableReason,
+        diagnostics: internalCampaign.diagnostics || null,
+      });
+    }
+  }
+
   const monetagTestCandidate = candidatePool.find((network) => network.network_name === "Monetag" && Boolean(network.monetag_test_mode));
-  const randomizedCandidates = monetagTestCandidate
+  const randomizedCandidates = internalLastResortUsed && internalNetwork
+    ? [internalNetwork]
+    : monetagTestCandidate
     ? [monetagTestCandidate, ...candidatePool.filter((network) => network !== monetagTestCandidate)]
     : buildWeightedSelectionOrder(candidatePool);
   const selected = randomizedCandidates[0];
@@ -357,6 +406,9 @@ export async function selectMediationNetwork(input: {
       final_displayed_provider: selected?.network_name || null,
       final_no_ad_reason: selected ? null : finalReason,
       final_reason: finalReason,
+      internal_last_resort: internalLastResortUsed,
+      internal_last_resort_reason: internalLastResortUsed ? "external_pool_empty_after_share_cap" : null,
+      internal_last_resort_unavailable_reason: internalLastResortUnavailableReason,
       monetag_test_mode_forced: Boolean(monetagTestCandidate),
       weighting: {
         internal_target_share_when_external_available: INTERNAL_SHARE_WITH_EXTERNAL,

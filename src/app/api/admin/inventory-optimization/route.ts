@@ -56,7 +56,7 @@ async function leaderboard(entityType: "miniapp" | "channel" | "bot") {
     SELECT
       b.id, b.bot_name as name, b.inventory_score, b.inventory_rank, b.traffic_quality_score, b.traffic_risk_level,
       b.inventory_override, b.inventory_priority_multiplier,
-      COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)), 0) as impressions_7d,
+      COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent' AND bd.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)), 0) as impressions_7d,
       COALESCE((SELECT SUM(bd.publisher_reward) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)), 0) as revenue_7d
     FROM bots b
     WHERE b.is_deleted = FALSE

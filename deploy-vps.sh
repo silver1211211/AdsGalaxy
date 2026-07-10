@@ -202,7 +202,11 @@ for MIG in \
   "20260707_0093_channel_campaign_validation_schema_alignment.sql" \
   "20260707_0094_channel_post_cleanup_lifecycle.sql" \
   "20260708_0095_channel_campaign_lifecycle_split.sql" \
-  "20260708_0097_best_effort_telegram_cleanup_states.sql"
+  "20260708_0097_best_effort_telegram_cleanup_states.sql" \
+  "20260708_0098_campaign_cpc_billing.sql" \
+  "20260710_0099_bot_status_compatibility.sql" \
+  "20260710_0100_campaign_status_compatibility.sql" \
+  "20260710_0101_broadcast_payout_configuration.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"

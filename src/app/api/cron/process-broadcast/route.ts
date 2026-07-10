@@ -27,6 +27,7 @@ import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campai
 import { botUserBroadcastEligibleCondition } from "@/lib/botAudience";
 import { composeCampaignCreativeText } from "@/lib/campaignCreative";
 import { campaignCategoryMatches } from "@/lib/campaignCategories";
+import { calculateBroadcastPayout, getBroadcastPayoutSettings, type BroadcastPayout } from "@/lib/broadcastPublisherCpmEngine";
 
 export const dynamic = 'force-dynamic';
 
@@ -129,7 +130,7 @@ async function finalizeBroadcastDelivery(input: {
   campaign: any;
   bot: any;
   user: any;
-  reward: number;
+  payout: BroadcastPayout;
   attempts: number;
 }) {
   const conn = await pool.getConnection();
@@ -148,10 +149,10 @@ async function finalizeBroadcastDelivery(input: {
 
     const [deliveryUpdate]: any = await conn.query(
       `UPDATE broadcast_deliveries
-       SET publisher_reward = ?, status = 'sent', retry_count = ?, last_success_at = NOW(),
+       SET publisher_reward = ?, reserve_amount = ?, platform_revenue = ?, status = 'sent', retry_count = ?, last_success_at = NOW(),
            failure_reason = NULL, telegram_error = NULL
        WHERE id = ? AND status = 'pending'`,
-      [input.reward, input.attempts, input.deliveryId]
+      [input.payout.publisherReward, input.payout.reserveAmount, input.payout.platformRevenue, input.attempts, input.deliveryId]
     );
     if (deliveryUpdate.affectedRows !== 1) throw new Error("broadcast_finalize_race");
     await conn.query("UPDATE bot_users SET last_broadcast_at = NOW() WHERE id = ?", [input.user.id]);
@@ -190,7 +191,7 @@ async function refundBroadcastReservation(input: {
     if (refundResult.affectedRows !== 1) throw new Error("broadcast_refund_campaign_missing");
     const [deliveryUpdate]: any = await conn.query(
       `UPDATE broadcast_deliveries
-       SET cost = 0, publisher_reward = 0, status = 'failed', failure_reason = ?, telegram_error = ?,
+       SET cost = 0, publisher_reward = 0, reserve_amount = 0, platform_revenue = 0, status = 'failed', failure_reason = ?, telegram_error = ?,
            retry_count = ?, last_failure_at = NOW()
        WHERE id = ? AND status = 'pending'`,
       [input.failureReason, input.telegramError.slice(0, 500), input.attempts, input.deliveryId]
@@ -236,9 +237,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ success: false, message: "Too early" }, { status: 429 });
     }
 
-    // Get reward percentage
-    const [rewardSetting]: any = await pool.query("SELECT value FROM settings WHERE \`key\` = 'broadcast_ad_reward_percentage'");
-    const rewardPercentage = parseFloat(rewardSetting[0]?.value || "50") / 100;
+    const payoutSettings = await getBroadcastPayoutSettings();
 
     // 1. Find active broadcast campaigns with budget
     const trustMultipliers = await getAdvertiserTrustMultipliers();
@@ -448,8 +447,8 @@ export async function GET(req: NextRequest) {
           ]]
         };
 
-        const cost = parseFloat(campaign.cpm) / 1000;
-        const reward = cost * rewardPercentage;
+        const payout = calculateBroadcastPayout(campaign.cpm, payoutSettings);
+        const cost = payout.advertiserDebit;
         const reservation = await reserveBroadcastDelivery({ campaign, bot, user, cost });
         if (!reservation.ok) {
           return {
@@ -479,7 +478,7 @@ export async function GET(req: NextRequest) {
 
         if (sendResult.ok && res && res.ok) {
           await finalizeBroadcastDelivery({
-            deliveryId: reservation.deliveryId, campaign, bot, user, reward, attempts: sendResult.attempts || 1,
+            deliveryId: reservation.deliveryId, campaign, bot, user, payout, attempts: sendResult.attempts || 1,
           });
           const remainingBudget = reservation.remainingBudget;
           const budgetExhausted = remainingBudget <= 0;

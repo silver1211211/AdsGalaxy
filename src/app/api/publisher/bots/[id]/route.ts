@@ -72,11 +72,12 @@ export async function GET(
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
     const { id } = await params;
-    const [hasBotUserSource, hasIntegrationFirstSeen, hasBroadcastDeliveries, hasBroadcastPublisherReward] = await Promise.all([
+    const [hasBotUserSource, hasIntegrationFirstSeen, hasBroadcastDeliveries, hasBroadcastPublisherReward, hasBotIntegrationEvents] = await Promise.all([
       columnExists("bot_users", "source"),
       columnExists("bot_users", "integration_first_seen_at"),
       tableExists("broadcast_deliveries"),
       columnExists("broadcast_deliveries", "publisher_reward"),
+      tableExists("bot_integration_events"),
     ]);
     const integrationUserCountExpr = hasIntegrationFirstSeen
       ? "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.integration_first_seen_at IS NOT NULL)"
@@ -90,6 +91,9 @@ export async function GET(
         : "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id)";
     const userCounts = botUserCountExpressions("b");
     const botSuccessfulExpr = hasBroadcastDeliveries
+      ? "COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent'), 0)"
+      : "0";
+    const botDeliveredExpr = hasBroadcastDeliveries
       ? "COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent'), 0)"
       : "0";
     const botFailedExpr = hasBroadcastDeliveries
@@ -119,9 +123,9 @@ export async function GET(
         ,${userCounts.pending} as pending_verification_count
         ,${userCounts.blocked} as blocked_count
         ,${userCounts.deliveryEligible} as delivery_eligible_count
-        ,${botSuccessfulExpr} as successful_sends
-        ,${botSuccessfulExpr} as successful_paid_deliveries
-        ,${botSuccessfulExpr} as delivered_sends
+        ,${botDeliveredExpr} as successful_sends
+        ,${botDeliveredExpr} as successful_paid_deliveries
+        ,${botDeliveredExpr} as delivered_sends
         ,${botFailedExpr} as failed_sends
         ,${botRevenueExpr} as publisher_revenue
         ,CASE WHEN ${botSuccessfulExpr} > 0 THEN (${botRevenueExpr} / ${botSuccessfulExpr}) * 1000 ELSE 0 END as effective_cpm
@@ -138,14 +142,16 @@ export async function GET(
     const integrationUrl = await ensureBotIntegration(pool, new URL(request.url).origin, bot.id);
     const integrationStatus = resolveBotIntegrationStatus({ botStatus: bot.status, registrationCount: bot.active_count, pendingVerificationCount: bot.pending_verification_count,
       installedAt: bot.integration_installed_at, lastReceivedAt: bot.integration_last_received_at, lastErrorAt: bot.integration_last_error_at });
-    const [eventRows] = await pool.query<RowDataPacket[]>(
-      `SELECT event_type, telegram_user_id, username, message,
-         CASE WHEN event_type = 'error' THEN message ELSE NULL END AS error,
-         CASE WHEN event_type IN ('user', 'duplicate', 'test') THEN 'success' ELSE event_type END AS result,
-         received_at
-       FROM bot_integration_events WHERE bot_id = ? ORDER BY id DESC LIMIT 10`,
-      [bot.id]
-    );
+    const eventRows = hasBotIntegrationEvents
+      ? (await pool.query<RowDataPacket[]>(
+        `SELECT event_type, telegram_user_id, username, message,
+           CASE WHEN event_type = 'error' THEN message ELSE NULL END AS error,
+           CASE WHEN event_type IN ('user', 'duplicate', 'test') THEN 'success' ELSE event_type END AS result,
+           received_at
+         FROM bot_integration_events WHERE bot_id = ? ORDER BY id DESC LIMIT 10`,
+        [bot.id]
+      ))[0]
+      : [];
 
     return NextResponse.json({
       id: bot.id,

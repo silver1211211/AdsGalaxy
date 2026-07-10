@@ -11,6 +11,7 @@ import { apiFetch } from "@/lib/api";
 import Modal from "@/components/ui/Modal";
 import ManualAddUsersPopup from "@/components/publisher/ManualAddUsersPopup";
 import TestIntegrationPopup from "@/components/publisher/TestIntegrationPopup";
+import BotAnalyticsDashboard from "@/components/publisher/BotAnalyticsDashboard";
 import { hasMinimumCpmSample } from "@/lib/statFormulas";
 
 const appOrigin = (
@@ -127,13 +128,15 @@ function parseStringArray(value: string | string[] | null | undefined): string[]
   } catch { return []; }
 }
 
-function formatMoney(value: number) {
-  const abs = Math.abs(value);
-  return `$${value.toFixed(abs > 0 && abs < 1 ? 4 : 2)}`;
+function formatMoney(value: unknown) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "$0.00";
+  const abs = Math.abs(amount);
+  return `$${amount.toFixed(abs > 0 && abs < 1 ? 4 : 2)}`;
 }
 
-function formatCpm(value: number, deliveries: number) {
-  return hasMinimumCpmSample(deliveries) ? formatMoney(value) : "--";
+function formatCpm(value: unknown, deliveries: unknown) {
+  return hasMinimumCpmSample(Number(deliveries) || 0) ? formatMoney(value) : "--";
 }
 
 interface BotDetailsScreenProps {
@@ -460,6 +463,8 @@ export default function BotDetailsScreen({
               </div>
             </div>
           </div>
+
+          <BotAnalyticsDashboard botId={bot.id} />
 
           {/* Bot integration guide (collapsible) */}
           <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">

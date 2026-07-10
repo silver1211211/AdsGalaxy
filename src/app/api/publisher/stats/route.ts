@@ -153,7 +153,7 @@ export async function GET(request: Request) {
     );
     const [botRangeRows]: any = await pool.query(
       `SELECT ranges.range_key,
-        COALESCE(SUM(CASE WHEN bd.status = 'sent' THEN 1 ELSE 0 END), 0) as impressions,
+        FLOOR(COALESCE(SUM(CASE WHEN bd.status = 'sent' THEN 1 ELSE 0 END), 0) / 5) as impressions,
         COALESCE(SUM(CASE WHEN bd.status = 'sent' THEN bd.publisher_reward ELSE 0 END), 0) as earnings,
         COALESCE(SUM(CASE WHEN bd.status = 'sent' THEN bd.cost ELSE 0 END), 0) as gross_revenue,
         COALESCE(SUM(CASE WHEN bd.status = 'failed' THEN 1 ELSE 0 END), 0) as failed_sends

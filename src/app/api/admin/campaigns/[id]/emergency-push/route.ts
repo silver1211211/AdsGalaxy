@@ -21,7 +21,8 @@ import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
 import { createSystemLog } from "@/lib/systemLogs";
 import { botUserBroadcastEligibleCondition } from "@/lib/botAudience";
 import { composeCampaignCreativeText } from "@/lib/campaignCreative";
-import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
+import { campaignExcludesChannel, campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
+import { calculateBroadcastPayout, getBroadcastPayoutSettings, type BroadcastPayout, type BroadcastPayoutSettings } from "@/lib/broadcastPublisherCpmEngine";
 
 export const dynamic = "force-dynamic";
 
@@ -54,6 +55,7 @@ type ChannelRow = RowDataPacket & {
   user_id: number;
   chat_id: string;
   username: string;
+  invite_link_hash?: string | null;
   categories: string | string[] | null;
   audience_continents: string | string[] | null;
 };
@@ -89,6 +91,8 @@ type BroadcastSchema = {
   hasDeliveryStatus: boolean;
   hasDeliveryCost: boolean;
   hasDeliveryPublisherReward: boolean;
+  hasDeliveryReserveAmount: boolean;
+  hasDeliveryPlatformRevenue: boolean;
   hasDeliveryRetryCount: boolean;
   hasDeliverySuccessAt: boolean;
   hasDeliveryFailureAt: boolean;
@@ -142,6 +146,20 @@ function normalizeFailureReason(value?: string) {
   return "unknown_error";
 }
 
+function classifySettlementFailure(reason: string) {
+  const normalized = String(reason || "").trim().toLowerCase();
+  if ([
+    "payout_safety_check_failed",
+    "campaign_budget_exhausted",
+    "campaign_not_active",
+    "daily_budget_limit",
+    "post_not_found",
+    "telegram_post_unavailable",
+    "telegram_post_deleted",
+  ].includes(normalized)) return "safe_rolled_back" as const;
+  return "fatal_financial_integrity" as const;
+}
+
 function campaignMatchesBot(campaign: CampaignRow, bot: BotRow) {
   const botCategories = parseJsonArray(bot.categories);
   const categoryMatches = campaignCategoryMatches(campaign.category, botCategories);
@@ -188,7 +206,7 @@ async function getBroadcastSchema(): Promise<BroadcastSchema> {
     WHERE TABLE_SCHEMA = DATABASE()
       AND (
         (TABLE_NAME = 'bot_users' AND COLUMN_NAME = 'chat_id')
-        OR (TABLE_NAME = 'broadcast_deliveries' AND COLUMN_NAME IN ('status', 'cost', 'publisher_reward', 'retry_count', 'last_success_at', 'last_failure_at', 'failure_reason', 'telegram_error'))
+        OR (TABLE_NAME = 'broadcast_deliveries' AND COLUMN_NAME IN ('status', 'cost', 'publisher_reward', 'reserve_amount', 'platform_revenue', 'retry_count', 'last_success_at', 'last_failure_at', 'failure_reason', 'telegram_error'))
       )
   `);
 
@@ -199,6 +217,8 @@ async function getBroadcastSchema(): Promise<BroadcastSchema> {
     hasDeliveryStatus: columns.has("broadcast_deliveries.status"),
     hasDeliveryCost: columns.has("broadcast_deliveries.cost"),
     hasDeliveryPublisherReward: columns.has("broadcast_deliveries.publisher_reward"),
+    hasDeliveryReserveAmount: columns.has("broadcast_deliveries.reserve_amount"),
+    hasDeliveryPlatformRevenue: columns.has("broadcast_deliveries.platform_revenue"),
     hasDeliveryRetryCount: columns.has("broadcast_deliveries.retry_count"),
     hasDeliverySuccessAt: columns.has("broadcast_deliveries.last_success_at"),
     hasDeliveryFailureAt: columns.has("broadcast_deliveries.last_failure_at"),
@@ -291,7 +311,7 @@ async function getEligibleChannels(campaign: CampaignRow, schema: EmergencySchem
   );
 
   const channelExclusions = await loadCampaignExclusions(pool, "campaign", [Number(campaign.id)], "channel");
-  const eligibleChannels = channels.filter((channel) => !campaignExcludesIdentifier(channelExclusions, Number(campaign.id), channel.username));
+  const eligibleChannels = channels.filter((channel) => !campaignExcludesChannel(channelExclusions, Number(campaign.id), channel));
 
   return {
     eligibleChannels: eligibleChannels.slice(0, MAX_EMERGENCY_CHANNELS),
@@ -385,9 +405,9 @@ async function postCampaignToChannel(options: {
   return { ok: false, postId, reason: result?.description || "Telegram send failed" };
 }
 
-async function deleteActivePostsForReplacementSafely(campaignId: number): Promise<CampaignPostDeletionSummary> {
+async function deleteActivePostsForReplacementSafely(campaignId: number, excludedChannelIds: number[]): Promise<CampaignPostDeletionSummary> {
   try {
-    return await deleteCampaignPosts({ campaignId, successStatus: "replaced" });
+    return await deleteCampaignPosts({ campaignId, successStatus: "replaced", excludedChannelIds });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Emergency campaign post deletion failed";
     console.warn("Emergency campaign post deletion failed", { campaign_id: campaignId, error: message });
@@ -480,17 +500,9 @@ async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: Bro
 }
 
 function requireBillableBroadcastSchema(schema: BroadcastSchema) {
-  if (!schema.hasDeliveryStatus || !schema.hasDeliveryCost || !schema.hasDeliveryPublisherReward) {
+  if (!schema.hasDeliveryStatus || !schema.hasDeliveryCost || !schema.hasDeliveryPublisherReward || !schema.hasDeliveryReserveAmount || !schema.hasDeliveryPlatformRevenue) {
     throw new Error("broadcast_billing_schema_missing");
   }
-}
-
-async function getBroadcastRewardPercentage() {
-  const [rows] = await pool.query<Array<RowDataPacket & { value: string }>>(
-    "SELECT value FROM settings WHERE `key` = 'broadcast_ad_reward_percentage' LIMIT 1"
-  );
-  const value = Number.parseFloat(String(rows[0]?.value || "50"));
-  return Math.min(1, Math.max(0, (Number.isFinite(value) ? value : 50) / 100));
 }
 
 async function reserveEmergencyBroadcastDelivery(input: {
@@ -571,11 +583,11 @@ async function reserveEmergencyBroadcastDelivery(input: {
 async function finalizeEmergencyBroadcastDelivery(input: {
   schema: BroadcastSchema;
   deliveryId: number;
-  reward: number;
+  payout: BroadcastPayout;
   attempts: number;
 }) {
-  const assignments = ["publisher_reward=?", "status='sent'"];
-  const params: Array<number | string> = [input.reward];
+  const assignments = ["publisher_reward=?", "reserve_amount=?", "platform_revenue=?", "status='sent'"];
+  const params: Array<number | string> = [input.payout.publisherReward, input.payout.reserveAmount, input.payout.platformRevenue];
   if (input.schema.hasDeliveryRetryCount) {
     assignments.push("retry_count=?");
     params.push(input.attempts);
@@ -614,7 +626,7 @@ async function refundEmergencyBroadcastDelivery(input: {
     }
     const reservedCost = Number(delivery.cost || 0);
     await conn.query("UPDATE campaigns SET budget=budget+? WHERE id=?", [reservedCost, input.campaignId]);
-    const assignments = ["cost=0", "publisher_reward=0", "status='failed'"];
+    const assignments = ["cost=0", "publisher_reward=0", "reserve_amount=0", "platform_revenue=0", "status='failed'"];
     const params: Array<number | string> = [];
     if (input.schema.hasDeliveryFailureReason) {
       assignments.push("failure_reason=?");
@@ -649,7 +661,7 @@ async function postBroadcastToBotUser(options: {
   bot: BotRow;
   user: BroadcastUserRow;
   schema: BroadcastSchema;
-  rewardPercentage: number;
+  payoutSettings: BroadcastPayoutSettings;
 }) {
   const { campaign, bot, user, schema } = options;
   const replyMarkup = {
@@ -657,8 +669,8 @@ async function postBroadcastToBotUser(options: {
       { text: campaign.button_text, url: campaign.link },
     ]],
   };
-  const cost = Number((Number(campaign.cpm || 0) / 1000).toFixed(8));
-  const reward = Number((cost * options.rewardPercentage).toFixed(8));
+  const payout = calculateBroadcastPayout(campaign.cpm, options.payoutSettings);
+  const cost = payout.advertiserDebit;
   const reservation = await reserveEmergencyBroadcastDelivery({ schema, campaign, bot, user, cost });
   if (!reservation.ok) return { ok: false, reason: reservation.reason };
 
@@ -688,7 +700,7 @@ async function postBroadcastToBotUser(options: {
     await finalizeEmergencyBroadcastDelivery({
       schema,
       deliveryId: reservation.deliveryId,
-      reward,
+      payout,
       attempts: sendResult.attempts || 1,
     });
     await pool.query("UPDATE bot_users SET last_broadcast_at = NOW() WHERE id = ?", [user.id]);
@@ -700,7 +712,7 @@ async function postBroadcastToBotUser(options: {
         [campaign.id]
       );
     }
-    return { ok: true, cost, reward, remainingBudget: reservation.remainingBudget };
+    return { ok: true, cost, reward: payout.publisherReward, remainingBudget: reservation.remainingBudget };
   }
 
   const reason = result?.description || "Telegram send failed";
@@ -727,7 +739,7 @@ async function postBroadcastToBotUser(options: {
 async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode) {
   const schema = await getBroadcastSchema();
   requireBillableBroadcastSchema(schema);
-  const rewardPercentage = await getBroadcastRewardPercentage();
+  const payoutSettings = await getBroadcastPayoutSettings();
   const { dispatches, skippedByLimit, skippedByExclusion } = await getEligibleBroadcastDispatches(campaign, schema);
   const failedUsers: Array<{ botId: number; userId: number; reason: string }> = [];
   let attempted = 0;
@@ -742,7 +754,7 @@ async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode
         bot: dispatch.bot,
         user: dispatch.user,
         schema,
-        rewardPercentage,
+        payoutSettings,
       });
 
       if (result.ok) {
@@ -863,15 +875,36 @@ export async function POST(
         publisherCredited: settlement.publisherCredited,
       };
 
-      if (settlement.failedPosts > 0) {
+      const settlementFailures = settlement.failedDetails.map((detail) => ({
+        ...detail,
+        classification: classifySettlementFailure(detail.reason),
+      }));
+      const fatalSettlementFailures = settlementFailures.filter((detail) => detail.classification === "fatal_financial_integrity");
+      const safeSettlementWarnings = settlementFailures.filter((detail) => detail.classification === "safe_rolled_back");
+      if (fatalSettlementFailures.length > 0) {
         return NextResponse.json({
           success: false,
-          error: "Replace Everything stopped because some active posts could not be settled safely.",
-          settlement: settlementSummary,
+          error: "Replace Everything stopped because a settlement failure may have affected financial integrity.",
+          settlement: { ...settlementSummary, failures: settlementFailures },
         }, { status: 409 });
       }
 
-      deleteSummary = await deleteActivePostsForReplacementSafely(campaign.id);
+      const channelExclusions = await loadCampaignExclusions(pool, "campaign", [Number(campaign.id)], "channel");
+      const [postedChannels] = await pool.query<ChannelRow[]>(
+        `SELECT DISTINCT ch.id, ch.username, ch.invite_link_hash
+         FROM campaign_posts cp
+         JOIN channels ch ON ch.id = cp.channel_id
+         WHERE cp.campaign_id = ?`,
+        [campaign.id]
+      );
+      const excludedChannelIds = postedChannels
+        .filter((channel) => campaignExcludesChannel(channelExclusions, Number(campaign.id), channel))
+        .map((channel) => Number(channel.id));
+
+      deleteSummary = await deleteActivePostsForReplacementSafely(campaign.id, excludedChannelIds);
+      if (safeSettlementWarnings.length > 0) {
+        settlementSummary = { ...settlementSummary, warnings: safeSettlementWarnings };
+      }
     }
     const { eligibleChannels, skippedByLimit, skippedByExclusion } = await getEligibleChannels(campaign, schema, mode);
     const failedChannels: Array<{ channelId: number; reason: string }> = [];

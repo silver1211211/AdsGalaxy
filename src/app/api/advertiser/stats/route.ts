@@ -65,16 +65,12 @@ export async function GET(request: Request) {
     const [userRows]: any = await pool.query("SELECT ad_balance FROM users WHERE id = ?", [user.id]);
     const adBalance = parseFloat(userRows[0]?.ad_balance || "0");
 
-    // 2. Calculate Locked Balance (Sum of budgets of pending, active, and paused campaigns)
+    // 2. Locked Balance is reserved only for Channel campaigns.
     const [lockedResult]: any = await pool.query(
       "SELECT COALESCE(SUM(budget), 0) as locked FROM campaigns WHERE user_id = ? AND status IN ('pending', 'active', 'paused')",
       [user.id]
     );
-    const [miniappLockedResult]: any = await pool.query(
-      "SELECT COALESCE(SUM(remaining_budget), 0) as locked FROM miniapp_rewarded_campaigns WHERE advertiser_id = ? AND status IN ('pending', 'approved', 'active', 'paused') AND campaign_budget_mode <> 'pay_as_you_go'",
-      [user.id]
-    );
-    const lockedBalance = parseFloat(lockedResult[0]?.locked || "0") + parseFloat(miniappLockedResult[0]?.locked || "0");
+    const lockedBalance = parseFloat(lockedResult[0]?.locked || "0");
 
     // 3. Get Active Ads count
     const [activeResult]: any = await pool.query(
@@ -111,15 +107,15 @@ export async function GET(request: Request) {
         COALESCE((SELECT COUNT(*) FROM ad_conversions conv WHERE conv.campaign_type = 'campaign' AND conv.campaign_id = c.id), 0) as conversions,
         COALESCE((SELECT SUM(conv.conversion_value) FROM ad_conversions conv WHERE conv.campaign_type = 'campaign' AND conv.campaign_id = c.id), 0) as conversion_value,
         CASE
-          WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)
+          WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
           ELSE ${campaignPostImpressionsExpr}
         END as impressions,
         CASE
-          WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.created_at >= CURDATE()), 0)
+          WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= CURDATE()), 0)
           ELSE ${campaignPostTodayImpressionsExpr}
         END as today_impressions,
         CASE
-          WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND bd.created_at < CURDATE()), 0)
+          WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND bd.created_at < CURDATE()), 0)
           ELSE ${campaignPostYesterdayImpressionsExpr}
         END as yesterday_impressions,
         CASE
@@ -142,28 +138,28 @@ export async function GET(request: Request) {
         END as today_spend,
         CASE
           WHEN (
-            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)
+            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
             ELSE ${campaignPostImpressionsExpr} END
           ) > 0
           THEN (
             CASE WHEN c.type = 'broadcast' THEN 0
             ELSE COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0) END
           ) / (
-            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 1)
+            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
             ELSE ${campaignPostImpressionsExpr} END
           ) * 100
           ELSE 0
         END as ctr,
         CASE
           WHEN (
-            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)
+            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
             ELSE ${campaignPostImpressionsExpr} END
           ) > 0
           THEN (
             CASE WHEN c.type = 'broadcast' THEN ${broadcastSpendExpr}
             ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) END
           ) / (
-            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 1)
+            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
             ELSE ${campaignPostImpressionsExpr} END
           ) * 1000
           ELSE 0
@@ -269,10 +265,10 @@ export async function GET(request: Request) {
     );
     const miniappClicks = Number(miniappClicksResult[0]?.total || 0);
     const [broadcastViewsResult]: any = await pool.query(
-      `SELECT COUNT(*) as total_views
+      `SELECT FLOOR(COUNT(*) / 5) as total_views
        FROM broadcast_deliveries bd
        JOIN campaigns c ON bd.campaign_id = c.id
-       WHERE c.user_id = ?`,
+       WHERE c.user_id = ? AND bd.status = 'sent'`,
       [user.id]
     );
     const broadcastViews = Number(broadcastViewsResult[0]?.total_views || 0);

@@ -829,7 +829,7 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
       .agx-rewarded-advertiser{display:flex;align-items:center;justify-content:center;margin-bottom:6px}
       .agx-rewarded-logo{width:24px;height:24px;border-radius:8px;object-fit:cover;border:1px solid rgba(255,255,255,.16);background:#0f172a}
       .agx-rewarded-title{margin:0 auto 4px;max-width:100%;font-size:17px;line-height:1.25;font-weight:900;letter-spacing:-.01em;color:#fff;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-      .agx-rewarded-desc{margin:0 auto 10px;width:100%;max-width:100%;color:#aab4c8;font-size:12.5px;line-height:1.4;font-weight:600;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+      .agx-rewarded-desc{margin:0 auto 10px;width:100%;max-width:100%;color:#aab4c8;font-size:10.5px;line-height:1.3;font-weight:600;letter-spacing:-.01em;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
       .agx-rewarded-cta{width:100%;min-height:44px;border:0;border-radius:14px;background:linear-gradient(135deg,#5b5cff 0%,#2563eb 52%,#14b8a6 100%);color:#fff;font-size:15px;font-weight:950;letter-spacing:-.005em;padding:11px 16px;cursor:pointer;box-shadow:0 14px 30px rgba(37,99,235,.34),inset 0 1px 0 rgba(255,255,255,.18);transition:transform .15s ease,box-shadow .15s ease;flex:0 0 auto}
       .agx-rewarded-cta:hover{transform:translateY(-1px)}
       .agx-rewarded-cta:active{transform:scale(.98);box-shadow:0 8px 20px rgba(37,99,235,.3),inset 0 1px 0 rgba(255,255,255,.18)}

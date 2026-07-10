@@ -166,7 +166,7 @@ function baseSelect(type: MarketplaceInventoryType) {
       COALESCE(b.traffic_quality_score, 60) as traffic_quality_score,
       COALESCE(b.inventory_score, 50) as inventory_score,
       COALESCE(b.inventory_rank, 'standard') as inventory_rank,
-      COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)), 0) as calculated_monthly_impressions,
+      COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent' AND bd.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)), 0) as calculated_monthly_impressions,
       0 as calculated_completion_rate,
       COALESCE((SELECT COUNT(*) FROM inventory_favorites f WHERE f.inventory_type = 'bot' AND f.inventory_id = b.id), 0) as favorites_count,
       COALESCE((SELECT COUNT(*) FROM inventory_marketplace_analytics a WHERE a.inventory_type = 'bot' AND a.inventory_id = b.id AND a.event_type = 'selection'), 0) as selection_count,

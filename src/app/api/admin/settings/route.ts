@@ -9,6 +9,7 @@ const MINIAPP_INTERNAL_SPLIT_KEYS = new Set([
   "miniapp_internal_reserve_percent",
 ]);
 const CHANNEL_SETTLEMENT_PERCENT_KEYS = new Set(["platform_margin_percent", "safety_reserve_percent"]);
+const BROADCAST_REVENUE_SPLIT_KEYS = new Set(["broadcast_publisher_share_percent", "broadcast_reserve_percent"]);
 const MIN_ADS_GALAXY_SHARE_PERCENT = 15;
 const MIN_RESERVE_PERCENT = 10;
 const CPM_SETTING_KEYS = new Set([
@@ -130,8 +131,41 @@ export async function PUT(request: Request) {
         return NextResponse.json({ success: true });
       }
 
+      if (atomicSettings.every(([settingKey]) => BROADCAST_REVENUE_SPLIT_KEYS.has(settingKey))) {
+        if (suppliedKeys.size !== BROADCAST_REVENUE_SPLIT_KEYS.size
+          || [...BROADCAST_REVENUE_SPLIT_KEYS].some((settingKey) => !suppliedKeys.has(settingKey))) {
+          return NextResponse.json({ error: "Bot publisher share and reserve must be submitted together" }, { status: 400 });
+        }
+        const split = new Map(atomicSettings.map(([settingKey, settingValue]) => [settingKey, Number(settingValue)]));
+        const publisherPercent = split.get("broadcast_publisher_share_percent")!;
+        const reservePercent = split.get("broadcast_reserve_percent")!;
+        if (![publisherPercent, reservePercent].every((percent) => Number.isFinite(percent) && percent >= 0 && percent <= 100)) {
+          return NextResponse.json({ error: "Bot publisher share and reserve must be numbers between 0 and 100" }, { status: 400 });
+        }
+        if (publisherPercent + reservePercent > 100) {
+          return NextResponse.json({ error: "Bot publisher share plus reserve cannot exceed 100%" }, { status: 400 });
+        }
+        const conn = await pool.getConnection();
+        try {
+          await conn.beginTransaction();
+          for (const [settingKey, settingValue] of atomicSettings) {
+            await conn.query(
+              "INSERT INTO settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)",
+              [settingKey, Number(settingValue).toString()]
+            );
+          }
+          await conn.commit();
+        } catch (error) {
+          await conn.rollback().catch(() => undefined);
+          throw error;
+        } finally {
+          conn.release();
+        }
+        return NextResponse.json({ success: true });
+      }
+
       if (atomicSettings.some(([settingKey]) => !MINIAPP_INTERNAL_SPLIT_KEYS.has(settingKey))) {
-        return NextResponse.json({ error: "Atomic settings updates are limited to CPM groups or Mini App revenue split settings" }, { status: 400 });
+        return NextResponse.json({ error: "Atomic settings updates are limited to CPM groups, Bot revenue split settings, or Mini App revenue split settings" }, { status: 400 });
       }
       if (suppliedKeys.size !== MINIAPP_INTERNAL_SPLIT_KEYS.size
         || [...MINIAPP_INTERNAL_SPLIT_KEYS].some((settingKey) => !suppliedKeys.has(settingKey))) {
@@ -236,6 +270,10 @@ export async function PUT(request: Request) {
       if (Math.abs(total - 100) > 0.000001) {
         return NextResponse.json({ error: "Mini App internal revenue split must equal 100%; submit all three split settings together using the settings object" }, { status: 400 });
       }
+    }
+
+    if (BROADCAST_REVENUE_SPLIT_KEYS.has(key)) {
+      return NextResponse.json({ error: "Bot publisher share and reserve must be submitted together using the settings object" }, { status: 400 });
     }
 
     if (CPM_SETTING_KEYS.has(key)) {
