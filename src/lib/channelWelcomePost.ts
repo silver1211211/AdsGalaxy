@@ -1,20 +1,21 @@
 import type { Pool, PoolConnection, ResultSetHeader } from "mysql2/promise";
 import pool from "@/lib/db";
-import { SAFE_TELEGRAM_PARSE_MODE, sendTelegramMessage } from "@/lib/telegram";
+import { sendTelegramMessage } from "@/lib/telegram";
 
 const ADSGALAXY_REF_LINK = "https://t.me/Ads_Galaxy_bot?startapp=REF770190998629F";
 
 // Plain-text URL (no <a> tag) so Telegram auto-links it instead of rendering
 // custom link text — this is a system welcome post, not a paid ad, so it must
 // never carry an inline keyboard, CTA button, tracking, or watermark.
-const WELCOME_CAPTION = (
-  `🎉 <b>Welcome to AdsGalaxy Publisher Network</b>\n\n` +
-  `Your channel has been successfully added to the AdsGalaxy advertising network.\n\n` +
-  `You're now eligible to receive sponsored campaigns from advertisers around the world and begin earning from your Telegram audience.\n\n` +
-  `As your channel grows, you'll gain access to more campaigns, higher-quality advertisers, and better earning opportunities.\n\n` +
-  `Thank you for publishing with AdsGalaxy.\n\n` +
-  `Start monetizing today:\n${ADSGALAXY_REF_LINK}`
-).replace(/<\/?b>/g, "");
+const WELCOME_CAPTION =
+  `🚀 <b>Welcome to AdsGalaxy</b>\n\n` +
+  `Your channel has been added and is now under review.\n\n` +
+  `💰 Monetize your Telegram:\n` +
+  `• Channels (Public & Private)\n` +
+  `• Bots\n` +
+  `• Mini Apps\n\n` +
+  `📢 Reach thousands of Telegram users by advertising your products across the AdsGalaxy network.\n\n` +
+  `Start monetizing:\n${ADSGALAXY_REF_LINK}`;
 
 async function logWelcomePostAttempt(channelId: number | string, status: "sent" | "failed", failureReason: string | null, telegramChatId: unknown, db: Pool | PoolConnection) {
   try {
@@ -29,7 +30,7 @@ async function logWelcomePostAttempt(channelId: number | string, status: "sent" 
 
 // Idempotent and race-safe: the claim UPDATE below only succeeds for one
 // caller at a time (WHERE welcome_post_sent_at IS NULL AND status is not
-// already 'sending'), so two concurrent/duplicate resume requests can never
+// already 'sending'), so two concurrent/duplicate creation requests can never
 // both send the welcome post. A failed attempt resets status to 'failed',
 // which is the only other state the claim condition accepts — so retrying
 // after a failure works, but a successful send can never be duplicated.
@@ -63,7 +64,7 @@ export async function sendChannelWelcomePostIfNeeded(
   try {
     const result = await sendTelegramMessage(chatId, WELCOME_CAPTION, {
       photo: imageUrl,
-      parse_mode: SAFE_TELEGRAM_PARSE_MODE,
+      parse_mode: "HTML",
     });
 
     if (result && result.ok) {

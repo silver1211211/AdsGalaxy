@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
-import { sendTelegramMessage } from "@/lib/telegram";
+import { escapeTelegramHtml, sendTelegramMessage } from "@/lib/telegram";
 import { requireWithdrawalsAllowed } from "@/lib/productionSafety";
 import { ensureWithdrawalSubmissionColumns } from "@/lib/schemaGuards";
 
@@ -105,11 +105,11 @@ export async function POST(request: Request) {
       const feeNote = fee > 0 ? `\nNetwork Fee: <b>-$${fee.toFixed(2)}</b>\nYou receive: <b>$${netAmount.toFixed(2)}</b>` : "";
       const message = `🚀 <b>Withdrawal Placed!</b>\n\n` +
         `Amount: <b>$${withdrawAmount.toFixed(2)}</b>${feeNote}\n` +
-        `Network: <b>${network}</b>\n` +
-        `Address: <code>${address}</code>\n\n` +
+        `Network: <b>${escapeTelegramHtml(network)}</b>\n` +
+        `Address: <code>${escapeTelegramHtml(address)}</code>\n\n` +
         `Your withdrawal has been placed successfully and will be processed shortly.`;
       
-      await sendTelegramMessage(userRows[0].telegram_id, message);
+      await sendTelegramMessage(userRows[0].telegram_id, message, { parse_mode: "HTML" });
 
       return NextResponse.json({ success: true });
     } catch (err) {

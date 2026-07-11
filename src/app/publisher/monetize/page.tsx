@@ -2503,14 +2503,8 @@ export default function MonetizePage() {
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-slate-50 pt-2.5 text-[11px] font-semibold text-slate-500">
                     <span className="flex items-center gap-1">
                       <Users size={11} />
-                      {formatCount(bot.subscriber_count)} users
+                      {formatCount(bot.active_count)} active users
                     </span>
-                    {Number(bot.active_count) > 0 && (
-                      <>
-                        <span className="text-slate-300">·</span>
-                        <span className="text-emerald-600 font-bold">{formatCount(bot.active_count)} active</span>
-                      </>
-                    )}
                     <span className="text-slate-300">·</span>
                     <span>{bot.posts_per_day ?? 1}/day</span>
                     {cats.length > 0 && (

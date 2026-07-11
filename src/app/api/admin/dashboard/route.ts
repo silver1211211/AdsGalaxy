@@ -4,6 +4,7 @@ import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
 import { getGlobalBotAudienceStats } from "@/lib/botAudience";
 import { getMiniAppPlatformStats } from "@/lib/miniappReports";
+import { columnExists } from "@/lib/schemaGuards";
 
 export async function GET() {
   if (!(await checkAdminAuth())) {
@@ -125,13 +126,17 @@ export async function GET() {
         COALESCE(SUM(reserve_amount), 0) as reserve
       FROM channel_daily_stats
     `);
+    const [hasBotPlatformRevenue, hasBotReserveAmount] = await Promise.all([
+      columnExists(pool, "broadcast_deliveries", "platform_revenue"),
+      columnExists(pool, "broadcast_deliveries", "reserve_amount"),
+    ]);
     const [[botPlatformStats]]: any = await pool.query(`
       SELECT
         FLOOR(COUNT(*) / 5) as impressions,
         COALESCE(SUM(cost), 0) as revenue,
         COALESCE(SUM(publisher_reward), 0) as publisher_earnings,
-        COALESCE(SUM(platform_revenue), 0) as platform_earnings,
-        COALESCE(SUM(reserve_amount), 0) as reserve
+        ${hasBotPlatformRevenue ? "COALESCE(SUM(platform_revenue), 0)" : "0"} as platform_earnings,
+        ${hasBotReserveAmount ? "COALESCE(SUM(reserve_amount), 0)" : "0"} as reserve
       FROM broadcast_deliveries
       WHERE status = 'sent'
     `);

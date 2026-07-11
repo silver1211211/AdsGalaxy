@@ -10,7 +10,6 @@ import { refreshChannelViews } from "@/lib/channelAdminViewRefresh";
 import { settleChannelCampaigns } from "@/lib/channelSettlement";
 import { getPublisherQuality } from "@/lib/publisherQuality";
 import { notifyChannelApproved, notifyChannelRejected, notifyChannelRemoved } from "@/lib/publisherNotifications";
-import { sendChannelWelcomePostIfNeeded } from "@/lib/channelWelcomePost";
 
 type ChannelRow = RowDataPacket & {
   id: number; user_id: number; status: string; is_deleted: number;
@@ -98,7 +97,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   } else if (action === "resume") {
     // The status<>'active' guard makes this a compare-and-swap: a retried or
     // double-submitted request only ever sees affectedRows=0 the second time,
-    // so the approval notification and welcome post never fire twice.
+    // so the approval notification never fires twice.
     const [update] = await pool.query<ResultSetHeader>(
       "UPDATE channels SET status='active',is_deleted=FALSE,paused_reason=NULL,failure_reason=NULL,reactivated_at=NOW() WHERE id=? AND status<>'active'",
       [channelId]
@@ -107,7 +106,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     if (update.affectedRows > 0) {
       await notifyChannelApproved(channel.telegram_id, channelId, channel.title);
     }
-    await sendChannelWelcomePostIfNeeded(channelId, channel.chat_id);
   } else if (action === "reject") {
     const [update] = await pool.query<ResultSetHeader>(
       "UPDATE channels SET status='rejected',paused_reason='Rejected by admin control center' WHERE id=? AND status<>'rejected'",

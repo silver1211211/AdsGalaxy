@@ -120,7 +120,7 @@ interface MiniAppAnalyticsDashboardProps {
 }
 
 export default function MiniAppAnalyticsDashboard({ miniappId }: MiniAppAnalyticsDashboardProps) {
-  const [dateMode, setDateMode] = useState<DateMode>("today");
+  const [dateMode, setDateMode] = useState<DateMode>("7d");
   const [data, setData] = useState<MiniAppReport | null>(null);
   const [loading, setLoading] = useState(true);
 

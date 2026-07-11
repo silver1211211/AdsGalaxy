@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import pool from "./db";
-import { sendTelegramMessage } from "./telegram";
+import { escapeTelegramHtml, sendTelegramMessage } from "./telegram";
 import { getLocalMiniappDevAuthenticatedUser, parseLocalMiniappDevInitData } from "./localMiniappDev";
 import { processReferralJoinReward } from "./referralSprint";
 import {
@@ -185,7 +185,8 @@ export async function getAuthenticatedUser(initData: string | null, options: { a
             if (!referralBlocked) {
               await sendTelegramMessage(
                 referrerTgId,
-                `<b>New Referral Joined!</b>\n\nHi ${referrerName}, someone joined with your referral code. You earned the instant join reward; the verification bonus unlocks after they join and verify the required channel.`
+                `<b>New Referral Joined!</b>\n\nHi ${escapeTelegramHtml(referrerName)}, someone joined with your referral code. You earned the instant join reward; the verification bonus unlocks after they join and verify the required channel.`,
+                { parse_mode: "HTML" }
               );
             }
           }

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { sendTelegramMessage } from "@/lib/telegram";
+import { escapeTelegramHtml, sendTelegramMessage } from "@/lib/telegram";
 import {
   autoPauseChannel,
   checkChannelHealth,
@@ -97,11 +97,11 @@ export async function GET(_req: NextRequest) {
             await pool.query("UPDATE channels SET last_subscriber_update_at = NOW() WHERE id = ?", [channel.id]);
           }
 
-          const channelLabel = channel.username ? `@${channel.username}` : `ID ${channel.chat_id}`;
-          const notification = `<b>Channel Health Alert</b>\n\nYour channel <b>${channel.title}</b> (${channelLabel}) is not currently counted as active.\n\nReason: <i>${health.reason || "Unable to verify channel access"}</i>\n\n${health.suggestedFix || "Please verify channel access and try again."}`;
+          const channelLabel = channel.username ? `@${escapeTelegramHtml(channel.username)}` : `ID ${escapeTelegramHtml(channel.chat_id)}`;
+          const notification = `<b>Channel Health Alert</b>\n\nYour channel <b>${escapeTelegramHtml(channel.title)}</b> (${channelLabel}) is not currently counted as active.\n\nReason: <i>${escapeTelegramHtml(health.reason || "Unable to verify channel access")}</i>\n\n${escapeTelegramHtml(health.suggestedFix || "Please verify channel access and try again.")}`;
 
           try {
-            await sendTelegramMessage(channel.owner_telegram_id, notification);
+            await sendTelegramMessage(channel.owner_telegram_id, notification, { parse_mode: "HTML" });
           } catch (notifyErr) {
             console.error(`Failed to notify publisher for channel ${channel.id}:`, notifyErr);
           }

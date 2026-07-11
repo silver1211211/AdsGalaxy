@@ -1,5 +1,13 @@
 export const SAFE_TELEGRAM_PARSE_MODE = undefined;
 
+export function escapeTelegramHtml(value: unknown) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 export async function sendTelegramMessage(chatId: string | number, text: string, options: any = {}) {
   const token = options.token || process.env.BOT_TOKEN;
   if (!token) {

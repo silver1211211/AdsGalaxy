@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
-import { sendTelegramMessage } from "@/lib/telegram";
+import { escapeTelegramHtml, sendTelegramMessage } from "@/lib/telegram";
 
 export async function GET(request: Request) {
   if (!(await checkAdminAuth())) {
@@ -170,7 +170,8 @@ export async function PATCH(request: Request) {
       try {
         await sendTelegramMessage(
           post.advertiser_telegram_id, 
-          `🔴 <b>Views Invalidated</b>\n\nYour campaign "<b>${post.campaign_name || 'N/A'}</b>" posted on "<b>${post.channel_title || 'N/A'}</b>" was found using fake/bot views.\n\nAfter detection, we have invalidated these views. The deducted amount (<b>$${totalAdvPaid.toFixed(2)}</b>) has been fully refunded to your campaign budget.`
+          `🔴 <b>Views Invalidated</b>\n\nYour campaign "<b>${escapeTelegramHtml(post.campaign_name || 'N/A')}</b>" posted on "<b>${escapeTelegramHtml(post.channel_title || 'N/A')}</b>" was found using fake/bot views.\n\nAfter detection, we have invalidated these views. The deducted amount (<b>$${totalAdvPaid.toFixed(2)}</b>) has been fully refunded to your campaign budget.`,
+          { parse_mode: "HTML" }
         );
       } catch (e) { console.error(e); }
     }
@@ -179,7 +180,8 @@ export async function PATCH(request: Request) {
       try {
         await sendTelegramMessage(
           post.publisher_telegram_id, 
-          `🔴 <b>Fake Views Detected</b>\n\nYour post on "<b>${post.channel_title || 'N/A'}</b>" for campaign "<b>${post.campaign_name || 'N/A'}</b>" was found using fake views.\n\nThe views have been invalidated and the locked reward (<b>$${totalPubReward.toFixed(2)}</b>) has been deducted from your account.\n\nThis action cannot be undone.`
+          `🔴 <b>Fake Views Detected</b>\n\nYour post on "<b>${escapeTelegramHtml(post.channel_title || 'N/A')}</b>" for campaign "<b>${escapeTelegramHtml(post.campaign_name || 'N/A')}</b>" was found using fake views.\n\nThe views have been invalidated and the locked reward (<b>$${totalPubReward.toFixed(2)}</b>) has been deducted from your account.\n\nThis action cannot be undone.`,
+          { parse_mode: "HTML" }
         );
       } catch (e) { console.error(e); }
     }

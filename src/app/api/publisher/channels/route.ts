@@ -20,6 +20,7 @@ import {
 } from "@/lib/privateChannelVerificationToken";
 import { logPrivateChannelDiagnostic } from "@/lib/privateChannelDiagnostics";
 import { notifyChannelSubmitted } from "@/lib/publisherNotifications";
+import { sendChannelWelcomePostIfNeeded } from "@/lib/channelWelcomePost";
 import { safeQueuePublisherWelcome } from "@/lib/supportMessages";
 
 type SettingRow = RowDataPacket & { value?: string | number | null };
@@ -569,6 +570,12 @@ export async function POST(request: Request) {
     }
 
     await notifyChannelSubmitted(user.telegram_id, result.insertId, normalizedTitle);
+    await sendChannelWelcomePostIfNeeded(result.insertId, resolvedChatId).catch((welcomeError: unknown) => {
+      console.error("Channel welcome post attempt failed after creation", {
+        channel_id: result.insertId,
+        error: welcomeError instanceof Error ? welcomeError.message : "unknown",
+      });
+    });
     await safeQueuePublisherWelcome(user.id);
 
     return NextResponse.json({ success: true, id: result.insertId });

@@ -1,5 +1,5 @@
 import pool from "@/lib/db";
-import { sendTelegramMessage } from "@/lib/telegram";
+import { escapeTelegramHtml, sendTelegramMessage } from "@/lib/telegram";
 
 type EntityType = "withdrawal" | "channel" | "miniapp" | "bot";
 
@@ -17,7 +17,7 @@ async function notify(
   if (!telegramId) return;
 
   try {
-    const result = await sendTelegramMessage(String(telegramId), message);
+    const result = await sendTelegramMessage(String(telegramId), message, { parse_mode: "HTML" });
     if (result && result.ok === false) {
       await logNotification(event, "failed", String(result.description || "send failed"), telegramId);
       console.error(`Notification delivery failed (${event.eventType}):`, result.description);
@@ -54,7 +54,7 @@ function money(value: unknown) {
 // ── Withdrawals ───────────────────────────────────────────────────────────
 
 export async function notifyWithdrawalPaid(telegramId: unknown, input: { withdrawalId?: number | string; amount: unknown; network?: string | null }) {
-  const networkLine = input.network ? `Network: <b>${input.network}</b>\n` : "";
+  const networkLine = input.network ? `Network: <b>${escapeTelegramHtml(input.network)}</b>\n` : "";
   const message =
     `🚀 <b>Withdrawal Completed</b>\n\n` +
     `Amount: <b>${money(input.amount)}</b>\n` +
@@ -65,7 +65,7 @@ export async function notifyWithdrawalPaid(telegramId: unknown, input: { withdra
 }
 
 export async function notifyWithdrawalRejected(telegramId: unknown, input: { withdrawalId?: number | string; amount: unknown; reason?: string | null; refunded: boolean }) {
-  const reasonLine = input.reason ? `Reason: <b>${input.reason}</b>\n\n` : "\n";
+  const reasonLine = input.reason ? `Reason: <b>${escapeTelegramHtml(input.reason)}</b>\n\n` : "\n";
   const refundLine = input.refunded
     ? "The withdrawal amount has been returned to your available balance."
     : "Contact support if you believe this is a mistake.";
@@ -82,7 +82,7 @@ export async function notifyWithdrawalRejected(telegramId: unknown, input: { wit
 export async function notifyChannelSubmitted(telegramId: unknown, channelId: number | string, title?: string) {
   await notify(
     telegramId,
-    `🕒 <b>Channel Submitted for Review</b>\n\nYour channel "<b>${title}</b>" has been submitted and is now pending review.\n\nWe'll notify you as soon as it's approved.`,
+    `🕒 <b>Channel Submitted for Review</b>\n\nYour channel "<b>${escapeTelegramHtml(title)}</b>" has been submitted and is now pending review.\n\nWe'll notify you as soon as it's approved.`,
     { entityType: "channel", entityId: channelId, eventType: "channel_submitted" }
   );
 }
@@ -90,7 +90,7 @@ export async function notifyChannelSubmitted(telegramId: unknown, channelId: num
 export async function notifyChannelApproved(telegramId: unknown, channelId: number | string, title?: string) {
   await notify(
     telegramId,
-    `✅ <b>Channel Approved</b>\n\nYour channel "<b>${title}</b>" has been approved and is now active in the AdsGalaxy advertising network.\n\nYou can start receiving sponsored campaigns right away.`,
+    `✅ <b>Channel Approved</b>\n\nYour channel "<b>${escapeTelegramHtml(title)}</b>" has been approved and is now active in the AdsGalaxy advertising network.\n\nYou can start receiving sponsored campaigns right away.`,
     { entityType: "channel", entityId: channelId, eventType: "channel_approved" }
   );
 }
@@ -98,7 +98,7 @@ export async function notifyChannelApproved(telegramId: unknown, channelId: numb
 export async function notifyChannelRejected(telegramId: unknown, channelId: number | string, title?: string) {
   await notify(
     telegramId,
-    `❌ <b>Channel Rejected</b>\n\nYour channel "<b>${title}</b>" was not approved for monetization at this time.\n\nReview our publisher guidelines and resubmit once the issue is resolved.`,
+    `❌ <b>Channel Rejected</b>\n\nYour channel "<b>${escapeTelegramHtml(title)}</b>" was not approved for monetization at this time.\n\nReview our publisher guidelines and resubmit once the issue is resolved.`,
     { entityType: "channel", entityId: channelId, eventType: "channel_rejected" }
   );
 }
@@ -106,7 +106,7 @@ export async function notifyChannelRejected(telegramId: unknown, channelId: numb
 export async function notifyChannelRemoved(telegramId: unknown, channelId: number | string, title?: string) {
   await notify(
     telegramId,
-    `🗑️ <b>Channel Removed</b>\n\nYour channel "<b>${title}</b>" has been removed from AdsGalaxy and will no longer receive campaigns.\n\nYou can add it again at any time if you'd like to resume monetization.`,
+    `🗑️ <b>Channel Removed</b>\n\nYour channel "<b>${escapeTelegramHtml(title)}</b>" has been removed from AdsGalaxy and will no longer receive campaigns.\n\nYou can add it again at any time if you'd like to resume monetization.`,
     { entityType: "channel", entityId: channelId, eventType: "channel_removed" }
   );
 }
@@ -116,7 +116,7 @@ export async function notifyChannelRemoved(telegramId: unknown, channelId: numbe
 export async function notifyMiniAppSubmitted(telegramId: unknown, miniAppId: number | string, name?: string) {
   await notify(
     telegramId,
-    `🕒 <b>Mini App Submitted for Review</b>\n\nYour Mini App "<b>${name}</b>" has been submitted and is now pending review.\n\nWe'll notify you as soon as it's approved.`,
+    `🕒 <b>Mini App Submitted for Review</b>\n\nYour Mini App "<b>${escapeTelegramHtml(name)}</b>" has been submitted and is now pending review.\n\nWe'll notify you as soon as it's approved.`,
     { entityType: "miniapp", entityId: miniAppId, eventType: "miniapp_submitted" }
   );
 }
@@ -124,7 +124,7 @@ export async function notifyMiniAppSubmitted(telegramId: unknown, miniAppId: num
 export async function notifyMiniAppApproved(telegramId: unknown, miniAppId: number | string, name?: string) {
   await notify(
     telegramId,
-    `✅ <b>Mini App Approved</b>\n\nYour Mini App "<b>${name}</b>" has been approved and is now eligible to serve ads.\n\nMake sure the AdsGalaxy SDK is integrated to start earning.`,
+    `✅ <b>Mini App Approved</b>\n\nYour Mini App "<b>${escapeTelegramHtml(name)}</b>" has been approved and is now eligible to serve ads.\n\nMake sure the AdsGalaxy SDK is integrated to start earning.`,
     { entityType: "miniapp", entityId: miniAppId, eventType: "miniapp_approved" }
   );
 }
@@ -132,7 +132,7 @@ export async function notifyMiniAppApproved(telegramId: unknown, miniAppId: numb
 export async function notifyMiniAppRejected(telegramId: unknown, miniAppId: number | string, name?: string) {
   await notify(
     telegramId,
-    `❌ <b>Mini App Rejected</b>\n\nYour Mini App "<b>${name}</b>" was not approved for monetization at this time.\n\nReview our publisher guidelines and resubmit once the issue is resolved.`,
+    `❌ <b>Mini App Rejected</b>\n\nYour Mini App "<b>${escapeTelegramHtml(name)}</b>" was not approved for monetization at this time.\n\nReview our publisher guidelines and resubmit once the issue is resolved.`,
     { entityType: "miniapp", entityId: miniAppId, eventType: "miniapp_rejected" }
   );
 }
@@ -140,7 +140,7 @@ export async function notifyMiniAppRejected(telegramId: unknown, miniAppId: numb
 export async function notifyMiniAppRemoved(telegramId: unknown, miniAppId: number | string, name?: string) {
   await notify(
     telegramId,
-    `🗑️ <b>Mini App Removed</b>\n\nYour Mini App "<b>${name}</b>" has been removed from AdsGalaxy and will no longer serve ads.\n\nContact support if you believe this was unexpected.`,
+    `🗑️ <b>Mini App Removed</b>\n\nYour Mini App "<b>${escapeTelegramHtml(name)}</b>" has been removed from AdsGalaxy and will no longer serve ads.\n\nContact support if you believe this was unexpected.`,
     { entityType: "miniapp", entityId: miniAppId, eventType: "miniapp_removed" }
   );
 }
@@ -150,7 +150,7 @@ export async function notifyMiniAppRemoved(telegramId: unknown, miniAppId: numbe
 export async function notifyBotSubmitted(telegramId: unknown, botId: number | string, botUsername?: string) {
   await notify(
     telegramId,
-    `🕒 <b>Bot Submitted for Review</b>\n\nYour bot @${botUsername} has been submitted and is now pending review.\n\nWe'll notify you as soon as it's approved.`,
+    `🕒 <b>Bot Submitted for Review</b>\n\nYour bot @${escapeTelegramHtml(botUsername)} has been submitted and is now pending review.\n\nWe'll notify you as soon as it's approved.`,
     { entityType: "bot", entityId: botId, eventType: "bot_submitted" }
   );
 }
@@ -158,7 +158,7 @@ export async function notifyBotSubmitted(telegramId: unknown, botId: number | st
 export async function notifyBotApproved(telegramId: unknown, botId: number | string, botUsername?: string) {
   await notify(
     telegramId,
-    `🤖 <b>Bot Approved</b>\n\nYour bot @${botUsername} has been approved for monetization.\n\nYou can now start serving ads to your bot's users.`,
+    `🤖 <b>Bot Approved</b>\n\nYour bot @${escapeTelegramHtml(botUsername)} has been approved for monetization.\n\nYou can now start serving ads to your bot's users.`,
     { entityType: "bot", entityId: botId, eventType: "bot_approved" }
   );
 }
@@ -166,7 +166,7 @@ export async function notifyBotApproved(telegramId: unknown, botId: number | str
 export async function notifyBotRejected(telegramId: unknown, botId: number | string, botUsername?: string) {
   await notify(
     telegramId,
-    `❌ <b>Bot Rejected</b>\n\nYour bot @${botUsername} was not approved for monetization at this time.\n\nReview our publisher guidelines and resubmit once the issue is resolved.`,
+    `❌ <b>Bot Rejected</b>\n\nYour bot @${escapeTelegramHtml(botUsername)} was not approved for monetization at this time.\n\nReview our publisher guidelines and resubmit once the issue is resolved.`,
     { entityType: "bot", entityId: botId, eventType: "bot_rejected" }
   );
 }
@@ -174,7 +174,7 @@ export async function notifyBotRejected(telegramId: unknown, botId: number | str
 export async function notifyBotRemoved(telegramId: unknown, botId: number | string, botUsername?: string) {
   await notify(
     telegramId,
-    `🗑️ <b>Bot Removed</b>\n\nYour bot @${botUsername} has been removed from AdsGalaxy and will no longer serve ads.\n\nAdd it again anytime if you'd like to resume monetization.`,
+    `🗑️ <b>Bot Removed</b>\n\nYour bot @${escapeTelegramHtml(botUsername)} has been removed from AdsGalaxy and will no longer serve ads.\n\nAdd it again anytime if you'd like to resume monetization.`,
     { entityType: "bot", entityId: botId, eventType: "bot_removed" }
   );
 }

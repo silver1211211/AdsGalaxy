@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
-import { sendTelegramMessage } from "@/lib/telegram";
+import { escapeTelegramHtml, sendTelegramMessage } from "@/lib/telegram";
 import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
 import type { RowDataPacket } from "mysql2/promise";
 import { loadBotToken } from "@/lib/botIntegration";
@@ -293,11 +293,11 @@ export async function PATCH(request: Request) {
 
     // Send Telegram Notification
     const message = normalizedAction === "activate"
-      ? `🤖 <b>Bot Approved!</b>\n\nYour bot <b>${bot.bot_name}</b> (@${bot.bot_username}) has been approved for monetization. You can now start serving ads.`
-      : `❌ <b>Bot Rejected</b>\n\nUnfortunately, your bot <b>${bot.bot_name}</b> (@${bot.bot_username}) was not approved for monetization at this time.`;
+      ? `🤖 <b>Bot Approved!</b>\n\nYour bot <b>${escapeTelegramHtml(bot.bot_name)}</b> (@${escapeTelegramHtml(bot.bot_username)}) has been approved for monetization. You can now start serving ads.`
+      : `❌ <b>Bot Rejected</b>\n\nUnfortunately, your bot <b>${escapeTelegramHtml(bot.bot_name)}</b> (@${escapeTelegramHtml(bot.bot_username)}) was not approved for monetization at this time.`;
 
     if (normalizedAction === "activate" || normalizedAction === "reject") {
-      await sendTelegramMessage(bot.telegram_id, message);
+      await sendTelegramMessage(bot.telegram_id, message, { parse_mode: "HTML" });
     }
 
     return NextResponse.json({ success: true });

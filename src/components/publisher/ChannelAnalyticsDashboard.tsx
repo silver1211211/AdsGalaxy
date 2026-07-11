@@ -118,7 +118,7 @@ interface ChannelAnalyticsDashboardProps {
 }
 
 export default function ChannelAnalyticsDashboard({ channelId, onSubscriberCount }: ChannelAnalyticsDashboardProps) {
-  const [dateMode, setDateMode] = useState<DateMode>("today");
+  const [dateMode, setDateMode] = useState<DateMode>("7d");
   const [data, setData] = useState<ChannelAnalytics | null>(null);
   const [loading, setLoading] = useState(true);
 

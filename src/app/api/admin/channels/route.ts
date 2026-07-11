@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars -- legacy admin channel payloads are not schema-generated */
 import pool from "@/lib/db";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
-import { sendTelegramMessage } from "@/lib/telegram";
+import { escapeTelegramHtml, sendTelegramMessage } from "@/lib/telegram";
 import { ensureDefaultChannelDistribution } from "@/lib/channelLifecycle";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import {
@@ -182,12 +182,13 @@ export async function PATCH(request: Request) {
     }
 
     // Send Telegram Notification
+    const channelLabel = channel.username ? `@${escapeTelegramHtml(channel.username)}` : "your private channel";
     const message = normalizedAction === "activate"
-      ? `✅ <b>Channel Approved!</b>\n\nYour channel <b>${channel.title}</b> (${channel.username ? `@${channel.username}` : "your private channel"}) has been approved and is now active in the advertisements network.`
-      : `❌ <b>Channel Rejected</b>\n\nUnfortunately, your channel <b>${channel.title}</b> (${channel.username ? `@${channel.username}` : "your private channel"}) was not approved for monetization at this time.`;
+      ? `✅ <b>Channel Approved!</b>\n\nYour channel <b>${escapeTelegramHtml(channel.title)}</b> (${channelLabel}) has been approved and is now active in the advertisements network.`
+      : `❌ <b>Channel Rejected</b>\n\nUnfortunately, your channel <b>${escapeTelegramHtml(channel.title)}</b> (${channelLabel}) was not approved for monetization at this time.`;
 
     if (normalizedAction === "activate" || normalizedAction === "reject") {
-      await sendTelegramMessage(channel.telegram_id, message);
+      await sendTelegramMessage(channel.telegram_id, message, { parse_mode: "HTML" });
     }
 
     return NextResponse.json({ success: true });
