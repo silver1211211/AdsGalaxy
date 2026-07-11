@@ -430,7 +430,7 @@ export async function POST(request: Request) {
         "paused_reason = NULL",
         "suggested_fix = NULL",
         "failure_reason = NULL",
-        "health_status = NULL",
+        "health_status = 'healthy'",
         "auto_paused_at = NULL"
       ];
       const updateParams = [
