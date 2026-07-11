@@ -206,7 +206,8 @@ for MIG in \
   "20260708_0098_campaign_cpc_billing.sql" \
   "20260710_0099_bot_status_compatibility.sql" \
   "20260710_0100_campaign_status_compatibility.sql" \
-  "20260710_0101_broadcast_payout_configuration.sql"
+  "20260710_0101_broadcast_payout_configuration.sql" \
+  "20260711_0102_bot_user_verification.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"
@@ -243,7 +244,7 @@ else
     $0 == begin { managed=1; next }
     $0 == end { managed=0; next }
     !managed
-  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|process-support-messages|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|retry-telegram-cleanup|referral-sprint)([[:space:]?]|$)' || true)
+  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|process-support-messages|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|retry-telegram-cleanup|verify-bot-users|referral-sprint)([[:space:]?]|$)' || true)
 
   {
     printf '%s\n' "$CLEAN_CRONTAB"
@@ -271,7 +272,8 @@ else
     echo "*/15 * * * * $CRON_BASE/developer-webhooks >/dev/null 2>&1"
     echo "*/30 * * * * $CRON_BASE/cleanup-expired-posts >/dev/null 2>&1"
     echo "*/30 * * * * $CRON_BASE/cleanup-expired-channel-views >/dev/null 2>&1"
-    echo "11-59/20 * * * * $CRON_BASE/retry-telegram-cleanup >/dev/null 2>&1"
+    echo "* * * * * $CRON_BASE/retry-telegram-cleanup >/dev/null 2>&1"
+    echo "*/5 * * * * $CRON_BASE/verify-bot-users >/dev/null 2>&1"
     echo "2 0 * * * $CRON_BASE/referral-sprint >/dev/null 2>&1"
     echo "$CRON_END"
   } | sed '/^[[:space:]]*$/d' | crontab -

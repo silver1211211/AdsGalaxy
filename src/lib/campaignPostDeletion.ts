@@ -3,7 +3,7 @@ import type { ResultSetHeader } from "mysql2/promise";
 import pool from "@/lib/db";
 
 const DEFAULT_MAX_POSTS_PER_RUN = 500;
-const MAX_DELETE_ATTEMPTS = 3;
+const MAX_DELETE_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 5000;
 const BATCH_DELAY_MS = 500;
 

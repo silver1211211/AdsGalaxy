@@ -4,7 +4,7 @@ import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 
-type BotRow = RowDataPacket & { id: number; bot_token: string; bot_token_encrypted: string | null };
+type BotRow = RowDataPacket & { id: number; owner_telegram_id: string | number | null };
 type ExistingUserRow = RowDataPacket & { id: number };
 type AuditRow = RowDataPacket & { id: number; admin_id: number | null; admin_username: string | null; metadata: unknown; created_at: string };
 
@@ -30,16 +30,28 @@ async function botUserColumns() {
   return new Set(rows.map((row) => row.COLUMN_NAME));
 }
 
-async function storeUser(connection: PoolConnection, columns: Set<string>, botId: number, user: { id: string; username: string | null; firstName: string | null }) {
+async function storeUser(connection: PoolConnection, columns: Set<string>, botId: number, ownerTelegramId: string, user: { id: string; username: string | null; firstName: string | null }) {
   const [existingRows] = await connection.query<ExistingUserRow[]>(
-    "SELECT id FROM bot_users WHERE bot_id = ? AND (user_id = ? OR chat_id = ?) ORDER BY id ASC LIMIT 1 FOR UPDATE",
-    [botId, user.id, user.id]
+    "SELECT id FROM bot_users WHERE bot_id = ? AND chat_id = ? ORDER BY id ASC LIMIT 1 FOR UPDATE",
+    [botId, user.id]
   );
   const existing = existingRows[0];
-  if (existing) return "existing" as const;
-  const names = ["bot_id", "user_id", "chat_id"];
-  const placeholders = ["?", "?", "?"];
-  const insertValues: unknown[] = [botId, user.id, user.id];
+  const isOwner = user.id === ownerTelegramId;
+  if (existing) {
+    if (isOwner) {
+      await connection.query(
+        `UPDATE bot_users SET status = 'active', is_active = TRUE, inactive_reason = NULL,
+           verification_success_at = COALESCE(verification_success_at, NOW()), verification_last_error = NULL,
+           verification_next_attempt_at = NULL, verification_claim_token = NULL, verification_claim_expires_at = NULL
+         WHERE id = ?`,
+        [existing.id]
+      );
+    }
+    return "existing" as const;
+  }
+  const names = ["bot_id", "chat_id"];
+  const placeholders = ["?", "?"];
+  const insertValues: unknown[] = [botId, user.id];
   const addValue = (column: string, value: unknown) => {
     if (!columns.has(column)) return;
     names.push(column); placeholders.push("?"); insertValues.push(value);
@@ -51,8 +63,9 @@ async function storeUser(connection: PoolConnection, columns: Set<string>, botId
   if (columns.has("first_seen_at")) { names.push("first_seen_at"); placeholders.push("NOW()"); }
   if (columns.has("last_seen_at")) { names.push("last_seen_at"); placeholders.push("NOW()"); }
   addValue("source", "manual_admin");
-  addValue("is_active", false);
-  addValue("status", "pending_verification");
+  addValue("is_active", isOwner);
+  addValue("status", isOwner ? "active" : "pending_verification");
+  if (isOwner && columns.has("verification_success_at")) { names.push("verification_success_at"); placeholders.push("NOW()"); }
   await connection.query(`INSERT INTO bot_users (${names.join(", ")}) VALUES (${placeholders.join(", ")})`, insertValues);
   return "added" as const;
 }
@@ -81,7 +94,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (parsed.submitted === 0) return NextResponse.json({ error: "Enter at least one Telegram user ID" }, { status: 400 });
   if (parsed.unique > MAX_IDS_PER_IMPORT) return NextResponse.json({ error: `Maximum ${MAX_IDS_PER_IMPORT} unique IDs per import` }, { status: 400 });
 
-  const [bots] = await pool.query<BotRow[]>("SELECT id, bot_token, bot_token_encrypted FROM bots WHERE id = ? AND is_deleted = FALSE LIMIT 1", [id]);
+  const [bots] = await pool.query<BotRow[]>(
+    `SELECT b.id, owner.telegram_id AS owner_telegram_id
+     FROM bots b JOIN users owner ON owner.id = b.user_id
+     WHERE b.id = ? AND b.is_deleted = FALSE LIMIT 1`,
+    [id]
+  );
   const bot = bots[0];
   if (!bot) return NextResponse.json({ error: "Bot not found" }, { status: 404 });
 
@@ -109,7 +127,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     await connection.beginTransaction();
     for (const user of verified) {
       try {
-        const result = await storeUser(connection, columns, bot.id, user);
+        const result = await storeUser(connection, columns, bot.id, String(bot.owner_telegram_id || ""), user);
         if (result === "added") added += 1;
         else updated += 1;
       } catch (error) {

@@ -97,7 +97,7 @@ export default function ManualAddUsersPopup({ isOpen, onClose, botId, onAdded }:
                 <div className="min-w-0 flex-1 pt-1.5">
                   <h3 className="text-[17px] font-black leading-snug text-slate-900">Manually Add Users</h3>
                   <p className="mt-1 text-xs font-medium leading-relaxed text-slate-500">
-                    Paste Telegram user IDs. Each is verified with this bot before saving.
+                    Users are added for verification. AdsGalaxy will automatically verify message delivery before activating them.
                   </p>
                 </div>
               </div>

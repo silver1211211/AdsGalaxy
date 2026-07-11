@@ -62,7 +62,8 @@ async function fastDebit(input: { conn: PoolConnection; postId: number; type: "c
   );
   const settledColumn = input.type === "click" ? "settled_clicks" : "settled_views";
   await input.conn.query(`UPDATE campaign_posts SET ${settledColumn}=${settledColumn}+?, spend=spend+? WHERE id=?`, [units, debit, input.postId]);
-  if (budget - debit <= 1e-10) {
+  const remaining = money(budget - debit);
+  if (remaining <= 0 || remaining + 1e-10 < unitPrice) {
     await input.conn.query("UPDATE campaigns SET status='budget_exhausted',budget=0,budget_exhausted_at=NOW(),pause_reason='budget_exhausted' WHERE id=?", [post.campaign_id]);
   }
   return { debited: true, duplicate: false, units };

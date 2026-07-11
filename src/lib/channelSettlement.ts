@@ -301,11 +301,9 @@ export async function settleChannelCampaigns(options: {
         const settledUnits = Math.min(dueUnits, affordableUnits);
         if (settledUnits <= 0) {
           if (currentBudget + 1e-10 < unitPrice) {
-            await connection.query(
-              "UPDATE campaigns SET status='paused', pause_reason='insufficient_budget_for_delivery' WHERE id=? AND status='active'",
-              [post.campaign_id]
-            );
+            await markCampaignBudgetExhausted(post.campaign_id, connection);
             await connection.commit();
+            exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
           } else {
             await connection.rollback();
           }

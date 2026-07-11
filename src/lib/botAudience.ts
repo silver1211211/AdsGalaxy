@@ -22,18 +22,26 @@ export function botUserPendingVerificationCondition(alias = "bu") {
   return `${alias}.status = '${BOT_USER_PENDING_STATUS}'`;
 }
 
+export function botOwnerExclusionCondition(userAlias = "bu", botAlias = "b") {
+  return `NOT EXISTS (SELECT 1 FROM users bot_owner WHERE bot_owner.id = ${botAlias}.user_id AND CAST(bot_owner.telegram_id AS CHAR) = CAST(${userAlias}.chat_id AS CHAR))`;
+}
+
+export function botUserActiveCondition(userAlias = "bu", botAlias = "b") {
+  return `${botOperationalCondition(botAlias)} AND ${botUserVerifiedReachableCondition(userAlias)} AND ${userAlias}.chat_id IS NOT NULL AND ${userAlias}.chat_id != ''`;
+}
+
 export function botUserBlockedCondition(alias = "bu") {
   return `(${alias}.is_active = FALSE AND ${alias}.status <> '${BOT_USER_PENDING_STATUS}') OR ${alias}.status IN (${BOT_USER_BLOCKED_STATUSES.map((status) => `'${status}'`).join(",")})`;
 }
 
 export function botUserBroadcastEligibleCondition(userAlias = "bu", botAlias = "b") {
-  return `${botOperationalCondition(botAlias)} AND ${botUserVerifiedReachableCondition(userAlias)} AND ${userAlias}.chat_id IS NOT NULL AND ${userAlias}.chat_id != ''`;
+  return `${botUserActiveCondition(userAlias, botAlias)} AND ${botOwnerExclusionCondition(userAlias, botAlias)}`;
 }
 
 export function botUserCountExpressions(botAlias = "b") {
   return {
     total: `(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = ${botAlias}.id)`,
-    active: `(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = ${botAlias}.id AND ${botUserBroadcastEligibleCondition("bu", botAlias)})`,
+    active: `(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = ${botAlias}.id AND ${botUserActiveCondition("bu", botAlias)})`,
     verified: `(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = ${botAlias}.id AND ${botUserVerifiedReachableCondition("bu")})`,
     reachable: `(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = ${botAlias}.id AND ${botUserVerifiedReachableCondition("bu")})`,
     blocked: `(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = ${botAlias}.id AND (${botUserBlockedCondition("bu")}))`,
@@ -55,7 +63,7 @@ export async function getBotAudienceStats(botId: number | string, db: Db = pool)
   }>>(
     `SELECT
        COUNT(*) AS total_users,
-       SUM(CASE WHEN ${botUserBroadcastEligibleCondition("bu", "b")} THEN 1 ELSE 0 END) AS active_users,
+       SUM(CASE WHEN ${botUserActiveCondition("bu", "b")} THEN 1 ELSE 0 END) AS active_users,
        SUM(CASE WHEN ${botUserVerifiedReachableCondition("bu")} THEN 1 ELSE 0 END) AS verified_users,
        SUM(CASE WHEN ${botUserVerifiedReachableCondition("bu")} THEN 1 ELSE 0 END) AS reachable_users,
        SUM(CASE WHEN ${botUserBlockedCondition("bu")} THEN 1 ELSE 0 END) AS blocked_users,
@@ -89,7 +97,7 @@ export async function getGlobalBotAudienceStats(db: Db = pool) {
   }>>(
     `SELECT
        COUNT(*) AS total_users,
-       SUM(CASE WHEN ${botUserBroadcastEligibleCondition("bu", "b")} THEN 1 ELSE 0 END) AS active_users,
+       SUM(CASE WHEN ${botUserActiveCondition("bu", "b")} THEN 1 ELSE 0 END) AS active_users,
        SUM(CASE WHEN ${botUserBroadcastEligibleCondition("bu", "b")} THEN 1 ELSE 0 END) AS delivery_eligible_users,
        SUM(CASE WHEN (${botUserBlockedCondition("bu")}) OR b.status <> 'active' OR b.is_deleted = TRUE THEN 1 ELSE 0 END) AS inactive_users
      FROM bot_users bu

@@ -111,7 +111,7 @@ export default function ManualBotUserImport({ botId, onImported }: { botId: numb
       <div className="border-b border-blue-100 bg-white/70 p-4 sm:p-5">
         <div className="flex items-start gap-3">
           <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-200"><UserPlus size={18} /></span>
-          <div><h4 className="text-sm font-black text-slate-900">Manually Add Bot Users</h4><p className="mt-1 text-xs leading-5 text-slate-500">Paste up to 100 Telegram user IDs. Each ID is verified with this bot before saving.</p></div>
+          <div><h4 className="text-sm font-black text-slate-900">Manually Add Bot Users</h4><p className="mt-1 text-xs leading-5 text-slate-500">Users are added for verification. AdsGalaxy will automatically verify message delivery before activating them.</p></div>
         </div>
       </div>
 

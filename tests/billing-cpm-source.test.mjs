@@ -36,6 +36,25 @@ test("click campaign billing uses CPC divided by 1000", () => {
   assert.match(processAds, /CASE WHEN c\.type = 'clicks' THEN COALESCE\(c\.cpc, 0\) ELSE COALESCE\(c\.cpm, 0\) END \/ 1000/);
 });
 
+test("channel budget exhaustion uses the next billable unit for CPM and CPC", () => {
+  const affordable = (remaining, bidPerThousand) => Math.max(0, Math.floor((remaining + 1e-10) / (bidPerThousand / 1000)));
+  assert.equal(debit(4000, 2.5), 10);
+  assert.equal(affordable(0.01, 2.5), 4);
+  assert.equal(debit(4, 2.5), 0.01);
+  assert.equal(affordable(0.0025, 2.5), 1);
+  assert.equal(affordable(0.0024, 2.5), 0);
+  assert.equal(affordable(0, 2.5), 0);
+  assert.equal(debit(1, 50), 0.05);
+  assert.equal(affordable(0.05, 50), 1);
+  assert.equal(affordable(0.049, 50), 0);
+  assert.match(settlement, /const isExhausted = remaining < unitPrice \|\| remaining <= 0/);
+  assert.match(settlement, /if \(currentBudget \+ 1e-10 < unitPrice\)[\s\S]*markCampaignBudgetExhausted/);
+  assert.match(fastBilling, /remaining <= 0 \|\| remaining \+ 1e-10 < unitPrice/);
+  assert.match(fastBilling, /SELECT id FROM channel_advertiser_debits WHERE source_key=\?/);
+  assert.match(fastBilling, /const unbilledUnits = Math\.max\(0, confirmedUnits - alreadySettled\)/);
+  assert.match(fastBilling, /catch \(error\) \{ await conn\.rollback\(\)/);
+});
+
 test("CPC schema and campaign forms agree without opening financial counters", () => {
   assert.match(cpcMigration, /ALTER TABLE campaigns ADD COLUMN cpc DECIMAL\(18,8\) NOT NULL DEFAULT 0 AFTER cpm/);
   assert.match(cpcMigration, /UPDATE campaigns\s+SET cpc = cpm\s+WHERE type = 'clicks'/);

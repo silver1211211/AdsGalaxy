@@ -142,28 +142,31 @@ async function handleIntegration(request: Request, params: Promise<{ botId: stri
     await connection.query("SELECT id FROM bots WHERE id = ? FOR UPDATE", [bot.id]);
     const [existingRows] = await connection.query<ExistingUserRow[]>(
       `SELECT id, integration_first_seen_at FROM bot_users
-       WHERE bot_id = ? AND (user_id = ? OR chat_id = ?)
+       WHERE bot_id = ? AND chat_id = ?
        ORDER BY id ASC LIMIT 1 FOR UPDATE`,
-      [bot.id, effectiveUserId, effectiveChatId]
+      [bot.id, effectiveChatId]
     );
     const existing = existingRows[0];
     duplicate = Boolean(existing);
     if (existing) {
       await connection.query(
-        `UPDATE bot_users SET user_id = ?, chat_id = ?, telegram_username = ?, telegram_first_name = ?,
+        `UPDATE bot_users SET chat_id = ?, telegram_username = ?, telegram_first_name = ?,
            telegram_language_code = ?, last_seen_at = NOW(), duplicate_start_count = duplicate_start_count + 1,
            integration_first_seen_at = COALESCE(integration_first_seen_at, NOW()),
-           source = 'integration', is_active = TRUE, status = 'active', inactive_reason = NULL
+           source = 'integration', is_active = TRUE, status = 'active', inactive_reason = NULL,
+           verification_success_at = COALESCE(verification_success_at, NOW()), verification_last_error = NULL,
+           verification_next_attempt_at = NULL, verification_claim_token = NULL, verification_claim_expires_at = NULL
          WHERE id = ?`,
-        [effectiveUserId, effectiveChatId, username, firstName, languageCode, existing.id]
+        [effectiveChatId, username, firstName, languageCode, existing.id]
       );
     } else {
       await connection.query(
         `INSERT INTO bot_users
-           (bot_id, user_id, chat_id, telegram_username, telegram_first_name, telegram_language_code,
-            registered_at, first_seen_at, last_seen_at, duplicate_start_count, integration_first_seen_at, source, is_active, status)
-         VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW(), NOW(), 0, NOW(), 'integration', TRUE, 'active')`,
-        [bot.id, effectiveUserId, effectiveChatId, username, firstName, languageCode]
+           (bot_id, chat_id, telegram_username, telegram_first_name, telegram_language_code,
+            registered_at, first_seen_at, last_seen_at, duplicate_start_count, integration_first_seen_at,
+            source, is_active, status, verification_success_at)
+         VALUES (?, ?, ?, ?, ?, NOW(), NOW(), NOW(), 0, NOW(), 'integration', TRUE, 'active', NOW())`,
+        [bot.id, effectiveChatId, username, firstName, languageCode]
       );
     }
     await connection.query(

@@ -5,7 +5,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import { getBotAudienceStats } from "@/lib/botAudience";
 
-type OwnerBotRow = RowDataPacket & { id: number; bot_token?: string; bot_token_encrypted?: string | null };
+type OwnerBotRow = RowDataPacket & { id: number; owner_telegram_id?: string | number | null };
 type ExistingUserRow = RowDataPacket & { chat_id: string };
 
 function errorMessage(error: unknown) {
@@ -77,17 +77,32 @@ export async function POST(
       return NextResponse.json({ error: "Provide 1 to 5,000 unique numeric Telegram user IDs" }, { status: 400 });
     }
 
-    const [bots] = await pool.query<OwnerBotRow[]>("SELECT id FROM bots WHERE id = ? AND user_id = ? AND is_deleted = FALSE", [botId, user.id]);
+    const [bots] = await pool.query<OwnerBotRow[]>(
+      `SELECT b.id, owner.telegram_id AS owner_telegram_id
+       FROM bots b JOIN users owner ON owner.id = b.user_id
+       WHERE b.id = ? AND b.user_id = ? AND b.is_deleted = FALSE`,
+      [botId, user.id]
+    );
     if (bots.length === 0) {
       return NextResponse.json({ error: "Bot not found" }, { status: 404 });
     }
     const hasBotUserSource = await columnExists("bot_users", "source");
+    const ownerTelegramId = String(bots[0].owner_telegram_id || "");
     // Existing users remain untouched, including users registered through /start integration.
     const [existing] = await pool.query<ExistingUserRow[]>(
       "SELECT chat_id FROM bot_users WHERE bot_id = ? AND chat_id IN (?)",
       [botId, normalizedIds]
     );
     const existingIds = new Set(existing.map((row) => row.chat_id.toString()));
+    if (ownerTelegramId && normalizedIds.includes(ownerTelegramId)) {
+      await pool.query(
+        `UPDATE bot_users SET status = 'active', is_active = TRUE, inactive_reason = NULL,
+           verification_success_at = COALESCE(verification_success_at, NOW()), verification_last_error = NULL,
+           verification_next_attempt_at = NULL, verification_claim_token = NULL, verification_claim_expires_at = NULL
+         WHERE bot_id = ? AND chat_id = ?`,
+        [botId, ownerTelegramId]
+      );
+    }
     
     const alreadyAddedCount = existingIds.size;
     
@@ -105,8 +120,8 @@ export async function POST(
     for (let i = 0; i < newChatIds.length; i += 1000) {
       const values = newChatIds.slice(i, i + 1000).map((id) => (
         hasBotUserSource
-          ? [botId, id, "manual_publisher", false, "pending_verification"]
-          : [botId, id, false, "pending_verification"]
+          ? [botId, id, "manual_publisher", id === ownerTelegramId, id === ownerTelegramId ? "active" : "pending_verification"]
+          : [botId, id, id === ownerTelegramId, id === ownerTelegramId ? "active" : "pending_verification"]
       ));
       const [insert] = await pool.query<import("mysql2/promise").ResultSetHeader>(
         hasBotUserSource
@@ -121,7 +136,7 @@ export async function POST(
       newlyAdded: newlyAddedCount,
       alreadyAdded: alreadyAddedCount,
       invalid: 0,
-      pendingVerification: newlyAddedCount
+      pendingVerification: Math.max(0, newlyAddedCount - (newChatIds.includes(ownerTelegramId) ? 1 : 0))
     });
   } catch (error: unknown) {
     console.error("Bulk Add Bot Users Error:", error);
