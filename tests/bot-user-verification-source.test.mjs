@@ -12,6 +12,9 @@ const broadcast = read("src/app/api/cron/process-broadcast/route.ts");
 const migration = read("db/migrations/20260711_0102_bot_user_verification.sql");
 const deployment = read("deploy-vps.sh");
 const cleanup = read("src/lib/campaignPostDeletion.ts");
+const manualPopup = read("src/components/publisher/ManualAddUsersPopup.tsx");
+const botDetails = read("src/components/publisher/BotDetailsScreen.tsx");
+const publisherBots = read("src/app/api/publisher/bots/route.ts");
 
 test("manual imports are pending while integration users activate by bot_id and chat_id", () => {
   assert.match(publisherImport, /id === ownerTelegramId \? "active" : "pending_verification"/);
@@ -75,4 +78,24 @@ test("campaign post deletion makes at most two attempts and bypasses permanent f
   for (const permanentCode of ["MESSAGE_NOT_FOUND", "MESSAGE_CANT_BE_DELETED", "BOT_IS_NOT_MEMBER", "CHAT_ADMIN_REQUIRED", "CHAT_NOT_FOUND"]) {
     assert.match(cleanup, new RegExp(`${permanentCode}[\\s\\S]*?retryable: false`));
   }
+});
+
+test("publisher-visible counts hide pending users without changing internal queue state", () => {
+  assert.match(audience, /export function botUserPublisherVisibleCondition/);
+  assert.match(audience, /status = '\$\{BOT_USER_VERIFIED_STATUS\}' OR/);
+  assert.match(audience, /SUM\(CASE WHEN \$\{botUserPublisherVisibleCondition\("bu"\)\} THEN 1 ELSE 0 END\) AS total_users/);
+  assert.match(publisherBots, /botUserCountExpressions\("b", \{ publisherVisible: true \}\)/);
+  assert.match(publisherImport, /pending_verification/);
+  assert.match(worker, /SET status = 'active', is_active = TRUE/);
+  assert.match(worker, /SET status = 'inactive', is_active = FALSE/);
+  assert.match(audience, /status <> '\$\{BOT_USER_PENDING_STATUS\}'/);
+});
+
+test("manual import shows queue progress, prevents duplicates, closes, and refreshes after success", () => {
+  assert.match(manualPopup, /User verification in progress\.\.\./);
+  assert.match(manualPopup, /if \(loading \|\| queued \|\| parsed\.numeric\.length === 0\) return/);
+  assert.match(manualPopup, /if \(!response\.ok\) throw new Error/);
+  assert.match(manualPopup, /setTimeout\(\(\) => \{[\s\S]*onClose\(\);[\s\S]*onAdded\?\.\(\)/);
+  assert.match(manualPopup, /parsed\.invalid\.length > 0/);
+  assert.match(botDetails, /onAdded=\{\(\) => setDetailsRefreshKey/);
 });

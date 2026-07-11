@@ -89,7 +89,7 @@ export async function GET(
       : hasIntegrationFirstSeen
         ? "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id AND bu.integration_first_seen_at IS NULL)"
         : "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id)";
-    const userCounts = botUserCountExpressions("b");
+    const userCounts = botUserCountExpressions("b", { publisherVisible: true });
     const botSuccessfulExpr = hasBroadcastDeliveries
       ? "COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent'), 0)"
       : "0";

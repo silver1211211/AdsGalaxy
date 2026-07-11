@@ -78,7 +78,7 @@ export async function GET(request: Request) {
         ? "(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id AND integration_first_seen_at IS NULL)"
         : "(SELECT COUNT(*) FROM bot_users WHERE bot_id = b.id)";
 
-    const userCounts = botUserCountExpressions("b");
+    const userCounts = botUserCountExpressions("b", { publisherVisible: true });
     const [rows] = await pool.query(
       `SELECT
         b.id,

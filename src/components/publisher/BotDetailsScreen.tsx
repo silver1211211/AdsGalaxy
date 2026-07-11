@@ -186,6 +186,7 @@ export default function BotDetailsScreen({
   const [testPopupOpen, setTestPopupOpen] = useState(false);
   const [integrationGuideOpen, setIntegrationGuideOpen] = useState(false);
   const [generalInfoOpen, setGeneralInfoOpen] = useState(false);
+  const [detailsRefreshKey, setDetailsRefreshKey] = useState(0);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const integrationRequestId = useRef(0);
 
@@ -234,7 +235,7 @@ export default function BotDetailsScreen({
       window.clearInterval(refreshTimer);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, [bot.id]);
+  }, [bot.id, detailsRefreshKey]);
 
   useEffect(() => () => {
     if (copiedTimer.current) clearTimeout(copiedTimer.current);
@@ -729,6 +730,7 @@ export default function BotDetailsScreen({
         isOpen={addUsersOpen}
         onClose={() => setAddUsersOpen(false)}
         botId={bot.id}
+        onAdded={() => setDetailsRefreshKey((value) => value + 1)}
       />
 
       <TestIntegrationPopup

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Loader2, UserPlus, X } from "lucide-react";
 import { apiFetch } from "@/lib/api";
@@ -25,10 +25,12 @@ export default function ManualAddUsersPopup({ isOpen, onClose, botId, onAdded }:
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<BulkAddResult | null>(null);
+  const [queued, setQueued] = useState(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const parsed = parseIds(input);
 
   function handleClose() {
-    if (loading) return;
+    if (loading || queued) return;
     setInput("");
     setError("");
     setResult(null);
@@ -36,7 +38,7 @@ export default function ManualAddUsersPopup({ isOpen, onClose, botId, onAdded }:
   }
 
   async function handleAdd() {
-    if (parsed.numeric.length === 0) return;
+    if (loading || queued || parsed.numeric.length === 0) return;
     setLoading(true);
     setError("");
     setResult(null);
@@ -49,13 +51,21 @@ export default function ManualAddUsersPopup({ isOpen, onClose, botId, onAdded }:
       if (!response.ok) throw new Error(data.error || "Failed to add users");
       setResult(data);
       setInput("");
-      onAdded?.();
+      setQueued(true);
+      closeTimer.current = setTimeout(() => {
+        setQueued(false);
+        setResult(null);
+        onClose();
+        onAdded?.();
+      }, 1200);
     } catch (addError) {
       setError(addError instanceof Error ? addError.message : "Failed to add users");
     } finally {
       setLoading(false);
     }
   }
+
+  useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
 
   return (
     <AnimatePresence>
@@ -102,27 +112,31 @@ export default function ManualAddUsersPopup({ isOpen, onClose, botId, onAdded }:
                 </div>
               </div>
 
-              <textarea
+              {queued ? (
+                <div className="flex min-h-36 items-center justify-center rounded-2xl border border-emerald-100 bg-emerald-50 px-4 text-center text-sm font-black text-emerald-700">
+                  User verification in progress...
+                </div>
+              ) : <textarea
                 value={input}
                 onChange={(event) => { setInput(event.target.value); setResult(null); setError(""); }}
                 rows={5}
                 placeholder={"12345, 67890\n99887"}
                 className="w-full resize-y rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-sm text-slate-800 outline-none transition focus:border-[#0c9de8] focus:bg-white focus:ring-4 focus:ring-[#0c9de8]/10"
-              />
+              />}
 
-              <div className="flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-wider">
+              {!queued && <div className="flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-wider">
                 <span className="rounded-full bg-slate-100 px-3 py-1.5 text-slate-600">{parsed.unique.length} unique</span>
                 <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-emerald-700">{parsed.numeric.length} numeric</span>
                 {parsed.invalid.length > 0 && (
                   <span className="rounded-full bg-red-50 px-3 py-1.5 text-red-700">{parsed.invalid.length} invalid format</span>
                 )}
-              </div>
+              </div>}
 
               {error && (
                 <div className="rounded-2xl border border-red-100 bg-red-50 px-3 py-3 text-xs font-bold text-red-700">{error}</div>
               )}
 
-              {result && (
+              {result && !queued && (
                 <div className="grid grid-cols-3 gap-2">
                   <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-3 text-center">
                     <p className="text-[9px] font-black uppercase tracking-widest text-emerald-500">Added</p>
@@ -139,7 +153,7 @@ export default function ManualAddUsersPopup({ isOpen, onClose, botId, onAdded }:
                 </div>
               )}
 
-              <button
+              {!queued && <button
                 type="button"
                 disabled={loading || parsed.numeric.length === 0}
                 onClick={handleAdd}
@@ -147,7 +161,7 @@ export default function ManualAddUsersPopup({ isOpen, onClose, botId, onAdded }:
               >
                 {loading ? <Loader2 size={16} className="animate-spin" /> : <UserPlus size={16} />}
                 {loading ? "Adding..." : "Add Users"}
-              </button>
+              </button>}
             </div>
           </motion.div>
         </div>

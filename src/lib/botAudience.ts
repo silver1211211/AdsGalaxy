@@ -34,13 +34,17 @@ export function botUserBlockedCondition(alias = "bu") {
   return `(${alias}.is_active = FALSE AND ${alias}.status <> '${BOT_USER_PENDING_STATUS}') OR ${alias}.status IN (${BOT_USER_BLOCKED_STATUSES.map((status) => `'${status}'`).join(",")})`;
 }
 
+export function botUserPublisherVisibleCondition(alias = "bu") {
+  return `(${alias}.status = '${BOT_USER_VERIFIED_STATUS}' OR (${botUserBlockedCondition(alias)}))`;
+}
+
 export function botUserBroadcastEligibleCondition(userAlias = "bu", botAlias = "b") {
   return `${botUserActiveCondition(userAlias, botAlias)} AND ${botOwnerExclusionCondition(userAlias, botAlias)}`;
 }
 
-export function botUserCountExpressions(botAlias = "b") {
+export function botUserCountExpressions(botAlias = "b", options: { publisherVisible?: boolean } = {}) {
   return {
-    total: `(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = ${botAlias}.id)`,
+    total: `(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = ${botAlias}.id${options.publisherVisible ? ` AND ${botUserPublisherVisibleCondition("bu")}` : ""})`,
     active: `(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = ${botAlias}.id AND ${botUserActiveCondition("bu", botAlias)})`,
     verified: `(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = ${botAlias}.id AND ${botUserVerifiedReachableCondition("bu")})`,
     reachable: `(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = ${botAlias}.id AND ${botUserVerifiedReachableCondition("bu")})`,
@@ -62,7 +66,7 @@ export async function getBotAudienceStats(botId: number | string, db: Db = pool)
     manually_imported: number;
   }>>(
     `SELECT
-       COUNT(*) AS total_users,
+       SUM(CASE WHEN ${botUserPublisherVisibleCondition("bu")} THEN 1 ELSE 0 END) AS total_users,
        SUM(CASE WHEN ${botUserActiveCondition("bu", "b")} THEN 1 ELSE 0 END) AS active_users,
        SUM(CASE WHEN ${botUserVerifiedReachableCondition("bu")} THEN 1 ELSE 0 END) AS verified_users,
        SUM(CASE WHEN ${botUserVerifiedReachableCondition("bu")} THEN 1 ELSE 0 END) AS reachable_users,

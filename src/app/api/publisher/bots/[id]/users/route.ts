@@ -110,9 +110,13 @@ export async function POST(
 
     if (newChatIds.length === 0) {
       return NextResponse.json({
+        success: true,
+        accepted: 0,
+        queued: 0,
         newlyAdded: 0,
         alreadyAdded: alreadyAddedCount,
-        invalid: 0
+        invalid: 0,
+        message: "User verification in progress..."
       });
     }
 
@@ -133,10 +137,14 @@ export async function POST(
     }
 
     return NextResponse.json({
+      success: true,
+      accepted: newlyAddedCount,
+      queued: Math.max(0, newlyAddedCount - (newChatIds.includes(ownerTelegramId) ? 1 : 0)),
       newlyAdded: newlyAddedCount,
       alreadyAdded: alreadyAddedCount,
       invalid: 0,
-      pendingVerification: Math.max(0, newlyAddedCount - (newChatIds.includes(ownerTelegramId) ? 1 : 0))
+      pendingVerification: Math.max(0, newlyAddedCount - (newChatIds.includes(ownerTelegramId) ? 1 : 0)),
+      message: "User verification in progress..."
     });
   } catch (error: unknown) {
     console.error("Bulk Add Bot Users Error:", error);

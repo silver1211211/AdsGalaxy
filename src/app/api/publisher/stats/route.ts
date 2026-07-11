@@ -205,7 +205,7 @@ export async function GET(request: Request) {
         failed_sends: metricNumber(row.failed_sends),
       }];
     }));
-    const botCounts = botUserCountExpressions("b");
+    const botCounts = botUserCountExpressions("b", { publisherVisible: true });
     const [[botAudienceRow]]: any = await pool.query(
       `SELECT
         COALESCE(SUM(${botCounts.active}), 0) as active_users,
