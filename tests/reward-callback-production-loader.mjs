@@ -15,6 +15,9 @@ registerHooks({
     if (specifier === "@/lib/db") {
       return { shortCircuit: true, url: dbShim };
     }
+    if (specifier === "next/server") {
+      return { shortCircuit: true, url: pathToFileURL(path.join(root, "node_modules", "next", "server.js")).href };
+    }
     if (specifier.startsWith("@/")) {
       const relative = specifier.slice(2);
       for (const extension of [".ts", ".tsx", ".js", ".mjs"]) {

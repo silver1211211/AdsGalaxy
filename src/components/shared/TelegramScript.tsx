@@ -1,10 +1,14 @@
 "use client";
 
 import { useEffect } from "react";
-import { ensureFreshAppVersion } from "@/lib/telegramWebApp";
+import { ensureFreshAppVersion, isTelegramMiniApp } from "@/lib/telegramWebApp";
 
 export default function TelegramScript() {
   useEffect(() => {
+    // Public web pages (including docs and local development) do not need the
+    // Telegram SDK or WebView cache reload behavior.
+    if (!isTelegramMiniApp()) return;
+
     // Force a one-time reload if this WebView is holding a stale cached build.
     ensureFreshAppVersion();
 

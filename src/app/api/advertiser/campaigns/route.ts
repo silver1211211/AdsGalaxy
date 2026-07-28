@@ -8,32 +8,30 @@ import { validatePostbackUrl } from "@/lib/conversionTracking";
 import { normalizeMarketplaceType, publicSelectionMetadata, recordMarketplaceEvent, validateDirectPlacementTargets } from "@/lib/publisherMarketplace";
 import { evaluateCampaignAutomation } from "@/lib/approvalAutomation";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
-import { columnExists, ensureClassicSettlementColumns } from "@/lib/schemaGuards";
-import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import { columnExists } from "@/lib/schemaGuards";
+import { assertCampaignCreationSchemaReady, CampaignSchemaNotReadyError } from "@/lib/campaignCreationReadiness";
+import type { RowDataPacket } from "mysql2/promise";
 import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { validateTotalBudget } from "@/lib/campaignBudget";
 import { safeQueueAdvertiserOnboarding } from "@/lib/supportMessages";
 import { validateCampaignCpmBid } from "@/lib/campaignCpmSettings";
 import { hasRestrictedClickCreativeContent } from "@/lib/campaignCreative";
+import {
+  CampaignCreatePublicError,
+  classifyCampaignCreateFailure,
+  publicCampaignValidationError,
+  validateCampaignObjective,
+  validateCampaignText,
+} from "@/lib/campaignCreationValidation";
+import { executeCampaignCreationTransaction } from "@/lib/campaignCreationTransaction";
 
 function campaignCreateErrorResponse(error: any) {
-  const message = String(error?.message || "");
-  const lowerMessage = message.toLowerCase();
-
-  if (message === "Invalid campaign category. Please select a valid category and try again."
-    || (lowerMessage.includes("data truncated") && lowerMessage.includes("category"))) {
-    return NextResponse.json(
-      { error: "Invalid campaign category. Please select a valid category and try again." },
-      { status: 400 }
-    );
-  }
-
   const authStatus = getAuthErrorStatus(error);
   if (authStatus !== 500) {
-    return NextResponse.json({ error: message || "Authentication failed" }, { status: authStatus });
+    return NextResponse.json({ error: String(error?.message || "Authentication failed") }, { status: authStatus });
   }
-
-  return NextResponse.json({ error: "Failed to create campaign. Please check your details and try again." }, { status: 500 });
+  const failure = classifyCampaignCreateFailure(error);
+  return NextResponse.json(failure.body, { status: failure.status });
 }
 
 export async function POST(request: Request) {
@@ -53,7 +51,7 @@ export async function POST(request: Request) {
     const link = formData.get("link") as string;
     const postbackUrl = validatePostbackUrl(formData.get("postback_url"));
     const button_text = formData.get("button_text") as string;
-    const type = formData.get("type") as string;
+    const type = validateCampaignObjective(formData.get("type"));
     const budget = validateTotalBudget(formData.get("budget"));
     const submittedCpm = parseFloat(String(formData.get("cpm") || "0"));
     const submittedCpc = parseFloat(String(formData.get("cpc") || formData.get("cpm") || "0"));
@@ -65,7 +63,12 @@ export async function POST(request: Request) {
     const directPlacementMode = String(formData.get("direct_placement_mode") || "network") === "direct" ? "direct" : "network";
     const directInventoryScope = String(formData.get("direct_inventory_scope") || "network");
     const directInventoryType = normalizeMarketplaceType(formData.get("direct_inventory_type") || (type === "broadcast" ? "bot" : "channel"));
-    const directInventoryIds = JSON.parse(String(formData.get("direct_inventory_ids") || "[]"));
+    let directInventoryIds: unknown;
+    try {
+      directInventoryIds = JSON.parse(String(formData.get("direct_inventory_ids") || "[]"));
+    } catch {
+      throw new CampaignCreatePublicError("INVALID_TARGETING", "Direct inventory selection is invalid.");
+    }
     const directSelectionMetadata = publicSelectionMetadata({
       direct_placement_mode: directPlacementMode,
       direct_inventory_scope: directInventoryScope,
@@ -85,22 +88,8 @@ export async function POST(request: Request) {
       frequency_cap_per_user: formData.get("frequency_cap_per_user"),
     }, budget);
 
-    // 1. Validation
-    if (!name || !campaignTitle || !message_text.trim() || !link || !budget || !cpm) {
-      return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
-    }
-
-    if (campaignTitle.length < 3) {
-      return NextResponse.json({ error: "Campaign title must be at least 3 characters" }, { status: 400 });
-    }
-
-    if (campaignTitle.length > 255) {
-      return NextResponse.json({ error: "Campaign title exceeds 255 characters" }, { status: 400 });
-    }
-
-    if (message_text.length > 1000) {
-      return NextResponse.json({ error: "Message text exceeds 1000 characters" }, { status: 400 });
-    }
+    // 1. Complete request validation (before upload or database mutation)
+    validateCampaignText({ name, campaignTitle, messageText: message_text, link, buttonText: button_text });
 
     await validateCampaignCpmBid(type, type === "clicks" ? cpc : cpm);
 
@@ -113,7 +102,16 @@ export async function POST(request: Request) {
       }
     }
 
-    // 2. Handle Image Upload to External API
+    const conn = await pool.getConnection();
+    try {
+      await assertCampaignCreationSchemaReady(conn);
+    } catch (error) {
+      conn.release();
+      throw error;
+    }
+    conn.release();
+
+    // 2. Optional image upload. Established behavior permits text-only campaigns.
     let imageUrl = null;
     if (imageFile) {
       if (imageFile.size > 1024 * 1024) {
@@ -133,31 +131,17 @@ export async function POST(request: Request) {
         if (imgData.success) {
           imageUrl = imgData.data.url;
         } else {
-          console.error("Image Upload Error:", imgData.message);
+          console.error("Campaign image upload was rejected by the provider");
         }
       } catch (err) {
-        console.error("Image API Connection Error:", err);
+        console.error("Campaign image upload provider was unavailable");
       }
     }
 
     // 3. Create Campaign (Transaction)
-    const conn = await pool.getConnection();
+    const transactionConnection = await pool.getConnection();
     try {
-      await ensureClassicSettlementColumns(conn);
-      await conn.beginTransaction();
-
-      const [balanceResult] = await conn.query<ResultSetHeader>(
-        `UPDATE users
-         SET ad_balance = ad_balance - ?
-         WHERE id = ? AND ad_balance >= ?`,
-        [budget, user.id, budget]
-      );
-      if (balanceResult.affectedRows !== 1) {
-        await conn.rollback();
-        return NextResponse.json({ error: "Insufficient ad balance. Please deposit funds." }, { status: 400 });
-      }
-
-      const [userRows] = await conn.query<Array<RowDataPacket & {
+      const [userRows] = await transactionConnection.query<Array<RowDataPacket & {
         advertiser_trust_level: string | null;
         telegram_id: string | number | null;
       }>>(
@@ -175,17 +159,23 @@ export async function POST(request: Request) {
         cpm,
         category,
         countries: formData.get("countries"),
-      }, conn);
+      }, transactionConnection);
       const directTargets = await validateDirectPlacementTargets({
         mode: directPlacementMode,
         scope: directInventoryScope,
         inventoryType: directInventoryType,
         inventoryIds: Array.isArray(directInventoryIds) ? directInventoryIds : [],
         cpm,
-      }, conn);
+      }, transactionConnection);
 
-      // Insert campaign
-      const [result]: any = await conn.query(
+      const creation = await executeCampaignCreationTransaction({
+        conn: transactionConnection,
+        userId: user.id,
+        budget,
+        description: `Campaign Creation: ${name}`,
+        createCampaign: async (conn) => {
+          // Insert campaign
+          const [result]: any = await conn.query(
         `INSERT INTO campaigns (
           user_id, name, campaign_title, parse_mode, message_text, image_url, link, postback_url, button_text, type,
           budget, total_budget, cpm, cpc, category, quality_score, quality_tier, quality_metadata,
@@ -224,30 +214,30 @@ export async function POST(request: Request) {
             required_cpm: directTargets.requiredCpm,
           }),
         ]
-      );
+          );
 
-      for (const inventoryId of directTargets.ids) {
-        await conn.query(
+          for (const inventoryId of directTargets.ids) {
+            await conn.query(
           "INSERT INTO campaign_direct_inventory_targets (campaign_type, campaign_id, inventory_type, inventory_id) VALUES ('campaign', ?, ?, ?)",
           [result.insertId, directInventoryType, inventoryId]
         );
-        await recordMarketplaceEvent({
+            await recordMarketplaceEvent({
           advertiserId: user.id,
           inventoryType: directInventoryType,
           inventoryId,
           eventType: "selection",
           metadata: { campaign_type: "campaign", campaign_id: result.insertId },
-        }, conn);
-      }
+            }, conn);
+          }
 
-      await replaceCampaignExclusions(conn, {
+          await replaceCampaignExclusions(conn, {
         campaignType: "campaign",
         campaignId: result.insertId,
         inventoryType: type === "broadcast" ? "bot" : "channel",
         identifiers: formData.get("excluded_inventory"),
-      });
+          });
 
-      await evaluateCampaignAutomation({
+          await evaluateCampaignAutomation({
         campaignType: "campaign",
         campaignId: result.insertId,
         advertiserId: user.id,
@@ -258,27 +248,24 @@ export async function POST(request: Request) {
         category,
         destinationUrl: link,
         creativeText: message_text,
-      }, conn);
+          }, conn);
 
-      // Create transaction record
-      await conn.query(
-        "INSERT INTO advertiser_transactions (user_id, amount, type, description) VALUES (?, ?, 'debit', ?)",
-        [user.id, budget, `Campaign Creation: ${name}`]
-      );
+          await safeQueueAdvertiserOnboarding(user.id, conn);
+          return Number(result.insertId);
+        },
+      });
 
-      await safeQueueAdvertiserOnboarding(user.id, conn);
-
-      await conn.commit();
-      return NextResponse.json({ success: true, id: result.insertId });
-    } catch (err) {
-      await conn.rollback();
-      throw err;
+      return NextResponse.json(creation);
     } finally {
-      conn.release();
+      transactionConnection.release();
     }
 
   } catch (error: any) {
-    console.error("Create Campaign Error:", error);
+    if (error instanceof CampaignSchemaNotReadyError) {
+      console.error("Campaign schema readiness check failed", { missingCount: error.missing.length });
+    } else if (!(error instanceof CampaignCreatePublicError) && !publicCampaignValidationError(error)) {
+      console.error("Campaign creation failed", { errorType: error?.constructor?.name || "UnknownError" });
+    }
     return campaignCreateErrorResponse(error);
   }
 }
@@ -311,13 +298,23 @@ export async function GET(request: Request) {
 
     const [rows]: any = await pool.query(
       `SELECT id, name, campaign_title, parse_mode, message_text, image_url, link, postback_url, button_text, rejection_reason,
-         type, budget, total_budget, cpm, cpc, category, continents, countries, languages, vpn_policy,
+         type,
+         CASE WHEN type = 'broadcast' THEN GREATEST(COALESCE(budget, 0), 0) ELSE budget END AS budget,
+         total_budget, cpm, cpc, category, continents, countries, languages, vpn_policy,
          device_policy, os_policy, start_at, end_at, daily_budget_limit,
          frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
-         direct_inventory_metadata, status, paused_at, resume_locked_until,
+         direct_inventory_metadata,
+         CASE
+           WHEN type = 'broadcast' AND status = 'active' AND (
+             ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8) <= 0
+             OR budget < ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8)
+           ) THEN 'budget_exhausted'
+           ELSE status
+         END AS status,
+         paused_at, resume_locked_until,
          completed_at, budget_exhausted_at, pause_reason, auto_reactivate,
          created_at, ${campaignUpdatedAtExpr} AS updated_at,
-         budget as remaining_budget,
+         CASE WHEN type = 'broadcast' THEN GREATEST(COALESCE(budget, 0), 0) ELSE budget END as remaining_budget,
          CASE
            WHEN type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
            ELSE ${campaignPostImpressionsExpr}
@@ -342,7 +339,13 @@ export async function GET(request: Request) {
            WHEN type = 'broadcast' THEN ${broadcastTodaySpendExpr}
            ELSE ${channelTodaySpendExpr}
          END as today_spend,
-         CASE WHEN COALESCE(c.budget, 0) <= 0 THEN TRUE ELSE FALSE END AS budget_exhausted,
+         CASE
+           WHEN type = 'broadcast' THEN (
+             ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8) <= 0
+             OR budget < ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8)
+           )
+           ELSE COALESCE(c.budget, 0) <= 0
+         END AS budget_exhausted,
          CASE WHEN COALESCE(c.daily_budget_limit, 0) > 0 AND (
            CASE WHEN type = 'broadcast' THEN ${broadcastTodaySpendExpr}
            ELSE ${channelTodaySpendExpr} END

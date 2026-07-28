@@ -40,7 +40,12 @@ interface Deposit {
   status: string;
   expired_at: number;
   created_at: string;
+  confirmed_at?: string | null;
+  bonus_amount?: string | null;
+  bonus_rate_basis_points?: number | null;
 }
+
+type DepositPromotion = { starts_at: string; ends_at: string; is_live: number };
 
 type DepositNetwork = {
   id: string;
@@ -98,6 +103,9 @@ export default function DepositPage() {
   const [activeFilter, setActiveFilter] = useState("all");
   const [limit, setLimit] = useState(10);
   const [depositNetworks, setDepositNetworks] = useState<DepositNetwork[]>(DEFAULT_NETWORKS);
+  const [promotion, setPromotion] = useState<DepositPromotion | null>(null);
+  const [promotionTimeLeft, setPromotionTimeLeft] = useState("");
+  const [showBonusTiers, setShowBonusTiers] = useState(false);
 
   const pendingDeposit = deposits.find(d => ["pending", "waiting", "paying"].includes(d.status));
 
@@ -146,6 +154,7 @@ export default function DepositPage() {
       if (!res.ok) throw new Error(data.error || "Failed to fetch deposits");
       setDeposits(data.deposits);
       setMinDeposit(data.minDeposit);
+      setPromotion(data.promotion || null);
       if (Array.isArray(data.networks) && data.networks.length > 0) {
         setDepositNetworks(data.networks);
         if (!data.networks.some((item: DepositNetwork) => item.id === network)) {
@@ -159,6 +168,27 @@ export default function DepositPage() {
       setIsLoading(false);
     }
   }, [network]);
+
+  useEffect(() => {
+    if (!promotion?.is_live) {
+      setPromotionTimeLeft("");
+      return;
+    }
+    const update = () => {
+      const milliseconds = new Date(promotion.ends_at).getTime() - Date.now();
+      if (milliseconds <= 0) {
+        setPromotionTimeLeft("");
+        return;
+      }
+      const minutes = Math.floor(milliseconds / 60000);
+      const days = Math.floor(minutes / 1440);
+      const hours = Math.floor((minutes % 1440) / 60);
+      setPromotionTimeLeft(`${days}d ${hours}h ${minutes % 60}m`);
+    };
+    update();
+    const timer = window.setInterval(update, 60000);
+    return () => window.clearInterval(timer);
+  }, [promotion]);
 
   useEffect(() => {
     setTitle("Deposit");
@@ -334,6 +364,31 @@ export default function DepositPage() {
           </div>
 
           <div className="space-y-3.5">
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-3.5 py-3 text-emerald-950">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest">
+                    {promotion?.is_live && promotionTimeLeft ? "Deposit Bonus Live" : "Promotion ended"}
+                  </p>
+                  {promotion?.is_live && promotionTimeLeft && (
+                    <p className="mt-1 text-xs font-semibold text-emerald-800">
+                      Get up to 12% extra Ad Balance on qualifying deposits. Ends in {promotionTimeLeft}.
+                    </p>
+                  )}
+                </div>
+                {promotion?.is_live && promotionTimeLeft && (
+                  <button type="button" onClick={() => setShowBonusTiers((value) => !value)}
+                    className="text-[10px] font-black uppercase tracking-widest text-emerald-700 underline underline-offset-2">
+                    View bonus tiers
+                  </button>
+                )}
+              </div>
+              {showBonusTiers && promotion?.is_live && promotionTimeLeft && (
+                <p className="mt-2 border-t border-emerald-200 pt-2 text-[11px] font-semibold text-emerald-800">
+                  $100–$299.99: 5% · $300–$719.99: 7.5% · $720–$2,200.99: 10% · $2,201+: 12%
+                </p>
+              )}
+            </div>
             <div className="space-y-2">
               <div className="flex justify-between items-center px-1">
                 <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Amount to deposit ($)</label>
@@ -503,6 +558,11 @@ export default function DepositPage() {
                       </div>
                       <div className="flex items-center gap-2">
                         <span className={cn("text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md bg-opacity-50", info.bg, info.color)}>{info.label}</span>
+                        {deposit.status === "paid" && Number(deposit.bonus_amount || 0) > 0 && (
+                          <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-emerald-700">
+                            +{Number(deposit.bonus_rate_basis_points || 0) / 100}% bonus
+                          </span>
+                        )}
                         <span className="w-1 h-1 bg-slate-300 rounded-full" />
                         <span className="text-[9px] font-bold text-slate-500 uppercase tracking-tight truncate">
                           {deposit.network} • {deposit.track_id}
@@ -581,6 +641,14 @@ export default function DepositPage() {
                     </p>
                   </div>
                 </div>
+                {viewingDeposit.status === "paid" && (
+                  <div className="rounded-2xl border border-emerald-100 bg-emerald-50/60 p-4 text-sm">
+                    <div className="flex justify-between"><span>Deposit amount</span><strong>${Number(viewingDeposit.amount).toFixed(2)}</strong></div>
+                    <div className="mt-1 flex justify-between"><span>Deposit bonus</span><strong>${Number(viewingDeposit.bonus_amount || 0).toFixed(2)}</strong></div>
+                    <div className="mt-1 flex justify-between"><span>Total credited</span><strong>${(Number(viewingDeposit.amount) + Number(viewingDeposit.bonus_amount || 0)).toFixed(2)}</strong></div>
+                    <div className="mt-1 flex justify-between"><span>Bonus rate</span><strong>{Number(viewingDeposit.bonus_rate_basis_points || 0) / 100}%</strong></div>
+                  </div>
+                )}
 
                 <div className="space-y-3 pt-2">
                   {["pending", "waiting", "paying"].includes(viewingDeposit.status) && (

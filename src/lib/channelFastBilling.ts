@@ -5,6 +5,8 @@ import { getPublisherQuality } from "@/lib/publisherQuality";
 import { recordPayoutSafetyCheck } from "@/lib/revenueProtection";
 import { getChannelUnitPrice, money } from "@/lib/channelBilling";
 import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
+import { deleteExhaustedChannelCampaignPosts, type CampaignPostDeletionSummary } from "@/lib/campaignPostDeletion";
+import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
 
 type LockedPost = RowDataPacket & {
   campaign_id: number; channel_id: number; publisher_id: number; campaign_type: string;
@@ -25,13 +27,13 @@ async function lockedPost(conn: PoolConnection, postId: number) {
 
 async function fastDebit(input: { conn: PoolConnection; postId: number; type: "click" | "view"; sourceKey: string; requestedUnits: number }) {
   const [existing] = await input.conn.query<RowDataPacket[]>("SELECT id FROM channel_advertiser_debits WHERE source_key=?", [input.sourceKey]);
-  if (existing.length) return { debited: false, duplicate: true, units: 0 };
+  if (existing.length) return { debited: false, duplicate: true, units: 0, becameExhausted: false, campaignId: null };
   const post = await lockedPost(input.conn, input.postId);
   if (!post || post.campaign_status !== "active" || post.post_status !== "active" || post.campaign_type !== `${input.type}s`) {
-    return { debited: false, duplicate: false, units: 0 };
+    return { debited: false, duplicate: false, units: 0, becameExhausted: false, campaignId: null };
   }
   const unitPrice = getChannelUnitPrice({ type: post.campaign_type, cpm: post.cpm, cpc: post.cpc });
-  if (!(unitPrice > 0)) return { debited: false, duplicate: false, units: 0 };
+  if (!(unitPrice > 0)) return { debited: false, duplicate: false, units: 0, becameExhausted: false, campaignId: post.campaign_id };
   const [[today]] = await input.conn.query<Array<RowDataPacket & { spend: string | number }>>(
     `SELECT
       COALESCE((SELECT SUM(advertiser_debit) FROM channel_advertiser_debits WHERE campaign_id=? AND created_at>=CURDATE()),0)
@@ -48,12 +50,18 @@ async function fastDebit(input: { conn: PoolConnection; postId: number; type: "c
     : Number(post.views || 0);
   const unbilledUnits = Math.max(0, confirmedUnits - alreadySettled);
   const units = Math.min(Math.max(0, Math.floor(input.requestedUnits)), unbilledUnits, affordableUnits);
-  if (!units) return { debited: false, duplicate: false, units: 0 };
+  if (!units) {
+    const becameExhausted = budget + 1e-10 < unitPrice;
+    if (becameExhausted) {
+      await markCampaignBudgetExhausted(post.campaign_id, input.conn);
+    }
+    return { debited: false, duplicate: false, units: 0, becameExhausted, campaignId: post.campaign_id };
+  }
   const debit = money(units * unitPrice);
   const [campaignUpdate] = await input.conn.query<ResultSetHeader>(`
     UPDATE campaigns SET budget=GREATEST(budget-?,0), channel_spend=channel_spend+?
     WHERE id=? AND status='active' AND budget>=?`, [debit, debit, post.campaign_id, debit]);
-  if (campaignUpdate.affectedRows !== 1) return { debited: false, duplicate: false, units: 0 };
+  if (campaignUpdate.affectedRows !== 1) return { debited: false, duplicate: false, units: 0, becameExhausted: false, campaignId: post.campaign_id };
   await input.conn.query(
     `INSERT INTO channel_advertiser_debits
       (source_key,settlement_type,campaign_id,post_id,channel_id,publisher_id,units,unit_price,advertiser_debit)
@@ -63,27 +71,53 @@ async function fastDebit(input: { conn: PoolConnection; postId: number; type: "c
   const settledColumn = input.type === "click" ? "settled_clicks" : "settled_views";
   await input.conn.query(`UPDATE campaign_posts SET ${settledColumn}=${settledColumn}+?, spend=spend+? WHERE id=?`, [units, debit, input.postId]);
   const remaining = money(budget - debit);
-  if (remaining <= 0 || remaining + 1e-10 < unitPrice) {
-    await input.conn.query("UPDATE campaigns SET status='budget_exhausted',budget=0,budget_exhausted_at=NOW(),pause_reason='budget_exhausted' WHERE id=?", [post.campaign_id]);
+  const becameExhausted = remaining <= 0 || remaining + 1e-10 < unitPrice;
+  if (becameExhausted) {
+    await markCampaignBudgetExhausted(post.campaign_id, input.conn);
   }
-  return { debited: true, duplicate: false, units };
+  return { debited: true, duplicate: false, units, becameExhausted, campaignId: post.campaign_id };
+}
+
+async function cleanupAfterFastDebit(result: Awaited<ReturnType<typeof fastDebit>>) {
+  let cleanup: CampaignPostDeletionSummary | null = null;
+  let cleanupError: string | null = null;
+  if (result.becameExhausted && result.campaignId !== null) {
+    try {
+      cleanup = await deleteExhaustedChannelCampaignPosts(result.campaignId);
+    } catch (error) {
+      cleanupError = error instanceof Error ? error.message : "channel_exhaustion_cleanup_failed";
+      console.error("Post-commit channel exhaustion cleanup failed", {
+        campaign_id: result.campaignId,
+        error: cleanupError,
+      });
+    }
+  }
+  return { ...result, cleanup, cleanupError };
 }
 
 export async function debitChannelClick(postId: number, clickId: number) {
   await ensureClassicSettlementColumns();
   const conn = await pool.getConnection();
-  try { await conn.beginTransaction(); const result = await fastDebit({ conn, postId, type: "click", sourceKey: `click:${clickId}`, requestedUnits: 1 }); await conn.commit(); return result; }
+  let result: Awaited<ReturnType<typeof fastDebit>>;
+  try {
+    await conn.beginTransaction();
+    result = await fastDebit({ conn, postId, type: "click", sourceKey: `click:${clickId}`, requestedUnits: 1 });
+    await conn.commit();
+  }
   catch (error) { await conn.rollback(); throw error; } finally { conn.release(); }
+  return cleanupAfterFastDebit(result);
 }
 
 export async function debitConfirmedChannelViews(postId: number, confirmedViews: number) {
   await ensureClassicSettlementColumns();
   const conn = await pool.getConnection();
+  let result: Awaited<ReturnType<typeof fastDebit>>;
   try {
     await conn.beginTransaction();
-    const result = await fastDebit({ conn, postId, type: "view", sourceKey: `view:${postId}:${confirmedViews}`, requestedUnits: confirmedViews });
-    await conn.commit(); return result;
+    result = await fastDebit({ conn, postId, type: "view", sourceKey: `view:${postId}:${confirmedViews}`, requestedUnits: confirmedViews });
+    await conn.commit();
   } catch (error) { await conn.rollback(); throw error; } finally { conn.release(); }
+  return cleanupAfterFastDebit(result);
 }
 
 export async function settlePendingChannelPublisherCredits(options: number | { limit?: number; campaignId?: number } = 500) {

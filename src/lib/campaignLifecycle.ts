@@ -1,6 +1,6 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { deleteActiveCampaignPosts } from "@/lib/campaignPostDeletion";
+import { deleteExhaustedChannelCampaignPosts } from "@/lib/campaignPostDeletion";
 
 const REQUIRED_CAMPAIGN_LIFECYCLE_COLUMNS = [
   "paused_at",
@@ -102,11 +102,21 @@ export async function markCampaignBudgetExhausted(campaignId: number | string, c
       pause_reason = 'budget_exhausted'
     WHERE id = ?
   `, [campaignId]);
+
+  await executor.query(`
+    UPDATE campaign_posts cp
+    JOIN campaigns c ON c.id = cp.campaign_id
+    SET cp.status = 'cleanup_pending'
+    WHERE cp.campaign_id = ?
+      AND c.type IN ('views', 'clicks')
+      AND c.status = 'budget_exhausted'
+      AND cp.status IN ('active', 'posted', 'sent')
+  `, [campaignId]);
 }
 
 export async function exhaustCampaignAndDeletePosts(campaignId: number | string) {
   await markCampaignBudgetExhausted(campaignId);
-  return deleteActiveCampaignPosts(campaignId);
+  return deleteExhaustedChannelCampaignPosts(campaignId);
 }
 
 export async function adminResumeCampaign(campaignId: number | string) {

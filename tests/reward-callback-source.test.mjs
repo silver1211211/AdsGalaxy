@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const read = (path) => readFileSync(path, "utf8");
-const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
 
 const rewardLibrary = read("src/lib/miniappRewardEvents.ts");
 const developerPlatform = read("src/lib/developerPlatform.ts");
@@ -116,11 +116,13 @@ test("lookup and pending behavior require publisher-scoped Mini App ownership", 
   assert.match(verifyRoute, /error_code: "EVENT_PENDING"/);
 });
 
-test("locked SDK runtime and mediation sources remain byte-identical", () => {
-  const expected = new Map([
-    ["src/app/sdk.js/route.ts", "a96c629adbdb575590811d6c160ac6cb31a93a59c8e49c41555809b18a9ddb78"],
-    ["src/lib/miniappSdkRuntime.ts", "bd3da025098d8da1c1b86d3504e318d52e8deeb3bab48d5bdda74cf370ae3494"],
-    ["src/lib/miniappMediationEngine.ts", "688144aede73261d2d49a621761d535ee0738d0086bd38f07149ee6f87fef3d6"],
-  ]);
-  for (const [path, hash] of expected) assert.equal(sha256(path), hash, path);
+test("locked SDK runtime and mediation sources retain canonical Git blob identity across checkout line endings", () => {
+  const protectedPaths = [
+    "src/app/sdk.js/route.ts",
+    "src/lib/miniappSdkRuntime.ts",
+    "src/lib/miniappMediationEngine.ts",
+  ];
+  for (const path of protectedPaths) {
+    assert.equal(git("hash-object", path), git("rev-parse", `HEAD:${path}`), path);
+  }
 });

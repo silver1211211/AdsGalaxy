@@ -2,7 +2,7 @@ import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { aggregateChannelStatistics } from "@/lib/channelStatistics";
 import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
-import { deleteActiveCampaignPosts, type CampaignPostDeletionSummary } from "@/lib/campaignPostDeletion";
+import { deleteExhaustedChannelCampaignPosts, type CampaignPostDeletionSummary } from "@/lib/campaignPostDeletion";
 import { creditUserLockedBalance } from "@/lib/earnings";
 import { recordPayoutSafetyCheck } from "@/lib/revenueProtection";
 import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
@@ -445,16 +445,15 @@ export async function settleChannelCampaigns(options: {
 
   const deletions: Record<number, CampaignPostDeletionSummary> = {};
   for (const [campaignId, campaign] of exhausted) {
-    const outstandingEngagement = await countOutstandingCampaignEngagement(campaignId);
-    if (outstandingEngagement > 0) {
-      console.warn("Skipping exhausted campaign post deletion because unsettled engagement remains", {
+    try {
+      deletions[campaignId] = await deleteExhaustedChannelCampaignPosts(campaignId);
+      await sendTelegramMessage(campaign.telegramId, `Campaign Budget Exhausted\n\nYour campaign "${campaign.name}" has exhausted its budget and its active channel posts were removed.`);
+    } catch (error) {
+      console.error("Post-commit channel exhaustion cleanup failed", {
         campaign_id: campaignId,
-        outstanding_posts: outstandingEngagement,
+        error: error instanceof Error ? error.message : "channel_exhaustion_cleanup_failed",
       });
-      continue;
     }
-    deletions[campaignId] = await deleteActiveCampaignPosts(campaignId);
-    await sendTelegramMessage(campaign.telegramId, `Campaign Budget Exhausted\n\nYour campaign "${campaign.name}" has exhausted its budget and its active channel posts were removed.`);
   }
 
   let statisticsAggregation: ChannelSettlementResult["statisticsAggregation"];

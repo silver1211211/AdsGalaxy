@@ -18,6 +18,7 @@ export async function sendTelegramMessage(chatId: string | number, text: string,
   const { parse_mode = SAFE_TELEGRAM_PARSE_MODE, reply_markup, photo } = options;
 
   try {
+    const timeoutMs = Math.min(30_000, Math.max(1_000, Number(options.timeoutMs) || 10_000));
     const endpoint = photo ? "sendPhoto" : "sendMessage";
     
     // If photo is a Buffer, we must use FormData
@@ -34,6 +35,7 @@ export async function sendTelegramMessage(chatId: string | number, text: string,
       const res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
         method: "POST",
         body: formData,
+        signal: AbortSignal.timeout(timeoutMs),
       });
       return await res.json();
     }
@@ -50,6 +52,7 @@ export async function sendTelegramMessage(chatId: string | number, text: string,
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     
     const data = await res.json();

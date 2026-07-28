@@ -207,7 +207,11 @@ for MIG in \
   "20260710_0099_bot_status_compatibility.sql" \
   "20260710_0100_campaign_status_compatibility.sql" \
   "20260710_0101_broadcast_payout_configuration.sql" \
-  "20260711_0102_bot_user_verification.sql"
+  "20260711_0102_bot_user_verification.sql" \
+  "20260727_0103_production_miniapp_reward_events.sql" \
+  "20260727_0104_developer_webhook_v2_outbox.sql" \
+  "20260728_0105_add_advertiser_transaction_description.sql" \
+  "20260728_0106_deposit_bonus_promotion.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"

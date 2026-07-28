@@ -243,6 +243,27 @@ export function assertBotIntegrationSecretReadable(encrypted: unknown, storedHas
   return secret;
 }
 
+export function diagnoseBotIntegrationSecret(encrypted: unknown, storedHash: unknown) {
+  if (!clean(encrypted) || !clean(storedHash)) {
+    return { ok: false as const, message: "Bot integration is not configured." };
+  }
+
+  try {
+    return {
+      ok: true as const,
+      message: "Bot integration secret is valid.",
+      secret: assertBotIntegrationSecretReadable(encrypted, storedHash),
+    };
+  } catch (error: unknown) {
+    return {
+      ok: false as const,
+      message: isBotEncryptionError(error)
+        ? "Bot integration credentials are invalid."
+        : "Bot integration secret could not be validated.",
+    };
+  }
+}
+
 export type BotIntegrationStatus = "not_installed" | "installed" | "imported_pending_verification" | "active" | "error" | "disabled" | "rejected";
 
 export function resolveBotIntegrationStatus(input: {

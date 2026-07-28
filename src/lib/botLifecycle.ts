@@ -65,7 +65,9 @@ export async function checkBotHealth(bot: { id: number | string; bot_token: stri
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const response = await fetch(`https://api.telegram.org/bot${bot.bot_token}/getMe`);
+      const response = await fetch(`https://api.telegram.org/bot${bot.bot_token}/getMe`, {
+        signal: AbortSignal.timeout(10_000),
+      });
       const data = await response.json().catch(() => ({}));
       if (!data.ok) {
         lastFailure = classifyBotTokenFailure(data.description || `HTTP ${response.status}`) || {
@@ -208,6 +210,8 @@ export async function sendWithRetries(send: () => Promise<any>) {
     const permanentUser = classifyBotUserSendFailure(last?.description, Number(last?.error_code || 0));
     const permanentBot = classifyBotTokenFailure(last?.description);
     if (permanentUser || permanentBot) return { ok: false, result: last, attempts: attempt, failure: permanentUser || permanentBot };
+    const retryAfter = Number(last?.parameters?.retry_after || 0);
+    if (attempt < 3) await sleep(Math.min(10_000, Math.max(250, retryAfter * 1000 || attempt * 500)));
   }
   return { ok: false, result: last, attempts: 3, failure: null };
 }

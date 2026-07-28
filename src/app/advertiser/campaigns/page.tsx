@@ -29,6 +29,7 @@ import {
   Megaphone,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { campaignPauseWarning } from "@/lib/campaignPauseLifecycle";
 import { apiFetch } from "@/lib/api";
 import { AnimatePresence, motion } from "framer-motion";
 import { useHeader } from "@/context/HeaderContext";
@@ -553,7 +554,13 @@ export default function MyCampaignsPage() {
                                 disabled={campaign.status === "pending" || campaign.status === "rejected" || campaign.status === "completed" || campaign.status === "budget_exhausted" || processingId === campaign.id}
                                 onClick={() => {
                                   if (campaign.status === "active") {
-                                    setConfirmModal({ isOpen: true, id: campaign.id, title: "Pause Campaign", message: "Pausing this campaign will delete all active posts from channels. You cannot resume this campaign for 1 hour unless an admin resumes it manually. Do you want to continue?", confirmText: "Pause", action: "status" });
+                                    const message = campaignPauseWarning(campaign.type);
+                                    if (!message) {
+                                      setNotification({ type: "error", title: "Unsupported Campaign", message: "This campaign type cannot be paused." });
+                                      setMenuOpenId(null);
+                                      return;
+                                    }
+                                    setConfirmModal({ isOpen: true, id: campaign.id, title: "Pause Campaign", message, confirmText: "Pause", action: "status" });
                                     setMenuOpenId(null);
                                     return;
                                   }

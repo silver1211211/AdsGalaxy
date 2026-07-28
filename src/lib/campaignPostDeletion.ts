@@ -4,6 +4,7 @@ import pool from "@/lib/db";
 
 const DEFAULT_MAX_POSTS_PER_RUN = 500;
 const MAX_DELETE_ATTEMPTS = 2;
+const MAX_CLEANUP_RETRY_RUNS = 5;
 const RETRY_DELAY_MS = 5000;
 const BATCH_DELAY_MS = 500;
 
@@ -170,18 +171,33 @@ async function fetchDeletionBatch(options: {
   lifetimeHours?: number;
   hasDeletedAt: boolean;
   hasCleanupStatus: boolean;
+  hasCleanupRetryCount: boolean;
   hasDeliveryConfirmedAt: boolean;
   excludedChannelIds?: number[];
   batchSize: number;
+  requiredCampaignStatus?: string;
 }) {
   const filters = [
+    "c.type IN ('views', 'clicks')",
     options.retryOnly
-      ? (options.hasCleanupStatus ? "(cp.cleanup_status = 'retry' OR cp.status = 'delete_failed')" : "cp.status = 'delete_failed'")
+      ? (options.hasCleanupStatus
+          ? "(cp.cleanup_status = 'retry' OR cp.status = 'cleanup_pending')"
+          : "cp.status IN ('delete_failed', 'cleanup_pending')")
       : options.olderThan24Hours
         ? "cp.status = 'active'"
         : "cp.status IN ('active', 'posted', 'sent', 'delete_failed', 'cleanup_pending')",
   ];
   const params: Array<number | string | number[]> = [];
+
+  if (options.requiredCampaignStatus) {
+    filters.push("c.status = ?");
+    params.push(options.requiredCampaignStatus);
+  }
+
+  if (options.retryOnly && options.hasCleanupRetryCount) {
+    filters.push("COALESCE(cp.cleanup_retry_count, 0) < ?");
+    params.push(MAX_CLEANUP_RETRY_RUNS);
+  }
 
   if (options.olderThan24Hours) {
     const ageExpression = options.hasDeliveryConfirmedAt
@@ -467,6 +483,7 @@ export async function deleteCampaignPosts(options: {
   maxPostsPerRun?: number;
   successStatus?: "deleted" | "replaced";
   excludedChannelIds?: number[];
+  requiredCampaignStatus?: string;
 }): Promise<CampaignPostDeletionSummary> {
   const token = process.env.BOT_TOKEN;
 
@@ -494,9 +511,11 @@ export async function deleteCampaignPosts(options: {
     lifetimeHours,
     hasDeletedAt: columns.hasDeletedAt,
     hasCleanupStatus: columns.hasCleanupStatus,
+    hasCleanupRetryCount: columns.hasCleanupRetryCount,
     hasDeliveryConfirmedAt: columns.hasDeliveryConfirmedAt,
     excludedChannelIds: options.excludedChannelIds,
     batchSize: maxPostsPerRun,
+    requiredCampaignStatus: options.requiredCampaignStatus,
   });
   if (expiredCounts) {
     summary.skipped = Math.max(0, expiredCounts.total - posts.length);
@@ -609,6 +628,15 @@ export async function deleteCampaignPosts(options: {
 
 export async function deleteActiveCampaignPosts(campaignId: number | string) {
   return deleteCampaignPosts({ campaignId, batchSize: 100, maxPostsPerRun: 500 });
+}
+
+export async function deleteExhaustedChannelCampaignPosts(campaignId: number | string) {
+  return deleteCampaignPosts({
+    campaignId,
+    requiredCampaignStatus: "budget_exhausted",
+    batchSize: 100,
+    maxPostsPerRun: 500,
+  });
 }
 
 export async function retryCampaignPostCleanup(campaignId?: number | string) {

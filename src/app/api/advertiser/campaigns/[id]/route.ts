@@ -12,6 +12,7 @@ import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { validatePostbackUrl } from "@/lib/conversionTracking";
 import { hasRestrictedClickCreativeContent } from "@/lib/campaignCreative";
 import { sendTelegramMessage } from "@/lib/telegram";
+import { pausableCampaignKind } from "@/lib/campaignPauseLifecycle";
 
 async function safeNotify(telegramId: unknown, message: string) {
   if (!telegramId) return;
@@ -66,7 +67,15 @@ export async function GET(
     const [campaignRows]: any = await pool.query(
       isBotCampaign
         ? `SELECT id, name, campaign_title, message_text, image_url, link, button_text,
-             type, budget, cpm, category, continents, status, created_at, updated_at
+             type, GREATEST(COALESCE(budget, 0), 0) AS budget, cpm, category, continents,
+             CASE
+               WHEN status = 'active' AND (
+                 ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8) <= 0
+                 OR budget < ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8)
+               ) THEN 'budget_exhausted'
+               ELSE status
+             END AS status,
+             created_at, updated_at
            FROM campaigns WHERE id = ? AND user_id = ?`
         : `SELECT id, name, campaign_title, parse_mode, message_text, image_url, link, postback_url, button_text,
              type, budget, cpm, category, continents, countries, languages, vpn_policy,
@@ -335,8 +344,25 @@ export async function PATCH(
         return NextResponse.json({ error: "Cannot toggle pending campaigns" }, { status: 400 });
       }
 
+      const campaignKind = pausableCampaignKind(campaign.type);
+      if (!campaignKind) {
+        return NextResponse.json({ error: "This campaign type cannot be paused or resumed" }, { status: 400 });
+      }
+
       if (campaign.status === "active") {
         await assertCampaignLifecycleColumns();
+        if (campaignKind === "bot") {
+          await pool.query(`
+            UPDATE campaigns
+            SET status = 'paused',
+              paused_at = NOW(),
+              resume_locked_until = NULL,
+              pause_reason = 'user_paused'
+            WHERE id = ? AND user_id = ?
+          `, [id, user.id]);
+          return NextResponse.json({ success: true, status: "paused" });
+        }
+
         const settlement = await settleCampaignEngagementBeforeDeletion(Number(id), "advertiser_pause");
         if (!settlement.ok) {
           return NextResponse.json({
@@ -376,11 +402,11 @@ export async function PATCH(
       if (campaign.status === "paused") {
         await assertCampaignLifecycleColumns();
 
-        if (campaign.pause_reason === "user_paused" && campaign.resume_locked_until) {
+        if (campaignKind === "channel" && campaign.pause_reason === "user_paused" && campaign.resume_locked_until) {
           const lockedUntil = new Date(campaign.resume_locked_until);
           if (lockedUntil.getTime() > Date.now()) {
             return NextResponse.json({
-              error: `This campaign can be resumed after ${lockedUntil.toLocaleString()}. Admin can resume it earlier.`
+              error: "This campaign cannot be resumed until the 1-hour pause period has ended."
             }, { status: 400 });
           }
         }

@@ -4,14 +4,15 @@ import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import {
-  assertBotIntegrationSecretReadable,
-  ensureBotIntegration,
+  diagnoseBotIntegrationSecret,
   isBotEncryptionError,
   loadBotToken,
   publisherBotEncryptionErrorMessage,
   validateBotIntegrationEncryptionConfig,
 } from "@/lib/botIntegration";
 import { getBotAudienceStats } from "@/lib/botAudience";
+import { loadOwnedBotForIntegrationDiagnostic } from "@/lib/botIntegrationDiagnostic";
+import { evaluateBotIntegrationReadiness } from "@/lib/botIntegrationReadiness";
 
 export const dynamic = "force-dynamic";
 
@@ -61,16 +62,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const { id } = await params;
     checks.push(check("publisher_authorization", "Publisher authorization valid", "success", "Publisher owns this bot and is authorized to run diagnostics."));
 
-    const [bots] = await pool.query<BotRow[]>(
-      `SELECT id, user_id, bot_name, bot_username, status, bot_token, bot_token_encrypted,
-        integration_secret_encrypted, integration_secret_hash, integration_installed_at,
-        integration_last_received_at, integration_last_error_at, integration_last_error
-       FROM bots
-       WHERE id = ? AND user_id = ? AND is_deleted = FALSE
-       LIMIT 1`,
-      [id, user.id]
-    );
-    const bot = bots[0];
+    const bot = await loadOwnedBotForIntegrationDiagnostic<BotRow>(pool, id, user.id);
     if (!bot) return NextResponse.json({ error: "Bot not found" }, { status: 404 });
 
     if (["paused", "deleted", "token_invalid", "bot_deleted", "unreachable"].includes(String(bot.status || ""))) {
@@ -104,13 +96,19 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       throw error;
     }
 
-    const integrationUrl = await ensureBotIntegration(pool, appOrigin(request), bot.id);
-    try {
-      assertBotIntegrationSecretReadable(bot.integration_secret_encrypted, bot.integration_secret_hash);
-      checks.push(check("integration_secret", "AdsGalaxy Connected", "success", "Integration secret is readable and matches its stored hash."));
-    } catch (error: unknown) {
-      checks.push(check("integration_secret", "AdsGalaxy Connected", "failure", "Secret Invalid", isBotEncryptionError(error) ? error.code : undefined));
-    }
+    const secretDiagnostic = diagnoseBotIntegrationSecret(
+      bot.integration_secret_encrypted,
+      bot.integration_secret_hash
+    );
+    const integrationUrl = secretDiagnostic.ok
+      ? `${appOrigin(request)}/api/bot/integration/${encodeURIComponent(String(bot.id))}/${secretDiagnostic.secret}`
+      : null;
+    checks.push(check(
+      "integration_secret",
+      "Bot integration secret valid",
+      secretDiagnostic.ok ? "success" : "failure",
+      secretDiagnostic.message
+    ));
 
     try {
       const { response, data } = await telegramJson(token, "getMe");
@@ -142,50 +140,49 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       checks.push(check("sdk_connected", "SDK Connected", "failure", "SDK Missing", error instanceof Error ? error.message : undefined));
     }
 
-    const requestId = `diag-${bot.id}-${Date.now()}-${crypto.randomUUID()}`;
-    const callbackResponse = await fetch(integrationUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        test: true,
-        bot_id: String(bot.id),
-        telegram_user_id: `9${String(bot.id).padStart(7, "0").slice(0, 7)}`,
-        username: "adsgalaxy_test",
-        timestamp: Math.floor(Date.now() / 1000),
-        request_id: requestId,
-      }),
-      cache: "no-store",
-    });
-    const callbackData = await callbackResponse.json().catch(() => ({}));
-    checks.push(check(
-      "sdk_callback",
-      "Integration endpoint reachable",
-      callbackResponse.ok && callbackData.success ? "success" : "failure",
-      callbackData.message || (callbackResponse.ok ? "Callback replied." : `Callback failed with HTTP ${callbackResponse.status}`)
-    ));
+    if (integrationUrl) {
+      const requestId = `diag-${bot.id}-${Date.now()}-${crypto.randomUUID()}`;
+      const callbackResponse = await fetch(integrationUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          test: true,
+          bot_id: String(bot.id),
+          telegram_user_id: `9${String(bot.id).padStart(7, "0").slice(0, 7)}`,
+          username: "adsgalaxy_test",
+          timestamp: Math.floor(Date.now() / 1000),
+          request_id: requestId,
+        }),
+        cache: "no-store",
+      });
+      const callbackData = await callbackResponse.json().catch(() => ({}));
+      const callbackAccepted = callbackResponse.ok && callbackData.success;
+      checks.push(check(
+        "sdk_callback",
+        "Integration endpoint reachable",
+        callbackAccepted ? "success" : "failure",
+        callbackAccepted
+          ? "Bot integration endpoint accepted the diagnostic event."
+          : "Bot integration endpoint could not be validated."
+      ));
 
-    const [eventRows] = await pool.query<RowDataPacket[]>(
-      "SELECT id FROM bot_integration_events WHERE bot_id = ? AND request_id_hash = ? LIMIT 1",
-      [bot.id, crypto.createHash("sha256").update(requestId).digest("hex")]
-    );
-    checks.push(check("database_registration", "AdsGalaxy Connected", eventRows[0] ? "success" : "failure", eventRows[0] ? "Diagnostic integration event was stored." : "Diagnostic integration event was not stored."));
+      const [eventRows] = await pool.query<RowDataPacket[]>(
+        "SELECT id FROM bot_integration_events WHERE bot_id = ? AND request_id_hash = ? LIMIT 1",
+        [bot.id, crypto.createHash("sha256").update(requestId).digest("hex")]
+      );
+      checks.push(check("database_registration", "AdsGalaxy Connected", eventRows[0] ? "success" : "failure", eventRows[0] ? "Diagnostic integration event was stored." : "Diagnostic integration event was not stored."));
+    } else {
+      checks.push(check("sdk_callback", "Integration endpoint reachable", "failure", "Bot integration is not configured."));
+      checks.push(check("database_registration", "AdsGalaxy Connected", "failure", "Diagnostic integration event was not stored."));
+    }
 
     const stats = await getBotAudienceStats(bot.id);
     checks.push(check("connection_state", "Bot Verified", bot.status === "active" ? "success" : "failure", bot.status === "active" ? "Bot Verified" : `Bot lifecycle status is ${bot.status}.`));
     checks.push(check("reachability_counts", "Reachability counts", "success", `${stats.verified_users} verified/reachable, ${stats.pending_verification} pending verification, ${stats.blocked_users} blocked.`));
 
-    const [developerRows] = await pool.query<RowDataPacket[]>(
-      `SELECT a.id
-       FROM developer_applications a
-       JOIN developer_api_keys k ON k.application_id = a.id
-       WHERE a.user_id = ? AND a.status = 'active' AND k.status = 'active'
-       LIMIT 1`,
-      [user.id]
-    );
-    checks.push(check("sdk_authentication", "Developer secret valid", developerRows[0] ? "success" : "failure", developerRows[0] ? "Active developer application and API key exist." : "Unauthorized"));
-
-    const status = summarize(checks);
-    checks.push(check("ready_for_production", "Ready for Production", status === "success" ? "success" : "failure", status === "success" ? "Ready for Production" : "Integration is not ready for production."));
+    const readiness = evaluateBotIntegrationReadiness(checks);
+    const status = readiness.ready ? summarize(checks) : "failure";
+    checks.push(check("ready_for_production", "Ready for Production", readiness.ready ? "success" : "failure", readiness.ready ? "Ready for Production" : "Integration is not ready for production."));
     return NextResponse.json({
       success: status !== "failure",
       status,
@@ -199,7 +196,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       checks.push(check("credential_failure", "Credential verification", "failure", "Bot credential verification failed.", error.code));
       return NextResponse.json({ success: false, status: "failure", checks, error: publisherBotEncryptionErrorMessage() }, { status: 503 });
     }
-    console.error("Bot integration diagnostic failed", { error: error instanceof Error ? error.message : "unknown" });
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Integration diagnostic failed", checks }, { status: getAuthErrorStatus(error) });
+    console.error("Bot integration diagnostic failed", {
+      error_name: error instanceof Error ? error.name : "UnknownError",
+      error_code: typeof (error as { code?: unknown })?.code === "string"
+        ? (error as { code: string }).code
+        : undefined,
+    });
+    return NextResponse.json({ error: "Integration diagnostic failed", checks }, { status: getAuthErrorStatus(error) });
   }
 }

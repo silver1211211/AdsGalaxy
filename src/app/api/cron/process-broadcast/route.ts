@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { SAFE_TELEGRAM_PARSE_MODE, sendTelegramMessage } from "@/lib/telegram";
-import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
 import { getAdvertiserTrustMultipliers, normalizeAdvertiserTrustLevel, qualityMultiplier } from "@/lib/advertiserTrust";
 import {
   calculateAdvertiserPerformanceScore,
@@ -28,6 +27,12 @@ import { botUserBroadcastEligibleCondition } from "@/lib/botAudience";
 import { composeCampaignCreativeText } from "@/lib/campaignCreative";
 import { campaignCategoryMatches } from "@/lib/campaignCategories";
 import { calculateBroadcastPayout, getBroadcastPayoutSettings, type BroadcastPayout } from "@/lib/broadcastPublisherCpmEngine";
+import {
+  addBroadcastMoney,
+  canFundBroadcastDelivery,
+  evaluateBroadcastAffordability,
+  refundedBroadcastStatus,
+} from "@/lib/broadcastBudgetLifecycle";
 
 export const dynamic = 'force-dynamic';
 
@@ -59,11 +64,22 @@ function normalizeFailureReason(value?: string) {
   return "unknown_error";
 }
 
-async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: any; cost: number }) {
+function parseTargetList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String);
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(String(value));
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: any; cost: number }, db = pool) {
   if (!Number.isFinite(input.cost) || input.cost <= 0) {
     return { ok: false as const, reason: "invalid_campaign_cost" };
   }
-  const conn = await pool.getConnection();
+  const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
     const [campaignRows]: any = await conn.query(
@@ -75,9 +91,11 @@ async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: 
       await conn.rollback();
       return { ok: false as const, reason: "campaign_budget_exhausted" };
     }
-    if (Number(lockedCampaign.budget || 0) + 1e-10 < input.cost) {
+    if (!canFundBroadcastDelivery(lockedCampaign.budget, input.cost)) {
       await conn.query(
-        "UPDATE campaigns SET status = 'paused', pause_reason = 'insufficient_budget_for_delivery', paused_at = NOW() WHERE id = ? AND status = 'active'",
+        `UPDATE campaigns
+         SET status = 'budget_exhausted', budget_exhausted_at = NOW(), pause_reason = 'budget_exhausted'
+         WHERE id = ? AND status = 'active'`,
         [input.campaign.id]
       );
       await conn.commit();
@@ -111,11 +129,20 @@ async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: 
       [input.campaign.id, input.bot.id, input.user.id, input.user.chat_id, input.cost]
     );
     const [[updatedCampaign]]: any = await conn.query("SELECT budget FROM campaigns WHERE id = ?", [input.campaign.id]);
+    const remainingBudget = updatedCampaign?.budget ?? 0;
+    if (!canFundBroadcastDelivery(remainingBudget, input.cost)) {
+      await conn.query(
+        `UPDATE campaigns
+         SET status = 'budget_exhausted', budget_exhausted_at = NOW(), pause_reason = 'budget_exhausted'
+         WHERE id = ? AND status = 'active'`,
+        [input.campaign.id]
+      );
+    }
     await conn.commit();
     return {
       ok: true as const,
       deliveryId: Number(deliveryResult.insertId),
-      remainingBudget: Number(updatedCampaign?.budget || 0),
+      remainingBudget: Number(remainingBudget),
     };
   } catch (error) {
     await conn.rollback().catch(() => undefined);
@@ -125,15 +152,15 @@ async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: 
   }
 }
 
-async function finalizeBroadcastDelivery(input: {
+export async function finalizeBroadcastDelivery(input: {
   deliveryId: number;
   campaign: any;
   bot: any;
   user: any;
   payout: BroadcastPayout;
   attempts: number;
-}) {
-  const conn = await pool.getConnection();
+}, db = pool) {
+  const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
     const [[delivery]]: any = await conn.query(
@@ -168,16 +195,29 @@ async function finalizeBroadcastDelivery(input: {
   }
 }
 
-async function refundBroadcastReservation(input: {
+export async function refundBroadcastReservation(input: {
   deliveryId: number;
   campaignId: number;
   failureReason: string;
   telegramError: string;
   attempts: number;
-}) {
-  const conn = await pool.getConnection();
+}, db = pool) {
+  const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
+    const [[candidateDelivery]]: any = await conn.query(
+      "SELECT status, cost FROM broadcast_deliveries WHERE id = ?",
+      [input.deliveryId]
+    );
+    if (!candidateDelivery || candidateDelivery.status !== "pending") {
+      await conn.commit();
+      return { refunded: false, idempotent: true };
+    }
+    const [[campaign]]: any = await conn.query(
+      "SELECT budget, status, pause_reason FROM campaigns WHERE id = ? FOR UPDATE",
+      [input.campaignId]
+    );
+    if (!campaign) throw new Error("broadcast_refund_campaign_missing");
     const [[delivery]]: any = await conn.query(
       "SELECT status, cost FROM broadcast_deliveries WHERE id = ? FOR UPDATE",
       [input.deliveryId]
@@ -197,6 +237,20 @@ async function refundBroadcastReservation(input: {
       [input.failureReason, input.telegramError.slice(0, 500), input.attempts, input.deliveryId]
     );
     if (deliveryUpdate.affectedRows !== 1) throw new Error("broadcast_refund_race");
+    const refundedBudget = addBroadcastMoney(campaign.budget, reservedCost);
+    if (refundedBroadcastStatus({
+      status: campaign.status,
+      pauseReason: campaign.pause_reason,
+      refundedBudget,
+      nextDebit: reservedCost,
+    }) === "active") {
+      await conn.query(
+        `UPDATE campaigns
+         SET status = 'active', budget_exhausted_at = NULL, pause_reason = NULL
+         WHERE id = ? AND status = 'budget_exhausted' AND pause_reason = 'budget_exhausted'`,
+        [input.campaignId]
+      );
+    }
     await conn.commit();
     return { refunded: true, idempotent: false };
   } catch (error) {
@@ -239,6 +293,19 @@ export async function GET(req: NextRequest) {
 
     const payoutSettings = await getBroadcastPayoutSettings();
 
+    await pool.query(`
+      UPDATE campaigns
+      SET status = 'budget_exhausted',
+        budget_exhausted_at = NOW(),
+        pause_reason = 'budget_exhausted'
+      WHERE type = 'broadcast'
+        AND status = 'active'
+        AND (
+          ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8) <= 0
+          OR budget < ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8)
+        )
+    `);
+
     // 1. Find active broadcast campaigns with budget
     const trustMultipliers = await getAdvertiserTrustMultipliers();
     const deliverySettings = await getDeliveryOptimizationSettings();
@@ -255,7 +322,9 @@ export async function GET(req: NextRequest) {
       SELECT c.*, COALESCE(u.advertiser_trust_level, 'new') as advertiser_trust_level
       FROM campaigns c
       JOIN users u ON c.user_id = u.id
-      WHERE c.type = 'broadcast' AND c.status = 'active' AND c.budget > 0
+      WHERE c.type = 'broadcast' AND c.status = 'active'
+        AND ROUND(GREATEST(COALESCE(c.cpm, 0), 0) / 1000, 8) > 0
+        AND c.budget >= ROUND(GREATEST(COALESCE(c.cpm, 0), 0) / 1000, 8)
         AND COALESCE(u.advertiser_trust_level, 'new') != 'restricted'
         AND (c.start_at IS NULL OR c.start_at <= NOW())
         AND (c.end_at IS NULL OR c.end_at >= NOW())
@@ -299,7 +368,8 @@ export async function GET(req: NextRequest) {
     });
 
     let totalDispatched = 0;
-    const limit = 20;
+    const configuredBatchSize = Number.parseInt(process.env.CRON_BROADCAST_BATCH_SIZE || "20", 10);
+    const limit = Math.min(100, Math.max(1, Number.isFinite(configuredBatchSize) ? configuredBatchSize : 20));
     const dispatches = [];
     const botExclusions = await loadCampaignExclusions(pool, "campaign", campaigns.map((campaign: { id: number | string }) => Number(campaign.id)), "bot");
 
@@ -310,7 +380,10 @@ export async function GET(req: NextRequest) {
       const [bots]: any = await pool.query(`
         SELECT * FROM bots
         WHERE status = 'active' AND is_deleted = FALSE
-        AND COALESCE(health_status, 'active') = 'active'
+        AND COALESCE(health_status, 'active') IN ('active', 'healthy')
+        AND bot_username IS NOT NULL AND bot_username <> ''
+        AND integration_secret_encrypted IS NOT NULL
+        AND integration_secret_hash IS NOT NULL
         AND user_id != ?
       `, [campaign.user_id]);
 
@@ -352,12 +425,12 @@ export async function GET(req: NextRequest) {
 
       const suitableBots = rankInventoryForDelivery(healthyBots.filter((bot: any) => {
         // Category match
-        const botCats = bot.categories ? (typeof bot.categories === 'string' ? JSON.parse(bot.categories) : bot.categories) : [];
+        const botCats = parseTargetList(bot.categories);
         if (!campaignCategoryMatches(campaign.category, botCats)) return false;
 
         // Continent match
-        const campConts = campaign.continents ? (typeof campaign.continents === 'string' ? JSON.parse(campaign.continents) : campaign.continents) : [];
-        const botConts = bot.continents ? (typeof bot.continents === 'string' ? JSON.parse(bot.continents) : bot.continents) : [];
+        const campConts = parseTargetList(campaign.continents);
+        const botConts = parseTargetList(bot.continents);
         if (campConts.length > 0) {
           const hasMatch = campConts.some((c: string) => botConts.includes(c) || botConts.includes("Global"));
           if (!hasMatch) return false;
@@ -374,7 +447,8 @@ export async function GET(req: NextRequest) {
         // 2: last_broadcast_at < 6h ago AND count in 24h < 2
         // Generalizing: last_broadcast_at < (24/posts_per_day) hours ago AND count in 24h < posts_per_day
         
-        const hoursInterval = 24 / bot.posts_per_day;
+        const postsPerDay = Math.min(24, Math.max(1, Number(bot.posts_per_day) || 1));
+        const hoursInterval = 24 / postsPerDay;
         
         const [users]: any = await pool.query(`
           SELECT bu.* 
@@ -401,7 +475,7 @@ export async function GET(req: NextRequest) {
         `, [
           bot.id,
           hoursInterval,
-          bot.posts_per_day,
+          postsPerDay,
           campaign.frequency_cap_per_user || null,
           campaign.id,
           campaign.frequency_cap_per_user || null,
@@ -481,10 +555,7 @@ export async function GET(req: NextRequest) {
             deliveryId: reservation.deliveryId, campaign, bot, user, payout, attempts: sendResult.attempts || 1,
           });
           const remainingBudget = reservation.remainingBudget;
-          const budgetExhausted = remainingBudget <= 0;
-          if (budgetExhausted) {
-            await markCampaignBudgetExhausted(campaign.id);
-          }
+          const budgetExhausted = evaluateBroadcastAffordability(remainingBudget, cost).exhausted;
 
           if (budgetExhausted) {
               try {

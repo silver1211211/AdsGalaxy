@@ -169,11 +169,14 @@ test("admin UI exposes Phase 2 controls and visibility cards", () => {
   assert.match(adminPage, /Cleanup Errors/);
 });
 
-test("advertiser pause finalizes, locks resume for one hour, and keeps cleanup best-effort", () => {
+test("advertiser channel pause finalizes, locks resume for one hour, and keeps cleanup best-effort", () => {
   assert.match(advertiserCampaignRoute, /settleCampaignEngagementBeforeDeletion\(Number\(id\), "advertiser_pause"\)/);
   assert.match(advertiserCampaignRoute, /resume_locked_until = DATE_ADD\(NOW\(\), INTERVAL 1 HOUR\)/);
   assert.match(advertiserCampaignRoute, /pause_reason = 'user_paused'/);
+  assert.match(advertiserCampaignRoute, /campaignKind === "channel"/);
   assert.match(advertiserCampaignRoute, /lockedUntil\.getTime\(\) > Date\.now\(\)/);
+  assert.match(advertiserCampaignRoute, /campaignKind === "bot"/);
+  assert.match(advertiserCampaignRoute, /resume_locked_until = NULL/);
   assert.doesNotMatch(advertiserCampaignRoute, /BOT_TOKEN is missing; cannot delete active posts safely/);
 });
 
