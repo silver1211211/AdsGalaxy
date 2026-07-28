@@ -4,13 +4,47 @@ import {
   createDeveloperApplication,
   generateDeveloperApiKey,
   getDeveloperDashboard,
+  manuallyRetryDeveloperWebhook,
   resetDeveloperApiKey,
+  rotateDeveloperWebhookSecret,
   saveDeveloperWebhook,
 } from "@/lib/developerPlatform";
+import { createOrReactivateApplicationMiniappBinding } from "@/lib/miniappRewardEvents";
 import pool from "@/lib/db";
+
+const PUBLIC_DEVELOPER_ACTION_ERRORS = new Set([
+  "Application not found",
+  "Mini App not found",
+  "Webhook not found",
+  "Terminal webhook delivery not found",
+  "Manual retry already queued",
+  "Application or Mini App is unavailable",
+  "Application and Mini App owners do not match",
+  "Application environment does not match binding",
+  "Mini App environment is already bound",
+  "Valid application and Mini App IDs are required",
+  "Invalid developer action",
+]);
 
 function clean(value: unknown) {
   return String(value || "").trim();
+}
+
+function publicDeveloperActionError(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  return PUBLIC_DEVELOPER_ACTION_ERRORS.has(message) ? message : "Developer action failed";
+}
+
+function publicDeveloperDashboardError(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  if (
+    message === "Account restricted"
+    || message.startsWith("Unauthorized:")
+    || message.startsWith("Invalid initData:")
+  ) {
+    return message;
+  }
+  return "Failed to load developer data";
 }
 
 export async function GET(request: Request) {
@@ -19,7 +53,7 @@ export async function GET(request: Request) {
     const user = await getAuthenticatedUser(initData);
     return NextResponse.json(await getDeveloperDashboard(Number(user.id)));
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Failed to load developer dashboard" }, { status: getAuthErrorStatus(error) });
+    return NextResponse.json({ error: publicDeveloperDashboardError(error) }, { status: getAuthErrorStatus(error) });
   }
 }
 
@@ -70,6 +104,44 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: true, ...result });
     }
 
+    if (action === "bind_miniapp") {
+      const applicationId = Number(body.application_id);
+      const miniappId = Number(body.miniapp_id);
+      const [apps]: any = await pool.query(
+        "SELECT mode FROM developer_applications WHERE id = ? AND user_id = ? AND status = 'active'",
+        [applicationId, user.id]
+      );
+      if (!apps[0]) return NextResponse.json({ error: "Application not found" }, { status: 404 });
+      const [miniapps]: any = await pool.query(
+        "SELECT id FROM miniapps WHERE id = ? AND user_id = ? AND is_deleted = FALSE",
+        [miniappId, user.id]
+      );
+      if (!miniapps[0]) return NextResponse.json({ error: "Mini App not found" }, { status: 404 });
+      const environment = apps[0].mode === "production" ? "production" : "sandbox";
+      const binding = await createOrReactivateApplicationMiniappBinding({
+        applicationId,
+        miniappId,
+        environment,
+      });
+      await pool.query(
+        `INSERT INTO developer_reward_action_audits
+          (user_id, application_id, miniapp_id, action, metadata)
+         VALUES (?, ?, ?, 'miniapp_bound', ?)`,
+        [user.id, applicationId, miniappId, JSON.stringify({ environment })]
+      );
+      return NextResponse.json({ success: true, binding });
+    }
+
+    if (action === "rotate_webhook_secret") {
+      const result = await rotateDeveloperWebhookSecret(Number(user.id), Number(body.webhook_id));
+      return NextResponse.json({ success: true, ...result });
+    }
+
+    if (action === "retry_webhook_delivery") {
+      const result = await manuallyRetryDeveloperWebhook(Number(user.id), Number(body.delivery_id));
+      return NextResponse.json({ success: true, ...result });
+    }
+
     if (action === "update_application") {
       await pool.query(
         `UPDATE developer_applications
@@ -92,6 +164,12 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ error: "Invalid developer action" }, { status: 400 });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Developer action failed" }, { status: getAuthErrorStatus(error) === 403 ? 403 : 400 });
+    const authStatus = getAuthErrorStatus(error);
+    const status = Number(error?.statusCode || (authStatus === 403 ? 403 : 400));
+    console.error("Developer Center action failed", {
+      error_name: error instanceof Error ? error.name : "UnknownError",
+      error_code: typeof error?.code === "string" ? error.code : undefined,
+    });
+    return NextResponse.json({ error: publicDeveloperActionError(error) }, { status });
   }
 }

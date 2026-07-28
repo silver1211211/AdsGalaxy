@@ -6,7 +6,7 @@ import DashboardLayout from "@/components/layout/DashboardLayout";
 import { apiFetch } from "@/lib/api";
 import { BarChart3, Bot, Code2, Copy, ExternalLink, Loader2, Plus, ShieldCheck, TestTube2, Webhook } from "lucide-react";
 
-const eventOptions = ["*", "campaign.approved", "campaign.rejected", "conversion.recorded", "referral.verified", "postback.conversion", "ad.click", "ad.completed"];
+const eventOptions = ["*", "reward.eligible", "reward.claimed", "campaign.approved", "campaign.rejected", "conversion.recorded", "referral.verified", "postback.conversion", "ad.click", "ad.completed"];
 
 function stat(value: unknown) {
   return Number(value || 0).toLocaleString();
@@ -25,8 +25,9 @@ function formatDate(value: unknown) {
 }
 
 export default function DeveloperCenterPage() {
-  const [data, setData] = useState<any>({ apps: [], keys: [], webhooks: [], deliveries: [], analytics: {} });
+  const [data, setData] = useState<any>({ apps: [], keys: [], webhooks: [], deliveries: [], miniapps: [], bindings: [], analytics: {} });
   const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [secret, setSecret] = useState("");
   const [appForm, setAppForm] = useState({
@@ -39,6 +40,7 @@ export default function DeveloperCenterPage() {
     webhook_url: "",
   });
   const [webhookForm, setWebhookForm] = useState({ application_id: "", url: "", events: ["*"] });
+  const [bindingForm, setBindingForm] = useState({ application_id: "", miniapp_id: "" });
 
   const fetchData = async () => {
     setLoading(true);
@@ -49,6 +51,7 @@ export default function DeveloperCenterPage() {
       setData(payload);
       if (!webhookForm.application_id && payload.apps?.[0]?.id) {
         setWebhookForm((prev) => ({ ...prev, application_id: String(payload.apps[0].id) }));
+        setBindingForm((prev) => ({ ...prev, application_id: String(payload.apps[0].id) }));
       }
     } catch (error: any) {
       setMessage(error.message || "Failed to load developer center");
@@ -67,17 +70,25 @@ export default function DeveloperCenterPage() {
   }, [data.analytics]);
 
   const submit = async (payload: Record<string, unknown>) => {
+    if (actionLoading) return;
+    setActionLoading(true);
     setMessage("");
     setSecret("");
-    const res = await apiFetch("/api/publisher/developer", { method: "POST", body: JSON.stringify(payload) });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      setMessage(json.error || "Developer action failed");
-      return;
+    try {
+      const res = await apiFetch("/api/publisher/developer", { method: "POST", body: JSON.stringify(payload) });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMessage(json.error || "Developer action failed");
+        return;
+      }
+      if (json.secret) setSecret(json.secret);
+      setMessage("Developer settings updated.");
+      await fetchData();
+    } catch (error: any) {
+      setMessage(error?.message || "Developer action failed");
+    } finally {
+      setActionLoading(false);
     }
-    if (json.secret) setSecret(json.secret);
-    setMessage("Developer settings updated.");
-    await fetchData();
   };
 
   const toggleWebhookEvent = (event: string) => {
@@ -189,6 +200,50 @@ export default function DeveloperCenterPage() {
                     ))}
                   </div>
                   <button onClick={() => submit({ action: "save_webhook", ...webhookForm, application_id: Number(webhookForm.application_id) })} className="rounded-xl bg-slate-900 px-4 py-3 text-xs font-black uppercase tracking-widest text-white">Save Webhook</button>
+                </div>
+              </section>
+            </div>
+
+            <div className="grid gap-4 xl:grid-cols-2">
+              <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Mini App bindings</h2>
+                <p className="mt-2 text-sm font-semibold text-slate-500">Bind a publisher-owned Mini App to one application in the matching environment.</p>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <select value={bindingForm.application_id} onChange={(e) => setBindingForm({ ...bindingForm, application_id: e.target.value })} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                    <option value="">Select application</option>
+                    {data.apps.map((app: any) => <option key={app.id} value={app.id}>{app.name} ({app.mode})</option>)}
+                  </select>
+                  <select value={bindingForm.miniapp_id} onChange={(e) => setBindingForm({ ...bindingForm, miniapp_id: e.target.value })} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                    <option value="">Select Mini App</option>
+                    {data.miniapps.map((miniapp: any) => <option key={miniapp.id} value={miniapp.id}>#{miniapp.id} {miniapp.miniapp_name}</option>)}
+                  </select>
+                </div>
+                <button disabled={actionLoading} onClick={() => submit({ action: "bind_miniapp", application_id: Number(bindingForm.application_id), miniapp_id: Number(bindingForm.miniapp_id) })} className="mt-3 rounded-xl bg-blue-600 px-4 py-3 text-xs font-black uppercase tracking-widest text-white disabled:opacity-50">Bind Mini App</button>
+                <div className="mt-4 grid gap-2">
+                  {data.bindings.map((binding: any) => (
+                    <div key={binding.id} className="rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700">
+                      #{binding.miniapp_id} {binding.miniapp_name} · {binding.environment} · {binding.status}
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Production webhook controls</h2>
+                <p className="mt-2 text-sm font-semibold text-slate-500">Reward webhooks support reward.eligible and reward.claimed. New secrets are displayed once.</p>
+                <div className="mt-4 grid gap-2">
+                  {data.webhooks.map((webhook: any) => (
+                    <div key={webhook.id} className="flex flex-col gap-2 rounded-xl bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="min-w-0"><p className="truncate text-sm font-black text-slate-800">{webhook.url}</p><p className="text-xs font-bold text-slate-400">{webhook.events.join(", ")}</p></div>
+                      <button disabled={actionLoading} onClick={() => submit({ action: "rotate_webhook_secret", webhook_id: Number(webhook.id) })} className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-black text-white disabled:opacity-50">Rotate secret</button>
+                    </div>
+                  ))}
+                  {data.deliveries.filter((delivery: any) => delivery.status === "failed" && delivery.terminal_at).map((delivery: any) => (
+                    <div key={delivery.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3">
+                      <div><p className="text-sm font-black text-slate-800">{delivery.event_type}</p><p className="text-xs font-bold text-slate-400">Failed delivery #{delivery.id}</p></div>
+                      <button disabled={actionLoading} onClick={() => submit({ action: "retry_webhook_delivery", delivery_id: Number(delivery.id) })} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-black text-white disabled:opacity-50">Retry</button>
+                    </div>
+                  ))}
                 </div>
               </section>
             </div>

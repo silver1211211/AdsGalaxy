@@ -2,7 +2,6 @@ import DocsArticle, { type DocsSection } from "@/components/docs/DocsArticle";
 import CopyCodeBlock from "@/components/docs/CopyCodeBlock";
 
 const publicSdkUrl = (process.env.NEXT_PUBLIC_SDK_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_ADSGALAXY_APP_URL || "https://app.adsgalaxy.online").replace(/\/$/, "");
-const backupSdkUrl = process.env.NEXT_PUBLIC_BACKUP_SDK_URL || "https://YOUR_BACKUP_ADSGALAXY_DOMAIN";
 
 const miniAppValidationExample = `Mini App Name: Your Mini App Name
 Mini App Username: @YourMiniAppBot
@@ -62,28 +61,6 @@ const miniAppFallbackExample = `<script>
       return window.AdsGalaxyFallback();
     };
   }
-</script>`;
-
-const miniAppReliabilityExample = `<script data-miniapp-id="YOUR_MINI_APP_ID">
-  !function(){
-    var s=document.currentScript,p=s.getAttribute('data-miniapp-id')||'default';
-    var d=['${publicSdkUrl}','${backupSdkUrl}'],i=0,t,sc;
-    function l(){
-      sc=document.createElement('script');
-      sc.async=true;
-      sc.src=d[i]+'/sdk.js?id='+p;
-      clearTimeout(t);
-      t=setTimeout(function(){
-        sc.onload=sc.onerror=null;
-        sc.src='';
-        if(++i<d.length)l();
-      },15000);
-      sc.onload=function(){clearTimeout(t)};
-      sc.onerror=function(){clearTimeout(t);if(++i<d.length)l()};
-      document.head.appendChild(sc);
-    }
-    l();
-  }();
 </script>`;
 
 const miniAppErrorHandlingExample = `window.showAdsGalaxy()
@@ -188,15 +165,6 @@ const sections: DocsSection[] = [
     code: { language: "html", value: miniAppFallbackExample },
   },
   {
-    id: "enhanced-reliability",
-    title: "Enhanced reliability script",
-    body: [
-      "This loader automatically switches to a backup AdsGalaxy SDK domain if the primary domain is unavailable.",
-      "Keep YOUR_BACKUP_ADSGALAXY_DOMAIN as a placeholder until you have a real AdsGalaxy backup domain configured.",
-    ],
-    code: { language: "html", value: miniAppReliabilityExample },
-  },
-  {
     id: "error-handling",
     title: "Error handling",
     body: ["Use structured error codes to decide whether to show no-fill, Telegram-only, or app-not-ready messaging."],
@@ -215,13 +183,24 @@ const sections: DocsSection[] = [
     id: "reward-security",
     title: "Reward security",
     body: [
-      "Grant your in-app reward only after window.showAdsGalaxy() resolves successfully. A rejected promise, no-fill response, timeout, or user-close result must not receive a reward.",
-      "Keep your own reward operation idempotent by storing the returned request_id and refusing to credit it twice.",
+      "Promise resolution means the browser flow completed; it is not proof for valuable wallet credit. Send the existing request_id to your backend and verify it with a bound Developer Center application and private key.",
+      "Storing request_id prevents only your own duplicate operation. It becomes trustworthy only after backend verification. Your backend controls the reward amount; never accept it from browser input.",
     ],
     bullets: [
-      "Do not trust a client-only button state as completion proof.",
+      "Internal AdsGalaxy completion can produce an eligible, server-validated event.",
+      "External browser completion is client-confirmed and remains ineligible without request-level provider proof.",
+      "Claim an eligible event once, then credit your wallet and store event_id atomically.",
       "Do not submit revenue, provider credentials, or API keys from browser code.",
-      "Use the Mini App ID from Mini App Details—not a Developer Center API reference.",
+      "Use the numeric Mini App ID for sdk.js and the Developer application only for private backend verification.",
+    ],
+  },
+  {
+    id: "backend-callbacks",
+    title: "Backend callbacks",
+    body: [
+      "In Developer Center, create the matching application, bind it to this Mini App, create a private reward_validation key, and configure reward.eligible and reward.claimed webhooks.",
+      "Verify signatures against the exact raw body, reject timestamps older than five minutes, deduplicate event_id under a unique constraint, and credit the wallet in the same transaction.",
+      "See the canonical Developer documentation for verify, claim, lookup, retry, secret rotation, and server examples.",
     ],
   },
   {
@@ -229,6 +208,7 @@ const sections: DocsSection[] = [
     title: "Earnings and withdrawals",
     body: [
       "Mini App earnings follow the AdsGalaxy earnings and withdrawal flow once eligible activity has been recorded and processed.",
+      "Locked and available publisher earnings are AdsGalaxy platform earnings. They are separate from rewards inside your own application wallet.",
       "Use the publisher withdrawal area to review available balance and withdrawal status.",
     ],
   },

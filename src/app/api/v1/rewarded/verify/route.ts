@@ -2,6 +2,17 @@ import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { enqueueDeveloperWebhook, logDeveloperApiRequest, recordSandboxEvent, validateDeveloperApiRequest } from "@/lib/developerPlatform";
+import {
+  bindExternalUserReference,
+  getRewardEventByEventId,
+  getRewardEventByRequestId,
+  isScopedMediationRequestPending,
+  normalizeRewardEvent,
+  productionRewardCallbacksEnabled,
+  requireApplicationMiniappScope,
+  RewardCallbackError,
+  type RewardEventRow,
+} from "@/lib/miniappRewardEvents";
 import { publicApiErrorMessage } from "@/lib/publicApiErrors";
 
 export const dynamic = "force-dynamic";
@@ -28,10 +39,86 @@ type VerificationRow = RowDataPacket & {
 
 export async function POST(request: Request) {
   let context: any = null;
-  const conn = await pool.getConnection();
+  let conn: Awaited<ReturnType<typeof pool.getConnection>> | null = null;
   try {
     context = await validateDeveloperApiRequest(request, "reward_validation", "/api/v1/rewarded/verify");
-    if (context.mode === "production") throw Object.assign(new Error("Production reward verification is not enabled; use the Mini App SDK"), { statusCode: 501 });
+    if (context.mode === "production") {
+      if (!productionRewardCallbacksEnabled()) {
+        throw Object.assign(new Error("Production reward verification is not enabled; use the Mini App SDK"), { statusCode: 501 });
+      }
+      if (context.keyType !== "private") {
+        throw new RewardCallbackError(403, "INVALID_API_KEY_TYPE", "private API key required");
+      }
+      const body = await request.json().catch(() => ({}));
+      const miniappId = Number(body.mini_app_id);
+      const requestId = clean(body.request_id);
+      const eventId = clean(body.event_id);
+      const externalUserReference = clean(body.external_user_reference);
+      if (!Number.isInteger(miniappId) || miniappId <= 0 || (!requestId && !eventId)) {
+        throw new RewardCallbackError(400, "INVALID_VERIFY_REQUEST", "mini_app_id and request_id or event_id are required");
+      }
+      if (requestId.length > 64 || eventId.length > 64 || (eventId && !eventId.startsWith("rwe_"))) {
+        throw new RewardCallbackError(400, "INVALID_VERIFY_REQUEST", "Invalid reward identifier");
+      }
+
+      await requireApplicationMiniappScope({
+        applicationId: context.applicationId,
+        miniappId,
+        environment: "production",
+        userId: context.userId,
+      });
+
+      const byRequest = requestId ? await getRewardEventByRequestId(requestId) : null;
+      const byEvent = eventId ? await getRewardEventByEventId(eventId) : null;
+      if (requestId && eventId && (!byRequest || !byEvent || byRequest.id !== byEvent.id)) {
+        throw new RewardCallbackError(409, "REWARD_IDENTIFIER_CONFLICT", "Reward identifiers do not match");
+      }
+      let event: RewardEventRow | null = byRequest || byEvent;
+      if (
+        event
+        && (
+          Number(event.application_id) !== context.applicationId
+          || Number(event.miniapp_id) !== miniappId
+          || event.environment !== "production"
+        )
+      ) {
+        event = null;
+      }
+      if (!event) {
+        const pending = requestId && await isScopedMediationRequestPending({
+          requestId,
+          miniappId,
+          publisherId: context.userId,
+        });
+        if (pending) {
+          await logDeveloperApiRequest(context, request, 202, false, { request_id: requestId, error_code: "EVENT_PENDING" });
+          return NextResponse.json({
+            success: false,
+            error_code: "EVENT_PENDING",
+            error: "Reward event is still being prepared",
+          }, { status: 202 });
+        }
+        throw new RewardCallbackError(404, "REWARD_EVENT_NOT_FOUND", "Reward event is unavailable");
+      }
+      if (externalUserReference) {
+        event = await bindExternalUserReference({
+          eventId: event.event_id,
+          applicationId: context.applicationId,
+          miniappId,
+          environment: "production",
+          externalUserReference,
+        });
+      }
+      const response = {
+        success: true,
+        api_version: "v1",
+        environment: "production",
+        event: normalizeRewardEvent(event),
+      };
+      await logDeveloperApiRequest(context, request, 200, true, { request_id: event.request_id, event_id: event.event_id });
+      return NextResponse.json(response);
+    }
+    conn = await pool.getConnection();
     const body = await request.json().catch(() => ({}));
     const requestId = clean(body.request_id);
     const externalUserId = clean(body.external_user_id);
@@ -118,13 +205,19 @@ export async function POST(request: Request) {
     await logDeveloperApiRequest(context, request, 200, true, payload);
     return NextResponse.json({ success: true, api_version: "v1", ...payload });
   } catch (error: any) {
-    try {
-      await conn.rollback();
-    } catch {}
+    if (conn) {
+      try {
+        await conn.rollback();
+      } catch {}
+    }
     const status = Number(error.statusCode || 400);
     await logDeveloperApiRequest(context, request, status, false, undefined, error.message);
-    return NextResponse.json({ error: publicApiErrorMessage(error, "Reward verification failed", status) }, { status });
+    const errorCode = error instanceof RewardCallbackError ? error.code : undefined;
+    return NextResponse.json({
+      error: publicApiErrorMessage(error, "Reward verification failed", status),
+      ...(context?.mode === "production" && errorCode ? { error_code: errorCode } : {}),
+    }, { status });
   } finally {
-    conn.release();
+    conn?.release();
   }
 }

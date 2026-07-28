@@ -11,6 +11,12 @@ import {
   recordInternalAdCompletionEvent,
   watchDurationQualityTier,
 } from "@/lib/internalAdCompletionQuality";
+import {
+  createRewardEvent,
+  getActiveProductionBindingForMiniapp,
+  productionRewardCallbacksEnabled,
+} from "@/lib/miniappRewardEvents";
+import { enqueueProductionRewardWebhook } from "@/lib/developerPlatform";
 
 type RequestRow = RowDataPacket & {
   id: number;
@@ -38,6 +44,44 @@ function cleanText(value: unknown) {
 function cleanOptionalText(value: unknown) {
   const text = cleanText(value);
   return text || null;
+}
+
+function publicInternalImpressionError(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  if (message.startsWith("Unauthorized") || message.startsWith("Invalid initData")) {
+    return { message, status: 401 };
+  }
+  return { message: "Failed to confirm internal ad impression", status: 400 };
+}
+
+async function createInternalRewardEvent(
+  conn: Awaited<ReturnType<typeof pool.getConnection>>,
+  input: { requestId: string; miniappId: number; telegramUserId: string }
+) {
+  if (!productionRewardCallbacksEnabled()) return null;
+  const binding = await getActiveProductionBindingForMiniapp(conn, input.miniappId);
+  if (!binding) return null;
+  const event = await createRewardEvent({
+    db: conn,
+    requestId: input.requestId,
+    miniappId: input.miniappId,
+    applicationId: Number(binding.application_id),
+    publisherId: Number(binding.publisher_id),
+    telegramUserId: input.telegramUserId,
+    provider: INTERNAL_NETWORK_NAME,
+    status: "eligible",
+    verificationLevel: "ads_galaxy_validated",
+    rewardEligible: true,
+    environment: "production",
+    metadata: { completion_source: "internal_server_validated" },
+  });
+  await enqueueProductionRewardWebhook({
+    db: conn,
+    applicationId: Number(binding.application_id),
+    eventType: "reward.eligible",
+    event,
+  });
+  return event;
 }
 
 export async function POST(request: Request) {
@@ -163,6 +207,9 @@ export async function POST(request: Request) {
           session_id: cleanOptionalText(body.session_id),
         },
       });
+      if (completed) {
+        await createInternalRewardEvent(conn, { requestId, miniappId, telegramUserId });
+      }
       await conn.commit();
       return NextResponse.json({
         success: true,
@@ -238,6 +285,9 @@ export async function POST(request: Request) {
         session_id: cleanOptionalText(body.session_id),
       },
     });
+    if (completed) {
+      await createInternalRewardEvent(conn, { requestId, miniappId, telegramUserId });
+    }
 
     await conn.commit();
 
@@ -256,11 +306,12 @@ export async function POST(request: Request) {
       // Transaction may not have started.
     }
 
-    const message = error?.message || "Failed to confirm internal ad impression";
-    const status = message.startsWith("Unauthorized") || message.startsWith("Invalid initData")
-        ? 401
-        : 400;
-    return NextResponse.json({ error: message }, { status });
+    console.error("Internal Mini App impression failed", {
+      error_name: error instanceof Error ? error.name : "UnknownError",
+      error_code: typeof error?.code === "string" ? error.code : undefined,
+    });
+    const publicError = publicInternalImpressionError(error);
+    return NextResponse.json({ error: publicError.message }, { status: publicError.status });
   } finally {
     // The impression helper holds this connection-scoped lock through the transaction commit/rollback.
     // Releasing a lock that was never acquired is harmless and prevents pooled connections retaining it.

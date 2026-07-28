@@ -202,12 +202,30 @@ export async function getDeveloperDashboard(userId: number) {
        AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`,
     [userId]
   );
+  const [miniapps]: any = await pool.query(
+    `SELECT id, miniapp_name, miniapp_username, status
+     FROM miniapps
+     WHERE user_id = ? AND is_deleted = FALSE
+     ORDER BY created_at DESC`,
+    [userId]
+  );
+  const [bindings]: any = await pool.query(
+    `SELECT dam.id, dam.application_id, dam.miniapp_id, dam.environment, dam.status,
+            m.miniapp_name, m.miniapp_username
+     FROM developer_application_miniapps dam
+     JOIN developer_applications a ON a.id = dam.application_id AND a.user_id = ?
+     JOIN miniapps m ON m.id = dam.miniapp_id
+     ORDER BY dam.created_at DESC`,
+    [userId]
+  );
   const errors = Number(analytics[0]?.errors || 0);
   return {
     apps: apps.map((app: any) => withIntegrationIds({ ...app, permissions: parseJsonArray(app.permissions) })),
     keys: keys.map((key: any) => ({ ...key, permissions: parseJsonArray(key.permissions) })),
     webhooks: webhooks.map((webhook: any) => ({ ...webhook, events: parseJsonArray(webhook.events) })),
     deliveries,
+    miniapps,
+    bindings,
     analytics: {
       ...(analytics[0] || {}),
       ad_requests: Number(eventAnalytics[0]?.ad_requests || 0),
@@ -249,7 +267,15 @@ export async function getAdminDeveloperPlatformData() {
   return { settings, apps, analytics: analytics[0] || {}, requests, deliveries };
 }
 
-export async function validateDeveloperApiRequest(request: Request, requiredPermission: DeveloperPermission, endpoint: string) {
+export async function validateDeveloperApiRequest(
+  request: Request,
+  requiredPermission: DeveloperPermission,
+  endpoint: string,
+  options: {
+    requiredKeyType?: "public" | "private";
+    enforceKeyTypeForMode?: "sandbox" | "production";
+  } = {}
+) {
   const apiKey = clean(request.headers.get("x-api-key") || request.headers.get("authorization")?.replace(/^Bearer\s+/i, ""));
   if (!apiKey) {
     throw Object.assign(new Error("API key required"), { statusCode: 401 });
@@ -266,6 +292,16 @@ export async function validateDeveloperApiRequest(request: Request, requiredPerm
   const record = rows[0];
   if (!record || record.status !== "active" || record.app_status !== "active") {
     throw Object.assign(new Error("API key disabled or invalid"), { statusCode: 403 });
+  }
+  if (
+    options.requiredKeyType
+    && (!options.enforceKeyTypeForMode || String(record.app_mode) === options.enforceKeyTypeForMode)
+    && record.key_type !== options.requiredKeyType
+  ) {
+    throw Object.assign(new Error(`${options.requiredKeyType} API key required`), {
+      statusCode: 403,
+      errorCode: "INVALID_API_KEY_TYPE",
+    });
   }
 
   const permissions = normalizePermissions(record.permissions);
@@ -307,6 +343,7 @@ export async function validateDeveloperApiRequest(request: Request, requiredPerm
   return {
     applicationId: Number(record.application_id),
     apiKeyId: Number(record.id),
+    keyType: String(record.key_type) as "public" | "private",
     userId: Number(record.user_id),
     mode: String(record.app_mode || "sandbox"),
     endpoint,
@@ -365,6 +402,83 @@ export async function enqueueDeveloperWebhook(applicationId: number, eventType: 
   }
 }
 
+type ProductionRewardEvent = {
+  id: number;
+  event_id: string;
+  request_id: string;
+  miniapp_id: number;
+  external_user_reference: string | null;
+  provider: string;
+  status: string;
+  verification_level: string;
+  reward_eligible: number | boolean;
+  completed_at: Date | string;
+  expires_at: Date | string;
+};
+
+function webhookIso(value: Date | string) {
+  return (value instanceof Date ? value : new Date(value)).toISOString();
+}
+
+export async function enqueueProductionRewardWebhook(input: {
+  db: PoolConnection;
+  applicationId: number;
+  eventType: "reward.eligible" | "reward.claimed";
+  event: ProductionRewardEvent;
+  claim?: { claim_id: string; claimed_at: string };
+}) {
+  const [webhooks]: any = await input.db.query(
+    "SELECT id, events, secret, secret_version FROM developer_webhooks WHERE application_id = ? AND status = 'active'",
+    [input.applicationId]
+  );
+  const payload = {
+    id: input.event.event_id,
+    type: input.eventType,
+    version: "2026-07-28",
+    created_at: input.eventType === "reward.claimed" && input.claim
+      ? input.claim.claimed_at
+      : webhookIso(input.event.completed_at),
+    data: {
+      event_id: input.event.event_id,
+      request_id: input.event.request_id,
+      mini_app_id: Number(input.event.miniapp_id),
+      external_user_reference: input.event.external_user_reference,
+      provider: input.event.provider,
+      status: input.event.status,
+      verification_level: input.event.verification_level,
+      reward_eligible: Boolean(input.event.reward_eligible),
+      completed_at: webhookIso(input.event.completed_at),
+      expires_at: webhookIso(input.event.expires_at),
+      ...(input.claim ? {
+        claim_id: input.claim.claim_id,
+        claimed_at: input.claim.claimed_at,
+      } : {}),
+    },
+  };
+  for (const webhook of webhooks) {
+    const events = parseJsonArray<string>(webhook.events);
+    if (!events.includes(input.eventType) && !events.includes("*")) continue;
+    const logicalKey = `auto:${webhook.id}:${input.event.event_id}:${input.eventType}`;
+    await input.db.query(
+      `INSERT IGNORE INTO developer_webhook_deliveries
+        (webhook_id, application_id, event_type, event_id, webhook_version,
+         signature_version, secret_version, signing_secret, logical_delivery_key,
+         payload, status, next_attempt_at)
+       VALUES (?, ?, ?, ?, 'v2', 'v2', ?, ?, ?, ?, 'pending', NOW())`,
+      [
+        webhook.id,
+        input.applicationId,
+        input.eventType,
+        input.event.event_id,
+        Number(webhook.secret_version || 1),
+        String(webhook.secret),
+        logicalKey,
+        JSON.stringify(payload),
+      ]
+    );
+  }
+}
+
 export async function saveDeveloperWebhook(userId: number, input: { applicationId: number; url?: unknown; events?: unknown }) {
   const [apps]: any = await pool.query("SELECT id FROM developer_applications WHERE id = ? AND user_id = ?", [input.applicationId, userId]);
   if (apps.length === 0) throw new Error("Application not found");
@@ -384,54 +498,352 @@ export async function resetDeveloperApiKey(keyId: number, userId: number) {
   return { raw_key: rawKey, key_prefix: rawKey.slice(0, 18) };
 }
 
+const V2_RETRY_DELAYS_MINUTES = [1, 5, 15, 60, 360] as const;
+const MAX_WEBHOOK_RESPONSE_BYTES = 64 * 1024;
+
+export async function claimWebhookDeliveryBatch() {
+  const conn = await pool.getConnection();
+  const token = crypto.randomBytes(24).toString("hex");
+  try {
+    await conn.beginTransaction();
+    const [rows]: any = await conn.query(
+      `SELECT id
+       FROM developer_webhook_deliveries
+       WHERE status IN ('pending', 'retrying')
+         AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+         AND (claim_expires_at IS NULL OR claim_expires_at <= NOW())
+       ORDER BY created_at ASC
+       LIMIT 25
+       FOR UPDATE`
+    );
+    const ids = rows.map((row: any) => Number(row.id)).filter(Boolean);
+    if (ids.length > 0) {
+      const placeholders = ids.map(() => "?").join(",");
+      await conn.query(
+        `UPDATE developer_webhook_deliveries
+         SET claim_token = ?, claimed_at = NOW(), claim_expires_at = DATE_ADD(NOW(), INTERVAL 5 MINUTE)
+         WHERE id IN (${placeholders})`,
+        [token, ...ids]
+      );
+    }
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback().catch(() => undefined);
+    throw error;
+  } finally {
+    conn.release();
+  }
+  const [claimed]: any = await pool.query(
+    `SELECT d.*, w.url, w.secret, w.previous_secret, w.previous_secret_version,
+            w.previous_secret_expires_at
+     FROM developer_webhook_deliveries d
+     JOIN developer_webhooks w ON w.id = d.webhook_id
+     WHERE d.claim_token = ?`,
+    [token]
+  );
+  return { token, deliveries: claimed };
+}
+
+function deliverySecret(delivery: any) {
+  if (delivery.signing_secret) return String(delivery.signing_secret);
+  if (
+    Number(delivery.secret_version) === Number(delivery.previous_secret_version)
+    && delivery.previous_secret
+    && delivery.previous_secret_expires_at
+    && new Date(delivery.previous_secret_expires_at).getTime() > Date.now()
+  ) {
+    return String(delivery.previous_secret);
+  }
+  return String(delivery.secret);
+}
+
+export async function hashBoundedWebhookResponse(
+  response: Response,
+  maxBytes = MAX_WEBHOOK_RESPONSE_BYTES
+) {
+  const hash = crypto.createHash("sha256");
+  if (!response.body) {
+    return { hash: `sha256:${hash.digest("hex")}`, bytesRead: 0, truncated: false };
+  }
+
+  const reader = response.body.getReader();
+  let bytesRead = 0;
+  let truncated = false;
+  let completed = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        completed = true;
+        break;
+      }
+      if (!value?.byteLength) continue;
+      const remaining = maxBytes - bytesRead;
+      if (remaining === 0) {
+        truncated = true;
+        break;
+      }
+      const accepted = value.byteLength > remaining ? value.subarray(0, remaining) : value;
+      hash.update(accepted);
+      bytesRead += accepted.byteLength;
+      if (accepted.byteLength < value.byteLength) {
+        truncated = true;
+        break;
+      }
+    }
+  } finally {
+    if (!completed) {
+      await reader.cancel("AdsGalaxy webhook response exceeded 64 KiB").catch(() => undefined);
+    }
+    reader.releaseLock();
+  }
+  return { hash: `sha256:${hash.digest("hex")}`, bytesRead, truncated };
+}
+
+function safeWebhookDeliveryError(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  const httpStatus = /^HTTP (\d{3})$/.exec(message);
+  if (httpStatus) return `HTTP ${httpStatus[1]}`;
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+    return "Webhook request timed out";
+  }
+  return "Webhook request failed";
+}
+
 export async function processPendingWebhookDeliveries() {
   const settings = await getSettings();
   const maxAttempts = settingNumber(settings, "webhook_retry_max_attempts", 5);
   const retryDelay = settingNumber(settings, "webhook_retry_delay_minutes", 10);
-  const [deliveries]: any = await pool.query(
-    `SELECT d.*, w.url, w.secret
-     FROM developer_webhook_deliveries d
-     JOIN developer_webhooks w ON w.id = d.webhook_id
-     WHERE d.status IN ('pending', 'retrying')
-       AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= NOW())
-     ORDER BY d.created_at ASC
-     LIMIT 25`
-  );
+  const { token, deliveries } = await claimWebhookDeliveryBatch();
 
   let delivered = 0;
   let failed = 0;
   for (const delivery of deliveries) {
-    const payload = delivery.payload ? JSON.parse(String(delivery.payload)) : {};
-    const body = JSON.stringify({ event: delivery.event_type, created_at: delivery.created_at, data: payload });
-    const signature = crypto.createHmac("sha256", String(delivery.secret)).update(body).digest("hex");
+    const payload = delivery.payload && typeof delivery.payload === "object"
+      ? delivery.payload
+      : delivery.payload
+        ? JSON.parse(String(delivery.payload))
+        : {};
+    const isV2 = delivery.webhook_version === "v2";
+    const body = isV2
+      ? JSON.stringify(payload)
+      : JSON.stringify({ event: delivery.event_type, created_at: delivery.created_at, data: payload });
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signingInput = isV2 ? `${timestamp}.${delivery.event_id}.${body}` : body;
+    const signature = crypto.createHmac("sha256", deliverySecret(delivery)).update(signingInput).digest("hex");
     try {
       const response = await fetch(String(delivery.url), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "x-adsgalaxy-event": String(delivery.event_type),
+          ...(isV2 ? {
+            "x-adsgalaxy-event-id": String(delivery.event_id),
+            "x-adsgalaxy-timestamp": timestamp,
+            "x-adsgalaxy-signature-version": "v2",
+          } : {}),
           "x-adsgalaxy-signature": signature,
         },
         body,
+        signal: AbortSignal.timeout(10_000),
       });
+      const responseBody = await hashBoundedWebhookResponse(response);
+      const responseHash = `${responseBody.hash};bytes=${responseBody.bytesRead};truncated=${responseBody.truncated ? 1 : 0}`;
       if (response.ok) {
-        await pool.query("UPDATE developer_webhook_deliveries SET status = 'delivered', attempts = attempts + 1, response_status = ?, delivered_at = NOW() WHERE id = ?", [response.status, delivery.id]);
+        await pool.query(
+          `UPDATE developer_webhook_deliveries
+           SET status = 'delivered', attempts = attempts + 1, response_status = ?,
+               response_body = ?, delivered_at = NOW(), last_attempt_at = NOW(),
+               claim_token = NULL, claimed_at = NULL, claim_expires_at = NULL
+           WHERE id = ? AND claim_token = ?`,
+          [response.status, responseHash, delivery.id, token]
+        );
         delivered += 1;
       } else {
         throw new Error(`HTTP ${response.status}`);
       }
     } catch (error: any) {
       const attempts = toInt(delivery.attempts) + 1;
-      const status = attempts >= maxAttempts ? "failed" : "retrying";
+      const v2Terminal = isV2 && attempts >= 6;
+      const legacyTerminal = !isV2 && attempts >= maxAttempts;
+      const terminal = v2Terminal || legacyTerminal;
+      const delay = isV2
+        ? V2_RETRY_DELAYS_MINUTES[Math.min(attempts - 1, V2_RETRY_DELAYS_MINUTES.length - 1)]
+        : retryDelay;
       await pool.query(
-        "UPDATE developer_webhook_deliveries SET status = ?, attempts = ?, next_attempt_at = DATE_ADD(NOW(), INTERVAL ? MINUTE), error_message = ? WHERE id = ?",
-        [status, attempts, retryDelay, String(error?.message || "Webhook failed").slice(0, 255), delivery.id]
+        `UPDATE developer_webhook_deliveries
+         SET status = ?, attempts = ?, next_attempt_at = ?,
+             error_message = ?, last_attempt_at = NOW(), terminal_at = ?,
+             claim_token = NULL, claimed_at = NULL, claim_expires_at = NULL
+         WHERE id = ? AND claim_token = ?`,
+        [
+          terminal ? "failed" : "retrying",
+          attempts,
+          terminal ? null : new Date(Date.now() + delay * 60_000),
+          safeWebhookDeliveryError(error),
+          terminal ? new Date() : null,
+          delivery.id,
+          token,
+        ]
       );
       failed += 1;
     }
   }
 
   return { processed: deliveries.length, delivered, failed };
+}
+
+async function auditDeveloperWebhookAction(input: {
+  userId: number;
+  applicationId: number;
+  webhookId?: number;
+  deliveryId?: number;
+  action: string;
+  metadata?: Record<string, unknown>;
+  db?: Db;
+}) {
+  const db = input.db || pool;
+  await db.query(
+    `INSERT INTO developer_webhook_action_audits
+      (user_id, application_id, webhook_id, delivery_id, action, metadata)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [
+      input.userId,
+      input.applicationId,
+      input.webhookId || null,
+      input.deliveryId || null,
+      input.action,
+      input.metadata ? JSON.stringify(input.metadata) : null,
+    ]
+  );
+}
+
+export async function rotateDeveloperWebhookSecret(
+  userId: number,
+  webhookId: number,
+  callerConnection?: PoolConnection
+) {
+  const conn = callerConnection || await pool.getConnection();
+  const ownsTransaction = !callerConnection;
+  const secret = randomToken("whsec");
+  try {
+    if (ownsTransaction) await conn.beginTransaction();
+    const [[webhook]]: any = await conn.query(
+      `SELECT application_id, secret_version
+       FROM developer_webhooks
+       WHERE id = ? AND user_id = ? AND status = 'active'
+       FOR UPDATE`,
+      [webhookId, userId]
+    );
+    if (!webhook) throw new Error("Webhook not found");
+    const nextVersion = Number(webhook.secret_version || 1) + 1;
+    await conn.query(
+      `UPDATE developer_webhooks
+       SET previous_secret = secret,
+           previous_secret_version = secret_version,
+           previous_secret_expires_at = DATE_ADD(NOW(), INTERVAL 24 HOUR),
+           secret = ?,
+           secret_version = ?,
+           secret_rotated_at = NOW()
+       WHERE id = ? AND user_id = ?`,
+      [secret, nextVersion, webhookId, userId]
+    );
+    await auditDeveloperWebhookAction({
+      userId,
+      applicationId: Number(webhook.application_id),
+      webhookId,
+      action: "webhook_secret_rotated",
+      metadata: { secret_version: nextVersion, overlap_hours: 24 },
+      db: conn,
+    });
+    if (ownsTransaction) await conn.commit();
+    return { secret, secret_version: nextVersion, previous_secret_overlap_hours: 24 };
+  } catch (error) {
+    if (ownsTransaction) await conn.rollback().catch(() => undefined);
+    throw error;
+  } finally {
+    if (ownsTransaction) conn.release();
+  }
+}
+
+export async function manuallyRetryDeveloperWebhook(
+  userId: number,
+  deliveryId: number,
+  callerConnection?: PoolConnection
+) {
+  const conn = callerConnection || await pool.getConnection();
+  const ownsTransaction = !callerConnection;
+  try {
+    if (ownsTransaction) await conn.beginTransaction();
+    const [[delivery]]: any = await conn.query(
+      `SELECT d.*, w.secret AS current_secret, w.secret_version AS current_secret_version
+       FROM developer_webhook_deliveries d
+       JOIN developer_applications a ON a.id = d.application_id
+       JOIN developer_webhooks w ON w.id = d.webhook_id
+       WHERE d.id = ? AND a.user_id = ? AND d.status = 'failed' AND d.terminal_at IS NOT NULL
+         AND (d.claim_expires_at IS NULL OR d.claim_expires_at <= NOW())
+       FOR UPDATE`,
+      [deliveryId, userId]
+    );
+    if (!delivery) throw new Error("Terminal webhook delivery not found");
+    const [[activeRetry]]: any = await conn.query(
+      `SELECT id
+       FROM developer_webhook_deliveries
+       WHERE manually_retried_from_id = ?
+         AND status IN ('pending', 'retrying')
+       LIMIT 1
+       FOR UPDATE`,
+      [deliveryId]
+    );
+    if (activeRetry) throw new Error("Manual retry already queued");
+    const [[sequence]]: any = await conn.query(
+      `SELECT COALESCE(MAX(manual_retry_sequence), 0) + 1 AS next_sequence
+       FROM developer_webhook_deliveries
+       WHERE id = ? OR manually_retried_from_id = ?`,
+      [deliveryId, deliveryId]
+    );
+    const nextSequence = Number(sequence.next_sequence);
+    const logicalKey = `manual:${deliveryId}:${nextSequence}`;
+    const [result]: any = await conn.query(
+      `INSERT INTO developer_webhook_deliveries
+        (webhook_id, application_id, event_type, event_id, webhook_version,
+         signature_version, secret_version, signing_secret, logical_delivery_key, manual_retry_sequence,
+         manually_retried_from_id, payload, status, next_attempt_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW())`,
+      [
+        delivery.webhook_id,
+        delivery.application_id,
+        delivery.event_type,
+        delivery.event_id,
+        delivery.webhook_version,
+        delivery.signature_version,
+        Number(delivery.current_secret_version || 1),
+        String(delivery.current_secret),
+        logicalKey,
+        nextSequence,
+        deliveryId,
+        typeof delivery.payload === "string"
+          ? delivery.payload
+          : JSON.stringify(delivery.payload || {}),
+      ]
+    );
+    await auditDeveloperWebhookAction({
+      userId,
+      applicationId: Number(delivery.application_id),
+      webhookId: Number(delivery.webhook_id),
+      deliveryId: Number(result.insertId),
+      action: "webhook_manual_retry",
+      metadata: { source_delivery_id: deliveryId, sequence: nextSequence },
+      db: conn,
+    });
+    if (ownsTransaction) await conn.commit();
+    return { delivery_id: Number(result.insertId), manual_retry_sequence: nextSequence };
+  } catch (error) {
+    if (ownsTransaction) await conn.rollback().catch(() => undefined);
+    throw error;
+  } finally {
+    if (ownsTransaction) conn.release();
+  }
 }
 
 export function sandboxAdPayload(applicationId: number, adFormat = "rewarded") {

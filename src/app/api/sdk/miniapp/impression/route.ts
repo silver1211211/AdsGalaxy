@@ -6,6 +6,11 @@ import { getMiniAppFeePercent, isMiniAppNetworkName } from "@/lib/miniappStats";
 import { recordNetworkSuccess } from "@/lib/miniappOptimization";
 import { publicSdkErrorResponse, requirePublicSdkUser } from "@/lib/publicSdkAuth";
 import { validateMiniappRevenue } from "@/lib/miniappRevenueValidation";
+import {
+  createRewardEvent,
+  getActiveProductionBindingForMiniapp,
+  productionRewardCallbacksEnabled,
+} from "@/lib/miniappRewardEvents";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +32,30 @@ function clean(value: unknown) {
 
 function today() {
   return new Date().toISOString().slice(0, 10);
+}
+
+async function createExternalRewardEvent(
+  conn: Awaited<ReturnType<typeof pool.getConnection>>,
+  input: { requestId: string; miniappId: number; telegramUserId: string; provider: string }
+) {
+  if (!productionRewardCallbacksEnabled()) return null;
+  const binding = await getActiveProductionBindingForMiniapp(conn, input.miniappId);
+  if (!binding) return null;
+  return createRewardEvent({
+    db: conn,
+    requestId: input.requestId,
+    miniappId: input.miniappId,
+    applicationId: Number(binding.application_id),
+    publisherId: Number(binding.publisher_id),
+    telegramUserId: input.telegramUserId,
+    provider: input.provider,
+    providerEventId: null,
+    status: "client_completed",
+    verificationLevel: "client_confirmed",
+    rewardEligible: false,
+    environment: "production",
+    metadata: { completion_source: "external_browser_callback" },
+  });
 }
 
 export async function POST(request: Request) {
@@ -62,6 +91,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: true, user_id: telegramUserId, request_id: requestId, reward_eligible: false, status: "not_external_network" });
     }
     if (Boolean(mediation.impression_confirmed)) {
+      await createExternalRewardEvent(conn, {
+        requestId,
+        miniappId,
+        telegramUserId,
+        provider: mediation.selected_network,
+      });
       await conn.commit();
       return NextResponse.json({ success: true, user_id: telegramUserId, request_id: requestId, reward_eligible: false, status: "pending_provider_confirmation" });
     }
@@ -146,6 +181,12 @@ export async function POST(request: Request) {
       miniapp_id: miniappId,
       request_id: requestId,
       final_displayed_provider: mediation.selected_network,
+    });
+    await createExternalRewardEvent(conn, {
+      requestId,
+      miniappId,
+      telegramUserId,
+      provider: mediation.selected_network,
     });
     await conn.commit();
     return NextResponse.json({ success: true, user_id: telegramUserId, request_id: requestId, reward_eligible: false, status: "pending_provider_confirmation" });
