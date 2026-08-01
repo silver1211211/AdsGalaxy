@@ -46,7 +46,7 @@ export async function POST(request: Request) {
     
     const name = String(formData.get("name") || "").trim();
     const campaignTitle = String(formData.get("campaign_title") || "").trim();
-    const parse_mode = "none";
+    const parse_mode = "html";
     const message_text = String(formData.get("message_text") || "");
     const link = formData.get("link") as string;
     const postbackUrl = validatePostbackUrl(formData.get("postback_url"));
