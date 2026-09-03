@@ -6,6 +6,7 @@ set -euo pipefail
 
 APP_DIR="/www/wwwroot/bots/AdsFusion"
 PM2_APP="AdsFusionApp"
+PM2_CRON="AdsFusionCron"
 ENV_FILE="$APP_DIR/.env"
 
 cd "$APP_DIR"
@@ -212,7 +213,13 @@ for MIG in \
   "20260727_0104_developer_webhook_v2_outbox.sql" \
   "20260728_0105_add_advertiser_transaction_description.sql" \
   "20260728_0106_deposit_bonus_promotion.sql" \
-  "20260728_0107_normalize_advertiser_transaction_description.sql"
+  "20260728_0107_normalize_advertiser_transaction_description.sql" \
+  "20260801_0109_direct_miniapp_reward_callbacks.sql" \
+  "20260811_0114_platform_broadcasts.sql" \
+  "20260822_0119_broadcast_recipient_windows.sql" \
+  "20260831_0122_miniapp_external_delivery_sync.sql" \
+  "20260902_0123_channel_safety_foundation.sql" \
+  "20260902_0124_miniapp_dynamic_cpm_v2.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"
@@ -220,19 +227,35 @@ done
 
 echo "    All migrations applied."
 
-echo "==> [3/5] Cleaning stale Next.js build artifacts..."
-rm -rf "$APP_DIR/.next"
-echo "    .next removed."
+BUILD_DIR=".next-build"
+
+echo "==> [3/5] Cleaning isolated Next.js build workspace..."
+rm -rf "$APP_DIR/$BUILD_DIR"
+echo "    $BUILD_DIR removed; live .next preserved."
 
 echo "==> [4/5] Rebuilding application..."
-NODE_ENV=production npm run build \
+NODE_ENV=production NEXT_DIST_DIR="$BUILD_DIR" npm run build \
   && echo "    Build succeeded." \
   || { echo "    ERROR: Build failed. PM2 will NOT be restarted."; exit 1; }
 
-echo "==> [5/5] Restarting PM2 process: $PM2_APP..."
-pm2 restart "$PM2_APP" \
-  && echo "    PM2 restarted." \
-  || { echo "    WARNING: pm2 restart failed — trying reload..."; pm2 reload "$PM2_APP"; }
+test -f "$APP_DIR/$BUILD_DIR/BUILD_ID" \
+  && test -f "$APP_DIR/$BUILD_DIR/prerender-manifest.json" \
+  || { echo "    ERROR: Required Next.js build manifests are missing. PM2 will NOT be restarted."; exit 1; }
+
+rm -rf "$APP_DIR/.next-previous"
+if [ -d "$APP_DIR/.next" ]; then
+  mv "$APP_DIR/.next" "$APP_DIR/.next-previous"
+fi
+mv "$APP_DIR/$BUILD_DIR" "$APP_DIR/.next"
+echo "    Complete build promoted; previous build retained for rollback."
+
+echo "==> [5/5] Restarting promoted application processes..."
+for PM2_PROCESS in "$PM2_APP" "$PM2_CRON"; do
+  echo "    Restarting $PM2_PROCESS..."
+  pm2 restart "$PM2_PROCESS" \
+    && echo "    $PM2_PROCESS restarted." \
+    || { echo "    WARNING: $PM2_PROCESS restart failed — trying reload..."; pm2 reload "$PM2_PROCESS"; }
+done
 
 pm2 save
 
@@ -249,7 +272,7 @@ else
     $0 == begin { managed=1; next }
     $0 == end { managed=0; next }
     !managed
-  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|process-support-messages|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|retry-telegram-cleanup|verify-bot-users|referral-sprint)([[:space:]?]|$)' || true)
+  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|platform-broadcasts|process-miniapp-internal-ads|miniapp-external-delivery-sync|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|process-support-messages|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|retry-telegram-cleanup|verify-bot-users|referral-sprint|promote-ads-galaxy)([[:space:]?]|$)' | grep -v 'scripts/sync-channel-identities\.sh' || true)
 
   {
     printf '%s\n' "$CLEAN_CRONTAB"
@@ -258,6 +281,9 @@ else
     # provider synchronization run only at their explicitly scheduled cadence.
     echo "* * * * * $CRON_BASE/process-ads >/dev/null 2>&1"
     echo "* * * * * $CRON_BASE/process-broadcast >/dev/null 2>&1"
+    echo "* * * * * $CRON_BASE/platform-broadcasts >/dev/null 2>&1"
+    echo "* * * * * $CRON_BASE/process-miniapp-internal-ads >/dev/null 2>&1"
+    echo "* * * * * $CRON_BASE/miniapp-external-delivery-sync >/dev/null 2>&1"
     echo "*/15 * * * * $CRON_BASE/update-views >/dev/null 2>&1"
     echo "3 * * * * $CRON_BASE/channel-settlement >/dev/null 2>&1"
     echo "8-59/15 * * * * $CRON_BASE/settle-broadcast-publishers >/dev/null 2>&1"
@@ -280,6 +306,8 @@ else
     echo "* * * * * $CRON_BASE/retry-telegram-cleanup >/dev/null 2>&1"
     echo "*/5 * * * * $CRON_BASE/verify-bot-users >/dev/null 2>&1"
     echo "2 0 * * * $CRON_BASE/referral-sprint >/dev/null 2>&1"
+    echo "*/10 * * * * $CRON_BASE/promote-ads-galaxy >/dev/null 2>&1"
+    echo "3-59/10 * * * * $APP_DIR/scripts/sync-channel-identities.sh >> $APP_DIR/tmp/channel-identity-sync.log 2>&1"
     echo "$CRON_END"
   } | sed '/^[[:space:]]*$/d' | crontab -
   echo "    Production crons installed without duplicate routes."
@@ -296,7 +324,7 @@ fi
 
 echo ""
 echo "==> Deployment complete. Checking application status..."
-pm2 status "$PM2_APP"
+pm2 status "$PM2_APP" "$PM2_CRON"
 
 echo ""
 echo "==> Tailing logs for 20 seconds (Ctrl-C to stop early)..."

@@ -4,7 +4,7 @@ import { Bot, Code2, Megaphone, Smartphone, Tv } from "lucide-react";
 const groups = [
   { title: "Publisher Guides", description: "Learn how to monetize channels, Mini Apps, and bots with AdsGalaxy.", href: "/docs/publisher", items: [
     { href: "/docs/publisher/channels", label: "Channel monetization", icon: Tv },
-    { href: "/docs/publisher/miniapps", label: "Mini App monetization", icon: Smartphone },
+    { href: "/docs/publisher/miniapps", label: "Mini Apps: Numeric ID, SDK Promise, and reward callback", icon: Smartphone },
     { href: "/docs/publisher/bots", label: "Bot monetization", icon: Bot },
   ]},
   { title: "Advertiser Guides", description: "Create campaigns for channels, Mini Apps, and bot broadcasts.", href: "/docs/advertiser", items: [
@@ -12,10 +12,10 @@ const groups = [
     { href: "/docs/advertiser/miniapps", label: "Mini App advertising", icon: Smartphone },
     { href: "/docs/advertiser/bots", label: "Bot advertising", icon: Megaphone },
   ]},
-  { title: "Developer Platform", description: "Integrate AdsGalaxy into Mini Apps, bots, websites, mobile apps, and future platforms.", href: "/docs/developers", items: [
-    { href: "/docs/developers#quick-start", label: "Quick Start", icon: Code2 },
-    { href: "/docs/developers#integration-id", label: "Integration ID", icon: Smartphone },
-    { href: "/docs/developers#analytics", label: "Analytics", icon: Bot },
+  { title: "Developer Platform", description: "Add one Mini App script, call showAdsGalaxy().then().catch(), and optionally receive a verified reward callback.", href: "/docs/developers", items: [
+    { href: "/docs/developers#quick-start", label: "Numeric Mini App ID and script", icon: Code2 },
+    { href: "/docs/developers#display", label: "Promise success and errors", icon: Smartphone },
+    { href: "/docs/developers#reward-callback", label: "Optional verified reward callback", icon: Bot },
   ]},
 ];
 

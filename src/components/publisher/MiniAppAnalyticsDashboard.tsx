@@ -6,7 +6,7 @@ import { ChartColumn } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
 import { SkeletonChart, SkeletonStatGrid } from "@/components/ui/Skeleton";
-import { hasMinimumCpcSample } from "@/lib/statFormulas";
+import { hasMinimumCpcSample, hasMinimumCpmSample } from "@/lib/statFormulas";
 
 type DateMode = "today" | "yesterday" | "7d" | "30d";
 
@@ -65,19 +65,14 @@ function formatMoney(value: number) {
   return `$${value.toFixed(abs > 0 && abs < 1 ? 4 : 2)}`;
 }
 
-function roundedDisplayMoneyValue(value: number) {
-  const abs = Math.abs(value);
-  return Number(value.toFixed(abs > 0 && abs < 1 ? 4 : 2));
-}
-
 function formatRate(value: number, sample: number, kind: "cpm" | "cpc") {
-  const confident = kind === "cpm" ? sample > 0 && value > 0 : hasMinimumCpcSample(sample);
+  const confident = kind === "cpm" ? hasMinimumCpmSample(sample) : hasMinimumCpcSample(sample);
   return confident ? formatMoney(value) : "--";
 }
 
 function formatDisplayedCpmFromRevenue(revenue: number, impressions: number) {
-  if (impressions <= 0 || revenue <= 0) return "--";
-  return formatMoney((roundedDisplayMoneyValue(revenue) / impressions) * 1000);
+  if (!hasMinimumCpmSample(impressions)) return "--";
+  return formatMoney((revenue / impressions) * 1000);
 }
 
 function formatNumber(value: number) {

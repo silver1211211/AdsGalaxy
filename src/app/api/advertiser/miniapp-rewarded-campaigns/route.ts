@@ -14,6 +14,7 @@ import { evaluateCampaignAutomation } from "@/lib/approvalAutomation";
 import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { validateTotalBudget } from "@/lib/campaignBudget";
 import { safeQueueAdvertiserOnboarding } from "@/lib/supportMessages";
+import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByIds } from "@/lib/miniappCampaignMetrics";
 
 function cleanText(value: unknown) {
   return String(value || "").trim();
@@ -130,7 +131,7 @@ function landingReviewFlags(landingUrl: string) {
 }
 
 async function validateCreativeImageUrl(imageUrl: string, maxSize = 1 * 1024 * 1024) {
-  const response = await fetch(imageUrl, { redirect: "follow" });
+  const response = await fetch(imageUrl, { redirect: "follow", signal: AbortSignal.timeout(8_000) });
   if (!response.ok) throw new Error("Image URL could not be loaded for validation.");
 
   const contentLength = Number(response.headers.get("content-length") || 0);
@@ -193,45 +194,21 @@ export async function GET(request: Request) {
         c.daily_budget_limit,
         c.frequency_cap_per_user,
         c.status,
+        c.pause_reason,
         c.creative_review_notes,
         c.requires_re_moderation,
         c.created_at,
         c.updated_at,
-        COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as impressions,
-        COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= CURDATE()), 0) as today_impressions,
-        COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND i.created_at < CURDATE()), 0) as yesterday_impressions,
-        COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as spend,
-        COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0) as clicks,
         COALESCE((SELECT COUNT(*) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0) as conversions,
         COALESCE((SELECT SUM(conv.conversion_value) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0) as conversion_value,
-        COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= CURDATE()), 0) as today_spend,
-        CASE WHEN COALESCE(c.remaining_budget, 0) <= 0 THEN TRUE ELSE FALSE END AS budget_exhausted,
-        CASE WHEN COALESCE(c.daily_budget_limit, 0) > 0 AND
-          COALESCE((SELECT SUM(i.advertiser_debit) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= CURDATE()), 0) >= c.daily_budget_limit
-          THEN TRUE ELSE FALSE END AS daily_cap_reached,
-        CASE WHEN COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) > 0
-          THEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0)
-            / COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 1) * 100
-          ELSE 0 END as ctr,
-        CASE WHEN COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) > 0
-          THEN COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0)
-            / COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 1) * 1000
-          ELSE 0 END as average_cpm,
-        CASE WHEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0) > 0
-          THEN COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0)
-            / COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 1)
-          ELSE 0 END as average_cpc,
-        CASE WHEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0) > 0
-          THEN COALESCE((SELECT COUNT(*) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0)
-            / COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 1) * 100
-          ELSE 0 END as conversion_rate,
-        (SELECT MAX(i.created_at) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id) as last_displayed_at
+        0 AS delivery_metrics_loaded_separately
        FROM miniapp_rewarded_campaigns c
        WHERE c.advertiser_id = ?
        ORDER BY c.created_at DESC`,
       [user.id]
     );
-    return NextResponse.json(rows);
+    const metrics = await getMiniAppCampaignMetricsByIds((rows as any[]).map((row) => row.id));
+    return NextResponse.json((rows as any[]).map((row) => applyMiniAppCampaignMetrics(row, metrics)));
   } catch (error: any) {
     console.error("Fetch Mini App Rewarded Campaigns Error:", error);
     return NextResponse.json({ error: "Unable to load campaigns right now" }, { status: getAuthErrorStatus(error) });

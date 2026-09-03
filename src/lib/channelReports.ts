@@ -108,14 +108,18 @@ function summarize(rows: DailyRow[]) {
     views,
     impressions: views,
     clicks,
+    cpm_eligible: views > 0 && (viewEarnings > 0 || clicks > 0),
     ctr: ctr(clicks, views),
     advertiser_average_cpm: cpm(viewSpend, views),
     advertiser_average_cpc: cpc(clickSpend, clicks),
-    average_cpm: cpm(viewEarnings, views),
-    cpm: cpm(viewEarnings, views),
+    // Effective publisher CPM is total selected-period earnings per 1,000
+    // impressions. This intentionally includes CPC earnings once a click has
+    // occurred, while a view campaign is visible from its first view.
+    average_cpm: cpm(earnings, views),
+    cpm: cpm(earnings, views),
     average_cpc: cpc(clickEarnings, clicks),
     cpc: cpc(clickEarnings, clicks),
-    effective_publisher_cpm: cpm(viewEarnings, views),
+    effective_publisher_cpm: cpm(earnings, views),
     effective_publisher_cpc: cpc(clickEarnings, clicks),
     active_posts: rows.length ? metricNumber(rows[rows.length - 1].active_posts) : 0,
   };
@@ -162,13 +166,13 @@ export async function buildChannelAnalyticsReport(channelId: number | string, ra
     const clicks = metricNumber(row?.clicks);
     const viewSpend = metricNumber(row?.view_spend);
     const clickSpend = metricNumber(row?.click_spend);
-    const viewEarnings = metricNumber(row?.view_earnings);
     const clickEarnings = metricNumber(row?.click_earnings);
     return {
       date,
       views,
       impressions: views,
       clicks,
+      cpm_eligible: views > 0 && (metricNumber(row?.view_earnings) > 0 || clicks > 0),
       ctr: ctr(clicks, views),
       earnings: fixedMetric(metricNumber(row?.earnings), 8),
       publisher_revenue: fixedMetric(metricNumber(row?.earnings), 8),
@@ -179,11 +183,11 @@ export async function buildChannelAnalyticsReport(channelId: number | string, ra
       reserve_amount: fixedMetric(metricNumber(row?.reserve_amount), 8),
       advertiser_average_cpm: cpm(viewSpend, views),
       advertiser_average_cpc: cpc(clickSpend, clicks),
-      average_cpm: cpm(viewEarnings, views),
-      cpm: cpm(viewEarnings, views),
+      average_cpm: cpm(metricNumber(row?.earnings), views),
+      cpm: cpm(metricNumber(row?.earnings), views),
       average_cpc: cpc(clickEarnings, clicks),
       cpc: cpc(clickEarnings, clicks),
-      effective_publisher_cpm: cpm(viewEarnings, views),
+      effective_publisher_cpm: cpm(metricNumber(row?.earnings), views),
       effective_publisher_cpc: cpc(clickEarnings, clicks),
       active_posts: metricNumber(row?.active_posts),
     };

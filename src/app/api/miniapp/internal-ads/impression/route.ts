@@ -8,6 +8,7 @@ import { requireMiniappTrackingUser } from "@/lib/publicSdkAuth";
 import {
   isCompletionEvent,
   normalizeWatchDuration,
+  qualityScoreForWatchTier,
   recordInternalAdCompletionEvent,
   watchDurationQualityTier,
 } from "@/lib/internalAdCompletionQuality";
@@ -17,6 +18,9 @@ import {
   productionRewardCallbacksEnabled,
 } from "@/lib/miniappRewardEvents";
 import { enqueueProductionRewardWebhook } from "@/lib/developerPlatform";
+import { enqueueDirectMiniappRewardCallback } from "@/lib/miniappDirectRewardCallbacks";
+import { dispatchMiniAppCampaignNotifications } from "@/lib/miniappCampaignNotifications";
+import { miniAppEconomicIdentity, trustedMiniAppCountry } from "@/lib/miniappEconomicTelemetry";
 
 type RequestRow = RowDataPacket & {
   id: number;
@@ -31,6 +35,7 @@ type RequestRow = RowDataPacket & {
   status: string;
   is_deleted: number | boolean;
   created_at: Date | string;
+  publisher_id: number;
 };
 
 export function OPTIONS() {
@@ -56,17 +61,15 @@ function publicInternalImpressionError(error: unknown) {
 
 async function createInternalRewardEvent(
   conn: Awaited<ReturnType<typeof pool.getConnection>>,
-  input: { requestId: string; miniappId: number; telegramUserId: string }
+  input: { requestId: string; miniappId: number; publisherId: number; telegramUserId: string }
 ) {
-  if (!productionRewardCallbacksEnabled()) return null;
   const binding = await getActiveProductionBindingForMiniapp(conn, input.miniappId);
-  if (!binding) return null;
   const event = await createRewardEvent({
     db: conn,
     requestId: input.requestId,
     miniappId: input.miniappId,
-    applicationId: Number(binding.application_id),
-    publisherId: Number(binding.publisher_id),
+    applicationId: binding ? Number(binding.application_id) : null,
+    publisherId: input.publisherId,
     telegramUserId: input.telegramUserId,
     provider: INTERNAL_NETWORK_NAME,
     status: "eligible",
@@ -75,10 +78,18 @@ async function createInternalRewardEvent(
     environment: "production",
     metadata: { completion_source: "internal_server_validated" },
   });
-  await enqueueProductionRewardWebhook({
+  if (binding && productionRewardCallbacksEnabled()) {
+    await enqueueProductionRewardWebhook({
+      db: conn,
+      applicationId: Number(binding.application_id),
+      eventType: "reward.eligible",
+      event,
+    });
+  }
+  await enqueueDirectMiniappRewardCallback({
     db: conn,
-    applicationId: Number(binding.application_id),
-    eventType: "reward.eligible",
+    miniappId: input.miniappId,
+    verifiedTelegramUserId: input.telegramUserId,
     event,
   });
   return event;
@@ -133,6 +144,7 @@ export async function POST(request: Request) {
         mr.final_result,
         mr.created_at,
         m.status,
+        m.user_id AS publisher_id,
         m.is_deleted
       FROM miniapp_mediation_requests mr
       JOIN miniapps m ON mr.miniapp_id = m.id
@@ -183,6 +195,17 @@ export async function POST(request: Request) {
         request_id: requestId,
       }, { status: 402 });
     }
+    if (mediationRequest.final_result === "campaign_budget_exhausted") {
+      await conn.commit();
+      return NextResponse.json({
+        success: false,
+        duplicate: true,
+        idempotent: true,
+        error: "Campaign budget cannot fund the next impression",
+        error_code: "CAMPAIGN_BUDGET_EXHAUSTED",
+        request_id: requestId,
+      }, { status: 402 });
+    }
 
     const elapsedSeconds = (Date.now() - new Date(mediationRequest.created_at).getTime()) / 1000;
     if (completed && elapsedSeconds < 14) {
@@ -207,29 +230,42 @@ export async function POST(request: Request) {
           session_id: cleanOptionalText(body.session_id),
         },
       });
-      if (completed) {
-        await createInternalRewardEvent(conn, { requestId, miniappId, telegramUserId });
-      }
+      const rewardEvent = completed
+        ? await createInternalRewardEvent(conn, { requestId, miniappId, publisherId: Number(mediationRequest.publisher_id), telegramUserId })
+        : null;
       await conn.commit();
       return NextResponse.json({
         success: true,
         duplicate: true,
         idempotent: true,
         request_id: requestId,
+        ...(rewardEvent ? { event_id: rewardEvent.event_id, completed: true, reward_eligible: true, status: "completed" } : {}),
         ...quality,
       });
     }
 
     const completionQualityTier = watchDurationQualityTier(watchDurationSeconds, completed);
+    const trustedGeo = trustedMiniAppCountry(request.headers, mediationRequest.country);
+    const economicIdentity = miniAppEconomicIdentity(request.headers, {
+      telegramUserId,
+      sessionId: body.session_id,
+      deviceId: body.device_id,
+      fingerprint: body.fingerprint,
+    });
     const result = await recordInternalAdImpression({
       conn,
       campaignId: Number(mediationRequest.internal_campaign_id),
       miniappId,
       requestId,
       telegramUserId,
-      country: mediationRequest.country,
+      country: trustedGeo.country,
+      countrySource: trustedGeo.source,
+      sessionHash: economicIdentity.session_hash,
+      deviceHash: economicIdentity.device_hash,
+      networkHash: economicIdentity.network_hash,
       watchDurationSeconds,
       completionQualityTier,
+      completionQualityScore: qualityScoreForWatchTier(completionQualityTier),
       completionStatus: completed ? "completed" : "impression_recorded",
     });
 
@@ -253,6 +289,21 @@ export async function POST(request: Request) {
         success: false,
         error: "Advertiser balance is insufficient for the next impression",
         error_code: "INSUFFICIENT_BALANCE",
+        request_id: requestId,
+      }, { status: 402 });
+    }
+
+    if ("budget_exhausted" in result && result.budget_exhausted && !("publisher_revenue" in result)) {
+      await conn.query(
+        "UPDATE miniapp_mediation_requests SET final_result = 'campaign_budget_exhausted' WHERE id = ?",
+        [mediationRequest.id]
+      );
+      await conn.commit();
+      void dispatchMiniAppCampaignNotifications(5).catch(() => undefined);
+      return NextResponse.json({
+        success: false,
+        error: "Campaign budget cannot fund the next impression",
+        error_code: "CAMPAIGN_BUDGET_EXHAUSTED",
         request_id: requestId,
       }, { status: 402 });
     }
@@ -285,15 +336,19 @@ export async function POST(request: Request) {
         session_id: cleanOptionalText(body.session_id),
       },
     });
-    if (completed) {
-      await createInternalRewardEvent(conn, { requestId, miniappId, telegramUserId });
-    }
+    const rewardEvent = completed
+      ? await createInternalRewardEvent(conn, { requestId, miniappId, publisherId: Number(mediationRequest.publisher_id), telegramUserId })
+      : null;
 
     await conn.commit();
+    if ("budget_exhausted" in result && result.budget_exhausted) {
+      void dispatchMiniAppCampaignNotifications(5).catch(() => undefined);
+    }
 
     return NextResponse.json({
       success: true,
       request_id: requestId,
+      ...(rewardEvent ? { event_id: rewardEvent.event_id, completed: true, reward_eligible: true, status: "completed" } : {}),
       miniapp_id: miniappId,
       network_name: INTERNAL_NETWORK_NAME,
       ...quality,
@@ -314,15 +369,24 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: publicError.message }, { status: publicError.status });
   } finally {
     // The impression helper holds this connection-scoped lock through the transaction commit/rollback.
-    // Releasing a lock that was never acquired is harmless and prevents pooled connections retaining it.
+    // Bound cleanup time so a stalled RELEASE_LOCK cannot permanently consume a pool slot.
+    let reusable = true;
     try {
-      await conn.query("SELECT RELEASE_LOCK(?)", [internalAdCooldownLockName(
-        miniappIdForLock,
-        telegramUserIdForLock
-      )]);
+      await Promise.race([
+        conn.query("SELECT RELEASE_LOCK(?)", [internalAdCooldownLockName(
+          miniappIdForLock,
+          telegramUserIdForLock
+        )]),
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error("Timed out releasing internal ad cooldown lock")),
+          2_000
+        )),
+      ]);
     } catch {
-      // Connection release remains safe if lock cleanup is unavailable.
+      // Closing the connection releases its named locks and prevents pool starvation.
+      reusable = false;
+      conn.destroy();
     }
-    conn.release();
+    if (reusable) conn.release();
   }
 }

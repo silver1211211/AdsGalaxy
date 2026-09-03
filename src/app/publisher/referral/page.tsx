@@ -404,7 +404,7 @@ export default function ReferralPage() {
   const teamProgressGoal  = teamUnlocked ? Math.max(1, Number(team?.sprint_referrals || 1)) : Math.max(1, Number(data?.team_league?.unlock_at || 1));
   const teamProgressPct   = teamUnlocked ? 100 : Math.min(100, Math.round((teamProgressNow / teamProgressGoal) * 100));
   const qualitySignals = [
-    verifiedReferrals > 0 ? "Verified referrals are counted for sprint rewards." : "Get your first verified referral to activate reward momentum.",
+    verifiedReferrals > 0 ? "Verified, fraud-cleared referrals with meaningful platform activity may count for sprint rewards." : "Ordinary rewards do not automatically qualify a referral for sprint rankings.",
     pendingTotal > 0 ? "Your highest daily milestone is pending for midnight settlement." : "No daily milestone reward is pending yet.",
     teamUnlocked ? "Team league is unlocked — your referrals now push team rank." : "Team league unlocks with more verified referrals.",
   ];
@@ -440,7 +440,7 @@ export default function ReferralPage() {
                 Turn quality invites into settled rewards.
               </h1>
               <p className="max-w-xl text-sm font-medium leading-6 text-white/70">
-                Share once, track every verified referral, climb the daily sprint, and push your team toward the pool.
+                Earn $0.005 for a valid registration and another $0.010 after valid channel verification ($0.015 ordinary maximum). Sprint qualification additionally requires meaningful platform activity and fraud clearance. Individual prizes are $1/$0.50/$0.25; team pools are $1.50/$0.75/$0.25. Daily, monthly, and platform caps apply, and suspicious referrals do not count.
               </p>
             </div>
 

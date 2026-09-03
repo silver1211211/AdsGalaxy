@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
+  BarChart3,
   Bot,
   BriefcaseBusiness,
   Code2,
@@ -71,6 +72,7 @@ const menuSections = [
     label: "GROWTH",
     items: [
       { href: "/admin/referrals", icon: Gift, label: "Referrals" },
+      { href: "/admin/audience-analytics", icon: BarChart3, label: "Audience Analytics" },
       { href: "/admin/enterprise", icon: BriefcaseBusiness, label: "Enterprise" },
     ],
   },

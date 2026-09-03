@@ -8,6 +8,8 @@
 
 # next.js
 /.next/
+/.next-*/
+/.next.*/
 /out/
 
 # production
@@ -16,6 +18,9 @@
 # misc
 .DS_Store
 *.pem
+*.bak*
+*.backup*
+*.orig
 
 # debug
 npm-debug.log*
@@ -29,6 +34,12 @@ yarn-error.log*
 .env.development.local
 .env.test.local
 .env.production.local
+
+# runtime and generated production data
+/backups/
+/public/uploads/
+/CHANNEL_AUDIENCE_CLASSIFICATION_APPLY_RESULT_*.json
+/CHANNEL_AUDIENCE_CLASSIFICATION_MANIFEST_*.json
 
 # vercel
 .vercel

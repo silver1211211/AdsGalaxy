@@ -1,4 +1,4 @@
-import type { PoolConnection, RowDataPacket } from "mysql2/promise";
+import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { aggregateChannelStatistics } from "@/lib/channelStatistics";
 import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
@@ -15,6 +15,7 @@ import { refreshCampaignViews } from "@/lib/channelAdminViewRefresh";
 import { createSystemLog } from "@/lib/systemLogs";
 import { settlePendingChannelPublisherCredits } from "@/lib/channelFastBilling";
 import { getChannelUnitPrice, money } from "@/lib/channelBilling";
+import { calculateCurrentCanonicalAllocation, shadowWriteChannelAllocation, unitsToDecimal } from "@/lib/channelAllocationLedger";
 
 type SettlementKind = "view" | "click";
 type ChannelPayoutPolicy = {
@@ -377,7 +378,7 @@ export async function settleChannelCampaigns(options: {
             settledUnits, debit, publisherCredit]
         );
 
-        await connection.query(
+        const [ledgerInsert] = await connection.query<ResultSetHeader>(
           `INSERT INTO channel_settlement_ledger
             (settlement_type, campaign_id, post_id, channel_id, publisher_id, old_settled_count, new_units,
              settled_through, advertiser_debit, platform_margin_percent, publisher_pool_before_reserve,
@@ -409,6 +410,24 @@ export async function settleChannelCampaigns(options: {
           exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
         }
         await connection.commit();
+
+        try {
+          const canonical = calculateCurrentCanonicalAllocation({
+            advertiserDebit: String(debit), platformMarginPercent: String(payoutPolicy.platformMarginPercent),
+            safetyReservePercent: String(payoutPolicy.safetyReservePercent), qualityWeight: String(quality.qualityWeight),
+          });
+          await shadowWriteChannelAllocation(connection, {
+            sourceKey: `legacy:${kind}:${post.post_id}:${settledThrough}`,
+            sourceType: kind, sourceRecordId: ledgerInsert.insertId, campaignId: post.campaign_id, postId: post.post_id,
+            channelId: post.channel_id, advertiserId: post.advertiser_id, publisherId: post.publisher_id,
+            billableUnits: settledUnits, unitPrice: String(unitPrice), advertiserDebit: unitsToDecimal(canonical.debit),
+            publisherAllocation: unitsToDecimal(canonical.publisher), platformAllocation: unitsToDecimal(canonical.platform),
+            reserveAllocation: unitsToDecimal(canonical.reserve), qualityAdjustment: unitsToDecimal(canonical.qualityAdjustment),
+            occurredAt: new Date(), settledAt: new Date(),
+          });
+        } catch (error) {
+          console.error("Canonical legacy allocation calculation failed", { ledger_id: ledgerInsert.insertId, error: error instanceof Error ? error.message : "unknown_error" });
+        }
 
         const detail: ChannelSettlementDetail = {
           campaign_id: post.campaign_id, post_id: post.post_id, type: kind,

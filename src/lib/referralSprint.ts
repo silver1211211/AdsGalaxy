@@ -1,8 +1,13 @@
 import type { PoolConnection } from "mysql2/promise";
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy referral query payloads are dynamically shaped */
 import pool from "@/lib/db";
+import { getPaidReferralEarnings, rebuildReferralEarningsCache, settleInsertedReferralReward } from "@/lib/paidReferralEarnings";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { blockReferralIfSelfDevice, ensureReferralSecuritySchema } from "@/lib/referralSecurity";
+import {
+  PAYOUT_CAPS, REFERRAL_REWARDS, SPRINT_ELIGIBILITY_SQL, SPRINT_PRIZES,
+  TEAM_SPRINT_POOLS, decimalToUnits, minimumUnits, referralIdempotencyKey, unitsToDecimal,
+} from "@/lib/referralHardening";
 
 type Db = typeof pool | PoolConnection;
 
@@ -95,6 +100,10 @@ export async function ensureReferralGrowthSettingDefaults(db: Db = pool, repairS
       ('referral_sprint_popup_interval_seconds', '86400', 'Minimum seconds before the Referral Sprint popup is shown again after dismissal'),
       ('referral_sprint_popup_interval_hours', '24', 'Minimum hours before the Referral Sprint popup is shown again after dismissal'),
       ('referral_reward_amount', '0.015', 'Total displayed referral reward: join reward plus channel verification bonus'),
+      ('referral_user_daily_cap', '0.50', 'Maximum referral-related payout per user per calendar day'),
+      ('referral_user_monthly_cap', '5.00', 'Maximum referral-related payout per user per calendar month'),
+      ('referral_platform_monthly_cap', '25.00', 'Maximum platform referral and sprint payout per calendar month'),
+      ('referral_sprint_user_cap', '1.50', 'Maximum total sprint award per user per sprint'),
       ('referral_settlement_time', '00:00', 'Daily referral reward settlement time in HH:mm server time'),
       ('referral_fraud_min_channel_conversion_percent', '3', 'Minimum percent of verified referrals who added channels before pending rewards are released'),
       ('team_sprint_referral_target', '5000', 'Verified referral target required for team sprint reward pool settlement'),
@@ -108,11 +117,11 @@ function sprintEnabled(settings: Map<string, string>) {
 }
 
 export function getReferralJoinRewardAmount(settings: Map<string, string>) {
-  return toNumber(getSetting(settings, "referral_join_reward_amount", "0.005"));
+  return toNumber(getSetting(settings, "referral_join_reward_amount", REFERRAL_REWARDS.registration));
 }
 
 export function getReferralVerificationRewardAmount(settings: Map<string, string>) {
-  return toNumber(getSetting(settings, "referral_verification_reward_amount", "0.010"));
+  return toNumber(getSetting(settings, "referral_verification_reward_amount", REFERRAL_REWARDS.verification));
 }
 
 export function getReferralTotalRewardAmount(settings: Map<string, string>) {
@@ -152,24 +161,84 @@ async function creditReferralReward(
     amount: number;
     reason: string;
     metadata?: Record<string, unknown>;
+    idempotencyKey?: string;
+    sourceType?: string;
+    sourceId?: number | null;
+    milestoneId?: number | null;
+    eligibilitySnapshot?: Record<string, unknown>;
   }
 ) {
   if (input.amount <= 0) return false;
+  let amount = input.amount;
+  if (input.sprintId && (input.rewardType.startsWith("sprint_rank_") || input.rewardType.startsWith("team_sprint_"))) {
+    const [[existing]]: any = await conn.query(
+      `SELECT COALESCE(SUM(amount),0) total FROM referral_reward_ledger
+       WHERE user_id=? AND sprint_id=? AND (reward_type LIKE 'sprint_rank_%' OR reward_type LIKE 'team_sprint_%') FOR UPDATE`,
+      [input.userId, input.sprintId]
+    );
+    const remaining = decimalToUnits(PAYOUT_CAPS.sprintUser) - decimalToUnits(existing?.total);
+    if (remaining <= 0) return false;
+    amount = toNumber(unitsToDecimal(minimumUnits(decimalToUnits(input.amount), remaining)));
+  }
   const [ledgerResult]: any = await conn.query(
     `INSERT IGNORE INTO referral_reward_ledger
-      (user_id, referral_id, sprint_id, reward_type, amount, status, reason, metadata)
-     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      (idempotency_key,user_id,referral_id,sprint_id,source_type,source_id,milestone_id,reward_type,amount,status,reason,metadata,eligibility_snapshot,eligible_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NOW())`,
     [
+      input.idempotencyKey || referralIdempotencyKey(input.rewardType, input.referralId || input.sourceId || input.userId, input.sprintId),
       input.userId,
       input.referralId || null,
       input.sprintId || null,
+      input.sourceType || (input.referralId ? "referral" : input.sprintId ? "sprint" : "user"),
+      input.sourceId || input.referralId || input.sprintId || input.userId,
+      input.milestoneId || null,
       input.rewardType,
-      input.amount,
+      amount,
       input.reason,
       JSON.stringify(input.metadata || {}),
+      JSON.stringify(input.eligibilitySnapshot || input.metadata || {}),
     ]
   );
   return ledgerResult.affectedRows === 1;
+}
+
+async function reserveReferralBudget(conn: PoolConnection, userId: number, requested: unknown, allOrNothing = false) {
+  const settings = await getSettings(conn);
+  const requestedUnits = decimalToUnits(requested);
+  const dailyCap = decimalToUnits(getSetting(settings, "referral_user_daily_cap", PAYOUT_CAPS.dailyUser));
+  const monthlyCap = decimalToUnits(getSetting(settings, "referral_user_monthly_cap", PAYOUT_CAPS.monthlyUser));
+  const platformCap = decimalToUnits(getSetting(settings, "referral_platform_monthly_cap", PAYOUT_CAPS.monthlyPlatform));
+  await conn.query(
+    `INSERT IGNORE INTO referral_budget_usage (scope_type,user_id,period_start,spent_amount) VALUES
+      ('user_day',?,CURDATE(),0),('user_month',?,DATE_FORMAT(CURDATE(),'%Y-%m-01'),0),
+      ('platform_month',0,DATE_FORMAT(CURDATE(),'%Y-%m-01'),0)`,
+    [userId, userId]
+  );
+  const [rows]: any = await conn.query(
+    `SELECT scope_type,spent_amount FROM referral_budget_usage
+     WHERE (scope_type='user_day' AND user_id=? AND period_start=CURDATE())
+        OR (scope_type='user_month' AND user_id=? AND period_start=DATE_FORMAT(CURDATE(),'%Y-%m-01'))
+        OR (scope_type='platform_month' AND user_id=0 AND period_start=DATE_FORMAT(CURDATE(),'%Y-%m-01'))
+     ORDER BY scope_type,user_id FOR UPDATE`,
+    [userId, userId]
+  );
+  const spent = new Map<string, number>(rows.map((row: any) => [String(row.scope_type), decimalToUnits(row.spent_amount)]));
+  const allowed = minimumUnits(
+    requestedUnits,
+    dailyCap - (spent.get("user_day") || 0),
+    monthlyCap - (spent.get("user_month") || 0),
+    platformCap - (spent.get("platform_month") || 0)
+  );
+  if (allowed <= 0 || (allOrNothing && allowed < requestedUnits)) return "0.00000000";
+  const amount = unitsToDecimal(allowed);
+  await conn.query(
+    `UPDATE referral_budget_usage SET spent_amount=spent_amount+?
+     WHERE (scope_type='user_day' AND user_id=? AND period_start=CURDATE())
+        OR (scope_type='user_month' AND user_id=? AND period_start=DATE_FORMAT(CURDATE(),'%Y-%m-01'))
+        OR (scope_type='platform_month' AND user_id=0 AND period_start=DATE_FORMAT(CURDATE(),'%Y-%m-01'))`,
+    [amount, userId, userId]
+  );
+  return amount;
 }
 
 async function creditImmediateReferralReward(
@@ -187,18 +256,22 @@ async function creditImmediateReferralReward(
   if (input.amount <= 0) return false;
   const [ledgerResult]: any = await conn.query(
     `INSERT IGNORE INTO referral_reward_ledger
-      (user_id, referral_id, sprint_id, reward_type, amount, status, reason, metadata)
-     VALUES (?, ?, ?, ?, ?, 'paid', ?, ?)`,
-    [input.userId, input.referralId, input.sprintId || null, input.rewardType, input.amount,
-      input.reason, JSON.stringify(input.metadata || {})]
+      (idempotency_key,user_id,referral_id,sprint_id,source_type,source_id,reward_type,amount,status,reason,metadata,eligibility_snapshot,eligible_at,settled_amount,settled_at)
+     VALUES (?, ?, ?, ?, 'referral', ?, ?, ?, 'pending', ?, ?, ?, NOW(), 0, NULL)`,
+    [referralIdempotencyKey(input.rewardType, input.referralId), input.userId, input.referralId, input.sprintId || null,
+      input.referralId, input.rewardType, input.amount, input.reason, JSON.stringify(input.metadata || {}),
+      JSON.stringify(input.metadata || {})]
   );
   if (ledgerResult.affectedRows !== 1) return false;
-  await conn.query(
-    `UPDATE users SET balance_available=balance_available+?,
-       total_referral_earnings=total_referral_earnings+? WHERE id=?`,
-    [input.amount, input.amount, input.userId]
-  );
-  return true;
+  const settledAmount = await reserveReferralBudget(conn, input.userId, input.amount, true);
+  if (decimalToUnits(settledAmount) < decimalToUnits(input.amount)) return "pending" as const;
+  const paid = await settleInsertedReferralReward(conn, {
+    ledgerId: Number(ledgerResult.insertId),
+    userId: input.userId,
+    amount: unitsToDecimal(decimalToUnits(input.amount)),
+  });
+  if (!paid) throw new Error("referral_reward_state_changed");
+  return "paid" as const;
 }
 
 export async function recordReferralSprintAudit(input: {
@@ -266,12 +339,12 @@ export async function ensureActiveReferralSprint(db: Db = pool) {
 
   const settings = await getSettings(db);
   const duration = Math.max(1, toInt(getSetting(settings, "sprint_duration_days", "14"), 14));
-  const first = toNumber(getSetting(settings, "sprint_first_place_reward", "10"));
-  const second = toNumber(getSetting(settings, "sprint_second_place_reward", "5"));
-  const third = toNumber(getSetting(settings, "sprint_third_place_reward", "2"));
-  const teamFirst = toNumber(getSetting(settings, "team_best_reward", "15"));
-  const teamSecond = toNumber(getSetting(settings, "team_second_reward", "8"));
-  const teamThird = toNumber(getSetting(settings, "team_third_reward", "4"));
+  const first = toNumber(getSetting(settings, "sprint_first_place_reward", SPRINT_PRIZES[0]));
+  const second = toNumber(getSetting(settings, "sprint_second_place_reward", SPRINT_PRIZES[1]));
+  const third = toNumber(getSetting(settings, "sprint_third_place_reward", SPRINT_PRIZES[2]));
+  const teamFirst = toNumber(getSetting(settings, "team_best_reward", TEAM_SPRINT_POOLS[0]));
+  const teamSecond = toNumber(getSetting(settings, "team_second_reward", TEAM_SPRINT_POOLS[1]));
+  const teamThird = toNumber(getSetting(settings, "team_third_reward", TEAM_SPRINT_POOLS[2]));
   const autoRestart = getSetting(settings, "sprint_auto_restart", "1") === "1" ? 1 : 0;
 
   const [result]: any = await db.query(
@@ -300,8 +373,10 @@ export async function getReferralLeaderboard(sprintId: number, limit = 25) {
        COUNT(*) as referral_count,
        COALESCE(SUM(r.reward_amount), 0) as referral_rewards
      FROM referrals r
+     JOIN referral_sprints s ON s.id=r.sprint_id
+     JOIN users ru ON ru.id=r.user_id
      WHERE r.sprint_id = ?
-       AND r.verification_status = 'verified'
+       AND ${SPRINT_ELIGIBILITY_SQL}
      GROUP BY r.invited_by
      ORDER BY referral_count DESC, referral_rewards DESC, r.invited_by ASC
      LIMIT ?`,
@@ -358,7 +433,10 @@ async function ensureActiveTeams(conn: PoolConnection, settings: Map<string, str
 
 async function getVerifiedReferralCount(userId: number, db: Db = pool) {
   const [[row]]: any = await db.query(
-    "SELECT COUNT(*) as count FROM referrals WHERE invited_by = ? AND verification_status = 'verified'",
+    `SELECT COUNT(*) as count FROM referrals r
+     JOIN referral_sprints s ON s.id=r.sprint_id
+     JOIN users ru ON ru.id=r.user_id
+     WHERE r.invited_by = ? AND ${SPRINT_ELIGIBILITY_SQL}`,
     [userId]
   );
   return toInt(row?.count, 0);
@@ -427,10 +505,17 @@ async function awardEligibleUserMilestones(conn: PoolConnection, userId: number,
   );
   const awarded: any[] = [];
   for (const milestone of milestones) {
+    const [existingThresholdClaims]: any = await conn.query(
+      `SELECT c.id FROM referral_milestone_claims c
+       JOIN referral_milestones existing_m ON existing_m.id=c.milestone_id
+       WHERE c.user_id=? AND existing_m.scope='user' AND existing_m.threshold_count=? LIMIT 1 FOR UPDATE`,
+      [userId, milestone.threshold_count]
+    );
+    if (existingThresholdClaims.length > 0) continue;
     const [claim]: any = await conn.query(
       `INSERT IGNORE INTO referral_milestone_claims
-        (milestone_id, user_id, sprint_id, amount, reward_type, status, paid_at, metadata)
-       VALUES (?, ?, ?, ?, ?, 'paid', NOW(), ?)`,
+        (milestone_id, user_id, sprint_id, amount, reward_type, status, paid_at, metadata, eligibility_snapshot)
+       VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, ?)`,
       [
         milestone.id,
         userId,
@@ -438,6 +523,7 @@ async function awardEligibleUserMilestones(conn: PoolConnection, userId: number,
         toNumber(milestone.reward_amount),
         milestone.reward_type,
         JSON.stringify({ threshold_count: milestone.threshold_count, label: milestone.reward_label }),
+        JSON.stringify({ valid_active_referrals: verifiedCount, meaningful_activity_required: true }),
       ]
     );
     if (claim.affectedRows > 0) {
@@ -449,6 +535,11 @@ async function awardEligibleUserMilestones(conn: PoolConnection, userId: number,
           amount: toNumber(milestone.reward_amount),
           reason: "referral_milestone",
           metadata: { threshold_count: milestone.threshold_count, reward_type: milestone.reward_type },
+          milestoneId: Number(milestone.id),
+          sourceType: "milestone_claim",
+          sourceId: Number(claim.insertId),
+          idempotencyKey: referralIdempotencyKey(`milestone_${milestone.id}`, userId),
+          eligibilitySnapshot: { valid_active_referrals: verifiedCount, meaningful_activity_required: true },
         });
       }
       awarded.push(milestone);
@@ -478,9 +569,11 @@ export async function processReferralJoinReward(referralId: number) {
     await ensureReferralSecuritySchema(conn);
     await conn.beginTransaction();
     const [rows]: any = await conn.query(
-      `SELECT r.*, u.telegram_id as referrer_telegram_id
+      `SELECT r.*, u.telegram_id as referrer_telegram_id,ru.telegram_id as referred_telegram_id,
+         ru.status as referred_user_status,ru.is_banned as referred_user_banned
        FROM referrals r
        JOIN users u ON u.id = r.invited_by
+       JOIN users ru ON ru.id = r.user_id
        WHERE r.id = ?
        LIMIT 1
        FOR UPDATE`,
@@ -493,6 +586,13 @@ export async function processReferralJoinReward(referralId: number) {
     }
 
     const referral = rows[0];
+    if (["fraud", "rejected", "banned", "deleted", "reversed"].includes(String(referral.status))
+      || ["fraud", "rejected", "blocked", "reversed"].includes(String(referral.reward_status))
+      || Number(referral.referred_user_banned || 0) === 1
+      || ["banned", "deleted", "rejected"].includes(String(referral.referred_user_status))) {
+      await conn.commit();
+      return { paid: false, reason: "ineligible_referral_status" };
+    }
     if (Number(referral.self_referral_blocked || 0) === 1) {
       await conn.commit();
       return { paid: false, reason: "self_referral_blocked" };
@@ -511,7 +611,9 @@ export async function processReferralJoinReward(referralId: number) {
       return { paid: false, reason: "already_paid" };
     }
 
-    const growthEnabled = sprintEnabled(settings);
+    const [[promotionAttribution]]: any = await conn.query("SELECT id FROM publisher_promotion_link_attributions WHERE referral_id=? LIMIT 1", [referral.id]);
+    const isPromotionReferral = Boolean(promotionAttribution);
+    const growthEnabled = sprintEnabled(settings) && !isPromotionReferral;
     const activeSprint = growthEnabled ? await ensureActiveReferralSprint(conn) : null;
     const configuredNewsChannel = process.env.TELEGRAM_NEWS_CHANNEL || process.env.NEXT_PUBLIC_CHANNEL || "AdsGalaxy_News";
     const requiredChannel = getSetting(settings, "required_channel_url", `https://t.me/${configuredNewsChannel.replace(/^@/, "")}`);
@@ -533,27 +635,31 @@ export async function processReferralJoinReward(referralId: number) {
       await conn.query(
         `UPDATE referrals
          SET status = 'joined',
-           reward_status = 'join_paid',
+           reward_status = CASE WHEN EXISTS (
+             SELECT 1 FROM referral_reward_ledger l WHERE l.idempotency_key=? AND l.status='paid'
+           ) THEN 'join_paid' ELSE 'join_pending' END,
            reward_amount = reward_amount + ?,
-           reward_paid_at = NOW(),
+           reward_paid_at = CASE WHEN EXISTS (
+             SELECT 1 FROM referral_reward_ledger l WHERE l.idempotency_key=? AND l.status='paid'
+           ) THEN NOW() ELSE reward_paid_at END,
            required_channel = ?,
            sprint_id = COALESCE(sprint_id, ?)
          WHERE id = ?`,
-        [joinRewardAmount, requiredChannel, activeSprint?.id || null, referral.id]
+        [referralIdempotencyKey("referral_join", referral.id), joinRewardAmount, referralIdempotencyKey("referral_join", referral.id), requiredChannel, activeSprint?.id || null, referral.id]
       );
 
       await createGrowthNotification(conn, {
         userId: Number(referral.invited_by),
         type: "referral_joined",
         title: "Referral joined",
-        message: "Your referral joined AdsGalaxy. The join reward was paid to your withdrawable balance.",
+        message: "Your referral joined AdsGalaxy. The join reward was recorded and settles subject to payout caps.",
         metadata: { referral_id: referral.id, amount: joinRewardAmount },
       });
     }
 
     await conn.commit();
     return credited
-      ? { paid: true, amount: joinRewardAmount, referral_id: referral.id }
+      ? { paid: credited === "paid", pending: credited === "pending", amount: joinRewardAmount, referral_id: referral.id }
       : { paid: false, reason: "already_paid" };
   } catch (error) {
     await conn.rollback();
@@ -578,6 +684,51 @@ async function getNextUserMilestone(verifiedCount: number, db: Db = pool) {
   return rows[0] || null;
 }
 
+const TEAM_LEADERBOARD_CACHE_MS = 20_000;
+const teamLeaderboardCache = new Map<number, { expiresAt: number; rows: any[] }>();
+
+async function getTeamLeaderboard(sprintId: number) {
+  const cached = teamLeaderboardCache.get(sprintId);
+  if (cached && cached.expiresAt > Date.now()) return cached.rows;
+
+  try {
+    const [rows]: any = await pool.query(
+      `SELECT t.id AS team_id, t.name, t.capacity,
+         COALESCE(member_counts.members, 0) AS members,
+         COALESCE(referral_counts.total_referrals, 0) AS total_referrals,
+         COALESCE(referral_counts.sprint_referrals, 0) AS sprint_referrals
+       FROM referral_teams t
+       LEFT JOIN (
+         SELECT team_id, COUNT(*) AS members
+         FROM referral_team_memberships
+         GROUP BY team_id
+       ) member_counts ON member_counts.team_id = t.id
+       LEFT JOIN (
+         SELECT tm.team_id,
+           COUNT(*) AS total_referrals,
+           COALESCE(SUM(r.sprint_id = ?), 0) AS sprint_referrals
+         FROM referral_team_memberships tm
+         JOIN referrals r
+           ON r.invited_by = tm.user_id
+          AND r.verification_status = 'verified'
+         GROUP BY tm.team_id
+       ) referral_counts ON referral_counts.team_id = t.id
+       WHERE t.status = 'active'
+       ORDER BY sprint_referrals DESC, total_referrals DESC, members DESC, t.id ASC
+       LIMIT 25`,
+      [sprintId]
+    );
+    teamLeaderboardCache.set(sprintId, { expiresAt: Date.now() + TEAM_LEADERBOARD_CACHE_MS, rows });
+    return rows;
+  } catch (error) {
+    console.error("Referral team leaderboard query failed", {
+      code: "REFERRAL_TEAM_LEADERBOARD_QUERY_FAILED",
+      db_code: String((error as { code?: string })?.code || "UNKNOWN"),
+    });
+    return cached?.rows || [];
+  }
+}
+
 async function getTeamLeagueSummary(userId: number, sprintId: number, verifiedCount: number, settings: Map<string, string>) {
   const unlockAt = Math.max(1, toInt(getSetting(settings, "team_league_unlock_referrals", "10"), 10));
   const [membershipRows]: any = await pool.query(
@@ -590,24 +741,7 @@ async function getTeamLeagueSummary(userId: number, sprintId: number, verifiedCo
   );
   const membership = membershipRows[0] || null;
 
-  const [leaderboard]: any = await pool.query(
-    `SELECT
-       t.id as team_id,
-       t.name,
-       t.capacity,
-       COUNT(DISTINCT tm.user_id) as members,
-       COUNT(DISTINCT r_all.id) as total_referrals,
-       COUNT(DISTINCT r_sprint.id) as sprint_referrals
-     FROM referral_teams t
-     LEFT JOIN referral_team_memberships tm ON tm.team_id = t.id
-     LEFT JOIN referrals r_all ON r_all.invited_by = tm.user_id AND r_all.verification_status = 'verified'
-     LEFT JOIN referrals r_sprint ON r_sprint.invited_by = tm.user_id AND r_sprint.sprint_id = ? AND r_sprint.verification_status = 'verified'
-     WHERE t.status = 'active'
-     GROUP BY t.id, t.name, t.capacity
-     ORDER BY sprint_referrals DESC, total_referrals DESC, members DESC, t.id ASC
-     LIMIT 25`,
-    [sprintId]
-  );
+  const leaderboard = await getTeamLeaderboard(sprintId);
   const [[sprintRewards]]: any = await pool.query(
     "SELECT best_team_reward,second_team_reward,third_team_reward FROM referral_sprints WHERE id=? LIMIT 1",
     [sprintId]
@@ -660,7 +794,7 @@ export async function getReferralGrowthSummary(userId: number) {
   const settings = await getSettings();
   const growthEnabled = sprintEnabled(settings);
   const sprint = growthEnabled ? await ensureActiveReferralSprint() : null;
-  const [userRows]: any = await pool.query("SELECT referral_code, total_referral_earnings FROM users WHERE id = ?", [userId]);
+  const [userRows]: any = await pool.query("SELECT referral_code FROM users WHERE id = ?", [userId]);
   const user = userRows[0] || {};
   let referralCode = user.referral_code;
   if (!referralCode) {
@@ -676,11 +810,12 @@ export async function getReferralGrowthSummary(userId: number) {
        COALESCE(SUM(CASE WHEN sprint_id = ? THEN 1 ELSE 0 END), 0) as sprint_referrals,
        COUNT(*) as total_referrals,
        COALESCE(SUM(CASE WHEN verification_status = 'verified' THEN 1 ELSE 0 END), 0) as verified_referrals,
-       COALESCE((SELECT SUM(l.amount) FROM referral_reward_ledger l WHERE l.user_id = ? AND l.status = 'paid'), 0) as referral_earnings
+       0 as referral_earnings
      FROM referrals
      WHERE invited_by = ?`,
-    [sprint?.id || 0, userId, userId]
+    [sprint?.id || 0, userId]
   );
+  stats.referral_earnings = await getPaidReferralEarnings(pool, userId);
   const [history]: any = await pool.query(
     `SELECT
        r.id,
@@ -752,12 +887,12 @@ export async function getReferralGrowthSummary(userId: number) {
       mode: "classic",
       sprint_enabled: false,
       referral_code: referralCode,
-      referral_link: `https://t.me/${botUsername}?startapp=${referralCode}`,
+      referral_link: `https://t.me/${botUsername}?start=${referralCode}`,
       reward_amount: getReferralTotalRewardAmount(settings),
       referral_join_reward_amount: getReferralJoinRewardAmount(settings),
       referral_verification_reward_amount: getReferralVerificationRewardAmount(settings),
       required_channel_url: getSetting(settings, "required_channel_url", defaultRequiredChannelUrl),
-      total_earnings: toNumber(user.total_referral_earnings || stats?.referral_earnings),
+      total_earnings: toNumber(stats?.referral_earnings),
       pending_rewards_total: 0,
       today_pending_amount: 0,
       next_settlement_date: nextSettlementDate,
@@ -803,12 +938,12 @@ export async function getReferralGrowthSummary(userId: number) {
     mode: "sprint",
     sprint_enabled: true,
     referral_code: referralCode,
-    referral_link: `https://t.me/${botUsername}?startapp=${referralCode}`,
+    referral_link: `https://t.me/${botUsername}?start=${referralCode}`,
     reward_amount: getReferralTotalRewardAmount(settings),
     referral_join_reward_amount: getReferralJoinRewardAmount(settings),
     referral_verification_reward_amount: getReferralVerificationRewardAmount(settings),
     required_channel_url: getSetting(settings, "required_channel_url", defaultRequiredChannelUrl),
-    total_earnings: toNumber(user.total_referral_earnings),
+    total_earnings: toNumber(stats?.referral_earnings),
     pending_rewards_total: dailyPendingAmount,
     today_pending_amount: dailyPendingAmount,
     pending_daily_milestone: earnedDailyMilestone ? {
@@ -907,9 +1042,11 @@ export async function processVerifiedReferralForUser(userId: number) {
     await ensureReferralSecuritySchema(conn);
     await conn.beginTransaction();
     const [rows]: any = await conn.query(
-      `SELECT r.*, u.telegram_id as referrer_telegram_id
+      `SELECT r.*, u.telegram_id as referrer_telegram_id,ru.telegram_id as referred_telegram_id,
+         ru.status as referred_user_status,ru.is_banned as referred_user_banned
        FROM referrals r
        JOIN users u ON u.id = r.invited_by
+       JOIN users ru ON ru.id = r.user_id
        WHERE r.user_id = ?
        LIMIT 1
        FOR UPDATE`,
@@ -922,6 +1059,13 @@ export async function processVerifiedReferralForUser(userId: number) {
     }
 
     const referral = rows[0];
+    if (["fraud", "rejected", "banned", "deleted", "reversed"].includes(String(referral.status))
+      || ["fraud", "rejected", "blocked", "reversed"].includes(String(referral.reward_status))
+      || Number(referral.referred_user_banned || 0) === 1
+      || ["banned", "deleted", "rejected"].includes(String(referral.referred_user_status))) {
+      await conn.commit();
+      return { paid: false, reason: "ineligible_referral_status" };
+    }
     if (Number(referral.self_referral_blocked || 0) === 1) {
       await conn.commit();
       return { paid: false, reason: "self_referral_blocked" };
@@ -939,13 +1083,23 @@ export async function processVerifiedReferralForUser(userId: number) {
     }
 
     const abuse = await detectReferralAbuse(referral, conn);
-    if (!abuse.allowed) {
+    if (!abuse.allowed || abuse.flags.some((flag) => flag.key === "referral_loop")) {
       await conn.commit();
       return { paid: false, reason: "abuse_blocked", abuse };
     }
+    const [[duplicateTelegram]]: any = await conn.query(
+      "SELECT COUNT(*) count FROM users WHERE telegram_id=? AND id<>?",
+      [referral.referred_telegram_id, referral.user_id]
+    );
+    if (referral.referred_telegram_id && Number(duplicateTelegram?.count || 0) > 0) {
+      await conn.commit();
+      return { paid: false, reason: "duplicate_telegram_identity" };
+    }
 
     const settings = await getSettings(conn);
-    const growthEnabled = sprintEnabled(settings);
+    const [[promotionAttribution]]: any = await conn.query("SELECT id FROM publisher_promotion_link_attributions WHERE referral_id=? LIMIT 1", [referral.id]);
+    const isPromotionReferral = Boolean(promotionAttribution);
+    const growthEnabled = sprintEnabled(settings) && !isPromotionReferral;
     const activeSprint = growthEnabled ? await ensureActiveReferralSprint(conn) : null;
     const configuredNewsChannel = process.env.TELEGRAM_NEWS_CHANNEL || process.env.NEXT_PUBLIC_CHANNEL || "AdsGalaxy_News";
     const requiredChannel = getSetting(settings, "required_channel_url", `https://t.me/${configuredNewsChannel.replace(/^@/, "")}`);
@@ -1002,8 +1156,8 @@ export async function processVerifiedReferralForUser(userId: number) {
 
     const verifiedCount = await getVerifiedReferralCount(Number(referral.invited_by), conn);
     const sprintId = activeSprint ? Number(activeSprint.id) : 0;
-    const firstBonusPaid = verifiedCount === 1 ? await awardFirstReferralBonus(conn, Number(referral.invited_by), settings, sprintId) : false;
-    const milestones = await awardEligibleUserMilestones(conn, Number(referral.invited_by), verifiedCount, sprintId);
+    const firstBonusPaid = !isPromotionReferral && verifiedCount === 1 ? await awardFirstReferralBonus(conn, Number(referral.invited_by), settings, sprintId) : false;
+    const milestones = isPromotionReferral ? [] : await awardEligibleUserMilestones(conn, Number(referral.invited_by), verifiedCount, sprintId);
     const team = growthEnabled ? await ensureTeamMembership(Number(referral.invited_by), verifiedCount, conn, settings, sprintId) : null;
     await createGrowthNotification(conn, {
       userId: Number(referral.invited_by),
@@ -1057,6 +1211,10 @@ async function paySprintWinner(conn: PoolConnection, sprint: any, winner: any, r
     amount,
     reason: "sprint_winner",
     metadata: { rank, referral_count: winner.referral_count },
+    sourceType: "sprint_winner",
+    sourceId: Number(winnerResult.insertId),
+    idempotencyKey: referralIdempotencyKey(`sprint_rank_${rank}`, winnerResult.insertId, sprint.id),
+    eligibilitySnapshot: { meaningful_activity_required: true, recalculated_at_finalization: true, referral_count: winner.referral_count },
   });
   if (!queued) return false;
 
@@ -1075,9 +1233,11 @@ async function payTeamSprintReward(conn: PoolConnection, sprint: any, team: any,
   if (rewardResult.affectedRows === 0) return false;
 
   const [members]: any = await conn.query(
-    `SELECT tm.user_id,COUNT(r.id) referral_count
+    `SELECT tm.user_id,COUNT(CASE WHEN ${SPRINT_ELIGIBILITY_SQL} THEN r.id END) referral_count
      FROM referral_team_memberships tm
-     LEFT JOIN referrals r ON r.invited_by=tm.user_id AND r.sprint_id=? AND r.verification_status='verified'
+     LEFT JOIN referrals r ON r.invited_by=tm.user_id AND r.sprint_id=?
+     LEFT JOIN referral_sprints s ON s.id=r.sprint_id
+     LEFT JOIN users ru ON ru.id=r.user_id
      WHERE tm.team_id=? GROUP BY tm.user_id HAVING referral_count>0 ORDER BY tm.user_id`,
     [sprint.id, team.team_id]
   );
@@ -1097,6 +1257,10 @@ async function payTeamSprintReward(conn: PoolConnection, sprint: any, team: any,
       amount: memberAmount,
       reason: "team_sprint_reward",
       metadata: { team_id: team.team_id, rank, team_reward_pool: amount, member_referrals: toInt(member.referral_count), team_referrals: teamReferrals, contribution_percent: Number((toInt(member.referral_count) / teamReferrals * 100).toFixed(4)) },
+      sourceType: "team_reward",
+      sourceId: Number(rewardResult.insertId),
+      idempotencyKey: referralIdempotencyKey(`team_sprint_rank_${rank}`, member.user_id, sprint.id),
+      eligibilitySnapshot: { meaningful_activity_required: true, recalculated_at_finalization: true, team_id: team.team_id, member_referrals: toInt(member.referral_count) },
     });
       await notifyUser(Number(member.user_id), `Team reward won\n\nTeam ${team.name} finished #${rank}. Your share of the team reward is pending until settlement.`, conn);
   }
@@ -1104,6 +1268,8 @@ async function payTeamSprintReward(conn: PoolConnection, sprint: any, team: any,
 }
 
 async function awardEligibleTeamMilestones(conn: PoolConnection, teamId: number, sprintId: number) {
+  const settings = await getSettings(conn);
+  if (getSetting(settings, "referral_team_milestones_enabled", "0") !== "1") return 0;
   const [[stats]]: any = await conn.query(
     `SELECT COUNT(r.id) as referrals
      FROM referral_team_memberships tm
@@ -1150,6 +1316,35 @@ async function awardEligibleTeamMilestones(conn: PoolConnection, teamId: number,
   return paid;
 }
 
+async function recalculateSprintEligibility(conn: PoolConnection, sprintId: number) {
+  await conn.query("DROP TEMPORARY TABLE IF EXISTS referral_sprint_eligibility_recalc");
+  await conn.query(
+    `CREATE TEMPORARY TABLE referral_sprint_eligibility_recalc AS
+     SELECT r.id,CASE WHEN ${SPRINT_ELIGIBILITY_SQL} THEN 'eligible' ELSE 'excluded' END eligibility_status,
+       CASE
+         WHEN r.status IN ('fraud','rejected','banned','deleted','reversed') OR r.reward_status IN ('fraud','rejected','blocked','reversed') THEN 'fraud_or_invalid_status'
+         WHEN r.verification_status<>'verified' THEN 'not_verified'
+         WHEN r.created_at<s.starts_at OR r.created_at>=s.ends_at THEN 'outside_sprint_period'
+         WHEN r.user_id=r.invited_by OR COALESCE(r.self_referral_blocked,0)=1 THEN 'self_referral'
+         WHEN COALESCE(ru.is_banned,0)=1 OR COALESCE(ru.status,'active') IN ('banned','deleted','rejected') THEN 'referred_user_ineligible'
+         WHEN EXISTS (SELECT 1 FROM referrals reciprocal WHERE reciprocal.user_id=r.invited_by AND reciprocal.invited_by=r.user_id) THEN 'reciprocal_referral'
+         WHEN EXISTS (SELECT 1 FROM users duplicate_tg WHERE duplicate_tg.telegram_id=ru.telegram_id AND duplicate_tg.id<>ru.id AND ru.telegram_id IS NOT NULL) THEN 'duplicate_telegram_identity'
+         WHEN EXISTS (SELECT 1 FROM referral_abuse_flags af WHERE af.referral_id=r.id AND af.status='open' AND af.signal_key IN ('same_ip_or_device_self_referral','shared_signal_cluster','mass_referral_creation','referral_loop','duplicate_telegram_identity')) THEN 'unresolved_shared_signal_abuse'
+         ELSE 'no_meaningful_activity' END exclusion_reason
+     FROM referrals r JOIN referral_sprints s ON s.id=r.sprint_id JOIN users ru ON ru.id=r.user_id
+     WHERE r.sprint_id=?`,
+    [sprintId]
+  );
+  await conn.query(
+    `UPDATE referrals r JOIN referral_sprint_eligibility_recalc e ON e.id=r.id
+     SET r.sprint_eligibility_status=e.eligibility_status,
+       r.sprint_exclusion_reason=CASE WHEN e.eligibility_status='eligible' THEN NULL ELSE e.exclusion_reason END,
+       r.sprint_eligibility_snapshot=JSON_OBJECT('checked_at',NOW(),'meaningful_activity_required',TRUE),
+       r.sprint_eligibility_checked_at=NOW()`
+  );
+  await conn.query("DROP TEMPORARY TABLE referral_sprint_eligibility_recalc");
+}
+
 export async function finalizeExpiredReferralSprints(actorId?: number | null) {
   if (!(await isReferralSprintEnabled())) {
     return { finalized: 0, rewards_paid: 0, next_created: false, disabled: true };
@@ -1161,12 +1356,15 @@ export async function finalizeExpiredReferralSprints(actorId?: number | null) {
     await conn.beginTransaction();
     const [sprints]: any = await conn.query("SELECT * FROM referral_sprints WHERE status = 'active' AND ends_at <= NOW() FOR UPDATE");
     for (const sprint of sprints) {
+      await recalculateSprintEligibility(conn, Number(sprint.id));
       const [leaderboard]: any = await conn.query(
-        `SELECT invited_by as user_id, COUNT(*) as referral_count
-         FROM referrals
-         WHERE sprint_id = ? AND verification_status = 'verified'
-         GROUP BY invited_by
-         ORDER BY referral_count DESC, invited_by ASC
+        `SELECT r.invited_by as user_id, COUNT(*) as referral_count
+         FROM referrals r
+         JOIN referral_sprints s ON s.id=r.sprint_id
+         JOIN users ru ON ru.id=r.user_id
+         WHERE r.sprint_id = ? AND ${SPRINT_ELIGIBILITY_SQL}
+         GROUP BY r.invited_by
+         ORDER BY referral_count DESC, r.invited_by ASC
          LIMIT 3`,
         [sprint.id]
       );
@@ -1179,10 +1377,11 @@ export async function finalizeExpiredReferralSprints(actorId?: number | null) {
         `SELECT t.id as team_id, t.name, COUNT(r.id) as referral_count
          FROM referral_teams t
          JOIN referral_team_memberships tm ON tm.team_id = t.id
-         LEFT JOIN referrals r ON r.invited_by = tm.user_id
-          AND r.sprint_id = ?
-          AND r.verification_status = 'verified'
+         LEFT JOIN referrals r ON r.invited_by = tm.user_id AND r.sprint_id = ?
+         LEFT JOIN users ru ON ru.id=r.user_id
+         LEFT JOIN referral_sprints s ON s.id=r.sprint_id
          WHERE t.status = 'active'
+           AND (r.id IS NULL OR (${SPRINT_ELIGIBILITY_SQL}))
          GROUP BY t.id, t.name
          ORDER BY referral_count DESC, t.id ASC
          LIMIT 3`,
@@ -1425,10 +1624,8 @@ async function settleUserDailyMilestone(
        WHERE user_id = ? AND reward_type = ? AND status = 'pending'`,
       [runId, userId, rewardType]
     );
-    await conn.query(
-      "UPDATE users SET balance_available = balance_available + ?, total_referral_earnings = total_referral_earnings + ? WHERE id = ?",
-      [amount, amount, userId]
-    );
+    await conn.query("UPDATE users SET balance_available = balance_available + ? WHERE id = ?", [amount, userId]);
+    await rebuildReferralEarningsCache(conn, userId);
   }
 
   const inserted = await insertSettlementHistory(conn, {
@@ -1528,10 +1725,8 @@ async function settleTeamSprintRewards(
            WHERE user_id = ? AND reward_type = ? AND status = 'pending'`,
           [runId, userId, rewardType]
         );
-        await conn.query(
-          "UPDATE users SET balance_available = balance_available + ?, total_referral_earnings = total_referral_earnings + ? WHERE id = ?",
-          [amount, amount, userId]
-        );
+        await conn.query("UPDATE users SET balance_available = balance_available + ? WHERE id = ?", [amount, userId]);
+        await rebuildReferralEarningsCache(conn, userId);
       }
       const inserted = await insertSettlementHistory(conn, {
         runId,
@@ -1555,6 +1750,50 @@ async function settleTeamSprintRewards(
     teamsSettled += 1;
   }
   return { paid, fraud: 0, teams_settled: teamsSettled };
+}
+
+async function settleCappedLedgerRows(conn: PoolConnection, userId: number, runId: number, settlementDate: string) {
+  const [rows]: any = await conn.query(
+    `SELECT * FROM referral_reward_ledger
+     WHERE user_id=? AND status='pending' AND COALESCE(eligible_at,created_at)<DATE_ADD(?,INTERVAL 1 DAY)
+     ORDER BY COALESCE(eligible_at,created_at),id FOR UPDATE`,
+    [userId, settlementDate]
+  );
+  let paidUnits = 0;
+  for (const row of rows) {
+    const remaining = decimalToUnits(row.amount) - decimalToUnits(row.settled_amount);
+    if (remaining <= 0) continue;
+    const settled = await reserveReferralBudget(conn, userId, unitsToDecimal(remaining));
+    const settledUnits = decimalToUnits(settled);
+    if (settledUnits <= 0) break;
+    const complete = settledUnits >= remaining;
+    await conn.query(
+      `UPDATE referral_reward_ledger SET settled_amount=settled_amount+?,status=?,settlement_run_id=?,settled_at=CASE WHEN ? THEN NOW() ELSE settled_at END WHERE id=?`,
+      [settled, complete ? "paid" : "pending", runId, complete ? 1 : 0, row.id]
+    );
+    await conn.query("UPDATE users SET balance_available=balance_available+? WHERE id=?", [settled, userId]);
+    await rebuildReferralEarningsCache(conn, userId);
+    paidUnits += settledUnits;
+    if (complete && row.source_type === "sprint_winner") {
+      await conn.query("UPDATE referral_sprint_winners SET reward_status='paid',paid_at=NOW() WHERE id=? AND reward_status<>'paid'", [row.source_id]);
+    } else if (complete && row.source_type === "team_reward") {
+      const [[outstanding]]: any = await conn.query("SELECT COUNT(*) count FROM referral_reward_ledger WHERE source_type='team_reward' AND source_id=? AND status<>'paid'", [row.source_id]);
+      if (Number(outstanding?.count || 0) === 0) await conn.query("UPDATE referral_team_rewards SET reward_status='paid',paid_at=NOW() WHERE id=? AND reward_status<>'paid'", [row.source_id]);
+    } else if (complete && row.source_type === "milestone_claim") {
+      await conn.query("UPDATE referral_milestone_claims SET status='paid',paid_at=NOW() WHERE id=? AND status<>'paid'", [row.source_id]);
+    } else if (complete && row.source_type === "publisher_commission") {
+      await conn.query("UPDATE referral_commission_ledger SET status='paid',settled_at=NOW() WHERE id=? AND status<>'paid'", [row.source_id]);
+    }
+    if (complete && row.referral_id) {
+      await conn.query(
+        `UPDATE referrals SET reward_status=CASE WHEN verification_status='verified' THEN 'paid' ELSE 'join_paid' END,
+         reward_paid_at=CASE WHEN verification_status='verified' THEN NOW() ELSE reward_paid_at END WHERE id=?`,
+        [row.referral_id]
+      );
+    }
+    if (!complete) break;
+  }
+  return unitsToDecimal(paidUnits);
 }
 
 export async function settlePendingReferralRewards(input: { settlementDate?: string; actorId?: number | null } = {}) {
@@ -1596,22 +1835,16 @@ export async function settlePendingReferralRewards(input: { settlementDate?: str
       `SELECT id
        FROM referral_reward_ledger
        WHERE status = 'pending'
-         AND DATE(created_at) = ?
+         AND COALESCE(eligible_at,created_at) < DATE_ADD(?,INTERVAL 1 DAY)
        FOR UPDATE`,
       [settlementDate]
     );
     const [pendingUsers]: any = await conn.query(
-      `SELECT candidates.user_id,
-         COALESCE(SUM(CASE WHEN ledger.status='pending' AND DATE(ledger.created_at)=? THEN ledger.amount ELSE 0 END),0) amount,
-         COUNT(CASE WHEN ledger.status='pending' AND DATE(ledger.created_at)=? THEN 1 END) rewards
-       FROM (
-         SELECT user_id FROM referral_reward_ledger WHERE status='pending' AND DATE(created_at)=?
-         UNION
-         SELECT invited_by user_id FROM referrals WHERE verification_status='verified' AND DATE(verified_at)=?
-       ) candidates
-       LEFT JOIN referral_reward_ledger ledger ON ledger.user_id=candidates.user_id
-       GROUP BY candidates.user_id`,
-      [settlementDate, settlementDate, settlementDate, settlementDate]
+      `SELECT user_id,COALESCE(SUM(amount-settled_amount),0) amount,COUNT(*) rewards
+       FROM referral_reward_ledger
+       WHERE status='pending' AND COALESCE(eligible_at,created_at)<DATE_ADD(?,INTERVAL 1 DAY)
+       GROUP BY user_id ORDER BY user_id`,
+      [settlementDate]
     );
 
     const blockedUsers = new Set<number>();
@@ -1673,67 +1906,35 @@ export async function settlePendingReferralRewards(input: { settlementDate?: str
           });
         }
         results.fraud_amount += pendingAmount;
-        await settleUserDailyMilestone(conn, runId, userId, settlementDate, quality, true);
         continue;
       }
 
-      await conn.query(
-        `UPDATE referral_reward_ledger
-         SET status = 'paid', settlement_run_id = ?, settled_at = NOW()
-         WHERE user_id = ? AND status = 'pending' AND DATE(created_at) = ?`,
-        [runId, userId, settlementDate]
-      );
-      await conn.query(
-        "UPDATE users SET balance_available = balance_available + ?, total_referral_earnings = total_referral_earnings + ? WHERE id = ?",
-        [pendingAmount, pendingAmount, userId]
-      );
-      await conn.query(
-        `UPDATE referrals r
-         SET r.reward_status = CASE WHEN r.verification_status = 'verified' THEN 'paid' ELSE 'join_paid' END,
-             r.reward_paid_at = CASE WHEN r.verification_status = 'verified' THEN NOW() ELSE r.reward_paid_at END
-         WHERE r.invited_by = ?
-           AND r.id IN (
-             SELECT referral_id
-             FROM referral_reward_ledger
-             WHERE user_id = ?
-               AND settlement_run_id = ?
-               AND referral_id IS NOT NULL
-           )
-           AND r.reward_status IN ('join_pending', 'verified_pending')`,
-        [userId, userId, runId]
-      );
+      const cappedPaid = toNumber(await settleCappedLedgerRows(conn, userId, runId, settlementDate));
       const inserted = await insertSettlementHistory(conn, {
         runId,
         userId,
         settlementDate,
         rewardLabel: "Daily Referral Reward",
         rewardType: "daily_referral_commission",
-        amount: pendingAmount,
+        amount: cappedPaid,
         status: "paid",
         verifiedReferrals: quality.verifiedReferrals,
         channelConversions: quality.channelConversions,
         conversionPercent: quality.conversionPercent,
-        metadata: { rewards: pending.rewards },
+        metadata: { rewards: pending.rewards, cap_overflow_pending: Math.max(0, pendingAmount - cappedPaid) },
       });
       if (inserted) {
         await createSettlementNotification(conn, {
           userId,
           status: "paid",
-          amount: pendingAmount,
+          amount: cappedPaid,
           settlementDate,
           rewardType: "daily_referral_commission",
           rewardLabel: "Daily Referral Reward",
         });
       }
-      results.paid_amount += pendingAmount;
-      const milestone = await settleUserDailyMilestone(conn, runId, userId, settlementDate, quality, false);
-      results.paid_amount += milestone.paid;
-      results.fraud_amount += milestone.fraud;
+      results.paid_amount += cappedPaid;
     }
-
-    const team = await settleTeamSprintRewards(conn, runId, settlementDate, settings, blockedUsers);
-    results.team_paid_amount = team.paid;
-    results.paid_amount += team.paid;
 
     await conn.query(
       `UPDATE referral_settlement_runs
@@ -1857,6 +2058,25 @@ export async function getAdminReferralGrowthData() {
        (SELECT COALESCE(SUM(amount), 0) FROM referral_reward_ledger WHERE status = 'paid') as referral_rewards_paid
      FROM referrals`
   );
+  const [[budget]]: any = await pool.query(
+    `SELECT COALESCE(SUM(CASE WHEN scope_type='platform_month' THEN spent_amount ELSE 0 END),0) spent_this_month
+     FROM referral_budget_usage WHERE period_start=DATE_FORMAT(CURDATE(),'%Y-%m-01')`
+  );
+  const [[ledgerStats]]: any = await pool.query(
+    `SELECT COALESCE(SUM(CASE WHEN status='pending' THEN amount-settled_amount ELSE 0 END),0) pending_rewards,
+      COALESCE(SUM(CASE WHEN status='fraud' THEN amount ELSE 0 END),0) fraud_held_rewards
+     FROM referral_reward_ledger`
+  );
+  const [exclusionReasons]: any = await pool.query(
+    `SELECT COALESCE(sprint_exclusion_reason,'not_yet_qualified') reason,COUNT(*) count
+     FROM referrals WHERE sprint_eligibility_status<>'eligible' GROUP BY reason ORDER BY count DESC`
+  );
+  const [[consistency]]: any = await pool.query(
+    `SELECT
+      (SELECT COUNT(*) FROM referral_sprint_winners w JOIN referral_reward_ledger l ON l.source_type='sprint_winner' AND l.source_id=w.id WHERE l.status='paid' AND w.reward_status<>'paid') +
+      (SELECT COUNT(*) FROM referral_team_rewards tr JOIN referral_reward_ledger l ON l.source_type='team_reward' AND l.source_id=tr.id WHERE l.status='paid' AND tr.reward_status<>'paid') inconsistent_paid_sources`
+  );
+  const platformCap = toNumber(getSetting(settingsMap, "referral_platform_monthly_cap", PAYOUT_CAPS.monthlyPlatform));
 
   return {
     sprint_enabled: enabled,
@@ -1874,6 +2094,22 @@ export async function getAdminReferralGrowthData() {
     abuse,
     audits,
     totals,
+    payout_controls: {
+      registration_reward: REFERRAL_REWARDS.registration,
+      verification_reward: REFERRAL_REWARDS.verification,
+      ordinary_maximum: REFERRAL_REWARDS.ordinaryMaximum,
+      individual_prizes: SPRINT_PRIZES,
+      team_pools: TEAM_SPRINT_POOLS,
+      daily_user_cap: getSetting(settingsMap, "referral_user_daily_cap", PAYOUT_CAPS.dailyUser),
+      monthly_user_cap: getSetting(settingsMap, "referral_user_monthly_cap", PAYOUT_CAPS.monthlyUser),
+      platform_monthly_cap: unitsToDecimal(decimalToUnits(platformCap)),
+      spent_this_month: String(budget?.spent_this_month || "0"),
+      budget_remaining: unitsToDecimal(decimalToUnits(platformCap) - decimalToUnits(budget?.spent_this_month || 0)),
+      pending_rewards: String(ledgerStats?.pending_rewards || "0"),
+      fraud_held_rewards: String(ledgerStats?.fraud_held_rewards || "0"),
+      exclusion_reason_counts: exclusionReasons,
+      paid_source_inconsistencies: Number(consistency?.inconsistent_paid_sources || 0),
+    },
   };
 }
 

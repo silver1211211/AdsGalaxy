@@ -1,229 +1,65 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 
+export const MINIAPP_PUBLISHER_CPM_FORMULA_VERSION = "miniapp_publisher_cpm_v2";
 export type MiniAppCpmMode = "live" | "fixed";
-
 export type MiniAppPublisherCpmSettings = {
-  min_cpm: number;
-  recommended_cpm: number;
-  max_cpm: number;
-  publisher_share_percent: number;
-  ads_galaxy_share_percent: number;
-  reserve_percent: number;
-  min_quality_factor: number;
-  max_quality_factor: number;
-  traffic_sensitivity: "low" | "medium" | "high";
-  repeat_penalty_enabled: boolean;
-  reserve_pool_enabled: boolean;
+  min_cpm:number; recommended_cpm:number; max_cpm:number; max_publisher_share:number; absolute_publisher_cpm_cap:number;
+  reserve_share:number; required_platform_margin_share:number; geo_unknown_factor:number; geo_factor_min:number; geo_factor_max:number;
+  geo_multipliers:Record<string,number>; frequency_decay_rate:number; frequency_zero_after:number;
+  quality_factor_min:number; quality_factor_max:number; trust_factor_min:number; trust_factor_max:number; fraud_factor_min:number; fraud_factor_max:number; formula_version:string; activated_at:string|null;
 };
+export type MiniAppEconomicSignals = { economicValue:number; impressionCount?:number; country?:string|null; demandYieldFactor?:number; uniquenessFactor?:number; frequencyFactor?:number; qualityFactor?:number; trustFactor?:number; fraudFactor?:number; cpmMode?:string|null; fixedPublisherCpm?:number|null };
+export type MiniAppPublisherCpmInput = { conn:PoolConnection; campaignId:number; miniappId:number; telegramUserId?:string|number; country?:string|null; countrySource?:string|null; advertiserCpm:number; cpmMode:string|null; fixedPublisherCpm?:number|null; sessionHash?:string|null; deviceHash?:string|null; networkHash?:string|null; completionQualityScore?:number; impressionValid?:boolean; duplicateOrReplay?:boolean; interactionSeconds?:number };
+type SettingRow=RowDataPacket&{key:string;value:string};
+type SignalRow=RowDataPacket&{publisher_trust_score:number|string|null;publisher_risk_score:number|string|null;traffic_quality_score:number|string|null;traffic_risk_level:string|null;total_24h:number|string;unique_users_24h:number|string;unique_devices_24h:number|string;unique_sessions_24h:number|string;unique_networks_24h:number|string;same_identity_10m:number|string;same_identity_1h:number|string;same_identity_24h:number|string;same_identity_7d:number|string};
 
-export type MiniAppPublisherCpmInput = {
-  conn: PoolConnection;
-  campaignId: number;
-  miniappId: number;
-  telegramUserId?: string | number;
-  country?: string | null;
-  advertiserCpm: number;
-  cpmMode: string | null;
-  fixedPublisherCpm?: number | null;
-};
+const DEFAULT_GEO_MULTIPLIERS:Record<string,number>=Object.fromEntries([
+  ..."US CA GB AU NZ DE FR NL CH NO SE DK FI IE AT BE LU SG JP KR AE IL".split(" ").map(code=>[code,1]),
+  ..."ES IT PT CZ PL EE LT LV SI SK HR GR MT CY SA QA KW BH HK TW".split(" ").map(code=>[code,.85]),
+  ..."IN BR MX AR CL UY CR PA MY TH TR ZA CN RO HU BG RS ME MK BA".split(" ").map(code=>[code,.68]),
+  ..."ID PH VN NG KE GH EG MA DZ TN CO PE EC DO GT SV JM JO IQ LB KZ UZ".split(" ").map(code=>[code,.52]),
+  ..."PK BD NP LK MM KH LA ET TZ UG RW ZM ZW CM SN CI ML NE BF MG MZ AO".split(" ").map(code=>[code,.4]),
+]);
+const DEFAULT_SETTINGS:MiniAppPublisherCpmSettings={min_cpm:.5,recommended_cpm:1,max_cpm:5,max_publisher_share:.5,absolute_publisher_cpm_cap:11,reserve_share:.1,required_platform_margin_share:.1,geo_unknown_factor:.45,geo_factor_min:.25,geo_factor_max:1,geo_multipliers:DEFAULT_GEO_MULTIPLIERS,frequency_decay_rate:.16,frequency_zero_after:120,quality_factor_min:0,quality_factor_max:1,trust_factor_min:.1,trust_factor_max:1,fraud_factor_min:0,fraud_factor_max:1,formula_version:MINIAPP_PUBLISHER_CPM_FORMULA_VERSION,activated_at:null};
+function number(value:unknown,fallback=0){const parsed=Number(value);return Number.isFinite(parsed)?parsed:fallback;}
+function clamp(value:number,min=0,max=1){return Math.min(max,Math.max(min,Number.isFinite(value)?value:min));}
+function setting(map:Map<string,string>,key:string,fallback:number){return number(map.get(key),fallback);}
+function share(value:number){return clamp(value>1?value/100:value);}
+function parseObject(value:string|undefined){try{const parsed=JSON.parse(value||"{}");return parsed&&typeof parsed==="object"&&!Array.isArray(parsed)?parsed as Record<string,unknown>:{};}catch{return {};}}
 
-type SettingRow = RowDataPacket & {
-  key: string;
-  value: string;
-};
-
-type QualitySnapshotRow = RowDataPacket & {
-  total_impressions: number;
-  unique_users: number;
-  repeat_count: number;
-};
-
-const DEFAULT_SETTINGS: MiniAppPublisherCpmSettings = {
-  min_cpm: 0.5,
-  recommended_cpm: 1,
-  max_cpm: 5,
-  publisher_share_percent: 60,
-  ads_galaxy_share_percent: 30,
-  reserve_percent: 10,
-  min_quality_factor: 0.1,
-  max_quality_factor: 0.9,
-  traffic_sensitivity: "medium",
-  repeat_penalty_enabled: true,
-  reserve_pool_enabled: true,
-};
-
-function toNumber(value: unknown, fallback = 0) {
-  const parsed = Number.parseFloat(String(value ?? ""));
-  return Number.isFinite(parsed) ? parsed : fallback;
+export async function getMiniAppPublisherCpmSettings(conn?:PoolConnection):Promise<MiniAppPublisherCpmSettings>{
+  const db=conn||pool;const [rows]=await db.query<SettingRow[]>(`SELECT \`key\`,value FROM settings WHERE \`key\` LIKE 'miniapp_publisher_cpm_v2_%' OR \`key\` IN ('miniapp_internal_min_cpm','miniapp_internal_recommended_cpm','miniapp_internal_max_cpm')`);const map=new Map(rows.map(row=>[row.key,row.value]));
+  const minCpm=Math.max(0,setting(map,"miniapp_internal_min_cpm",DEFAULT_SETTINGS.min_cpm)),maxCpm=Math.max(minCpm,setting(map,"miniapp_internal_max_cpm",DEFAULT_SETTINGS.max_cpm));
+  const geoMin=clamp(setting(map,"miniapp_publisher_cpm_v2_geo_factor_min",DEFAULT_SETTINGS.geo_factor_min)),geoMax=clamp(setting(map,"miniapp_publisher_cpm_v2_geo_factor_max",DEFAULT_SETTINGS.geo_factor_max),geoMin,1);
+  const geoMultipliers={...DEFAULT_GEO_MULTIPLIERS};for(const [code,value] of Object.entries(parseObject(map.get("miniapp_publisher_cpm_v2_geo_multipliers"))))if(/^[A-Z]{2}$/.test(code))geoMultipliers[code]=clamp(number(value,DEFAULT_SETTINGS.geo_unknown_factor),geoMin,geoMax);
+  return {min_cpm:minCpm,recommended_cpm:clamp(setting(map,"miniapp_internal_recommended_cpm",DEFAULT_SETTINGS.recommended_cpm),minCpm,maxCpm),max_cpm:maxCpm,max_publisher_share:share(setting(map,"miniapp_publisher_cpm_v2_max_share",.5)),absolute_publisher_cpm_cap:Math.max(0,setting(map,"miniapp_publisher_cpm_v2_absolute_cpm_cap",11)),reserve_share:share(setting(map,"miniapp_publisher_cpm_v2_reserve_share",.1)),required_platform_margin_share:share(setting(map,"miniapp_publisher_cpm_v2_required_margin_share",.1)),geo_unknown_factor:clamp(setting(map,"miniapp_publisher_cpm_v2_geo_unknown_factor",.45),geoMin,geoMax),geo_factor_min:geoMin,geo_factor_max:geoMax,geo_multipliers:geoMultipliers,frequency_decay_rate:Math.max(0,setting(map,"miniapp_publisher_cpm_v2_frequency_decay_rate",.16)),frequency_zero_after:Math.max(1,Math.floor(setting(map,"miniapp_publisher_cpm_v2_frequency_zero_after",120))),quality_factor_min:clamp(setting(map,"miniapp_publisher_cpm_v2_quality_factor_min",0)),quality_factor_max:clamp(setting(map,"miniapp_publisher_cpm_v2_quality_factor_max",1)),trust_factor_min:clamp(setting(map,"miniapp_publisher_cpm_v2_trust_factor_min",.1)),trust_factor_max:clamp(setting(map,"miniapp_publisher_cpm_v2_trust_factor_max",1)),fraud_factor_min:clamp(setting(map,"miniapp_publisher_cpm_v2_fraud_factor_min",0)),fraud_factor_max:clamp(setting(map,"miniapp_publisher_cpm_v2_fraud_factor_max",1)),formula_version:map.get("miniapp_publisher_cpm_v2_formula_version")||MINIAPP_PUBLISHER_CPM_FORMULA_VERSION,activated_at:map.get("miniapp_publisher_cpm_v2_activated_at")||null};
 }
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
+export function normalizeMiniAppCpmMode(value:unknown):MiniAppCpmMode{return String(value||"live").toLowerCase()==="fixed"?"fixed":"live";}
+export function validateAdvertiserCpmBid(cpm:number,settings:MiniAppPublisherCpmSettings){if(!Number.isFinite(cpm)||cpm<=0)throw new Error("CPM Bid is required");if(settings.min_cpm>0&&cpm<settings.min_cpm)throw new Error(`CPM Bid must be at least $${settings.min_cpm.toFixed(2)}`);if(settings.max_cpm>0&&cpm>settings.max_cpm)throw new Error("CPM Bid exceeds the maximum allowed CPM");}
+export function maxPublisherCpm(advertiserCpm:number,settings:MiniAppPublisherCpmSettings){return Math.min(Math.max(0,advertiserCpm)*settings.max_publisher_share,settings.absolute_publisher_cpm_cap);}
+export function geoValueFactor(country:unknown,settings:MiniAppPublisherCpmSettings){const code=String(country||"").trim().toUpperCase();return /^[A-Z]{2}$/.test(code)?clamp(settings.geo_multipliers[code]??settings.geo_unknown_factor,settings.geo_factor_min,settings.geo_factor_max):settings.geo_unknown_factor;}
+export function rollingFrequencyFactor(counts:{recent10m:number;hour:number;day:number;sevenDays:number},settings:MiniAppPublisherCpmSettings){const pressure=Math.max(0,counts.recent10m-1)*1.4+Math.max(0,counts.hour-2)*.45+Math.max(0,counts.day-5)*.12+Math.max(0,counts.sevenDays-15)*.025;if(counts.sevenDays>=settings.frequency_zero_after)return 0;const factor=Math.exp(-settings.frequency_decay_rate*pressure);return factor<.0001?0:clamp(factor);}
+export function trustValueFactor(score:number,settings:MiniAppPublisherCpmSettings){return clamp(.35+clamp(score,0,100)/100*.65,settings.trust_factor_min,settings.trust_factor_max);}
+export function fraudValueFactor(score:number,confirmed:boolean,settings:MiniAppPublisherCpmSettings){return confirmed?0:clamp(1-Math.pow(clamp(score,0,100)/100,1.35),settings.fraud_factor_min,settings.fraud_factor_max);}
+export function calculateDynamicPublisherEconomics(signals:MiniAppEconomicSignals,settings:MiniAppPublisherCpmSettings){
+  const economicValue=Math.max(0,number(signals.economicValue)),impressionCount=Math.max(0,number(signals.impressionCount,1)),reserve=economicValue*settings.reserve_share,requiredMargin=economicValue*settings.required_platform_margin_share;
+  const envelope=Math.max(0,Math.min(economicValue*settings.max_publisher_share,settings.absolute_publisher_cpm_cap/1000*impressionCount,economicValue-reserve-requiredMargin));
+  const factors={geo:geoValueFactor(signals.country,settings),demand_yield:clamp(number(signals.demandYieldFactor,1)),uniqueness:clamp(number(signals.uniquenessFactor,1)),frequency:clamp(number(signals.frequencyFactor,1)),quality:clamp(number(signals.qualityFactor,1),settings.quality_factor_min,settings.quality_factor_max),trust:clamp(number(signals.trustFactor,1),settings.trust_factor_min,settings.trust_factor_max),fraud:clamp(number(signals.fraudFactor,1),settings.fraud_factor_min,settings.fraud_factor_max)};
+  const mode=normalizeMiniAppCpmMode(signals.cpmMode),requestedBase=mode==="fixed"?Math.min(Math.max(0,number(signals.fixedPublisherCpm))/1000,envelope):envelope;
+  const payout=clamp(requestedBase*Object.values(factors).reduce((product,factor)=>product*factor,1),0,envelope),retained=Math.max(0,economicValue-payout-reserve);
+  return {formula_version:settings.formula_version,cpm_mode:mode,economic_value:economicValue,impression_count:impressionCount,publisher_cap:envelope,publisher_payout:payout,publisher_cpm:impressionCount>0?payout/impressionCount*1000:0,reserve,platform_retained:retained,required_platform_margin:requiredMargin,factors};
 }
-
-function settingNumber(rows: Map<string, string>, key: string, fallback: number) {
-  return toNumber(rows.get(key), fallback);
-}
-
-function settingBool(rows: Map<string, string>, key: string, fallback: boolean) {
-  const value = rows.get(key);
-  if (value === undefined) return fallback;
-  return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "enabled";
-}
-
-export async function getMiniAppPublisherCpmSettings(conn?: PoolConnection): Promise<MiniAppPublisherCpmSettings> {
-  const db = conn || pool;
-  const [rows] = await db.query<SettingRow[]>(`
-    SELECT \`key\`, value
-    FROM settings
-    WHERE \`key\` IN (
-      'miniapp_internal_min_cpm',
-      'miniapp_internal_recommended_cpm',
-      'miniapp_internal_max_cpm',
-      'miniapp_internal_publisher_share_percent',
-      'miniapp_internal_ads_galaxy_share_percent',
-      'miniapp_internal_reserve_percent',
-      'miniapp_internal_min_quality_factor',
-      'miniapp_internal_max_quality_factor',
-      'miniapp_internal_traffic_sensitivity',
-      'miniapp_internal_repeat_penalty_enabled',
-      'miniapp_internal_reserve_pool_enabled'
-    )
-  `);
-
-  const settingsMap = new Map(rows.map((row) => [row.key, row.value]));
-  const sensitivity = String(settingsMap.get("miniapp_internal_traffic_sensitivity") || DEFAULT_SETTINGS.traffic_sensitivity).toLowerCase();
-  const minQuality = clamp(settingNumber(settingsMap, "miniapp_internal_min_quality_factor", DEFAULT_SETTINGS.min_quality_factor), 0, 1);
-  const maxQuality = clamp(settingNumber(settingsMap, "miniapp_internal_max_quality_factor", DEFAULT_SETTINGS.max_quality_factor), minQuality, 1);
-
-  const minCpm = Math.max(0, settingNumber(settingsMap, "miniapp_internal_min_cpm", DEFAULT_SETTINGS.min_cpm));
-  const maxCpm = Math.max(minCpm, settingNumber(settingsMap, "miniapp_internal_max_cpm", DEFAULT_SETTINGS.max_cpm));
-  return {
-    min_cpm: minCpm,
-    recommended_cpm: clamp(Math.max(0, settingNumber(settingsMap, "miniapp_internal_recommended_cpm", DEFAULT_SETTINGS.recommended_cpm)), minCpm, maxCpm),
-    max_cpm: maxCpm,
-    publisher_share_percent: clamp(settingNumber(settingsMap, "miniapp_internal_publisher_share_percent", DEFAULT_SETTINGS.publisher_share_percent), 0, 100),
-    ads_galaxy_share_percent: clamp(settingNumber(settingsMap, "miniapp_internal_ads_galaxy_share_percent", DEFAULT_SETTINGS.ads_galaxy_share_percent), 0, 100),
-    reserve_percent: clamp(settingNumber(settingsMap, "miniapp_internal_reserve_percent", DEFAULT_SETTINGS.reserve_percent), 0, 100),
-    min_quality_factor: minQuality,
-    max_quality_factor: maxQuality,
-    traffic_sensitivity: sensitivity === "low" || sensitivity === "high" ? sensitivity : "medium",
-    repeat_penalty_enabled: settingBool(settingsMap, "miniapp_internal_repeat_penalty_enabled", DEFAULT_SETTINGS.repeat_penalty_enabled),
-    reserve_pool_enabled: settingBool(settingsMap, "miniapp_internal_reserve_pool_enabled", DEFAULT_SETTINGS.reserve_pool_enabled),
-  };
-}
-
-export function assertMiniAppRevenueSplit(settings: MiniAppPublisherCpmSettings) {
-  const total = settings.publisher_share_percent + settings.ads_galaxy_share_percent + settings.reserve_percent;
-  if (Math.abs(total - 100) > 0.000001) {
-    throw new Error("Mini App internal revenue split must equal 100%");
-  }
-}
-
-export function normalizeMiniAppCpmMode(value: unknown): MiniAppCpmMode {
-  return String(value || "live").toLowerCase() === "fixed" ? "fixed" : "live";
-}
-
-export function validateAdvertiserCpmBid(cpm: number, settings: MiniAppPublisherCpmSettings) {
-  if (!Number.isFinite(cpm) || cpm <= 0) {
-    throw new Error("CPM Bid is required");
-  }
-  if (settings.min_cpm > 0 && cpm < settings.min_cpm) {
-    throw new Error(`CPM Bid must be at least $${settings.min_cpm.toFixed(2)}`);
-  }
-  if (settings.max_cpm > 0 && cpm > settings.max_cpm) {
-    throw new Error("CPM Bid exceeds the maximum allowed CPM");
-  }
-}
-
-export function maxPublisherCpm(advertiserCpm: number, settings: MiniAppPublisherCpmSettings) {
-  return Math.max(0, advertiserCpm * (settings.publisher_share_percent / 100));
-}
-
-function repeatPenaltyFactor(repeatCount: number) {
-  if (repeatCount <= 3) return 1;
-  if (repeatCount <= 10) return 0.85;
-  if (repeatCount <= 20) return 0.65;
-  if (repeatCount <= 50) return 0.4;
-  return 0.2;
-}
-
-function sensitivityWeight(value: MiniAppPublisherCpmSettings["traffic_sensitivity"]) {
-  if (value === "low") return 0.75;
-  if (value === "high") return 1.25;
-  return 1;
-}
-
-export async function calculateMiniAppPublisherPayout(input: MiniAppPublisherCpmInput) {
-  const settings = await getMiniAppPublisherCpmSettings(input.conn);
-  assertMiniAppRevenueSplit(settings);
-
-  const advertiserCpm = Math.max(0, input.advertiserCpm);
-  const grossRevenue = advertiserCpm / 1000;
-  const publisherCeilingCpm = maxPublisherCpm(advertiserCpm, settings);
-  const mode = normalizeMiniAppCpmMode(input.cpmMode);
-
-  const [[snapshot]] = await input.conn.query<QualitySnapshotRow[]>(`
-    SELECT
-      COUNT(*) as total_impressions,
-      COUNT(DISTINCT telegram_user_id) as unique_users,
-      SUM(CASE WHEN telegram_user_id = ? THEN 1 ELSE 0 END) as repeat_count
-    FROM miniapp_internal_ad_impressions
-    WHERE campaign_id = ?
-      AND miniapp_id = ?
-      AND created_at >= CURDATE()
-  `, [input.telegramUserId || "", input.campaignId, input.miniappId]);
-
-  const totalImpressions = Number(snapshot?.total_impressions || 0);
-  const uniqueUsers = Number(snapshot?.unique_users || 0);
-  const repeatCount = Number(snapshot?.repeat_count || 0) + 1;
-  const diversityScore = totalImpressions > 0 ? clamp(uniqueUsers / totalImpressions, 0, 1) : 0.75;
-  const countryScore = input.country ? 0.85 : 0.7;
-  const repetitionScore = repeatPenaltyFactor(repeatCount);
-  const engagementScore = 0.75;
-  const rawQualityScore = clamp(((countryScore + diversityScore + repetitionScore + engagementScore) / 4) * sensitivityWeight(settings.traffic_sensitivity), 0, 1);
-  const qualityFactor = clamp(
-    settings.min_quality_factor + rawQualityScore * (settings.max_quality_factor - settings.min_quality_factor),
-    settings.min_quality_factor,
-    settings.max_quality_factor
-  );
-  const repeatPenalty = settings.repeat_penalty_enabled ? repetitionScore : 1;
-
-  const fixedPublisherCpm = Math.max(0, Number(input.fixedPublisherCpm || 0));
-  const livePublisherCpm = publisherCeilingCpm * qualityFactor * repeatPenalty;
-  const requestedPublisherCpm = mode === "fixed" ? fixedPublisherCpm : livePublisherCpm;
-  const publisherCpm = Math.min(requestedPublisherCpm, publisherCeilingCpm);
-  const publisherRevenue = publisherCpm / 1000;
-  const reserveRevenue = settings.reserve_pool_enabled ? grossRevenue * (settings.reserve_percent / 100) : 0;
-  const adsGalaxyRevenue = Math.max(0, grossRevenue - publisherRevenue - reserveRevenue);
-
-  return {
-    settings,
-    cpm_mode: mode,
-    advertiser_cpm: advertiserCpm,
-    gross_revenue: grossRevenue,
-    publisher_cpm: publisherCpm,
-    publisher_revenue: publisherRevenue,
-    ads_galaxy_revenue: adsGalaxyRevenue,
-    reserve_revenue: reserveRevenue,
-    publisher_ceiling_cpm: publisherCeilingCpm,
-    quality_factor: mode === "fixed" ? null : qualityFactor,
-    repeat_penalty_factor: mode === "fixed" ? null : repeatPenalty,
-    quality_metadata: {
-      total_impressions_today: totalImpressions,
-      unique_users_today: uniqueUsers,
-      repeat_count_today: repeatCount,
-      country_score: countryScore,
-      diversity_score: diversityScore,
-      repetition_score: repetitionScore,
-      engagement_score: engagementScore,
-      traffic_sensitivity: settings.traffic_sensitivity,
-      reserve_pool_enabled: settings.reserve_pool_enabled,
-      repeat_penalty_enabled: settings.repeat_penalty_enabled,
-      publisher_share_percent: settings.publisher_share_percent,
-      ads_galaxy_share_percent: settings.ads_galaxy_share_percent,
-      reserve_percent: settings.reserve_percent,
-    },
-  };
+export async function calculateMiniAppPublisherPayout(input:MiniAppPublisherCpmInput){
+  const settings=await getMiniAppPublisherCpmSettings(input.conn);const clauses:string[]=[],values:unknown[]=[];
+  for(const [column,value] of [["telegram_user_id",input.telegramUserId],["device_hash",input.deviceHash],["session_hash",input.sessionHash],["network_hash",input.networkHash]] as const)if(value!==undefined&&value!==null&&value!==""){clauses.push(`i.${column}=?`);values.push(value);}
+  const identity=clauses.length?clauses.join(" OR "):"0";const identityParams=[...values,...values,...values,...values];
+  const [rows]=await input.conn.query<SignalRow[]>(`SELECT COALESCE(u.publisher_trust_score,60) publisher_trust_score,COALESCE(u.publisher_risk_score,0) publisher_risk_score,COALESCE(m.traffic_quality_score,50) traffic_quality_score,COALESCE(m.traffic_risk_level,'low') traffic_risk_level,COUNT(i.id) total_24h,COUNT(DISTINCT i.telegram_user_id) unique_users_24h,COUNT(DISTINCT i.device_hash) unique_devices_24h,COUNT(DISTINCT i.session_hash) unique_sessions_24h,COUNT(DISTINCT i.network_hash) unique_networks_24h,SUM(i.created_at>=DATE_SUB(NOW(),INTERVAL 10 MINUTE) AND (${identity})) same_identity_10m,SUM(i.created_at>=DATE_SUB(NOW(),INTERVAL 1 HOUR) AND (${identity})) same_identity_1h,SUM(i.created_at>=DATE_SUB(NOW(),INTERVAL 24 HOUR) AND (${identity})) same_identity_24h,SUM(i.created_at>=DATE_SUB(NOW(),INTERVAL 7 DAY) AND (${identity})) same_identity_7d FROM miniapps m JOIN users u ON u.id=m.user_id LEFT JOIN miniapp_internal_ad_impressions i ON i.miniapp_id=m.id AND i.campaign_id=? AND i.created_at>=DATE_SUB(NOW(),INTERVAL 7 DAY) WHERE m.id=? GROUP BY m.id,u.id`,[...identityParams,input.campaignId,input.miniappId]);
+  const row=rows[0],total=number(row?.total_24h),unique=[number(row?.unique_users_24h),number(row?.unique_devices_24h),number(row?.unique_sessions_24h),number(row?.unique_networks_24h)].filter(v=>v>0);
+  const uniqueness=total>0&&unique.length>=2?clamp(unique.reduce((sum,v)=>sum+v/total,0)/unique.length):.7;
+  const frequency=rollingFrequencyFactor({recent10m:number(row?.same_identity_10m)+1,hour:number(row?.same_identity_1h)+1,day:number(row?.same_identity_24h)+1,sevenDays:number(row?.same_identity_7d)+1},settings);
+  const completion=clamp(number(input.completionQualityScore,.5)),traffic=clamp(number(row?.traffic_quality_score,50)/100),timing=input.interactionSeconds===undefined?.7:clamp(input.interactionSeconds/15),valid=input.impressionValid===false||input.duplicateOrReplay?0:1,quality=clamp(valid*(completion*.5+traffic*.3+timing*.2));
+  const trust=trustValueFactor(number(row?.publisher_trust_score,60),settings),risk=Math.max(number(row?.publisher_risk_score),row?.traffic_risk_level==="critical"?100:row?.traffic_risk_level==="high"?80:0),fraud=fraudValueFactor(risk,input.duplicateOrReplay===true,settings);
+  const economics=calculateDynamicPublisherEconomics({economicValue:Math.max(0,input.advertiserCpm)/1000,country:input.country,uniquenessFactor:uniqueness,frequencyFactor:frequency,qualityFactor:quality,trustFactor:trust,fraudFactor:fraud,demandYieldFactor:1,cpmMode:input.cpmMode,fixedPublisherCpm:input.fixedPublisherCpm},settings);
+  return {settings,advertiser_cpm:Math.max(0,input.advertiserCpm),gross_revenue:economics.economic_value,publisher_cpm:economics.publisher_cpm,publisher_revenue:economics.publisher_payout,ads_galaxy_revenue:economics.platform_retained,reserve_revenue:economics.reserve,publisher_ceiling_cpm:economics.publisher_cap*1000,quality_factor:quality,repeat_penalty_factor:frequency,formula_version:economics.formula_version,cpm_mode:economics.cpm_mode,publisher_cap:economics.publisher_cap,factors:economics.factors,quality_metadata:{formula_version:economics.formula_version,country:input.country||null,country_source:input.countrySource||"unknown",...economics.factors,frequency_counts:{recent_10m:number(row?.same_identity_10m)+1,hour:number(row?.same_identity_1h)+1,day:number(row?.same_identity_24h)+1,seven_days:number(row?.same_identity_7d)+1},uniqueness_sample_size:total,publisher_trust_score:number(row?.publisher_trust_score,60),fraud_risk_score:risk,reserve_share:settings.reserve_share,max_publisher_share:settings.max_publisher_share,absolute_publisher_cpm_cap:settings.absolute_publisher_cpm_cap,required_platform_margin:economics.required_platform_margin}};
 }

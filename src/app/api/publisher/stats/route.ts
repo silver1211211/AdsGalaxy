@@ -22,7 +22,7 @@ export async function GET(request: Request) {
       [user.id]
     );
     const [deliveryEligibleChannelRows]: any = await pool.query(
-      "SELECT COUNT(*) as total FROM channels WHERE user_id = ? AND is_deleted = FALSE AND status = 'active' AND COALESCE(health_status, 'healthy') IN ('healthy','warning')",
+      "SELECT COUNT(*) as total FROM channels WHERE user_id = ? AND is_deleted = FALSE AND status = 'active'",
       [user.id]
     );
 
@@ -89,6 +89,14 @@ export async function GET(request: Request) {
     );
     const [[referralPromotionSetting]]: any = await pool.query(
       "SELECT value FROM referral_growth_settings WHERE `key` = 'referral_dashboard_promotion_enabled' LIMIT 1"
+    );
+    const [[promoteCampaign]]: any = await pool.query(
+      `SELECT CASE WHEN status='paid' AND completion_expires_at IS NOT NULL AND completion_expires_at<=UTC_TIMESTAMP(6) THEN NULL
+                   WHEN status='paid' AND payment_confirmed_at IS NOT NULL THEN 'paid'
+                   WHEN ends_at IS NOT NULL AND ends_at<=NOW(6) THEN 'closed'
+                   WHEN status='scheduled' AND starts_at<=NOW(6) THEN 'active'
+                   ELSE status END status
+       FROM publisher_promotion_campaigns WHERE slug = 'promote-ads-galaxy' LIMIT 1`
     );
     const [referralGrowthSettings]: any = await pool.query(
       "SELECT `key`, value FROM referral_growth_settings WHERE `key` IN ('referral_join_reward_amount', 'referral_verification_reward_amount', 'referral_sprint_popup_interval_seconds', 'referral_sprint_popup_interval_hours')"
@@ -244,6 +252,7 @@ export async function GET(request: Request) {
       referral_sprint_popup_interval_hours: Number(referralSettingsMap.get("referral_sprint_popup_interval_hours") || 24),
       referral_sprint_enabled: referralSprintSetting?.value === "1",
       referral_dashboard_promotion_enabled: referralPromotionSetting?.value !== "0",
+      promote_ads_galaxy_status: promoteCampaign?.status || null,
       join_rewarded: user.join_rewarded
     }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
   } catch (error: any) {

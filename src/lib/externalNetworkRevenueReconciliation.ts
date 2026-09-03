@@ -5,6 +5,7 @@ import pool from "@/lib/db";
 import { getMiniAppFeePercent } from "@/lib/miniappStats";
 import { isMiniAppNetworkName, type MiniAppNetworkName } from "@/lib/miniappNetworkAdapters";
 import { cpm, metricNumber } from "@/lib/statFormulas";
+import { calculateDynamicPublisherEconomics, fraudValueFactor, getMiniAppPublisherCpmSettings, trustValueFactor } from "@/lib/miniappPublisherCpmEngine";
 
 type Db = typeof pool | PoolConnection;
 
@@ -74,6 +75,7 @@ type DailyStatRow = RowDataPacket & {
   ads_galaxy_fee: string | number;
   publisher_revenue: string | number;
 };
+type PublisherSignalRow = RowDataPacket & { publisher_trust_score:string|number|null;publisher_risk_score:string|number|null;traffic_quality_score:string|number|null;traffic_risk_level:string|null };
 
 type SettlementRow = RowDataPacket & {
   id: number;
@@ -514,14 +516,25 @@ async function reconcileRecord(conn: PoolConnection, adapter: ProviderAdapter, r
   const settlement = await hasSettlement(conn, Number(stat.id));
   const previousPublisherRevenue = metricNumber(stat.publisher_revenue);
   const previousGrossRevenue = metricNumber(stat.gross_revenue);
+  const impressions = record.impressions ?? Math.floor(metricNumber(stat.impressions));
   const providerGrossRevenue = record.grossEarnings ?? (feePercent >= 100 ? record.publisherEarnings : record.publisherEarnings / (1 - feePercent / 100));
   const reconciledGrossRevenue = Math.max(0, providerGrossRevenue);
-  const reconciledPublisherRevenue = Math.min(Math.max(0, record.publisherEarnings), reconciledGrossRevenue);
+  const settings = await getMiniAppPublisherCpmSettings(conn);
+  const [[publisherSignals]] = await conn.query<PublisherSignalRow[]>(`SELECT COALESCE(u.publisher_trust_score,60) publisher_trust_score,COALESCE(u.publisher_risk_score,0) publisher_risk_score,COALESCE(m.traffic_quality_score,50) traffic_quality_score,COALESCE(m.traffic_risk_level,'low') traffic_risk_level FROM miniapps m JOIN users u ON u.id=m.user_id WHERE m.id=? LIMIT 1`,[config.miniapp_id]);
+  const publisherRisk=Math.max(metricNumber(publisherSignals?.publisher_risk_score),publisherSignals?.traffic_risk_level==="critical"?100:publisherSignals?.traffic_risk_level==="high"?80:0);
+  const completionFactor=record.impressions&&record.completedViews!==undefined?Math.min(1,Math.max(0,record.completedViews/Math.max(1,record.impressions))):.75;
+  const providerQuality=Math.min(1,Math.max(0,(metricNumber(publisherSignals?.traffic_quality_score)/100)*.5+completionFactor*.5));
+  const externalEconomics=calculateDynamicPublisherEconomics({economicValue:reconciledGrossRevenue,impressionCount:impressions,country:null,demandYieldFactor:1,uniquenessFactor:.8,frequencyFactor:1,qualityFactor:providerQuality,trustFactor:trustValueFactor(metricNumber(publisherSignals?.publisher_trust_score),settings),fraudFactor:fraudValueFactor(publisherRisk,false,settings)},settings);
+  // Provider reports are daily aggregates, so the activation day itself remains legacy.
+  // This prevents a migration/re-run from repricing any historical settlement.
+  const useDynamicV2=Boolean(settings.activated_at&&record.date>settings.activated_at.slice(0,10));
+  const legacyPublisherRevenue=Math.min(Math.max(0,record.publisherEarnings),reconciledGrossRevenue);
+  const reconciledPublisherRevenue = useDynamicV2?externalEconomics.publisher_payout:legacyPublisherRevenue;
   const publisherRevenueDelta = reconciledPublisherRevenue - previousPublisherRevenue;
   const grossRevenueDelta = reconciledGrossRevenue - previousGrossRevenue;
-  const impressions = record.impressions ?? Math.floor(metricNumber(stat.impressions));
-  const effectivePublisherCpm = record.effectiveCpm ?? cpm(reconciledPublisherRevenue, impressions);
-  const adsGalaxyFee = Math.max(0, reconciledGrossRevenue - reconciledPublisherRevenue);
+  const effectivePublisherCpm = cpm(reconciledPublisherRevenue, impressions);
+  const adsGalaxyFee = useDynamicV2?externalEconomics.platform_retained:Math.max(0,reconciledGrossRevenue-legacyPublisherRevenue);
+  const reserveRevenue = useDynamicV2?externalEconomics.reserve:0;
   const metadata = {
     provider: adapter.provider,
     provider_record_id: record.providerRecordId,
@@ -536,6 +549,13 @@ async function reconcileRecord(conn: PoolConnection, adapter: ProviderAdapter, r
       effective_cpm: record.effectiveCpm !== undefined,
     },
     raw: record.metadata || null,
+    formula_version: useDynamicV2?externalEconomics.formula_version:"legacy_external_provider_payout",
+    activation_boundary_utc: settings.activated_at,
+    economic_value: externalEconomics.economic_value,
+    publisher_cap: externalEconomics.publisher_cap,
+    reserve: reserveRevenue,
+    platform_retained: adsGalaxyFee,
+    factors: externalEconomics.factors,
   };
 
   if (settlement) {
@@ -597,6 +617,7 @@ async function reconcileRecord(conn: PoolConnection, adapter: ProviderAdapter, r
            provider_reported_effective_cpm = ?,
            gross_revenue = ?,
            ads_galaxy_fee = ?,
+           reserve_revenue = ?,
            publisher_revenue = ?,
            gross_cpm = CASE WHEN ? > 0 THEN (? / ?) * 1000 ELSE 0 END,
            net_cpm = ?,
@@ -618,6 +639,7 @@ async function reconcileRecord(conn: PoolConnection, adapter: ProviderAdapter, r
         effectivePublisherCpm,
         reconciledGrossRevenue,
         adsGalaxyFee,
+        reserveRevenue,
         reconciledPublisherRevenue,
         impressions,
         reconciledGrossRevenue,
@@ -686,6 +708,7 @@ async function reconcileRecord(conn: PoolConnection, adapter: ProviderAdapter, r
          provider_reported_effective_cpm = ?,
          gross_revenue = ?,
          ads_galaxy_fee = ?,
+         reserve_revenue = ?,
          publisher_revenue = ?,
          gross_cpm = CASE WHEN ? > 0 THEN (? / ?) * 1000 ELSE 0 END,
          net_cpm = ?,
@@ -707,6 +730,7 @@ async function reconcileRecord(conn: PoolConnection, adapter: ProviderAdapter, r
       effectivePublisherCpm,
       reconciledGrossRevenue,
       adsGalaxyFee,
+      reserveRevenue,
       reconciledPublisherRevenue,
       impressions,
       reconciledGrossRevenue,

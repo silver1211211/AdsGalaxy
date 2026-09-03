@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import pool from "@/lib/db";
+import { queryWithRetry } from "@/lib/dbResilience";
 import type { RowDataPacket } from "mysql2/promise";
 
 type PublicSettingRow = RowDataPacket & { key: string; value: string };
@@ -27,9 +27,10 @@ const PUBLIC_SETTING_KEYS = [
 
 export async function GET() {
   try {
-    const [rows] = await pool.query<PublicSettingRow[]>(
+    const [rows] = await queryWithRetry<PublicSettingRow[]>(
       "SELECT `key`, value FROM settings WHERE `key` IN (?)",
-      [PUBLIC_SETTING_KEYS]
+      [PUBLIC_SETTING_KEYS],
+      { timeoutMs: 5_000, attempts: 3, operation: "public_settings" },
     );
     const settings = rows.reduce<Record<string, string>>((acc, row) => {
       acc[row.key] = row.value;

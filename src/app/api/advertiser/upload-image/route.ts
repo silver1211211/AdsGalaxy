@@ -31,7 +31,7 @@ export async function POST(request: Request) {
     imgApiFormData.append("action", "upload");
     imgApiFormData.append("image", file);
 
-    const imgRes = await fetch(process.env.IMG_API_ENDPOINT, { method: "POST", body: imgApiFormData });
+    const imgRes = await fetch(process.env.IMG_API_ENDPOINT, { method: "POST", body: imgApiFormData, signal: AbortSignal.timeout(10_000) });
     const imgData = await imgRes.json();
 
     if (!imgData.success) {

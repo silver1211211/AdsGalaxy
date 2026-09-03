@@ -70,7 +70,7 @@ export async function GET(request: Request) {
       SELECT
         MIN(bd.id) as id,
         NULL as post_id,
-        FLOOR(COUNT(*) / 5) as count,
+        COUNT(*) as count,
         SUM(bd.publisher_reward) as amount,
         MAX(bd.created_at) as created_at,
         'sent' as status,

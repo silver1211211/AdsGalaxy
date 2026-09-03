@@ -12,14 +12,16 @@ const developerUi = read("src/app/publisher/developer/page.tsx");
 const developerDocs = read("src/app/docs/developers/page.tsx");
 const developerDocsRedirect = read("src/app/docs/developer/page.tsx");
 const miniappDocs = read("src/app/docs/publisher/miniapps/page.tsx");
+const integrationExamples = read("src/lib/miniappIntegrationExamples.ts");
 const migration = read("db/migrations/20260727_0104_developer_webhook_v2_outbox.sql");
 
-test("completion routes create reward events only behind the callback flag and caller transaction", () => {
-  assert.match(internalCompletion, /if \(!productionRewardCallbacksEnabled\(\)\) return null/);
+test("completion routes create authoritative events in the caller transaction", () => {
+  assert.match(internalCompletion, /applicationId: binding \? Number\(binding\.application_id\) : null/);
+  assert.match(internalCompletion, /publisherId: input\.publisherId/);
   assert.match(internalCompletion, /createRewardEvent\(\{\s*db: conn/);
   assert.match(internalCompletion, /status: "eligible"/);
   assert.match(internalCompletion, /verificationLevel: "ads_galaxy_validated"/);
-  assert.match(internalCompletion, /if \(completed\)/);
+  assert.match(internalCompletion, /enqueueDirectMiniappRewardCallback/);
   assert.match(externalCompletion, /if \(!productionRewardCallbacksEnabled\(\)\) return null/);
   assert.match(externalCompletion, /createRewardEvent\(\{\s*db: conn/);
   assert.match(externalCompletion, /status: "client_completed"/);
@@ -68,8 +70,8 @@ test("publisher actions enforce owned binding, rotation, and terminal retry", ()
   assert.match(platform, /db: conn/);
   assert.match(platform, /if \(ownsTransaction\) await conn\.commit\(\)/);
   assert.match(platform, /if \(ownsTransaction\) await conn\.rollback\(\)/);
-  assert.match(developerUi, /Mini App bindings/);
-  assert.match(developerUi, /Production webhook controls/);
+  assert.match(developerUi, /Advanced Mini App API bindings/);
+  assert.match(developerUi, /Advanced Developer webhook controls/);
 });
 
 test("public callback and Developer Center errors are allowlisted", () => {
@@ -90,7 +92,7 @@ test("documentation requires server verification and contains no fake backup ori
   assert.doesNotMatch(miniappDocs, /Grant your in-app reward only after window\.showAdsGalaxy\(\) resolves/);
   assert.match(developerDocs, /signing input is timestamp .* event_id .* raw_body/);
   assert.match(developerDocs, /five minutes/);
-  assert.match(developerDocs, /timingSafeEqual/);
+  assert.match(integrationExamples, /timingSafeEqual/);
   assert.match(developerDocs, /hash_equals/);
   assert.match(developerDocs, /compare_digest/);
 });

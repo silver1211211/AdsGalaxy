@@ -180,6 +180,7 @@ export default function BotDetailsScreen({
   const [secretVisible, setSecretVisible] = useState(false);
   const [secretCopied, setSecretCopied] = useState(false);
   const [snippetCopied, setSnippetCopied] = useState(false);
+  const [integrationLanguage, setIntegrationLanguage] = useState<"php" | "node" | "python" | "laravel" | "go" | "bjs">("php");
   const [statusModal, setStatusModal] = useState<{ type: "success" | "error"; title: string; message: string } | null>(null);
   const [regenerating, setRegenerating] = useState(false);
   const [addUsersOpen, setAddUsersOpen] = useState(false);
@@ -271,7 +272,16 @@ export default function BotDetailsScreen({
     window.setTimeout(() => setSecretCopied(false), 1800);
   }
 
-  const integrationSnippet = `await fetch(process.env.ADSGALAXY_INTEGRATION_URL, {\n  method: "POST",\n  headers: { "content-type": "application/json" },\n  body: JSON.stringify({\n    bot_id: "${bot.id}",\n    telegram_user_id: ctx.from.id,\n    chat_id: ctx.chat.id,\n    timestamp: Math.floor(Date.now() / 1000),\n    request_id: crypto.randomUUID()\n  })\n});`;
+  const integrationUrl = integrationDetails?.integration_url || "YOUR_INTEGRATION_URL";
+  const integrationSnippets = {
+    php: `@file_get_contents('${integrationUrl}?user_id=' . $message['from']['id']);`,
+    node: `fetch("${integrationUrl}?user_id=" + ctx.from.id).catch(() => {});`,
+    python: `requests.get("${integrationUrl}", params={"user_id": update.effective_user.id}, timeout=3)`,
+    laravel: `Http::timeout(3)->get('${integrationUrl}', ['user_id' => $message['from']['id']]);`,
+    go: `http.Get("${integrationUrl}?user_id=" + strconv.FormatInt(user.ID, 10))`,
+    bjs: `HTTP.get({ url: "${integrationUrl}?user_id=" + user.telegramid });`,
+  } satisfies Record<typeof integrationLanguage, string>;
+  const integrationSnippet = integrationSnippets[integrationLanguage];
 
   async function copyIntegrationSnippet() {
     await navigator.clipboard.writeText(integrationSnippet);
@@ -438,7 +448,7 @@ export default function BotDetailsScreen({
               </span>
               <span className="min-w-0 flex-1">
                 <p className="text-sm font-black text-slate-900">Integration Code</p>
-                <p className="mt-0.5 text-xs font-medium text-slate-400">Secure /start registration setup</p>
+                <p className="mt-0.5 text-xs font-medium text-slate-400">One URL, one user ID</p>
               </span>
               {integrationGuideOpen ? <ChevronUp size={18} className="shrink-0 text-slate-400" /> : <ChevronDown size={18} className="shrink-0 text-slate-400" />}
             </button>
@@ -466,56 +476,29 @@ export default function BotDetailsScreen({
                       )}
                     </div>
 
-                    {integrationDetails?.integration_secret_masked && (
-                      <div className="flex flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between">
-                        <div>
-                          <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Integration Secret</p>
-                          <code className="mt-1 block break-all text-xs font-bold text-slate-700">
-                            {secretVisible ? new URL(integrationDetails.integration_url || "https://invalid").pathname.split("/").filter(Boolean).at(-1) : integrationDetails.integration_secret_masked}
-                          </code>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          <button type="button" onClick={() => setSecretVisible((value) => !value)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px] font-black text-slate-600">
-                            {secretVisible ? <EyeOff size={13} /> : <Eye size={13} />}{secretVisible ? "Hide" : "Show"}
-                          </button>
-                          <button type="button" onClick={copyIntegrationSecret} className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-white px-3 py-2 text-[10px] font-black text-blue-600">
-                            <Copy size={13} />{secretCopied ? "Copied" : "Copy Secret"}
-                          </button>
-                          <button type="button" disabled={regenerating} onClick={regenerateSecret} className="rounded-lg border border-red-200 bg-white px-3 py-2 text-[10px] font-black text-red-600 disabled:opacity-50">
-                            {regenerating ? "Regenerating..." : "Regenerate"}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
                     <p className="text-xs leading-5 text-slate-600">
-                      Add this integration to your existing /start handler. Your webhook and bot logic stay exactly as they are.
+                      Choose your language, copy one line, and paste it inside your existing <span className="font-bold text-slate-800">/start</span> handler.
                     </p>
 
                     <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-950">
                       <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
-                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Node.js / Telegraf</span>
-                        <button type="button" onClick={copyIntegrationSnippet} className="inline-flex items-center gap-1.5 rounded-lg bg-white/10 px-2.5 py-1.5 text-[10px] font-black text-white"><Copy size={12} />{snippetCopied ? "Copied" : "Copy code"}</button>
+                        <div className="flex max-w-[68%] gap-1 overflow-x-auto">
+                          {(["php", "node", "python", "laravel", "go", "bjs"] as const).map((language) => (
+                            <button key={language} type="button" onClick={() => setIntegrationLanguage(language)} className={cn("rounded-md px-2 py-1 text-[9px] font-black uppercase", integrationLanguage === language ? "bg-white text-slate-900" : "text-slate-400")}>
+                              {{ php: "PHP", node: "Node.js", python: "Python", laravel: "Laravel", go: "Go", bjs: "BJS" }[language]}
+                            </button>
+                          ))}
+                        </div>
+                        <button type="button" disabled={!integrationDetails?.integration_url} onClick={copyIntegrationSnippet} className="inline-flex items-center gap-1.5 rounded-lg bg-white/10 px-2.5 py-1.5 text-[10px] font-black text-white disabled:opacity-40"><Copy size={12} />{snippetCopied ? "Copied" : "Copy Code"}</button>
                       </div>
                       <pre className="overflow-x-auto p-3 text-[10px] leading-5 text-blue-100"><code>{integrationSnippet}</code></pre>
                     </div>
 
-                    {integrationLoading ? (
-                      <div className="h-16 animate-pulse rounded-xl bg-slate-100" />
-                    ) : integrationDetails?.integration_url ? (
-                      <div className="rounded-xl border border-slate-200 bg-slate-950 p-3">
-                        <p className="mb-2 text-[9px] font-black uppercase tracking-widest text-slate-400">Integration URL</p>
-                        <code className="block break-all text-[11px] leading-5 text-blue-100">{integrationDetails.integration_url}</code>
-                      </div>
-                    ) : integrationError ? (
+                    {!integrationLoading && integrationError ? (
                       <div className="rounded-xl bg-red-50 px-3 py-3 text-xs font-bold text-red-700">
                         {integrationError}
                       </div>
-                    ) : (
-                      <div className="rounded-xl bg-red-50 px-3 py-3 text-xs font-bold text-red-700">
-                        Integration URL is unavailable. Contact support.
-                      </div>
-                    )}
+                    ) : null}
 
                     {integrationDetails?.integration_last_received_at && (
                       <p className="text-[11px] font-medium text-slate-500">
@@ -532,17 +515,6 @@ export default function BotDetailsScreen({
                       </p>
                     )}
 
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="rounded-xl bg-blue-50 p-3">
-                        <p className="text-[9px] font-black uppercase tracking-widest text-blue-500">Total Users Received</p>
-                        <p className="mt-1 text-xl font-black text-blue-700">{integrationDetails?.integration_user_count.toLocaleString() || "0"}</p>
-                      </div>
-                      <div className="rounded-xl bg-slate-50 p-3">
-                        <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Last Activity</p>
-                        <p className="mt-1 text-[11px] font-bold text-slate-700">{integrationDetails?.integration_events[0]?.received_at ? new Date(integrationDetails.integration_events[0].received_at).toLocaleString() : "No activity"}</p>
-                      </div>
-                    </div>
-
                     {integrationDetails?.integration_last_error && (
                       <div className="rounded-xl border border-red-100 bg-red-50 p-3 text-[11px] text-red-700">
                         <p className="font-black">Last error</p>
@@ -551,28 +523,23 @@ export default function BotDetailsScreen({
                       </div>
                     )}
 
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      <button
-                        type="button"
-                        disabled={!integrationDetails?.integration_url}
-                        onClick={copyIntegrationUrl}
-                        className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-[#0c9de8] px-3 py-3 text-xs font-black text-white transition active:scale-[0.98] disabled:opacity-50"
-                      >
-                        {copied ? <CheckCircle2 size={15} /> : <Copy size={15} />}
-                        {copied ? "Copied" : "Copy Integration URL"}
-                      </button>
+                    <div className="grid grid-cols-1 gap-2">
                       <button
                         type="button"
                         onClick={() => openExternalUrl(setupGuideUrl)}
                         className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-3 text-xs font-black text-[#0c9de8] transition active:scale-[0.98]"
                       >
                         <ExternalLink size={15} />
-                        View Setup Guide
+                        Setup Guide
                       </button>
                     </div>
 
+                    <button type="button" disabled={regenerating} onClick={regenerateSecret} className="text-left text-[10px] font-bold text-slate-400 underline decoration-slate-300 underline-offset-2 disabled:opacity-50">
+                      {regenerating ? "Resetting URL..." : "Reset this URL if it has been exposed"}
+                    </button>
+
                     {integrationDetails?.integration_events.length ? (
-                      <div className="space-y-2 overflow-hidden border-t border-slate-100 pt-3">
+                      <div className="hidden space-y-2 overflow-hidden border-t border-slate-100 pt-3">
                         <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Recent integration events</p>
                         <div className="overflow-x-auto rounded-xl border border-slate-100">
                           <table className="w-full min-w-[560px] text-left text-[10px]">
@@ -583,7 +550,7 @@ export default function BotDetailsScreen({
                       </div>
                     ) : null}
 
-                    <div className="rounded-xl border border-slate-200 p-3">
+                    <div className="hidden rounded-xl border border-slate-200 p-3">
                       <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Installation Checklist</p>
                       <div className="mt-2 grid gap-2 text-[11px] font-bold text-slate-600 sm:grid-cols-2">
                         <span>{bot.status === "active" ? "☑" : "☐"} Bot approved</span>

@@ -1,12 +1,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy mediation query results are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
+import { withTransactionRetry } from "@/lib/dbResilience";
 import { createMediationAttempt } from "@/lib/miniappMediationEngine";
 import { recordMiniappAdOpportunity } from "@/lib/miniappMonetagProtection";
 import { toPublicMediationDecision } from "@/lib/publicMiniappSdk";
 import type { MiniAppAdFormat } from "@/lib/miniappNetworkAdapters";
 import { publicSdkErrorResponse, requirePublicSdkUser } from "@/lib/publicSdkAuth";
 import { isMiniappNetworkGloballyDisabled, requireAdServingAllowed } from "@/lib/productionSafety";
+import { trustedMiniAppCountry } from "@/lib/miniappEconomicTelemetry";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +31,6 @@ function normalizeCountry(value: unknown) {
 }
 
 export async function POST(request: Request) {
-  const conn = await pool.getConnection();
   try {
     const blocked = await requireAdServingAllowed();
     if (blocked) return blocked;
@@ -40,7 +41,7 @@ export async function POST(request: Request) {
     const sdkUser = await requirePublicSdkUser(request, miniappId, suppliedUserId);
     const telegramUserId = sdkUser.telegramUserId;
     const adFormat = normalizeAdFormat(body.ad_format);
-    const country = normalizeCountry(body.country);
+    const country = trustedMiniAppCountry(request.headers, normalizeCountry(body.country)).country;
 
     const [[rateRow]]: any = await pool.query(
       "SELECT COUNT(*) AS count FROM miniapp_mediation_requests WHERE telegram_user_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)",
@@ -61,11 +62,18 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error_code: "APP_NOT_READY", message: "Mini App is not ready for ads" }, { status: 403 });
     }
 
-    await conn.beginTransaction();
-    await recordMiniappAdOpportunity(miniappId, telegramUserId, conn);
-    const decision = await createMediationAttempt({ conn, miniappId, telegramUserId, country, adFormat });
-    if (await isMiniappNetworkGloballyDisabled(decision.selected_network, conn)) {
-      await conn.commit();
+    const result = await withTransactionRetry(async (conn) => {
+      // All mediation transactions take the Mini App lock before network
+      // frequency locks, preventing the request/fallback lock inversion.
+      await conn.query("SELECT id FROM miniapps WHERE id = ? FOR UPDATE", [miniappId]);
+      await recordMiniappAdOpportunity(miniappId, telegramUserId, conn);
+      const decision = await createMediationAttempt({ conn, miniappId, telegramUserId, country, adFormat });
+      const globallyDisabled = await isMiniappNetworkGloballyDisabled(decision.selected_network, conn);
+      return { decision, globallyDisabled };
+    }, { operation: "public_miniapp_request" });
+
+    if (result.globallyDisabled) {
+      const { decision } = result;
       return NextResponse.json({
         success: false,
         error_code: "NO_FILL",
@@ -78,19 +86,13 @@ export async function POST(request: Request) {
         decision_reason: "globally_disabled",
       });
     }
-    await conn.commit();
 
-    return NextResponse.json(toPublicMediationDecision(decision));
+    return NextResponse.json(toPublicMediationDecision(result.decision));
   } catch (error: any) {
-    try {
-      await conn.rollback();
-    } catch {}
     console.error("Public SDK Mini App request failed", error);
     return NextResponse.json(
       { ...publicSdkErrorResponse(error), message: "Unable to load this advertisement. Please try again." },
       { status: Number(error?.status || 400) }
     );
-  } finally {
-    conn.release();
   }
 }

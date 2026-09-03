@@ -1,4 +1,5 @@
 import { isTelegramMiniApp, waitForTelegramInitData } from "./telegramWebApp";
+import { miniappReloadDebug } from "./miniappReloadDebug";
 
 const LOCAL_MINIAPP_DEV_STORAGE_KEY = "adsgalaxy_local_miniapp_dev";
 const LOCAL_MINIAPP_DEV_INIT_DATA_PREFIX = "adsgalaxy-local-miniapp-dev:";
@@ -64,6 +65,10 @@ function getOrCreateDeviceId() {
 }
 
 export async function apiFetch(url: string, options: ApiFetchOptions = {}) {
+  const route = url.split("?")[0];
+  const diagnosticRoutes = new Set(["/api/me/status", "/api/advertiser/campaigns", "/api/advertiser/miniapp-rewarded-campaigns", "/api/advertiser/stats", "/api/publisher/channels", "/api/publisher/stats", "/api/publisher/referrals"]);
+  const shouldDiagnose = diagnosticRoutes.has(route);
+  const requestStartedAt = Date.now();
   const { requireAuth = true, timeoutMs = 15000, ...fetchOptions } = options;
   const localDevInitData = typeof window !== "undefined" ? getOrCreateLocalMiniappDevInitData() : "";
   const initData = localDevInitData || (typeof window !== "undefined"
@@ -73,14 +78,27 @@ export async function apiFetch(url: string, options: ApiFetchOptions = {}) {
   const headers = new Headers(fetchOptions.headers);
   headers.set("x-telegram-init-data", initData || "");
   headers.set("x-adsgalaxy-device-id", getOrCreateDeviceId());
+  if (shouldDiagnose) miniappReloadDebug("api_fetch_started", { route, init_data_present: Boolean(initData), phase: "started" });
 
   if (!(fetchOptions.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
 
-  const response = typeof window !== "undefined"
-    ? await fetchWithTimeout(url, { ...fetchOptions, headers }, timeoutMs)
-    : await fetch(url, { ...fetchOptions, headers });
+  let response: Response;
+  try {
+    response = typeof window !== "undefined"
+      ? await fetchWithTimeout(url, { ...fetchOptions, headers }, timeoutMs)
+      : await fetch(url, { ...fetchOptions, headers });
+  } catch (error) {
+    if (shouldDiagnose) miniappReloadDebug("api_fetch_failed", {
+      route, phase: error instanceof DOMException && error.name === "AbortError" ? "aborted" : "failed",
+      duration_ms: Date.now() - requestStartedAt,
+      error_name: error instanceof Error ? error.name : "UnknownError",
+      error_message: error instanceof Error ? error.message : "Request failed",
+    });
+    throw error;
+  }
+  if (shouldDiagnose) miniappReloadDebug("api_fetch_completed", { route, phase: "completed", status: response.status, duration_ms: Date.now() - requestStartedAt });
 
   if (response.status === 403 && typeof window !== "undefined") {
     const payload = await response.clone().json().catch(() => ({}));

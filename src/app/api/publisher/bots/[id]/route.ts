@@ -91,7 +91,7 @@ export async function GET(
         : "(SELECT COUNT(*) FROM bot_users bu WHERE bu.bot_id = b.id)";
     const userCounts = botUserCountExpressions("b", { publisherVisible: true });
     const botSuccessfulExpr = hasBroadcastDeliveries
-      ? "COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent'), 0)"
+      ? "COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent'), 0)"
       : "0";
     const botDeliveredExpr = hasBroadcastDeliveries
       ? "COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent'), 0)"

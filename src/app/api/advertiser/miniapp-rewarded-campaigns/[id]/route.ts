@@ -6,6 +6,7 @@ import { getMiniAppPublisherCpmSettings, validateAdvertiserCpmBid } from "@/lib/
 import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { normalizeMiniAppCampaignCategories, validateMiniAppCampaignText } from "@/lib/miniappCampaignValidation";
 import { validateOptionalDailyBudget } from "@/lib/campaignBudget";
+import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByIds } from "@/lib/miniappCampaignMetrics";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,30 +22,24 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
          advertiser_cpm_bid, campaign_budget_mode, daily_budget_mode, target_countries,
          countries, languages, vpn_policy, device_policy, os_policy, start_at, end_at,
          daily_budget_limit, frequency_cap_per_user, direct_placement_mode,
-         direct_inventory_scope, direct_inventory_metadata, status, created_at, updated_at
+         direct_inventory_scope, direct_inventory_metadata, status, pause_reason, created_at, updated_at
        FROM miniapp_rewarded_campaigns WHERE id = ? AND advertiser_id = ?`,
       [id, user.id]
     );
     if (!rows.length) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
-    const [[stats]]: any = await pool.query(
-      `SELECT
-         COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = ?), 0) as impressions,
-         COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = ?), 0) as spend,
-         COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = ?), 0) as clicks,
-         CASE WHEN COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = ?), 0) > 0
-           THEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = ?), 0)
-             / COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = ?), 1) * 100
-           ELSE 0
-         END as ctr`,
-      [id, id, id, id, id, id]
-    );
     const [chartData]: any = await pool.query(
-      `SELECT DATE(created_at) as date, COUNT(*) as count
-       FROM miniapp_internal_ad_impressions
-       WHERE campaign_id = ? AND created_at > NOW() - INTERVAL 7 DAY
-       GROUP BY DATE(created_at)
-       ORDER BY date ASC`,
-      [id]
+      `SELECT date, SUM(count) AS count FROM (
+         SELECT DATE(created_at) AS date, COUNT(*) AS count
+         FROM miniapp_internal_ad_impressions
+         WHERE campaign_id = ? AND created_at > NOW() - INTERVAL 7 DAY
+         GROUP BY DATE(created_at)
+         UNION ALL
+         SELECT DATE(created_at) AS date, SUM(external_impressions_added) AS count
+         FROM miniapp_external_delivery_batches
+         WHERE campaign_id = ? AND created_at > NOW() - INTERVAL 7 DAY
+         GROUP BY DATE(created_at)
+       ) combined_daily_delivery GROUP BY date ORDER BY date ASC`,
+      [id, id]
     );
     try {
       const [exclusions]: any = await pool.query(
@@ -56,7 +51,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
       rows[0].excluded_inventory = [];
     }
-    return NextResponse.json({ ...rows[0], ...stats, chart_data: chartData });
+    const metrics = await getMiniAppCampaignMetricsByIds([id]);
+    return NextResponse.json({ ...applyMiniAppCampaignMetrics(rows[0], metrics), chart_data: chartData });
   } catch (error: any) {
     console.error("Miniapp campaign GET error:", error);
     const status = getAuthErrorStatus(error);

@@ -5,134 +5,89 @@ import { checkAdminAuth } from "@/lib/adminAuth";
 import { getGlobalBotAudienceStats } from "@/lib/botAudience";
 import { getMiniAppPlatformStats } from "@/lib/miniappReports";
 import { columnExists } from "@/lib/schemaGuards";
+import { getAdminChannelSafetyMetrics } from "@/lib/channelSafety";
+
+const DASHBOARD_CACHE_MS = 60_000;
+const DASHBOARD_STALE_MS = 24 * 60 * 60 * 1000;
+let dashboardCache: { expiresAt: number; payload: Record<string, unknown> } | null = null;
 
 export async function GET() {
   if (!(await checkAdminAuth())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  try {
-    const [[usersTotal]]: any = await pool.query("SELECT COUNT(*) as count FROM users");
-    const [[usersToday]]: any = await pool.query("SELECT COUNT(*) as count FROM users WHERE DATE(created_at) = CURDATE()");
-    const [[usersWeek]]: any = await pool.query("SELECT COUNT(*) as count FROM users WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)");
-    const [[usersMonth]]: any = await pool.query("SELECT COUNT(*) as count FROM users WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)");
+  if (dashboardCache && dashboardCache.expiresAt > Date.now()) {
+    return NextResponse.json(dashboardCache.payload, {
+      headers: { "Cache-Control": "private, max-age=60, stale-while-revalidate=300", "X-AdsGalaxy-Cache": "HIT" },
+    });
+  }
 
-    const [campaignsQuery]: any = await pool.query("SELECT status, COUNT(*) as count FROM campaigns GROUP BY status");
+  try {
+    const [
+      [[usersAggregate]], [campaignsQuery], [[campaignTypeStats]], [miniappCampaignsQuery],
+      [channelsQuery], [[approvedChannels]], [[deliveryEligibleChannels]], [withdrawalsQuery],
+      [[depositsPaid]], [[withdrawalsPaid]], [[totalSubscribers]], [[botsTotal]],
+      [[botsDeliveryEligible]], [[botsPaused]], botAudienceStats, [[conversionTotals]],
+      [topConversionCampaigns], [topConversionCategories], [topConversionInventory],
+      [[conversionReviews]], [[attributionSetting]], [[miniappsActive]], [[impressionsToday]],
+      [[impressionsYesterday]], miniappStats, [[channelPlatformStats]],
+      hasBotPlatformRevenue, hasBotReserveAmount, safetyMetrics,
+    ]: any = await Promise.all([
+      pool.query(`SELECT COUNT(*) AS total,
+        SUM(created_at >= CURDATE()) AS today,
+        SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)) AS week,
+        SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)) AS month FROM users`),
+      pool.query("SELECT status, COUNT(*) as count FROM campaigns GROUP BY status"),
+      pool.query("SELECT SUM(status = 'pending' AND type != 'broadcast') AS channel_pending, SUM(status = 'pending' AND type = 'broadcast') AS bot_pending FROM campaigns"),
+      pool.query("SELECT status, COUNT(*) as count FROM miniapp_rewarded_campaigns GROUP BY status"),
+      pool.query("SELECT status, COUNT(*) as count FROM channels WHERE is_deleted = FALSE GROUP BY status"),
+      pool.query("SELECT COUNT(*) as count, COALESCE(SUM(subscriber_count), 0) as subscribers FROM channels WHERE is_deleted = FALSE AND status = 'active'"),
+      pool.query("SELECT COUNT(*) as count, COALESCE(SUM(subscriber_count), 0) as subscribers FROM channels WHERE is_deleted = FALSE AND status = 'active'"),
+      pool.query("SELECT status, COUNT(*) as count FROM withdrawals GROUP BY status"),
+      pool.query("SELECT SUM(amount) as total FROM deposits WHERE status IN ('Paid', 'paid', 'success')"),
+      pool.query("SELECT SUM(amount) as total FROM withdrawals WHERE status = 'success'"),
+      pool.query("SELECT COALESCE(SUM(subscriber_count), 0) as total FROM channels WHERE is_deleted = FALSE"),
+      pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status = 'active'"),
+      pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status = 'active' AND COALESCE(health_status, 'active') IN ('active', 'healthy')"),
+      pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status IN ('paused', 'token_invalid', 'bot_deleted', 'unreachable')"),
+      getGlobalBotAudienceStats(),
+      pool.query("SELECT COUNT(*) as conversions, COALESCE(SUM(conversion_value), 0) as conversion_value FROM ad_conversions"),
+      pool.query(`SELECT campaign_type, campaign_id, COUNT(*) as conversions, COALESCE(SUM(conversion_value), 0) as conversion_value
+        FROM ad_conversions GROUP BY campaign_type, campaign_id ORDER BY conversions DESC, conversion_value DESC LIMIT 5`),
+      pool.query(`SELECT COALESCE(ac.category, 'Uncategorized') as category, COUNT(conv.id) as conversions
+        FROM ad_conversions conv JOIN ad_click_attribution ac ON ac.click_id = conv.click_id
+        GROUP BY COALESCE(ac.category, 'Uncategorized') ORDER BY conversions DESC LIMIT 5`),
+      pool.query(`SELECT COALESCE(ac.inventory_type, 'unknown') as inventory_type, COALESCE(ac.inventory_id, 0) as inventory_id, COUNT(conv.id) as conversions
+        FROM ad_conversions conv JOIN ad_click_attribution ac ON ac.click_id = conv.click_id
+        GROUP BY COALESCE(ac.inventory_type, 'unknown'), COALESCE(ac.inventory_id, 0) ORDER BY conversions DESC LIMIT 5`),
+      pool.query("SELECT COUNT(*) as open_count FROM conversion_review_queue WHERE status IN ('open', 'monitor')"),
+      pool.query("SELECT value FROM settings WHERE `key` = 'conversion_attribution_window_days' LIMIT 1"),
+      pool.query("SELECT COUNT(*) as count FROM miniapps WHERE is_deleted = FALSE AND status IN ('approved', 'monetized')"),
+      pool.query("SELECT COALESCE(SUM(impressions), 0) as count FROM miniapp_daily_stats WHERE date = CURDATE()"),
+      pool.query("SELECT COALESCE(SUM(impressions), 0) as count FROM miniapp_daily_stats WHERE date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)"),
+      getMiniAppPlatformStats(),
+      pool.query(`SELECT COALESCE(SUM(views), 0) as impressions, COALESCE(SUM(clicks), 0) as clicks,
+        COALESCE(SUM(spend), 0) as revenue, COALESCE(SUM(earnings), 0) as publisher_earnings,
+        COALESCE(SUM(platform_revenue), 0) as platform_earnings, COALESCE(SUM(reserve_amount), 0) as reserve
+        FROM channel_daily_stats`),
+      columnExists(pool, "broadcast_deliveries", "platform_revenue"),
+      columnExists(pool, "broadcast_deliveries", "reserve_amount"),
+      getAdminChannelSafetyMetrics(),
+    ]);
+    const usersTotal = { count: Number(usersAggregate.total || 0) };
+    const usersToday = { count: Number(usersAggregate.today || 0) };
+    const usersWeek = { count: Number(usersAggregate.week || 0) };
+    const usersMonth = { count: Number(usersAggregate.month || 0) };
     const campaignsStats = campaignsQuery.reduce((acc: any, row: any) => ({ ...acc, [row.status]: row.count }), {});
-    const [[campaignTypeStats]]: any = await pool.query(`
-      SELECT
-        SUM(CASE WHEN status = 'pending' AND type != 'broadcast' THEN 1 ELSE 0 END) AS channel_pending,
-        SUM(CASE WHEN status = 'pending' AND type = 'broadcast' THEN 1 ELSE 0 END) AS bot_pending
-      FROM campaigns
-    `);
-    const [miniappCampaignsQuery]: any = await pool.query(
-      "SELECT status, COUNT(*) as count FROM miniapp_rewarded_campaigns GROUP BY status"
-    );
     const miniappCampaignsStats = miniappCampaignsQuery.reduce((acc: any, row: any) => ({ ...acc, [row.status]: row.count }), {});
     const standardCampaignTotal = Object.values(campaignsStats).reduce((sum: number, value: any) => sum + Number(value || 0), 0);
     const miniappCampaignTotal = Object.values(miniappCampaignsStats).reduce((sum: number, value: any) => sum + Number(value || 0), 0);
 
-    const [channelsQuery]: any = await pool.query("SELECT status, COUNT(*) as count FROM channels WHERE is_deleted = FALSE GROUP BY status");
     const channelsStats = channelsQuery.reduce((acc: any, row: any) => ({ ...acc, [row.status]: row.count }), {});
-    const [[approvedChannels]]: any = await pool.query(`
-      SELECT COUNT(*) as count, COALESCE(SUM(subscriber_count), 0) as subscribers
-      FROM channels
-      WHERE is_deleted = FALSE
-        AND status = 'active'
-    `);
-    const [[deliveryEligibleChannels]]: any = await pool.query(`
-      SELECT COUNT(*) as count, COALESCE(SUM(subscriber_count), 0) as subscribers
-      FROM channels
-      WHERE is_deleted = FALSE
-        AND status = 'active'
-        AND COALESCE(health_status, 'healthy') IN ('healthy','warning')
-    `);
-
-    const [withdrawalsQuery]: any = await pool.query("SELECT status, COUNT(*) as count FROM withdrawals GROUP BY status");
     const withdrawalsStats = withdrawalsQuery.reduce((acc: any, row: any) => ({ ...acc, [row.status]: row.count }), {});
-
-    const [[depositsPaid]]: any = await pool.query("SELECT SUM(amount) as total FROM deposits WHERE status IN ('Paid', 'paid', 'success')");
-    const [[withdrawalsPaid]]: any = await pool.query("SELECT SUM(amount) as total FROM withdrawals WHERE status = 'success'");
-
-    const [[totalSubscribers]]: any = await pool.query(`
-      SELECT COALESCE(SUM(subscriber_count), 0) as total
-      FROM channels
-      WHERE is_deleted = FALSE
-    `);
-    const [audienceByCountry]: any = await pool.query(`
-      SELECT
-        COALESCE(NULLIF(UPPER(TRIM(marketplace_country)), ''), 'UNASSIGNED') as country,
-        COUNT(*) as channels,
-        COALESCE(SUM(COALESCE(subscriber_count, 0)), 0) as audience
-      FROM channels
-      WHERE is_deleted = FALSE
-      GROUP BY COALESCE(NULLIF(UPPER(TRIM(marketplace_country)), ''), 'UNASSIGNED')
-      ORDER BY audience DESC
-    `);
-    
-    const [[botsTotal]]: any = await pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status = 'active'");
-    const [[botsDeliveryEligible]]: any = await pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status = 'active' AND COALESCE(health_status, 'active') IN ('active', 'healthy')");
-    const [[botsPaused]]: any = await pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status IN ('paused', 'token_invalid', 'bot_deleted', 'unreachable')");
-    const botAudienceStats = await getGlobalBotAudienceStats();
-    const [[conversionTotals]]: any = await pool.query(`
-      SELECT
-        COUNT(*) as conversions,
-        COALESCE(SUM(conversion_value), 0) as conversion_value
-      FROM ad_conversions
-    `);
-    const [topConversionCampaigns]: any = await pool.query(`
-      SELECT campaign_type, campaign_id, COUNT(*) as conversions, COALESCE(SUM(conversion_value), 0) as conversion_value
-      FROM ad_conversions
-      GROUP BY campaign_type, campaign_id
-      ORDER BY conversions DESC, conversion_value DESC
-      LIMIT 5
-    `);
-    const [topConversionCategories]: any = await pool.query(`
-      SELECT COALESCE(ac.category, 'Uncategorized') as category, COUNT(conv.id) as conversions
-      FROM ad_conversions conv
-      JOIN ad_click_attribution ac ON ac.click_id = conv.click_id
-      GROUP BY COALESCE(ac.category, 'Uncategorized')
-      ORDER BY conversions DESC
-      LIMIT 5
-    `);
-    const [topConversionInventory]: any = await pool.query(`
-      SELECT COALESCE(ac.inventory_type, 'unknown') as inventory_type, COALESCE(ac.inventory_id, 0) as inventory_id, COUNT(conv.id) as conversions
-      FROM ad_conversions conv
-      JOIN ad_click_attribution ac ON ac.click_id = conv.click_id
-      GROUP BY COALESCE(ac.inventory_type, 'unknown'), COALESCE(ac.inventory_id, 0)
-      ORDER BY conversions DESC
-      LIMIT 5
-    `);
-    const [[conversionReviews]]: any = await pool.query("SELECT COUNT(*) as open_count FROM conversion_review_queue WHERE status IN ('open', 'monitor')");
-    const [[attributionSetting]]: any = await pool.query("SELECT value FROM settings WHERE `key` = 'conversion_attribution_window_days' LIMIT 1");
-
-    const [[miniappsActive]]: any = await pool.query(
-      "SELECT COUNT(*) as count FROM miniapps WHERE is_deleted = FALSE AND status IN ('approved', 'monetized')"
-    );
-    const [[impressionsToday]]: any = await pool.query(
-      "SELECT COALESCE(SUM(impressions), 0) as count FROM miniapp_daily_stats WHERE date = CURDATE()"
-    );
-    const [[impressionsYesterday]]: any = await pool.query(
-      "SELECT COALESCE(SUM(impressions), 0) as count FROM miniapp_daily_stats WHERE date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)"
-    );
-    const miniappStats = await getMiniAppPlatformStats();
-    const [[channelPlatformStats]]: any = await pool.query(`
-      SELECT
-        COALESCE(SUM(views), 0) as impressions,
-        COALESCE(SUM(clicks), 0) as clicks,
-        COALESCE(SUM(spend), 0) as revenue,
-        COALESCE(SUM(earnings), 0) as publisher_earnings,
-        COALESCE(SUM(platform_revenue), 0) as platform_earnings,
-        COALESCE(SUM(reserve_amount), 0) as reserve
-      FROM channel_daily_stats
-    `);
-    const [hasBotPlatformRevenue, hasBotReserveAmount] = await Promise.all([
-      columnExists(pool, "broadcast_deliveries", "platform_revenue"),
-      columnExists(pool, "broadcast_deliveries", "reserve_amount"),
-    ]);
     const [[botPlatformStats]]: any = await pool.query(`
       SELECT
-        FLOOR(COUNT(*) / 5) as impressions,
+        COUNT(*) as impressions,
         COALESCE(SUM(cost), 0) as revenue,
         COALESCE(SUM(publisher_reward), 0) as publisher_earnings,
         ${hasBotPlatformRevenue ? "COALESCE(SUM(platform_revenue), 0)" : "0"} as platform_earnings,
@@ -157,7 +112,7 @@ export async function GET() {
       + Number(miniappStats.lifetime.total_impressions || 0);
     const platformClicks = Number(channelPlatformStats?.clicks || 0) + Number(miniappStats.lifetime.total_clicks || 0);
 
-    return NextResponse.json({
+    const payload = {
       users: {
         total: usersTotal.count,
         today: usersToday.count,
@@ -186,12 +141,7 @@ export async function GET() {
         approvedSubscribers: Number(approvedChannels.subscribers || 0),
         deliveryEligible: deliveryEligibleChannels.count || 0,
         deliveryEligibleSubscribers: Number(deliveryEligibleChannels.subscribers || 0),
-        totalSubscribers: Number(totalSubscribers.total || 0),
-        audienceByCountry: audienceByCountry.map((row: any) => ({
-          country: row.country,
-          channels: Number(row.channels || 0),
-          audience: Number(row.audience || 0),
-        }))
+        totalSubscribers: Number(totalSubscribers.total || 0)
       },
       bots: {
         total: botsTotal.count,
@@ -252,10 +202,20 @@ export async function GET() {
         top_campaigns: topConversionCampaigns,
         top_categories: topConversionCategories,
         top_inventory: topConversionInventory
-      }
-    }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
+      },
+      trust_safety: safetyMetrics,
+    };
+    dashboardCache = { expiresAt: Date.now() + DASHBOARD_CACHE_MS, payload };
+    return NextResponse.json(payload, {
+      headers: { "Cache-Control": "private, max-age=60, stale-while-revalidate=300", "X-AdsGalaxy-Cache": "MISS" },
+    });
   } catch (error: any) {
     console.error("Admin Dashboard API Error:", error);
+    if (dashboardCache && dashboardCache.expiresAt + DASHBOARD_STALE_MS > Date.now()) {
+      return NextResponse.json(dashboardCache.payload, {
+        headers: { "Cache-Control": "private, no-store", "X-AdsGalaxy-Cache": "STALE" },
+      });
+    }
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
 }

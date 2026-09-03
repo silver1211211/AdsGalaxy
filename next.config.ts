@@ -8,6 +8,7 @@ const sdkCorsHeaders = [
 ];
 
 const nextConfig: NextConfig = {
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   allowedDevOrigins: ["curious-necessarily-hyacinth.ngrok-free.dev"],
   async headers() {
     return [

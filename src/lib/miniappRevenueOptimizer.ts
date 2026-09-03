@@ -170,7 +170,7 @@ function gradualCpm(previous: number, target: number, minCpm: number, maxCpm: nu
 
 async function calculateRecommendedCpm(db: Db, settings: OptimizerSettings) {
   const cpmSettings = await getMiniAppPublisherCpmSettings(db as PoolConnection).catch(() => null);
-  const publisherShare = clamp(metricNumber(cpmSettings?.publisher_share_percent ?? 60), 1, 100) / 100;
+  const publisherShare = clamp(metricNumber(cpmSettings?.max_publisher_share ?? 0.5), 0.01, 1);
   const revenue = await platformRevenueMetrics(db);
   const weightedPublisherTarget = await countryWeightedPublisherTarget(db, settings.recommendedCpm * publisherShare);
   const safeHistoricalAdvertiserCpm = revenue.effectiveNetworkCpm > 0

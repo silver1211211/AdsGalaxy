@@ -11,22 +11,27 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
+import { getApiErrorMessage } from "@/lib/apiErrorMessage";
+import { PUBLISHER_CHANNEL_AUDIENCE_OPTIONS } from "@/lib/channelAudience";
 
 interface AddChannelFormProps {
   onClose: () => void;
   onSuccess: () => void;
 }
 
-const CONTINENTS = [
-  "Global", "Africa", "Asia", "Europe", "North America", "South America", "Oceania"
-];
+type TelegramChannelInfo = {
+  id: string | number;
+  username: string;
+  title: string;
+  subscriber_count: number;
+};
 
 export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormProps) {
   const [step, setStep] = useState(1);
   const [username, setUsername] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
-  const [channelInfo, setChannelInfo] = useState<any>(null);
+  const [channelInfo, setChannelInfo] = useState<TelegramChannelInfo | null>(null);
   
   // Form fields
   const [editedTitle, setEditedTitle] = useState("");
@@ -39,28 +44,28 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
     setError("");
     try {
       const res = await apiFetch(`/api/telegram/chat-info?username=${username}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to fetch channel info");
-      
-      setChannelInfo(data);
-      setEditedTitle(data.title);
+      const data: unknown = await res.json();
+      if (!res.ok) throw new Error(getApiErrorMessage(data, "Failed to fetch channel info"));
+      const details = data as TelegramChannelInfo;
+      setChannelInfo(details);
+      setEditedTitle(details.title);
       setStep(2);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to fetch channel info");
     } finally {
       setIsLoading(false);
     }
   };
 
   const toggleContinent = (cont: string) => {
-    setSelectedContinents(prev => 
-      prev.includes(cont) 
-        ? prev.filter(c => c !== cont) 
-        : [...prev, cont]
-    );
+    setSelectedContinents((previous) => previous.includes(cont) ? [] : [cont]);
   };
 
   const handleSubmit = async () => {
+    if (!channelInfo) {
+      setError("Fetch the channel information before registering it.");
+      return;
+    }
     const trimmedTitle = editedTitle.trim();
     if (trimmedTitle.length < 3) {
       setError("Channel name must be at least 3 characters.");
@@ -89,13 +94,13 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
       
       if (!res.ok) {
         const data = await res.json();
-        throw new Error(data.error || "Failed to add channel");
+        throw new Error(getApiErrorMessage(data, "Failed to add channel"));
       }
       
       onSuccess();
       onClose();
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to add channel");
     } finally {
       setIsLoading(false);
     }
@@ -197,21 +202,21 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
 
               {/* Audience */}
               <div className="space-y-2">
-                <label className="text-sm font-semibold text-slate-700">Audience Continent</label>
+                <label className="text-sm font-semibold text-slate-700">Target Audience</label>
                 <div className="grid grid-cols-2 gap-2">
-                  {CONTINENTS.map((cont) => (
+                  {PUBLISHER_CHANNEL_AUDIENCE_OPTIONS.map((option) => (
                     <button
-                      key={cont}
-                      onClick={() => toggleContinent(cont)}
+                      key={option.value}
+                      onClick={() => toggleContinent(option.value)}
                       className={cn(
                         "px-3 py-2 text-xs font-semibold rounded-lg border transition-all text-left flex items-center justify-between",
-                        selectedContinents.includes(cont)
+                        selectedContinents.includes(option.value)
                           ? "bg-blue-50 border-blue-200 text-blue-700"
                           : "bg-white border-slate-100 text-slate-500 hover:border-slate-200"
                       )}
                     >
-                      {cont}
-                      {selectedContinents.includes(cont) && <CheckCircle2 size={12} />}
+                      {option.label}
+                      {selectedContinents.includes(option.value) && <CheckCircle2 size={12} />}
                     </button>
                   ))}
                 </div>

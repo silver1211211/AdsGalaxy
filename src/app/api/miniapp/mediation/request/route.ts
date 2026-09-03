@@ -7,6 +7,7 @@ import { createMediationAttempt } from "@/lib/miniappMediationEngine";
 import { INTERNAL_NETWORK_NAME } from "@/lib/miniappInternalAds";
 import type { MiniAppAdFormat } from "@/lib/miniappNetworkAdapters";
 import { isMiniappNetworkGloballyDisabled, requireAdServingAllowed } from "@/lib/productionSafety";
+import { trustedMiniAppCountry } from "@/lib/miniappEconomicTelemetry";
 
 type MiniAppRow = RowDataPacket & {
   id: number;
@@ -44,7 +45,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const miniappId = Number(body.miniapp_id);
     const telegramUserId = cleanText(body.telegram_user_id);
-    const country = normalizeCountry(body.country);
+    const country = trustedMiniAppCountry(request.headers, normalizeCountry(body.country)).country;
     const adFormat = normalizeAdFormat(body.ad_format);
 
     if (!Number.isInteger(miniappId) || miniappId <= 0) {

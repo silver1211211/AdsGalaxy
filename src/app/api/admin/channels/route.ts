@@ -10,6 +10,12 @@ import {
   onboardPrivateChannelTracking,
 } from "@/lib/privateChannelTrackingOnboarding";
 import { decryptPrivateInviteLink } from "@/lib/privateInviteLinkVault";
+import { classifyChannelGeoConfidence } from "@/lib/channelGeoQuality";
+
+async function tableExists(table: string) {
+  const [rows]: any = await pool.query("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? LIMIT 1", [table]);
+  return rows.length > 0;
+}
 
 function withPrivateModerationLinks(rows: any[]) {
   return rows.map((row) => {
@@ -39,10 +45,35 @@ export async function GET(request: Request) {
   const offset = (page - 1) * limit;
 
   try {
+    const hasGeoClassifications = await tableExists("channel_geo_classifications");
+    const geoFields = hasGeoClassifications
+      ? ", geo.selected_region AS geo_selected_region,geo.authoritative_region AS geo_authoritative_region,geo.confidence AS geo_confidence,geo.reason AS geo_reason,geo.conflict_detected AS geo_conflict_detected,geo.status AS geo_status"
+      : ", NULL AS geo_selected_region,NULL AS geo_authoritative_region,'unknown' AS geo_confidence,'not_classified' AS geo_reason,0 AS geo_conflict_detected,'stale' AS geo_status";
+    const geoJoin = hasGeoClassifications ? " LEFT JOIN channel_geo_classifications geo ON geo.channel_id=c.id" : "";
+    const hasTelegramIdentities = await tableExists("channel_telegram_identities");
+    const identityFields = hasTelegramIdentities
+      ? `, ti.telegram_chat_id AS telegram_identity_chat_id,ti.current_username AS telegram_current_username,
+          ti.previous_username AS telegram_previous_username,ti.bot_member_status,ti.bot_can_post,
+          ti.last_verified_at AS telegram_last_verified_at,ti.last_username_changed_at,
+          ti.last_failure_code AS telegram_failure_code,ti.last_failure_reason AS telegram_failure_reason`
+      : `, NULL AS telegram_identity_chat_id,NULL AS telegram_current_username,NULL AS telegram_previous_username,
+          NULL AS bot_member_status,NULL AS bot_can_post,NULL AS telegram_last_verified_at,
+          NULL AS last_username_changed_at,NULL AS telegram_failure_code,NULL AS telegram_failure_reason`;
+    const identityJoin = hasTelegramIdentities ? " LEFT JOIN channel_telegram_identities ti ON ti.channel_id=c.id" : "";
+    const recoveryFields = `,
+      (SELECT a.reason FROM channel_admin_action_audits a
+       WHERE a.channel_id=c.id AND a.action IN ('telegram_recovery_audit','telegram_identity_sync')
+       ORDER BY a.created_at DESC,a.id DESC LIMIT 1) AS telegram_recovery_reason,
+      (SELECT a.created_at FROM channel_admin_action_audits a
+       WHERE a.channel_id=c.id AND a.action IN ('telegram_recovery_audit','telegram_identity_sync')
+       ORDER BY a.created_at DESC,a.id DESC LIMIT 1) AS telegram_recovery_checked_at`;
     let query = `
       SELECT c.*, u.first_name, u.last_name, u.username AS owner_username, u.telegram_id as owner_telegram_id
+        ${geoFields} ${identityFields} ${recoveryFields}
       FROM channels c
       LEFT JOIN users u ON c.user_id = u.id
+      ${geoJoin}
+      ${identityJoin}
     `;
     let countQuery = "SELECT COUNT(*) as total FROM channels c LEFT JOIN users u ON c.user_id = u.id";
     const queryParams: any[] = [];
@@ -86,13 +117,15 @@ export async function GET(request: Request) {
     const [[countRow]]: any = await pool.query(countQuery, queryParams);
     const [[summary]]: any = await pool.query(`
       SELECT
+        SUM(CASE WHEN status = 'pending' AND is_deleted = FALSE THEN 1 ELSE 0 END) as pending_channels,
         SUM(CASE WHEN status = 'active' AND is_deleted = FALSE THEN 1 ELSE 0 END) as active_channels,
-        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'healthy') IN ('healthy','warning') THEN 1 ELSE 0 END) as delivery_eligible_channels,
+        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE THEN 1 ELSE 0 END) as delivery_eligible_channels,
         SUM(CASE WHEN status IN ('paused', 'bot_removed', 'channel_not_found', 'permission_missing') AND is_deleted = FALSE THEN 1 ELSE 0 END) as paused_channels,
         SUM(CASE WHEN status IN ('bot_removed', 'channel_not_found', 'permission_missing') AND is_deleted = FALSE THEN 1 ELSE 0 END) as failed_channels,
+        SUM(CASE WHEN under_review=TRUE AND is_deleted=FALSE THEN 1 ELSE 0 END) as manual_review_channels,
         SUM(CASE WHEN status = 'deleted' OR is_deleted = TRUE THEN 1 ELSE 0 END) as deleted_channels,
         SUM(CASE WHEN status = 'active' AND is_deleted = FALSE THEN subscriber_count ELSE 0 END) as active_subscribers,
-        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'healthy') IN ('healthy','warning') THEN subscriber_count ELSE 0 END) as delivery_eligible_subscribers
+        SUM(CASE WHEN status = 'active' AND is_deleted = FALSE THEN subscriber_count ELSE 0 END) as delivery_eligible_subscribers
       FROM channels
     `);
 
@@ -119,7 +152,7 @@ export async function PATCH(request: Request) {
 
     // Fetch channel and owner details
     const [rows]: any = await pool.query(
-      `SELECT c.title, c.username, c.chat_id, c.channel_type, u.telegram_id
+      `SELECT c.title, c.username, c.chat_id, c.channel_type, c.audience_continents, u.telegram_id
        FROM channels c 
        JOIN users u ON c.user_id = u.id 
        WHERE c.id = ?`,
@@ -145,6 +178,19 @@ export async function PATCH(request: Request) {
     const status = statusMap[normalizedAction];
 
     if (normalizedAction === "activate") {
+      const privacySchema = await getChannelPrivacySchema();
+      const tracking = await onboardPrivateChannelTracking({
+        channelId: id,
+        chatId: channel.chat_id,
+        channelType: channel.channel_type === "private" ? "private" : "public",
+        schema: privacySchema,
+      });
+      if (channel.channel_type === "private" && tracking.status !== "active") {
+        return NextResponse.json({
+          error: "Private channel activation requires a verified MTProto tracking-account membership.",
+          tracking,
+        }, { status: 409 });
+      }
       await pool.query(
         `UPDATE channels
          SET status = ?,
@@ -159,16 +205,18 @@ export async function PATCH(request: Request) {
         [status, id]
       );
       await ensureDefaultChannelDistribution();
-      const privacySchema = await getChannelPrivacySchema();
-      await onboardPrivateChannelTracking({
-        channelId: id,
-        chatId: channel.chat_id,
-        channelType: channel.channel_type === "private" ? "private" : "public",
-        schema: privacySchema,
-      }).catch((trackingError: unknown) => {
-        const message = trackingError instanceof Error ? trackingError.message : "tracking_onboarding_error";
-        console.warn("Private tracking onboarding after admin approval failed", { channel_id: id, error: message });
-      });
+      if (await tableExists("channel_geo_classifications")) {
+        const geo = classifyChannelGeoConfidence({ publisherSelected: channel.audience_continents });
+        await pool.query(`INSERT INTO channel_geo_classifications
+          (channel_id,selected_region,authoritative_region,confidence,source,reason,evidence,conflict_detected,status,classified_at)
+          VALUES (?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP())
+          ON DUPLICATE KEY UPDATE selected_region=VALUES(selected_region),authoritative_region=VALUES(authoritative_region),
+            confidence=VALUES(confidence),source=VALUES(source),reason=VALUES(reason),evidence=VALUES(evidence),
+            conflict_detected=VALUES(conflict_detected),status=VALUES(status),classified_at=VALUES(classified_at)`,
+          [id, geo.selected_region, geo.authoritative_region, geo.confidence, "admin_channel_activation", geo.reason,
+            JSON.stringify({ publisher_selected: channel.audience_continents, language_hint: geo.language_hint }), geo.conflict_detected ? 1 : 0,
+            geo.conflict_detected ? "review_required" : "current"]);
+      }
     } else if (normalizedAction === "delete") {
       await pool.query("UPDATE channels SET status = ?, is_deleted = TRUE, paused_reason = 'Deleted by admin.', suggested_fix = NULL WHERE id = ?", [status, id]);
       await clearPrivateTrackingAssignment(id, await getChannelPrivacySchema());

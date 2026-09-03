@@ -13,7 +13,7 @@ const adminBots = read("src/app/api/admin/bots/route.ts");
 const subscriberCron = read("src/app/api/cron/update-subscribers/route.ts");
 const withdrawals = read("src/app/api/publisher/withdrawals/route.ts");
 const audits = read("src/app/api/admin/audits/route.ts");
-const auth = read("src/lib/auth.ts");
+const referralAttribution = read("src/lib/referralAttribution.ts");
 
 test("publisher lifecycle and withdrawal HTML notifications use HTML parse mode", () => {
   assert.match(notifications, /sendTelegramMessage\(String\(telegramId\), message, \{ parse_mode: "HTML" \}\)/);
@@ -25,7 +25,7 @@ test("publisher lifecycle and withdrawal HTML notifications use HTML parse mode"
 });
 
 test("all confirmed direct HTML Telegram paths use HTML mode and escape dynamic values", () => {
-  for (const source of [adminChannels, adminBots, subscriberCron, withdrawals, audits, auth]) {
+  for (const source of [adminChannels, adminBots, subscriberCron, withdrawals, audits, referralAttribution]) {
     assert.match(source, /parse_mode: "HTML"/);
     assert.match(source, /escapeTelegramHtml\(/);
   }
@@ -54,7 +54,7 @@ test("welcome post uses exact approved HTML copy, image environment variable, an
     "• Mini Apps",
     "📢 Reach thousands of Telegram users by advertising your products across the AdsGalaxy network.",
     "Start monetizing:",
-    "https://t.me/Ads_Galaxy_bot?startapp=REF770190998629F",
+    "https://t.me/Ads_Galaxy_bot?start=REF770190998629F",
   ]) assert.ok(welcome.includes(text), `missing welcome copy: ${text}`);
   assert.match(welcome, /process\.env\.CHANNEL_WELCOME_IMAGE_URL/);
   assert.match(welcome, /photo: imageUrl/);

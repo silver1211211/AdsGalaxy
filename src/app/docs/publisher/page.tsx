@@ -3,7 +3,7 @@ import { Bot, Smartphone, Tv } from "lucide-react";
 
 const cards = [
   { href: "/docs/publisher/channels", title: "Channel Monetization", description: "Add Telegram channels, set posting times, pass review, and earn from approved ads.", icon: Tv },
-  { href: "/docs/publisher/miniapps", title: "Mini App Monetization", description: "Submit Mini Apps and track approved AdsGalaxy performance.", icon: Smartphone },
+  { href: "/docs/publisher/miniapps", title: "Mini App Monetization", description: "Use your Numeric Mini App ID, one script tag, showAdsGalaxy().then().catch(), and an optional verified reward callback.", icon: Smartphone },
   { href: "/docs/publisher/bots", title: "Bot Monetization", description: "Connect bots, grow eligible users, and earn from broadcast delivery.", icon: Bot },
 ];
 

@@ -1,14 +1,21 @@
-import { Geist, Geist_Mono } from "next/font/google";
+import localFont from "next/font/local";
+import Script from "next/script";
 import "./globals.css";
 
-const geistSans = Geist({
+const geistSans = localFont({
+  src: "./fonts/Geist-Latin.woff2",
   variable: "--font-geist-sans",
-  subsets: ["latin"],
+  weight: "100 900",
+  style: "normal",
+  display: "swap",
 });
 
-const geistMono = Geist_Mono({
+const geistMono = localFont({
+  src: "./fonts/GeistMono-Latin.woff2",
   variable: "--font-geist-mono",
-  subsets: ["latin"],
+  weight: "100 900",
+  style: "normal",
+  display: "swap",
 });
 
 import { HeaderProvider } from "@/context/HeaderContext";
@@ -26,7 +33,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} h-full`}
       suppressHydrationWarning
     >
       <head>
@@ -39,6 +46,11 @@ export default function RootLayout({
         <meta name="adsgalaxy-build" content={appBuildMarker} />
       </head>
       <body className="min-h-full flex flex-col" suppressHydrationWarning>
+        <Script
+          id="telegram-web-app-js"
+          src="https://telegram.org/js/telegram-web-app.js"
+          strategy="beforeInteractive"
+        />
         <TelegramScript />
         <PopupQueueProvider>
           <HeaderProvider>

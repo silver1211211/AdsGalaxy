@@ -3,23 +3,54 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, Users, Megaphone, Tv, CreditCard, DollarSign, Activity, AlertCircle, CheckCircle, Clock, XCircle, TrendingUp, Bot, ShieldCheck, Smartphone, Eye } from "lucide-react";
+import { Loader2, Users, Megaphone, Tv, CreditCard, DollarSign, Activity, AlertCircle, CheckCircle, Clock, XCircle, TrendingUp, Bot, ShieldCheck, Smartphone, Eye, Wallet } from "lucide-react";
 import Link from "next/link";
 
+const DASHBOARD_CACHE_KEY = "ads-galaxy-admin-dashboard-v1";
+
+function readCachedDashboard() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(DASHBOARD_CACHE_KEY);
+    if (!raw) return null;
+    const cached = JSON.parse(raw);
+    return cached && typeof cached === "object" ? cached : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function AdminDashboard() {
-  const [stats, setStats] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState<any>(() => readCachedDashboard());
+  const [loading, setLoading] = useState(() => !readCachedDashboard());
   const [error, setError] = useState("");
 
   useEffect(() => {
-    fetch("/api/admin/dashboard")
-      .then((res) => res.json())
+    const cached = readCachedDashboard();
+
+    const controller = new AbortController();
+    fetch("/api/admin/dashboard", { signal: controller.signal })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(typeof data?.error === "string" ? data.error : "Dashboard refresh failed");
+        return data;
+      })
       .then((data) => {
         if (data.error) throw new Error(data.error);
         setStats(data);
+        setError("");
+        try {
+          window.sessionStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify(data));
+        } catch {
+          // Storage is an optimization only.
+        }
       })
-      .catch((err) => setError(err.message))
+      .catch((err) => {
+        if (err?.name !== "AbortError" && !cached) setError(err.message);
+      })
       .finally(() => setLoading(false));
+
+    return () => controller.abort();
   }, []);
 
   if (loading) {
@@ -130,17 +161,6 @@ export default function AdminDashboard() {
             <StatCard title="Active Miniapps" value={(stats.miniapps?.active || 0).toLocaleString()} icon={Smartphone} bgClass="bg-amber-100" textClass="text-amber-600" subtitle="Approved and monetizing" />
             <StatCard title="Impressions Displayed Today" value={(stats.miniapps?.impressionsToday || 0).toLocaleString()} icon={Eye} bgClass="bg-red-100" textClass="text-red-600" secondaryLabel="Displayed Yesterday" secondaryValue={(stats.miniapps?.impressionsYesterday || 0).toLocaleString()} />
           </div>
-          <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-            <h3 className="mb-3 text-sm font-bold text-slate-900">Audience by country</h3>
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-              {(stats.channels.audienceByCountry || []).map((row: any) => (
-                <div key={row.country} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
-                  <span className="font-semibold text-slate-600">{row.country === "UNASSIGNED" ? "Unassigned" : row.country}</span>
-                  <span className="font-black text-slate-900">{Number(row.audience).toLocaleString()}</span>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
 
         {/* Conversion Analytics */}
@@ -170,6 +190,20 @@ export default function AdminDashboard() {
                 ))}
               </div>
             ))}
+          </div>
+        </div>
+
+        {/* Trust and Safety */}
+        <div>
+          <SectionHeader title="Channel Trust & Safety" icon={ShieldCheck} href="/admin/withdrawals" />
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <StatCard title="Fraud Coverage" value={`${Number(stats.trust_safety?.coverage_percent || 0).toFixed(1)}%`} icon={ShieldCheck} bgClass="bg-emerald-100" textClass="text-emerald-600" secondaryLabel="Never evaluated" secondaryValue={Number(stats.trust_safety?.never_evaluated_channels || 0).toLocaleString()} />
+            <StatCard title="Stale Evaluations" value={Number(stats.trust_safety?.stale_evaluations || 0).toLocaleString()} icon={Clock} bgClass="bg-amber-100" textClass="text-amber-600" secondaryLabel="Oldest age" secondaryValue={stats.trust_safety?.oldest_evaluation_age_hours == null ? "N/A" : `${stats.trust_safety.oldest_evaluation_age_hours}h`} />
+            <StatCard title="Manual Review" value={Number(stats.trust_safety?.withdrawals_requiring_manual_review || 0).toLocaleString()} icon={AlertCircle} bgClass="bg-red-100" textClass="text-red-600" secondaryLabel="Incomplete coverage" secondaryValue={Number(stats.trust_safety?.withdrawals_incomplete_fraud_coverage || 0).toLocaleString()} />
+            <StatCard title="Ledger Gaps" value={Number(stats.trust_safety?.ledger_coverage_gaps || 0).toLocaleString()} icon={Activity} bgClass="bg-indigo-100" textClass="text-indigo-600" secondaryLabel="Cutover state" secondaryValue={String(stats.trust_safety?.ledger_classification || "unknown").replaceAll("_", " ")} />
+            <StatCard title="High-risk Publishers" value={Number(stats.trust_safety?.high_risk_publishers || 0).toLocaleString()} icon={Users} bgClass="bg-rose-100" textClass="text-rose-600" secondaryLabel="Critical flags" secondaryValue={Number(stats.trust_safety?.unresolved_critical_flags || 0).toLocaleString()} />
+            <StatCard title="GEO Conflicts / Stale" value={Number(stats.trust_safety?.geo_conflicts_or_stale || 0).toLocaleString()} icon={Tv} bgClass="bg-cyan-100" textClass="text-cyan-600" />
+            <StatCard title="Traffic Alerts" value={Number(stats.trust_safety?.telemetry_concentration_alerts || 0).toLocaleString()} icon={AlertCircle} bgClass="bg-orange-100" textClass="text-orange-600" subtitle="Privacy-safe concentration signals, 7 days" />
           </div>
         </div>
 
@@ -268,9 +302,4 @@ export default function AdminDashboard() {
       </div>
     </AdminLayout>
   );
-}
-
-// Just adding Wallet icon since it wasn't imported from lucide-react in the top import initially
-function Wallet(props: any) {
-  return <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg>
 }

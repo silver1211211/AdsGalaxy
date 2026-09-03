@@ -1,4 +1,7 @@
-@import "tailwindcss";
+/* Limit class discovery to application source. Production keeps uploads,
+   backups, and historical Next build trees beside src. */
+@import "tailwindcss" source(none);
+@source "../";
 
 :root {
   --background: #ffffff;

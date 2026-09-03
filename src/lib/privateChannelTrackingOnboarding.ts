@@ -7,7 +7,7 @@ import {
   type MtprotoAccountNumber,
 } from "@/lib/telegramMtproto";
 
-type TelegramResponse<T = any> = {
+type TelegramResponse<T = unknown> = {
   ok: boolean;
   result?: T;
   description?: string;
@@ -43,7 +43,7 @@ function hasTrackingColumns(schema: ChannelPrivacySchema) {
     && schema.hasTrackingAccountFailureReason;
 }
 
-async function telegram<T = any>(method: string, body: Record<string, unknown>): Promise<TelegramResponse<T>> {
+async function telegram<T = unknown>(method: string, body: Record<string, unknown>): Promise<TelegramResponse<T>> {
   const token = process.env.BOT_TOKEN;
   if (!token) return { ok: false, description: "bot_token_missing" };
 
@@ -94,7 +94,7 @@ async function markActive(
          tracking_account_last_failure_at = NULL,
          tracking_account_failure_reason = NULL
      WHERE id = ?`,
-    [account, memberStatus, channelId]
+    [account, memberStatus === "member" || memberStatus === "already_member" ? "member" : memberStatus, channelId]
   );
 }
 
@@ -130,7 +130,9 @@ export async function clearPrivateTrackingAssignment(channelId: number | string,
 }
 
 function chooseAccountOrder(configuredAccounts: MtprotoAccountNumber[]) {
-  return ([1, 2] as MtprotoAccountNumber[]).filter((account) => configuredAccounts.includes(account));
+  // Account 1 is intentionally excluded until its Telegram session is
+  // reauthorized. New private channels must be joined by account 2 only.
+  return ([2] as MtprotoAccountNumber[]).filter((account) => configuredAccounts.includes(account));
 }
 
 export async function onboardPrivateChannelTracking(input: {
@@ -196,8 +198,8 @@ export async function onboardPrivateChannelTracking(input: {
       createdInvite = invite.result.invite_link;
       const joined = await joinPrivateInviteWithAccount(account, createdInvite);
       if (joined.ok) {
-        await markActive(input.channelId, account, joined.memberStatus, input.schema);
-        return { status: "active", tracking_account: account, member_status: joined.memberStatus, manual_usernames };
+        await markActive(input.channelId, account, "member", input.schema);
+        return { status: "active", tracking_account: account, member_status: "member", manual_usernames };
       }
 
       errors.push(`account_${account}:${safeReason(joined.code)}`);

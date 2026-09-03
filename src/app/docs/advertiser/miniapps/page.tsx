@@ -83,7 +83,7 @@ const sections: DocsSection[] = [
     id: "publisher-integration",
     title: "Publisher setup",
     body: [
-      "Advertisers do not add developer code or Integration IDs. Publishers handle setup inside approved Mini Apps.",
+      "Advertisers do not add publisher SDK code or Numeric Mini App IDs. Publishers handle setup inside approved Mini Apps.",
       "Use advertiser docs to understand campaign creation, ad appearance, targeting, budget usage, and reporting.",
     ],
   },

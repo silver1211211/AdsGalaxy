@@ -31,6 +31,7 @@ import {
 import { cn } from "@/lib/utils";
 import { campaignPauseWarning } from "@/lib/campaignPauseLifecycle";
 import { apiFetch } from "@/lib/api";
+import { miniappReloadDebug } from "@/lib/miniappReloadDebug";
 import { AnimatePresence, motion } from "framer-motion";
 import { useHeader } from "@/context/HeaderContext";
 import { useRouter } from "next/navigation";
@@ -129,6 +130,7 @@ export default function MyCampaignsPage() {
   });
 
   const fetchCampaigns = async (silent = false) => {
+    miniappReloadDebug("advertiser_campaign_fetch_started", { phase: "started" });
     if (!silent) setIsLoading(true);
     setError("");
     try {
@@ -183,7 +185,9 @@ export default function MyCampaignsPage() {
         (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
       );
       setCampaigns(all);
+      miniappReloadDebug("advertiser_campaign_fetch_completed", { phase: "completed", status: failures.length ? 207 : 200 });
     } catch (error) {
+      miniappReloadDebug("advertiser_campaign_fetch_failed", { phase: error instanceof DOMException && error.name === "AbortError" ? "aborted" : "failed", error_name: error instanceof Error ? error.name : "UnknownError", error_message: error instanceof Error ? error.message : "Campaign fetch failed" });
       console.error("Error fetching campaigns:", error);
       setError("We couldn't load your campaigns right now. Please refresh or try again shortly.");
     } finally {

@@ -4,7 +4,7 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Trash2, ExternalLink, BadgeCheck, Tv, Loader2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Trash2, ExternalLink, BadgeCheck, Tv, Loader2, CheckCheck } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import EmptyState from "@/components/ui/EmptyState";
@@ -78,6 +78,28 @@ function StatusBadge({ status }: { status: string }) {
       {status.replace(/_/g, " ")}
     </span>
   );
+}
+
+function telegramState(channel: any) {
+  const reason = String(channel.telegram_recovery_reason || "");
+  const failure = String(channel.telegram_failure_code || "");
+  if (channel.under_review || reason === "manual_review_required" || failure.includes("collision")) return { label: "Manual review", tone: "border-amber-200 bg-amber-50 text-amber-800" };
+  if (reason === "manual_policy_rejection_preserved") return { label: "Policy rejected", tone: "border-red-200 bg-red-50 text-red-700" };
+  if (reason === "technical_rejection_recovered") return { label: "Technical rejection recovered", tone: "border-emerald-200 bg-emerald-50 text-emerald-700" };
+  if (reason === "bot_readded") return { label: "Bot re-added", tone: "border-emerald-200 bg-emerald-50 text-emerald-700" };
+  if (reason === "permission_restored") return { label: "Permission restored", tone: "border-emerald-200 bg-emerald-50 text-emerald-700" };
+  if (reason === "recovered_by_chat_id") return { label: channel.telegram_previous_username ? "Username changed / recovered" : "Recovered by chat ID", tone: "border-emerald-200 bg-emerald-50 text-emerald-700" };
+  if (failure === "channel_not_found" || channel.status === "channel_not_found") return { label: "Not found / inaccessible", tone: "border-red-200 bg-red-50 text-red-700" };
+  if (failure === "bot_removed" || channel.status === "bot_removed") return { label: "Bot removed", tone: "border-red-200 bg-red-50 text-red-700" };
+  if (failure === "permission_missing" || channel.status === "permission_missing") return { label: "Permission missing", tone: "border-red-200 bg-red-50 text-red-700" };
+  if (failure) return { label: "Check incomplete", tone: "border-amber-200 bg-amber-50 text-amber-800" };
+  if (channel.telegram_last_verified_at) return { label: "Telegram healthy", tone: "border-emerald-200 bg-emerald-50 text-emerald-700" };
+  return { label: "Not checked", tone: "border-slate-200 bg-slate-50 text-slate-600" };
+}
+
+function TelegramStateBadge({ channel }: { channel: any }) {
+  const state = telegramState(channel);
+  return <span className={`mt-1 inline-flex rounded-full border px-2 py-0.5 text-[10px] font-bold ${state.tone}`}>{state.label}</span>;
 }
 
 function ChannelIdentifier({ channel, mobile = false }: { channel: any; mobile?: boolean }) {
@@ -204,6 +226,9 @@ export default function AdminChannelsPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [selectedPendingIds, setSelectedPendingIds] = useState<number[]>([]);
+  const [bulkApprovalLoading, setBulkApprovalLoading] = useState(false);
+  const [bulkApprovalConfirmOpen, setBulkApprovalConfirmOpen] = useState(false);
   const [error, setError] = useState("");
 
   const [viewModalOpen, setViewModalOpen] = useState(false);
@@ -218,6 +243,7 @@ export default function AdminChannelsPage() {
       setChannels(data.channels);
       setSummary(data.summary || null);
       setTotalPages(data.totalPages);
+      setSelectedPendingIds([]);
     } catch (err) {
       console.error(err);
     } finally {
@@ -266,6 +292,44 @@ export default function AdminChannelsPage() {
     const { channel, action } = pendingAction;
     setPendingAction(null);
     await handleAction(channel.id, action);
+  };
+
+  const visiblePendingIds = channels
+    .filter((channel: any) => channel.status === "pending")
+    .map((channel: any) => Number(channel.id));
+  const allVisiblePendingSelected = visiblePendingIds.length > 0
+    && visiblePendingIds.every((id) => selectedPendingIds.includes(id));
+
+  const togglePendingChannel = (channelId: number) => {
+    setSelectedPendingIds((current) => current.includes(channelId)
+      ? current.filter((id) => id !== channelId)
+      : [...current, channelId]);
+  };
+
+  const toggleAllVisiblePending = () => {
+    setSelectedPendingIds((current) => allVisiblePendingSelected
+      ? current.filter((id) => !visiblePendingIds.includes(id))
+      : Array.from(new Set([...current, ...visiblePendingIds])));
+  };
+
+  const approvePendingChannels = async () => {
+    setBulkApprovalConfirmOpen(false);
+    setBulkApprovalLoading(true);
+    setError("");
+    try {
+      const response = await fetch("/api/admin/channels/bulk-approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(selectedPendingIds.length > 0 ? { channel_ids: selectedPendingIds } : {}),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "Unable to approve pending channels");
+      await fetchChannels(page, statusFilter, search);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBulkApprovalLoading(false);
+    }
   };
 
   const renderContinents = (continentsStr: string) => {
@@ -324,6 +388,18 @@ export default function AdminChannelsPage() {
         confirmBtnVariant={pendingAction?.danger ? "danger" : "primary"}
         isLoading={actionLoading !== null}
       />
+      <ConfirmationModal
+        isOpen={bulkApprovalConfirmOpen}
+        onClose={() => setBulkApprovalConfirmOpen(false)}
+        onConfirm={approvePendingChannels}
+        title={selectedPendingIds.length > 0 ? "Approve Selected Channels" : "Approve All Pending Channels"}
+        message={selectedPendingIds.length > 0
+          ? `Approve the ${selectedPendingIds.length} selected pending channel${selectedPendingIds.length === 1 ? "" : "s"}? Only channels still pending will be changed.`
+          : `Approve all ${Number(summary?.pending_channels || 0).toLocaleString()} pending channels? Only channels still pending when you confirm will be changed.`}
+        confirmBtnText={selectedPendingIds.length > 0 ? "Approve selected" : "Approve all pending"}
+        confirmBtnVariant="primary"
+        isLoading={bulkApprovalLoading}
+      />
 
       {/* Channel Review Modal */}
       {viewModalOpen && selectedChannel && (
@@ -357,6 +433,24 @@ export default function AdminChannelsPage() {
                   {selectedChannel.suggested_fix && <div className="mt-1 font-medium text-amber-700">{selectedChannel.suggested_fix}</div>}
                 </div>
               )}
+
+              <div>
+                <h4 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-400">Telegram Connection</h4>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <TelegramStateBadge channel={selectedChannel} />
+                    <span className="text-xs text-slate-500">
+                      Last check: {selectedChannel.telegram_last_verified_at ? new Date(selectedChannel.telegram_last_verified_at).toLocaleString() : "Never"}
+                    </span>
+                  </div>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    <div><span className="text-xs text-slate-500">Bot membership</span><div className="font-semibold capitalize text-slate-900">{String(selectedChannel.bot_member_status || "unknown").replaceAll("_", " ")}</div></div>
+                    <div><span className="text-xs text-slate-500">Can post</span><div className="font-semibold text-slate-900">{selectedChannel.bot_can_post === null || selectedChannel.bot_can_post === undefined ? "Unknown" : selectedChannel.bot_can_post ? "Yes" : "No"}</div></div>
+                    <div className="sm:col-span-2"><span className="text-xs text-slate-500">Current health reason</span><div className="mt-0.5 break-words font-semibold text-slate-900">{selectedChannel.telegram_failure_reason || selectedChannel.telegram_recovery_reason || "Healthy"}</div></div>
+                    {selectedChannel.telegram_previous_username && <div className="sm:col-span-2"><span className="text-xs text-slate-500">Username history</span><div className="font-semibold text-slate-900">@{selectedChannel.telegram_previous_username} → @{selectedChannel.telegram_current_username || "private"}</div></div>}
+                  </div>
+                </div>
+              </div>
 
               {/* Performance */}
               <div>
@@ -467,6 +561,12 @@ export default function AdminChannelsPage() {
                       <div className="text-xs font-medium text-slate-500">Audience Continents</div>
                       {renderContinents(selectedChannel.audience_continents)}
                     </div>
+                    <div className={`rounded-lg border p-2 ${selectedChannel.geo_conflict_detected ? "border-amber-200 bg-amber-50" : "border-slate-200 bg-slate-50"}`}>
+                      <div className="text-xs font-medium text-slate-500">GEO Confidence</div>
+                      <div className="mt-0.5 font-semibold capitalize text-slate-900">{String(selectedChannel.geo_confidence || "unknown").replaceAll("_", " ")}</div>
+                      <div className="mt-1 text-[11px] text-slate-600">Selected: {String(selectedChannel.geo_selected_region || "unknown").replaceAll("_", " ")} · Authoritative: {String(selectedChannel.geo_authoritative_region || "unknown").replaceAll("_", " ")}</div>
+                      <div className="mt-1 text-[11px] text-slate-500">{String(selectedChannel.geo_reason || "not_classified").replaceAll("_", " ")}{selectedChannel.geo_conflict_detected ? " · Conflict requires review" : ""}</div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -571,9 +671,20 @@ export default function AdminChannelsPage() {
       {/* Main Table Card */}
       <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         {/* Toolbar */}
-        <div className="flex flex-col gap-4 border-b border-slate-200 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-          <h2 className="text-sm font-semibold text-slate-900">All Channels</h2>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <div className="flex flex-col gap-4 border-b border-slate-200 px-4 py-4 sm:px-5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between lg:justify-start">
+            <h2 className="text-sm font-semibold text-slate-900">All Channels</h2>
+            <button
+              type="button"
+              onClick={() => setBulkApprovalConfirmOpen(true)}
+              disabled={bulkApprovalLoading || Number(summary?.pending_channels || 0) === 0}
+              className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-black text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
+            >
+              {bulkApprovalLoading ? <Loader2 size={15} className="animate-spin" /> : <CheckCheck size={15} />}
+              {selectedPendingIds.length > 0 ? `Approve Selected Channels (${selectedPendingIds.length})` : "Approve All Pending Channels"}
+            </button>
+          </div>
+          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
               <input
@@ -605,6 +716,9 @@ export default function AdminChannelsPage() {
           <table className="w-full min-w-[980px] text-left text-sm">
             <thead className="border-b border-slate-200 bg-slate-50">
               <tr>
+                <th className="w-12 px-3 py-3 text-center">
+                  {visiblePendingIds.length > 0 && <input type="checkbox" checked={allVisiblePendingSelected} onChange={toggleAllVisiblePending} aria-label="Select all pending channels on this page" className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" />}
+                </th>
                 <th className="px-5 py-3 text-xs font-semibold text-slate-500">Channel</th>
                 <th className="px-5 py-3 text-xs font-semibold text-slate-500">Owner</th>
                 <th className="px-5 py-3 text-xs font-semibold text-slate-500">Subscribers</th>
@@ -618,10 +732,10 @@ export default function AdminChannelsPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <SkeletonTableRows columns={9} rows={6} />
+                <SkeletonTableRows columns={10} rows={6} />
               ) : channels.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="p-10">
+                  <td colSpan={10} className="p-10">
                     <EmptyState
                       icon={isFiltering ? Search : Tv}
                       title={isFiltering ? "No channels match your filters" : "No channels yet"}
@@ -632,6 +746,9 @@ export default function AdminChannelsPage() {
               ) : (
                 channels.map((channel: any) => (
                   <tr key={channel.id} className="align-top transition-colors hover:bg-slate-50">
+                    <td className="px-3 py-4 text-center">
+                      {channel.status === "pending" && <input type="checkbox" checked={selectedPendingIds.includes(Number(channel.id))} onChange={() => togglePendingChannel(Number(channel.id))} aria-label={`Select pending channel ${channel.title || channel.id}`} className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" />}
+                    </td>
                     <td className="px-5 py-4">
                       <div className="flex items-start gap-3">
                         <ChannelAvatar channel={channel} />
@@ -674,6 +791,7 @@ export default function AdminChannelsPage() {
                     </td>
                     <td className="px-5 py-4">
                       <StatusBadge status={channel.status} />
+                      <div><TelegramStateBadge channel={channel} /></div>
                     </td>
                     <td className="px-5 py-4 text-right">
                       <ActionButtons channel={channel} actionLoading={actionLoading} onView={openViewModal} onAction={openActionConfirm} />
@@ -701,7 +819,8 @@ export default function AdminChannelsPage() {
             />
           ) : (
             channels.map((channel: any) => (
-              <div key={channel.id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div key={channel.id} className={`rounded-xl border bg-white p-4 shadow-sm ${selectedPendingIds.includes(Number(channel.id)) ? "border-emerald-400 ring-2 ring-emerald-100" : "border-slate-200"}`}>
+                {channel.status === "pending" && <label className="mb-3 flex min-h-10 cursor-pointer items-center gap-3 rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-800"><input type="checkbox" checked={selectedPendingIds.includes(Number(channel.id))} onChange={() => togglePendingChannel(Number(channel.id))} className="h-5 w-5 rounded border-emerald-300 text-emerald-600 focus:ring-emerald-500"/><span>Select this pending channel</span></label>}
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex min-w-0 items-start gap-3">
                     <ChannelAvatar channel={channel} />
@@ -716,6 +835,7 @@ export default function AdminChannelsPage() {
                   </div>
                   <StatusBadge status={channel.status} />
                 </div>
+                <TelegramStateBadge channel={channel} />
                 {(channel.failure_reason || channel.paused_reason) && (
                   <div className="mt-2 rounded-lg border border-amber-100 bg-amber-50 p-2 text-xs font-semibold text-amber-800">
                     {channel.failure_reason || channel.paused_reason}

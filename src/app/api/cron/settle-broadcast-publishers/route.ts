@@ -6,7 +6,7 @@ import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronS
 
 export const dynamic = "force-dynamic";
 
-export async function settleBroadcastPublisherDelivery(candidateId: number, db = pool) {
+async function settleBroadcastPublisherDelivery(candidateId: number, db = pool) {
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();

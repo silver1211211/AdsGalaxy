@@ -1,12 +1,9 @@
 import crypto from "crypto";
 import pool from "./db";
-import { escapeTelegramHtml, sendTelegramMessage } from "./telegram";
 import { getLocalMiniappDevAuthenticatedUser, parseLocalMiniappDevInitData } from "./localMiniappDev";
-import { processReferralJoinReward } from "./referralSprint";
+import { attributeReferral, finalizeStoredReferralForUser } from "./referralAttribution";
 import {
-  blockReferralIfSelfDevice,
   getReferralSecuritySignals,
-  markReferralJoinSignals,
   updateUserReferralSecuritySignals,
 } from "./referralSecurity";
 
@@ -125,10 +122,18 @@ export async function getAuthenticatedUser(initData: string | null, options: { a
 
       // Update existing user info
       await pool.query(
-        "UPDATE users SET first_name = ?, last_name = ?, username = ?, photo_url = ? WHERE telegram_id = ?",
+        "UPDATE users SET first_name = ?, last_name = ?, username = ?, photo_url = ?, last_active_at = NOW() WHERE telegram_id = ?",
         [tgUser.first_name, tgUser.last_name || "", tgUser.username || "", tgUser.photo_url || "", telegramId]
       );
       await updateUserReferralSecuritySignals(Number(rows[0].id), securitySignals);
+      if (tgUser.start_param) {
+        await attributeReferral({
+          userId: Number(rows[0].id),
+          token: tgUser.start_param,
+          signals: securitySignals,
+        });
+      }
+      await finalizeStoredReferralForUser(Number(rows[0].id), securitySignals);
       return rows[0];
     } else {
       // Create new user — ON DUPLICATE KEY UPDATE guards against concurrent first-login races.
@@ -156,46 +161,21 @@ export async function getAuthenticatedUser(initData: string | null, options: { a
         newUserId = existing[0]?.id || null;
       }
 
-      // Handle referral if start_param exists (only for truly new users with a fresh insertId)
-      if (result.insertId && tgUser.start_param) {
-        const [referrerRows]: any = await pool.query(
-          "SELECT id, telegram_id, first_name FROM users WHERE referral_code = ?",
-          [tgUser.start_param]
-        );
-        if (referrerRows.length > 0) {
-          const invitedBy = referrerRows[0].id;
-          const referrerTgId = referrerRows[0].telegram_id;
-          const referrerName = referrerRows[0].first_name;
-
-          if (Number(invitedBy) !== Number(newUserId)) {
-            const [referralResult]: any = await pool.query(
-              "INSERT IGNORE INTO referrals (user_id, invited_by) VALUES (?, ?)",
-              [newUserId, invitedBy]
-            );
-            let referralBlocked = false;
-            if (referralResult.affectedRows > 0) {
-              await markReferralJoinSignals(Number(referralResult.insertId), securitySignals);
-              const selfDevice = await blockReferralIfSelfDevice(Number(referralResult.insertId));
-              referralBlocked = selfDevice.blocked;
-              if (!referralBlocked) {
-                await processReferralJoinReward(Number(referralResult.insertId));
-              }
-            }
-
-            if (!referralBlocked) {
-              await sendTelegramMessage(
-                referrerTgId,
-                `<b>New Referral Joined!</b>\n\nHi ${escapeTelegramHtml(referrerName)}, someone joined with your referral code. You earned the instant join reward; the verification bonus unlocks after they join and verify the required channel.`,
-                { parse_mode: "HTML" }
-              );
-            }
-          }
-        }
+      // Telegram delivers startapp payloads as signed start_param init data.
+      // Attribute through the same shared workflow used by the bot /start flow.
+      if (newUserId && tgUser.start_param) {
+        await attributeReferral({
+          userId: Number(newUserId),
+          token: tgUser.start_param,
+          signals: securitySignals,
+        });
       }
 
       const [newUser]: any = await pool.query("SELECT * FROM users WHERE id = ?", [newUserId]);
       if (newUserId) {
+        await pool.query("UPDATE users SET last_active_at = NOW() WHERE id = ?", [newUserId]);
         await updateUserReferralSecuritySignals(Number(newUserId), securitySignals);
+        await finalizeStoredReferralForUser(Number(newUserId), securitySignals);
       }
       return newUser[0];
     }
@@ -206,4 +186,62 @@ export async function getAuthenticatedUser(initData: string | null, options: { a
 
     throw new Error("Internal authentication error");
   }
+}
+
+/**
+ * Read-only authentication for latency-sensitive bootstrap checks.
+ *
+ * Do not replace this with getAuthenticatedUser(): that function deliberately
+ * refreshes profile/referral metadata and can wait on write locks held by the
+ * ad-processing workload. App bootstrap only needs the current account state.
+ */
+export async function getAuthenticatedUserStatus(
+  initData: string | null,
+  options: { request?: Request } = {},
+) {
+  if (!initData || initData === "undefined" || initData === "null") {
+    throw new Error("Unauthorized: No initData provided");
+  }
+
+  if (parseLocalMiniappDevInitData(initData)) {
+    if (process.env.NODE_ENV === "production" || process.env.ENABLE_LOCAL_MINIAPP_DEV !== "true") {
+      throw new Error("Unauthorized: Local Mini App dev auth is disabled");
+    }
+    return getLocalMiniappDevAuthenticatedUser(initData, { allowBanned: true });
+  }
+
+  const botToken = process.env.BOT_TOKEN;
+  if (!botToken) {
+    throw new Error("Server configuration error: BOT_TOKEN not set");
+  }
+
+  const telegramUser = validateInitData(initData, botToken) as TelegramUser & { start_param?: string };
+  const [rows]: any = await pool.query({
+    sql: `SELECT id, status, banned_at, ban_reason
+          FROM users
+          WHERE telegram_id = ?
+          LIMIT 1`,
+    timeout: 5000,
+    values: [String(telegramUser.id)],
+  });
+
+  if (!rows[0]) {
+    // A genuinely new user still needs the full creation/referral workflow.
+    return getAuthenticatedUser(initData, { allowBanned: true });
+  }
+
+  await pool.query("UPDATE users SET last_active_at = NOW() WHERE id = ?", [rows[0].id]);
+
+  const securitySignals = getReferralSecuritySignals(options.request);
+  await updateUserReferralSecuritySignals(Number(rows[0].id), securitySignals);
+  if (telegramUser.start_param) {
+    await attributeReferral({
+      userId: Number(rows[0].id),
+      token: telegramUser.start_param,
+      signals: securitySignals,
+    });
+  }
+  await finalizeStoredReferralForUser(Number(rows[0].id), securitySignals);
+
+  return rows[0];
 }

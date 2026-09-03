@@ -34,6 +34,13 @@ type WithdrawalRow = {
   miniapp_earnings?: string | number;
   balance_locked?: string | number;
   balance_available?: string | number;
+  preclearance?: {
+    state: "cleared" | "manual_review_required";
+    reasons: string[];
+    reason_details?: Array<{ code: string; detail: string }>;
+    risk?: { score: number; state: string };
+    ledger?: { classification: string; coverage_gap_records: number };
+  };
 };
 type ActionModal = { type: ActionType; withdrawal: WithdrawalRow } | null;
 
@@ -89,13 +96,19 @@ function FraudMetrics({ withdrawal, dense = false }: { withdrawal: WithdrawalRow
   ];
 
   return (
-    <div className={`grid ${dense ? "grid-cols-2" : "grid-cols-2 xl:grid-cols-4"} gap-2`}>
-      {items.map(([label, value]) => (
-        <div key={label} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5">
-          <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</div>
-          <div className="text-xs font-semibold text-slate-900">{value}</div>
-        </div>
-      ))}
+    <div className="space-y-2">
+      <div className={`rounded-md border px-2 py-1.5 ${withdrawal.preclearance?.state === "cleared" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
+        <div className="text-[10px] font-bold uppercase tracking-wide">Pre-clearance: {withdrawal.preclearance?.state === "cleared" ? "Cleared" : "Manual review required"}</div>
+        {withdrawal.preclearance?.reasons?.length ? <div className="mt-0.5 text-[10px]">{withdrawal.preclearance.reasons.join(", ").replaceAll("_", " ")}</div> : null}
+      </div>
+      <div className={`grid ${dense ? "grid-cols-2" : "grid-cols-2 xl:grid-cols-4"} gap-2`}>
+        {items.map(([label, value]) => (
+          <div key={label} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5">
+            <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</div>
+            <div className="text-xs font-semibold text-slate-900">{value}</div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -212,7 +225,7 @@ export default function AdminWithdrawalsPage() {
       <button onClick={() => { setSelectedWithdrawal(withdrawal); setViewModalOpen(true); }} className="rounded-md p-1.5 text-slate-400 hover:bg-blue-50 hover:text-blue-600" title="View details">
         <Eye size={16} />
       </button>
-      <button onClick={() => openAction("approve", withdrawal)} disabled={actionLoading === withdrawal.id} className="inline-flex items-center gap-1 rounded-md border border-emerald-100 bg-emerald-50 px-2 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">
+      <button onClick={() => openAction("approve", withdrawal)} disabled={actionLoading === withdrawal.id || withdrawal.preclearance?.state === "manual_review_required"} title={withdrawal.preclearance?.state === "manual_review_required" ? `Blocked: ${withdrawal.preclearance.reasons.join(", ")}` : "Approve withdrawal"} className="inline-flex items-center gap-1 rounded-md border border-emerald-100 bg-emerald-50 px-2 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50">
         {actionLoading === withdrawal.id ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} Approve
       </button>
       <button onClick={() => openAction("reject", withdrawal)} disabled={actionLoading === withdrawal.id} className="inline-flex items-center gap-1 rounded-md border border-red-100 bg-red-50 px-2 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50">

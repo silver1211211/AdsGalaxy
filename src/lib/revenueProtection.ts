@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy protection query payloads are not schema-generated */
 import pool from "@/lib/db";
+import { getPaidReferralEarnings } from "@/lib/paidReferralEarnings";
 import { sendTelegramMessage } from "@/lib/telegram";
 
 type SettingMap = Map<string, string>;
@@ -159,13 +160,20 @@ async function getFinancialTotals(start: Date, end: Date) {
   );
   const [[miniapp]]: any = await pool.query(
     `SELECT
-       COALESCE(SUM(cost), 0) as spend,
-       COALESCE(SUM(publisher_revenue), 0) as publisher_earnings,
-       COALESCE(SUM(ads_galaxy_revenue), 0) as platform_revenue,
+       COALESCE(SUM(spend), 0) as spend,
+       COALESCE(SUM(publisher_earnings), 0) as publisher_earnings,
+       COALESCE(SUM(platform_revenue), 0) as platform_revenue,
        COALESCE(SUM(reserve_revenue), 0) as reserve_revenue
-     FROM miniapp_internal_ad_impressions
-     WHERE created_at >= ? AND created_at < ?`,
-    params
+     FROM (
+       SELECT cost AS spend, publisher_revenue AS publisher_earnings,
+         ads_galaxy_revenue AS platform_revenue, reserve_revenue
+       FROM miniapp_internal_ad_impressions WHERE created_at >= ? AND created_at < ?
+       UNION ALL
+       SELECT advertiser_debit AS spend, 0 AS publisher_earnings,
+         advertiser_debit AS platform_revenue, 0 AS reserve_revenue
+       FROM miniapp_external_delivery_batches WHERE created_at >= ? AND created_at < ?
+     ) combined_miniapp_revenue`,
+    [...params, ...params]
   );
   const spend = toNumber(classic?.spend) + toNumber(miniapp?.spend);
   const publisherEarnings = toNumber(classic?.publisher_earnings) + toNumber(miniapp?.publisher_earnings);
@@ -309,8 +317,7 @@ async function updatePublisherRiskScores(settings: SettingMap) {
       COALESCE(SUM(inv.fraud_signal_count), 0) as fraud_signals,
       COALESCE(SUM(inv.abandoned), 0) as abandoned,
       COALESCE(SUM(inv.completed), 0) as completed,
-      COALESCE(w.rejections, 0) as risk_history,
-      COALESCE(u.total_referral_earnings, 0) as referral_earnings
+      COALESCE(w.rejections, 0) as risk_history
     FROM users u
     LEFT JOIN (
       SELECT user_id, traffic_quality_score, 0 as fraud_signal_count, 0 as abandoned, 0 as completed FROM channels WHERE is_deleted = 0
@@ -329,7 +336,7 @@ async function updatePublisherRiskScores(settings: SettingMap) {
     LEFT JOIN (
       SELECT user_id, COUNT(*) as rejections FROM withdrawals WHERE status = 'rejected' GROUP BY user_id
     ) w ON w.user_id = u.id
-    GROUP BY u.id, w.rejections, u.total_referral_earnings
+    GROUP BY u.id, w.rejections
     HAVING avg_quality IS NOT NULL
   `);
 
@@ -341,7 +348,14 @@ async function updatePublisherRiskScores(settings: SettingMap) {
     const abandonmentRate = completions + toNumber(row.abandoned) > 0 ? toNumber(row.abandoned) / (completions + toNumber(row.abandoned)) : 0;
     const abandonmentRisk = clamp(abandonmentRate * 25, 0, 25);
     const historyRisk = clamp(toNumber(row.risk_history) * 8, 0, 20);
-    const referralRisk = toNumber(row.referral_earnings) > 100 ? 10 : 0;
+    let paidReferralEarnings: string;
+    try {
+      paidReferralEarnings = await getPaidReferralEarnings(pool, Number(row.id));
+    } catch (error) {
+      console.error("Publisher risk referral aggregate unavailable", { user_id: Number(row.id), error_code: "REFERRAL_AGGREGATE_FAILED" });
+      continue; // Incomplete canonical inputs must not produce a financial/security decision.
+    }
+    const referralRisk = BigInt(paidReferralEarnings.replace(".", "")) > BigInt("10000000000") ? 10 : 0;
     const score = Math.round(clamp(qualityRisk + fraudRisk + abandonmentRisk + historyRisk + referralRisk, 0, 100));
     await pool.query("UPDATE users SET publisher_risk_score = ? WHERE id = ?", [score, row.id]);
     if (score >= critical) {
@@ -475,7 +489,8 @@ async function detectTrafficAnomalies(settings: SettingMap) {
       COALESCE((SELECT SUM(views) FROM campaign_posts WHERE DATE(created_at) = CURDATE()), 0) as views,
       COALESCE((SELECT COUNT(*) FROM ad_conversions WHERE created_at >= CURDATE()), 0) as conversions,
       COALESCE((SELECT COUNT(*) FROM referrals WHERE created_at >= CURDATE()), 0) as referrals,
-      COALESCE((SELECT SUM(cost) FROM miniapp_internal_ad_impressions WHERE created_at >= CURDATE()), 0) as revenue
+      COALESCE((SELECT SUM(cost) FROM miniapp_internal_ad_impressions WHERE created_at >= CURDATE()), 0)
+        + COALESCE((SELECT SUM(advertiser_debit) FROM miniapp_external_delivery_batches WHERE created_at >= CURDATE()), 0) as revenue
   `);
   const [[average]]: any = await pool.query(`
     SELECT
@@ -483,7 +498,8 @@ async function detectTrafficAnomalies(settings: SettingMap) {
       COALESCE((SELECT SUM(views) / 7 FROM campaign_posts WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY) AND created_at < CURDATE()), 0) as views,
       COALESCE((SELECT COUNT(*) / 7 FROM ad_conversions WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY) AND created_at < CURDATE()), 0) as conversions,
       COALESCE((SELECT COUNT(*) / 7 FROM referrals WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY) AND created_at < CURDATE()), 0) as referrals,
-      COALESCE((SELECT SUM(cost) / 7 FROM miniapp_internal_ad_impressions WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY) AND created_at < CURDATE()), 0) as revenue
+      COALESCE((SELECT SUM(cost) / 7 FROM miniapp_internal_ad_impressions WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY) AND created_at < CURDATE()), 0)
+        + COALESCE((SELECT SUM(advertiser_debit) / 7 FROM miniapp_external_delivery_batches WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY) AND created_at < CURDATE()), 0) as revenue
   `);
   let alerts = 0;
   for (const metric of ["clicks", "views", "conversions", "referrals", "revenue"]) {

@@ -6,6 +6,8 @@ type PostRow = RowDataPacket & {
   id: number; message_id: number | string; views: number | string | null;
   chat_id: string; username: string | null; channel_type: "public" | "private";
   tracking_account: number | null;
+  tracking_account_status: string | null;
+  tracking_account_member_status: string | null;
 };
 
 type CampaignPostRow = PostRow & { channel_id: number };
@@ -25,7 +27,8 @@ async function publicViews(username: string, messageId: number | string) {
 
 export async function refreshChannelViews(channelId: number, limit = 25) {
   const [posts] = await pool.query<PostRow[]>(
-    `SELECT cp.id,cp.message_id,cp.views,ch.chat_id,ch.username,ch.channel_type,ch.tracking_account
+    `SELECT cp.id,cp.message_id,cp.views,ch.chat_id,ch.username,ch.channel_type,ch.tracking_account,
+       ch.tracking_account_status,ch.tracking_account_member_status
      FROM campaign_posts cp JOIN channels ch ON ch.id=cp.channel_id
      WHERE cp.channel_id=? AND cp.status='active' AND cp.deleted_at IS NULL
        AND cp.delivery_failed_at IS NULL AND cp.delivery_confirmed_at IS NOT NULL
@@ -41,14 +44,16 @@ export async function refreshChannelViews(channelId: number, limit = 25) {
       let fetched: number;
       let source: string;
       if (post.channel_type === "private") {
-        const result = await getPrivatePostViews(post.chat_id, post.message_id, { preferredAccount: post.tracking_account, rotationSeed: post.id });
+        if (!post.tracking_account || post.tracking_account_status !== "active" || !["member", "already_member"].includes(String(post.tracking_account_member_status || ""))) throw new Error("private_tracking_account_not_verified_member");
+        const result = await getPrivatePostViews(post.chat_id, post.message_id, { preferredAccount: post.tracking_account, rotationSeed: post.id, requirePreferredAccount: true });
         if (!result.ok) throw new Error(result.code);
         fetched = result.views;
         source = "admin_mtproto_private";
       } else {
         if (!post.username) throw new Error("missing_public_username");
-        fetched = await publicViews(post.username, post.message_id);
-        source = "admin_public_api";
+        const mtproto = await getPrivatePostViews(`@${post.username.replace(/^@/, "")}`, post.message_id, { rotationSeed: post.id });
+        if (mtproto.ok) { fetched = mtproto.views; source = "admin_mtproto_public"; }
+        else { try { fetched = await publicViews(post.username, post.message_id); source = "admin_public_api_fallback"; } catch (publicError) { throw new Error(`mtproto:${mtproto.code}; public:${publicError instanceof Error ? publicError.message : "failed"}`); } }
       }
       await pool.query(
         `UPDATE campaign_posts SET views=GREATEST(COALESCE(views,0),?),last_views_update=NOW(),
@@ -75,7 +80,8 @@ export async function refreshChannelViews(channelId: number, limit = 25) {
 // untouched.
 export async function refreshCampaignViews(campaignId: number, limit = 50) {
   const [posts] = await pool.query<CampaignPostRow[]>(
-    `SELECT cp.id,cp.message_id,cp.views,cp.channel_id,ch.chat_id,ch.username,ch.channel_type,ch.tracking_account
+    `SELECT cp.id,cp.message_id,cp.views,cp.channel_id,ch.chat_id,ch.username,ch.channel_type,ch.tracking_account,
+       ch.tracking_account_status,ch.tracking_account_member_status
      FROM campaign_posts cp JOIN channels ch ON ch.id=cp.channel_id
      WHERE cp.campaign_id=? AND cp.status='active' AND cp.deleted_at IS NULL
        AND cp.delivery_failed_at IS NULL AND cp.delivery_confirmed_at IS NOT NULL
@@ -91,14 +97,16 @@ export async function refreshCampaignViews(campaignId: number, limit = 50) {
       let fetched: number;
       let source: string;
       if (post.channel_type === "private") {
-        const result = await getPrivatePostViews(post.chat_id, post.message_id, { preferredAccount: post.tracking_account, rotationSeed: post.id });
+        if (!post.tracking_account || post.tracking_account_status !== "active" || !["member", "already_member"].includes(String(post.tracking_account_member_status || ""))) throw new Error("private_tracking_account_not_verified_member");
+        const result = await getPrivatePostViews(post.chat_id, post.message_id, { preferredAccount: post.tracking_account, rotationSeed: post.id, requirePreferredAccount: true });
         if (!result.ok) throw new Error(result.code);
         fetched = result.views;
         source = "pre_deletion_mtproto_private";
       } else {
         if (!post.username) throw new Error("missing_public_username");
-        fetched = await publicViews(post.username, post.message_id);
-        source = "pre_deletion_public_api";
+        const mtproto = await getPrivatePostViews(`@${post.username.replace(/^@/, "")}`, post.message_id, { rotationSeed: post.id });
+        if (mtproto.ok) { fetched = mtproto.views; source = "pre_deletion_mtproto_public"; }
+        else { try { fetched = await publicViews(post.username, post.message_id); source = "pre_deletion_public_api_fallback"; } catch (publicError) { throw new Error(`mtproto:${mtproto.code}; public:${publicError instanceof Error ? publicError.message : "failed"}`); } }
       }
       await pool.query(
         `UPDATE campaign_posts SET views=GREATEST(COALESCE(views,0),?),last_views_update=NOW(),

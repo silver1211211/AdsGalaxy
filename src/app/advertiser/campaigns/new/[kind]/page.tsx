@@ -34,13 +34,32 @@ import { composeCampaignCreativeText, hasRestrictedClickCreativeContent } from "
 const BUTTON_TEXTS = ["Learn more", "Get started", "Join channel", "Join group", "Start bot", "Buy Now", "Sign Up", "Download", "Visit site", "Play now", "Shop now"];
 const CONTINENTS = [
   { id: "global", name: "Global", countries: "All countries" },
-  { id: "africa", name: "Africa", countries: "Nigeria, South Africa, Egypt, etc." },
-  { id: "asia", name: "Asia", countries: "India, China, Vietnam, etc." },
-  { id: "europe", name: "Europe", countries: "UK, Germany, France, etc." },
-  { id: "north_america", name: "North America", countries: "USA, Canada" },
-  { id: "south_america", name: "South America", countries: "Brazil, Argentina" },
-  { id: "oceania", name: "Oceania", countries: "Australia, NZ, Fiji, etc." },
+  { id: "africa", name: "Africa", countries: "Nigeria, South Africa, Egypt, Kenya" },
+  { id: "asia", name: "Asia", countries: "India, China, Japan" },
+  { id: "europe", name: "Europe", countries: "United Kingdom, Germany, France, Italy, Spain" },
+  { id: "north_america", name: "North America", countries: "United States, Canada, Mexico" },
+  { id: "south_america", name: "South America", countries: "Brazil, Argentina, Colombia" },
+  { id: "oceania", name: "Oceania", countries: "Australia, New Zealand" },
 ];
+
+function campaignAudienceSelection(value: unknown, isBotCampaign: boolean) {
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value || "[]") : value;
+    if (parsed && !Array.isArray(parsed) && typeof parsed === "object") {
+      const config = parsed as { mode?: unknown; audiences?: unknown };
+      if (config.mode === "explicit") {
+        return Array.isArray(config.audiences) ? config.audiences.map(String) : [];
+      }
+    }
+    if (!Array.isArray(parsed)) return isBotCampaign ? CONTINENTS.map((continent) => continent.id) : [];
+    if (isBotCampaign) return parsed.map(String);
+    const normalized = Array.from(new Set(parsed.map((item) => String(item).trim().toLowerCase().replace(/[^a-z0-9]+/g, "_"))));
+    if (normalized.length === CONTINENTS.length || normalized.includes("global")) return ["global"];
+    return normalized.filter((item) => CONTINENTS.some((continent) => continent.id === item && item !== "global"));
+  } catch {
+    return isBotCampaign ? CONTINENTS.map((continent) => continent.id) : [];
+  }
+}
 
 type MarketplaceItem = {
   id: number;
@@ -98,7 +117,7 @@ export default function NewCampaignWizardPage() {
     budget: "",
     cpm: "",
     cpc: "",
-    continents: CONTINENTS.map(c => c.id),
+    continents: isBotCampaign ? CONTINENTS.map(c => c.id) : ["global"],
     countries: "",
     languages: "",
     vpn_policy: "allow_all",
@@ -179,14 +198,7 @@ export default function NewCampaignWizardPage() {
           setError(data.error || "Failed to load campaign");
           return;
         }
-        const continents = (() => {
-          try {
-            const parsed = JSON.parse(String(data.continents || "[]"));
-            return Array.isArray(parsed) ? parsed : CONTINENTS.map((continent) => continent.id);
-          } catch {
-            return CONTINENTS.map((continent) => continent.id);
-          }
-        })();
+        const continents = campaignAudienceSelection(data.continents, isBotCampaign);
         setFormData((previous) => ({
           ...previous,
           name: data.name || "",
@@ -281,6 +293,10 @@ export default function NewCampaignWizardPage() {
   const handleSubmit = async () => {
     const trimmedName = (formData.name || "").trim();
     const trimmedCampaignTitle = (formData.campaign_title || "").trim();
+    if (!isBotCampaign && formData.continents.length === 0) {
+      setError("Select at least one target audience.");
+      return;
+    }
     if (trimmedName.length < 3) {
       setError("Campaign name must be at least 3 characters.");
       return;
@@ -391,6 +407,19 @@ export default function NewCampaignWizardPage() {
 
   const toggleContinent = (id: string) => {
     setFormData(prev => {
+      if (!isBotCampaign) {
+        if (id === "global") {
+          return { ...prev, continents: prev.continents.includes("global") ? [] : ["global"] };
+        }
+        const withoutGlobal = prev.continents.filter((audience) => audience !== "global");
+        return {
+          ...prev,
+          continents: withoutGlobal.includes(id)
+            ? withoutGlobal.filter((audience) => audience !== id)
+            : [...withoutGlobal, id],
+        };
+      }
+
       let newCons = [...prev.continents];
 
       if (id === "global") {
@@ -1099,7 +1128,8 @@ export default function NewCampaignWizardPage() {
 
             {/* ── Continents ── */}
             <div className="rounded-2xl border border-slate-100 bg-white shadow-sm p-5 space-y-3">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Targeting Regions</p>
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Target Audience</p>
+              {!isBotCampaign && <p className="text-[11px] font-semibold text-slate-500">Global is a standalone audience. Select one or combine specific regions.</p>}
               <div className="grid grid-cols-2 gap-2">
                 {CONTINENTS.map((con) => (
                   <button
@@ -1129,9 +1159,9 @@ export default function NewCampaignWizardPage() {
               </button>
               <button
                 onClick={handleSubmit}
-                disabled={isLoading || !formData.budget || !bidValue}
+                disabled={isLoading || !formData.budget || !bidValue || (!isBotCampaign && formData.continents.length === 0)}
                 className="flex-1 py-3.5 text-white rounded-2xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:bg-slate-100 disabled:text-slate-400 transition-colors"
-                style={{ background: (isLoading || !formData.budget || !bidValue) ? undefined : "#0c9de8" }}
+                style={{ background: (isLoading || !formData.budget || !bidValue || (!isBotCampaign && formData.continents.length === 0)) ? undefined : "#0c9de8" }}
               >
                 {isLoading ? <Loader2 size={16} className="animate-spin" /> : <PlusCircle size={16} />}
                 {isLoading ? "Creating…" : "Launch Campaign"}

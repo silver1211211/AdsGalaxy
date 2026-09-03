@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { logPublisherChannelError, publisherChannelError } from "@/lib/publisherChannelErrors";
 import { buildChannelAnalyticsReport, databaseToday, resolveChannelAnalyticsRange } from "@/lib/channelReports";
 import { metricNumber } from "@/lib/statFormulas";
 
@@ -22,7 +23,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       [id, user.id]
     );
     const channel = channels[0];
-    if (!channel) return NextResponse.json({ error: "Channel not found" }, { status: 404 });
+    if (!channel) return publisherChannelError("CHANNEL_NOT_ACCESSIBLE", 404);
 
     const today = await databaseToday();
     const range = resolveChannelAnalyticsRange(new URL(request.url), today);
@@ -34,8 +35,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       ...report,
     }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to load channel analytics";
-    console.error("GET Channel Analytics Error:", message);
-    return NextResponse.json({ error: message }, { status: getAuthErrorStatus(error) });
+    logPublisherChannelError("analytics", error);
+    return publisherChannelError("CHANNEL_ANALYTICS_FAILED", getAuthErrorStatus(error));
   }
 }

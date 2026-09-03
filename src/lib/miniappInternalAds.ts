@@ -10,6 +10,8 @@ import {
 } from "@/lib/inventoryOptimization";
 import { qualityScoreForWatchTier, watchDurationQualityTier, type WatchQualityTier } from "@/lib/internalAdCompletionQuality";
 import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
+import { miniAppImpressionCost } from "@/lib/miniappExternalDeliveryMath";
+import { enqueueMiniAppBudgetExhaustedNotification, markMiniAppCampaignBudgetExhausted } from "@/lib/miniappCampaignNotifications";
 
 export const INTERNAL_NETWORK_NAME = "AdsGalaxyInternal";
 
@@ -39,6 +41,8 @@ type CampaignRow = RowDataPacket & {
   advertiser_cpm_bid: string | number;
   cpm_mode: string | null;
   fixed_publisher_cpm: string | number | null;
+  fixed_cpm_override_reason: string | null;
+  fixed_cpm_override_expires_at: string | Date | null;
   campaign_budget_mode: string | null;
   quality_score: string | number;
   advertiser_trust_level: string;
@@ -138,6 +142,10 @@ export async function selectInternalRewardedCampaign(input: {
   miniappId: number;
   telegramUserId?: string | number;
   country: string | null;
+  countrySource?: string | null;
+  sessionHash?: string | null;
+  deviceHash?: string | null;
+  networkHash?: string | null;
   ignoreNetworkShareCap?: boolean;
 }) {
   const startedAt = Date.now();
@@ -200,7 +208,7 @@ export async function selectInternalRewardedCampaign(input: {
   const [campaigns] = await input.conn.query<CampaignRow[]>(`
     SELECT
       c.id, c.advertiser_id, c.status, c.campaign_name, c.title, c.description, c.cta_text, c.title_color, c.body_color, c.categories, c.image_url, c.logo_url, c.landing_url, c.budget,
-      remaining_budget, total_spend, impressions, admin_cpm, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm,
+      remaining_budget, total_spend, impressions, admin_cpm, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm, fixed_cpm_override_reason, fixed_cpm_override_expires_at,
       campaign_budget_mode, target_countries, countries, start_at,
       end_at, daily_budget_limit, frequency_cap_per_user, c.quality_score,
       c.direct_placement_mode, c.direct_inventory_scope, c.creative_review_status,
@@ -276,7 +284,7 @@ export async function selectInternalRewardedCampaign(input: {
       reject(row, skipReason, { advertiser_cpm_bid: row.advertiser_cpm_bid });
       continue;
     }
-    const cost = Number((cpm / 1000).toFixed(8));
+    const cost = miniAppImpressionCost(cpm);
     if (toNumber(row.remaining_budget) <= 0) {
       skipReason = "campaign_budget_exhausted";
       reject(row, skipReason, { remaining_budget: row.remaining_budget, cost });
@@ -380,7 +388,7 @@ export async function selectInternalRewardedCampaign(input: {
   audit.selected_campaign_id = Number(campaign.id);
 
   const cpm = toNumber(campaign.advertiser_cpm_bid);
-  const cost = Number((cpm / 1000).toFixed(8));
+  const cost = miniAppImpressionCost(cpm);
 
   return {
     campaign: {
@@ -415,6 +423,10 @@ export async function recordInternalAdImpression(input: {
   requestId: string;
   telegramUserId: string;
   country: string | null;
+  countrySource?: string | null;
+  sessionHash?: string | null;
+  deviceHash?: string | null;
+  networkHash?: string | null;
   watchDurationSeconds?: number;
   completionQualityTier?: WatchQualityTier;
   completionQualityScore?: number;
@@ -428,7 +440,7 @@ export async function recordInternalAdImpression(input: {
   if (Number(cooldownLock?.acquired || 0) !== 1) throw new Error("internal_cooldown_lock_unavailable");
 
   const [campaignRows] = await input.conn.query<CampaignRow[]>(
-    `SELECT id, advertiser_id, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm,
+    `SELECT id, advertiser_id, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm, fixed_cpm_override_reason, fixed_cpm_override_expires_at,
        remaining_budget, daily_budget_limit
      FROM miniapp_rewarded_campaigns
      WHERE id = ? AND status IN ('approved', 'active')
@@ -481,18 +493,15 @@ export async function recordInternalAdImpression(input: {
   }
 
   const cpm = toNumber(campaign.advertiser_cpm_bid);
-  const cost = Number((cpm / 1000).toFixed(8));
+  const cost = miniAppImpressionCost(cpm);
 
   if (cost <= 0) {
     throw new Error("Internal campaign CPM is invalid");
   }
 
   if (toNumber(campaign.remaining_budget) + 1e-10 < cost) {
-    await input.conn.query(
-      "UPDATE miniapp_rewarded_campaigns SET status = 'paused', pause_reason = 'budget_exhausted', remaining_budget = GREATEST(remaining_budget, 0) WHERE id = ?",
-      [input.campaignId]
-    );
-    throw new Error("campaign_budget_exhausted");
+    await markMiniAppCampaignBudgetExhausted(input.conn, input.campaignId);
+    return { duplicate: false, insufficient_balance: false, budget_exhausted: true, cpm, cost };
   }
   if (toNumber(campaign.daily_budget_limit) > 0) {
     const [[dailyRow]] = await input.conn.query<RowDataPacket[]>(
@@ -510,9 +519,16 @@ export async function recordInternalAdImpression(input: {
     miniappId: input.miniappId,
     telegramUserId: input.telegramUserId,
     country: input.country,
+    countrySource: input.countrySource,
+    sessionHash: input.sessionHash,
+    deviceHash: input.deviceHash,
+    networkHash: input.networkHash,
     advertiserCpm: cpm,
-    cpmMode: campaign.cpm_mode,
+    cpmMode: campaign.cpm_mode === "fixed" && (!campaign.fixed_cpm_override_expires_at || new Date(campaign.fixed_cpm_override_expires_at).getTime() > Date.now()) ? "fixed" : "live",
     fixedPublisherCpm: campaign.fixed_publisher_cpm === null ? null : toNumber(campaign.fixed_publisher_cpm),
+    completionQualityScore: input.completionQualityScore,
+    impressionValid: true,
+    interactionSeconds: input.watchDurationSeconds,
   });
   const watchDurationSeconds = Math.max(0, Number(input.watchDurationSeconds ?? 1.5) || 0);
   const completionQualityTier = input.completionQualityTier || watchDurationQualityTier(watchDurationSeconds, false);
@@ -545,9 +561,11 @@ export async function recordInternalAdImpression(input: {
         ads_galaxy_revenue, reserve_revenue, quality_factor,
         repeat_penalty_factor, quality_metadata, cpm_mode,
         watch_duration_seconds, completion_status, completion_quality_tier,
-        completion_quality_score
+        completion_quality_score, economic_value, publisher_cap, formula_version,
+        geo_source, geo_factor, demand_yield_factor, uniqueness_factor, frequency_factor,
+        traffic_quality_factor, trust_factor, fraud_factor, session_hash, device_hash, network_hash
       )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.campaignId,
       input.miniappId,
@@ -570,6 +588,20 @@ export async function recordInternalAdImpression(input: {
       input.completionStatus || "impression_recorded",
       completionQualityTier,
       completionQualityScore,
+      payout.gross_revenue,
+      payout.publisher_cap,
+      payout.formula_version,
+      input.countrySource || "unknown",
+      payout.factors.geo,
+      payout.factors.demand_yield,
+      payout.factors.uniqueness,
+      payout.factors.frequency,
+      payout.factors.quality,
+      payout.factors.trust,
+      payout.factors.fraud,
+      input.sessionHash || null,
+      input.deviceHash || null,
+      input.networkHash || null,
     ]
   );
 
@@ -577,15 +609,16 @@ export async function recordInternalAdImpression(input: {
     `UPDATE miniapp_rewarded_campaigns
      SET total_spend = total_spend + ?, impressions = impressions + 1,
          remaining_budget = GREATEST(remaining_budget - ?, 0),
-         pause_reason = CASE
-           WHEN remaining_budget - ? <= 0 THEN 'budget_exhausted'
-           WHEN remaining_budget - ? < ? THEN 'insufficient_budget_for_delivery'
-           ELSE NULL END,
+         budget_exhaustion_cycle = budget_exhaustion_cycle
+           + CASE WHEN remaining_budget - ? < ? AND COALESCE(pause_reason, '') != 'budget_exhausted' THEN 1 ELSE 0 END,
+         pause_reason = CASE WHEN remaining_budget - ? < ? THEN 'budget_exhausted' ELSE NULL END,
          status = CASE WHEN remaining_budget - ? < ? THEN 'paused' ELSE status END
      WHERE id = ? AND status IN ('approved', 'active') AND remaining_budget >= ?`,
-    [cost, cost, cost, cost, cost, cost, cost, input.campaignId, cost]
+    [cost, cost, cost, cost, cost, cost, cost, cost, input.campaignId, cost]
   );
   if (campaignUpdate.affectedRows !== 1) throw new Error("campaign_budget_exhausted");
+  const budgetExhausted = toNumber(campaign.remaining_budget) - cost + 1e-10 < cost;
+  if (budgetExhausted) await enqueueMiniAppBudgetExhaustedNotification(input.conn, input.campaignId);
   await input.conn.query(
     "INSERT INTO advertiser_transactions (user_id, amount, type, description) VALUES (?, ?, 'debit', ?)",
     [campaign.advertiser_id, cost, `Mini App impression ${input.requestId}`]
@@ -631,6 +664,7 @@ export async function recordInternalAdImpression(input: {
   return {
     duplicate: false,
     insufficient_balance: false,
+    budget_exhausted: budgetExhausted,
     cpm,
     cost,
     ads_galaxy_fee: adsGalaxyFee,

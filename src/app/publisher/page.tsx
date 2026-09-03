@@ -26,6 +26,7 @@ import { AnimatePresence } from "framer-motion";
 import { useHeader } from "@/context/HeaderContext";
 import AppBootState from "@/components/shared/AppBootState";
 import { getTelegramWebApp, waitForTelegramInitData } from "@/lib/telegramWebApp";
+import { miniappReloadDebug } from "@/lib/miniappReloadDebug";
 import ChannelDetailsScreen from "@/components/publisher/ChannelDetailsScreen";
 import AddChannelScreen from "@/components/publisher/AddChannelScreen";
 import BotDetailsScreen from "@/components/publisher/BotDetailsScreen";
@@ -33,6 +34,7 @@ import AddBotScreen from "@/components/publisher/AddBotScreen";
 import MiniAppDetailsScreen from "@/components/publisher/MiniAppDetailsScreen";
 import Toast from "@/components/ui/Toast";
 import { publicChannelUrl } from "@/lib/telegramChannelInput";
+import PromoteAdsGalaxyBanner from "@/components/publisher/PromoteAdsGalaxyBanner";
 
 type PublisherStats = {
   balance_locked?: string | number;
@@ -45,6 +47,7 @@ type PublisherStats = {
   referral_reward_amount?: string | number;
   referral_sprint_enabled?: boolean;
   referral_dashboard_promotion_enabled?: boolean;
+  promote_ads_galaxy_status?: string | null;
   recent_channels?: Array<{
     id: number;
     title: string;
@@ -94,6 +97,7 @@ export default function PublisherDashboard() {
   const channelReward = process.env.NEXT_PUBLIC_CHANNEL_REWARD || "0.5";
 
   const fetchStats = React.useCallback(async () => {
+    miniappReloadDebug("publisher_dashboard_fetch_started", { route: "/api/publisher/stats", phase: "started" });
     setIsLoading(true);
     setLoadError(false);
     try {
@@ -101,7 +105,9 @@ export default function PublisherDashboard() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to load publisher stats");
       setStats(data);
+      miniappReloadDebug("publisher_dashboard_fetch_completed", { route: "/api/publisher/stats", phase: "completed", status: res.status });
     } catch (error) {
+      miniappReloadDebug("publisher_dashboard_fetch_failed", { route: "/api/publisher/stats", phase: error instanceof DOMException && error.name === "AbortError" ? "aborted" : "failed", error_name: error instanceof Error ? error.name : "UnknownError", error_message: error instanceof Error ? error.message : "Publisher fetch failed" });
       console.error("Error fetching stats:", error);
       setLoadError(true);
     } finally {
@@ -263,6 +269,9 @@ export default function PublisherDashboard() {
       />
 
       <div className="space-y-8">
+        {stats && ((Number(stats.total_monetized || 0) > 0) || Boolean(stats.recent_monetized?.length) || Boolean(stats.recent_channels?.length)) && (
+          <PromoteAdsGalaxyBanner status={stats.promote_ads_galaxy_status} />
+        )}
         {/* Premium Header */}
         <div className="relative overflow-hidden rounded-[2rem] bg-slate-950 p-6 text-white shadow-2xl shadow-blue-950/10">
           <div className="absolute -right-16 -top-20 h-52 w-52 rounded-full bg-[#0c9de8]/40 blur-3xl" />

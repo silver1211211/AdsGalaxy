@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy admin campaign payloads are not schema-generated */
 import pool from "@/lib/db";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { adminResumeCampaign, recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { recordAutomationAudit } from "@/lib/approvalAutomation";
 import { sendTelegramMessage } from "@/lib/telegram";
+import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByIds } from "@/lib/miniappCampaignMetrics";
 
 async function safeNotify(telegramId: unknown, message: string) {
   if (!telegramId) return;
@@ -33,7 +35,9 @@ export async function GET(request: Request) {
         c.id, 'campaign' AS campaign_kind, c.user_id, c.name, c.type,
         c.status, c.budget, c.total_budget, c.daily_budget_limit, c.cpm, c.quality_score, c.quality_tier,
         c.link, c.message_text, c.image_url, c.button_text, c.category,
-        c.continents, c.created_at, c.rejection_reason,
+        c.continents, c.countries, c.languages, c.vpn_policy, c.device_policy, c.os_policy,
+        c.start_at, c.end_at, c.frequency_cap_per_user, c.direct_placement_mode,
+        c.direct_inventory_scope, c.direct_inventory_metadata, c.created_at, c.rejection_reason,
         u.first_name, u.last_name, u.username, u.telegram_id,
         COALESCE(u.advertiser_trust_level, 'new') AS advertiser_trust_level,
         (SELECT COUNT(*) FROM campaigns ch WHERE ch.user_id = c.user_id AND ch.status IN ('active','completed','budget_exhausted')) AS advertiser_approved_campaigns,
@@ -46,7 +50,7 @@ export async function GET(request: Request) {
           ELSE COALESCE(c.channel_spend, 0)
         END AS spend,
         CASE WHEN c.type = 'broadcast'
-          THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
+          THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
           ELSE COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.campaign_id = c.id), 0)
         END AS impressions,
         CASE WHEN c.type = 'broadcast' THEN 0
@@ -63,23 +67,21 @@ export async function GET(request: Request) {
         m.id, 'miniapp' AS campaign_kind, m.advertiser_id AS user_id, m.campaign_name AS name, 'miniapp_rewarded' AS type,
         CASE WHEN m.status = 'approved' THEN 'active' ELSE m.status END AS status,
         m.budget, m.budget AS total_budget, m.daily_budget_limit, m.advertiser_cpm_bid AS cpm, m.quality_score, m.quality_tier,
-        m.landing_url AS link, m.description AS message_text, m.image_url, m.cta_text AS button_text, '' AS category,
-        '[]' AS continents, m.created_at, m.creative_review_notes AS rejection_reason,
+        m.landing_url AS link, m.description AS message_text, m.image_url, m.cta_text AS button_text, m.categories AS category,
+        NULL AS continents, m.countries, m.languages, m.vpn_policy, m.device_policy, m.os_policy,
+        m.start_at, m.end_at, m.frequency_cap_per_user, m.direct_placement_mode,
+        m.direct_inventory_scope, m.direct_inventory_metadata, m.created_at, m.creative_review_notes AS rejection_reason,
         u.first_name, u.last_name, u.username, u.telegram_id,
         COALESCE(u.advertiser_trust_level, 'new') AS advertiser_trust_level,
         (SELECT COUNT(*) FROM campaigns ch WHERE ch.user_id = m.advertiser_id AND ch.status IN ('active','completed','budget_exhausted')) AS advertiser_approved_campaigns,
         (SELECT COUNT(*) FROM campaigns ch WHERE ch.user_id = m.advertiser_id AND ch.status = 'rejected') AS advertiser_rejected_campaigns,
         'MINI APP' AS type_label,
         m.remaining_budget,
-        CASE WHEN COALESCE(m.remaining_budget, 0) <= 0 THEN TRUE ELSE FALSE END AS budget_exhausted,
-        COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = m.id), 0) AS spend,
-        COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = m.id), 0) AS impressions,
-        COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = m.id), 0) AS clicks,
-        CASE WHEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = m.id), 0) > 0
-          THEN COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = m.id), 0)
-            / (SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = m.id)
-          ELSE 0
-        END AS average_cpc,
+        FALSE AS budget_exhausted,
+        0 AS spend,
+        0 AS impressions,
+        0 AS clicks,
+        0 AS average_cpc,
         m.requires_re_moderation
       FROM miniapp_rewarded_campaigns m LEFT JOIN users u ON m.advertiser_id = u.id
     `;
@@ -104,13 +106,31 @@ export async function GET(request: Request) {
     }
 
     const query = `SELECT * FROM (${innerQuery}) AS combined${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
-    const countQuery = `SELECT COUNT(*) AS total FROM (${innerQuery}) AS combined${whereClause}`;
+    // Counting must not execute the expensive delivery, impression, click and
+    // advertiser-history subqueries used by the ten visible result rows.
+    const countInnerQuery = `
+      SELECT c.status,c.name,c.message_text,u.first_name,u.last_name,u.username,u.telegram_id,
+        COALESCE(u.advertiser_trust_level,'new') advertiser_trust_level
+      FROM campaigns c LEFT JOIN users u ON u.id=c.user_id
+      UNION ALL
+      SELECT CASE WHEN m.status='approved' THEN 'active' ELSE m.status END status,
+        m.campaign_name name,m.description message_text,u.first_name,u.last_name,u.username,u.telegram_id,
+        COALESCE(u.advertiser_trust_level,'new') advertiser_trust_level
+      FROM miniapp_rewarded_campaigns m LEFT JOIN users u ON u.id=m.advertiser_id
+    `;
+    const countQuery = `SELECT COUNT(*) AS total FROM (${countInnerQuery}) AS combined${whereClause}`;
 
     const [rows]: any = await pool.query(query, [...queryParams, limit, offset]);
     const [[countRow]]: any = await pool.query(countQuery, queryParams);
+    const miniAppMetrics = await getMiniAppCampaignMetricsByIds(
+      rows.filter((row: any) => row.campaign_kind === "miniapp").map((row: any) => row.id),
+    );
+    const normalizedRows = rows.map((row: any) => row.campaign_kind === "miniapp"
+      ? applyMiniAppCampaignMetrics(row, miniAppMetrics)
+      : row);
 
     return NextResponse.json({
-      campaigns: rows,
+      campaigns: normalizedRows,
       total: countRow.total,
       page,
       totalPages: Math.ceil(countRow.total / limit),

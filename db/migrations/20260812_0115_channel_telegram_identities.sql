@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS channel_telegram_identities (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  channel_id INT NOT NULL,
+  telegram_chat_id VARCHAR(64) NOT NULL,
+  channel_type ENUM('public','private') NOT NULL,
+  current_username VARCHAR(191) NULL,
+  previous_username VARCHAR(191) NULL,
+  bot_member_status VARCHAR(32) NULL,
+  bot_can_post TINYINT(1) NOT NULL DEFAULT 0,
+  last_verified_at DATETIME(6) NULL,
+  last_username_changed_at DATETIME(6) NULL,
+  last_failure_code VARCHAR(64) NULL,
+  last_failure_reason VARCHAR(500) NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_channel_telegram_identity_channel (channel_id),
+  UNIQUE KEY uq_channel_telegram_identity_chat (telegram_chat_id),
+  KEY idx_channel_identity_verify (last_verified_at),
+  CONSTRAINT fk_channel_telegram_identity_channel FOREIGN KEY (channel_id) REFERENCES channels(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -18,6 +18,8 @@ type ViewPost = RowDataPacket & {
   channel_username: string | null;
   channel_type: "public" | "private";
   tracking_account: number | string | null;
+  tracking_account_status: string | null;
+  tracking_account_member_status: string | null;
 };
 
 type PublicViewResult =
@@ -178,6 +180,8 @@ export async function GET(request: NextRequest) {
       : "(cp.last_views_update IS NULL OR cp.last_views_update < DATE_SUB(NOW(), INTERVAL 45 MINUTE))";
     const channelType = privacy.hasChannelType ? "ch.channel_type" : "'public'";
     const trackingAccount = privacy.hasTrackingAccount ? "ch.tracking_account" : "NULL";
+    const trackingAccountStatus = privacy.hasTrackingAccountStatus ? "ch.tracking_account_status" : "NULL";
+    const trackingMemberStatus = privacy.hasTrackingAccountMemberStatus ? "ch.tracking_account_member_status" : "NULL";
     const activePostConditions = `cp.status = 'active'
          AND cp.deleted_at IS NULL
          AND cp.delivery_failed_at IS NULL
@@ -204,7 +208,8 @@ export async function GET(request: NextRequest) {
     const duePosts = Number(workloadRows[0]?.duePosts || 0);
     const [posts] = await pool.query<ViewPost[]>(
       `SELECT cp.id, cp.channel_id, cp.message_id, cp.views, ch.chat_id,
-         ch.username AS channel_username, ${channelType} AS channel_type, ${trackingAccount} AS tracking_account
+         ch.username AS channel_username, ${channelType} AS channel_type, ${trackingAccount} AS tracking_account,
+         ${trackingAccountStatus} AS tracking_account_status,${trackingMemberStatus} AS tracking_account_member_status
        FROM campaign_posts cp
        JOIN channels ch ON ch.id = cp.channel_id
        WHERE ${activePostConditions}
@@ -233,16 +238,23 @@ export async function GET(request: NextRequest) {
 
       try {
         if (post.channel_type === "private") {
-          const result = await getPrivatePostViews(post.chat_id || "", post.message_id, {
-            preferredAccount: post.tracking_account ? Number(post.tracking_account) : null,
-            rotationSeed: post.id,
-          });
+          const assignmentReady = Boolean(post.tracking_account)
+            && post.tracking_account_status === "active"
+            && ["member", "already_member"].includes(String(post.tracking_account_member_status || ""));
+          const result = assignmentReady
+            ? await getPrivatePostViews(post.chat_id || "", post.message_id, {
+                preferredAccount: Number(post.tracking_account),
+                rotationSeed: post.id,
+                requirePreferredAccount: true,
+              })
+            : { ok: false as const, code: "private_tracking_account_not_verified_member" };
           if (result.ok) {
             fetchedViews = result.views;
             if (privacy.hasViewTrackingStatus) await pool.query("UPDATE channels SET view_tracking_status = 'available' WHERE id = ?", [post.channel_id]);
             if (privacy.hasTrackingAccount && privacy.hasTrackingAccountStatus && privacy.hasTrackingAccountLastSuccessAt) {
               await pool.query(
                 `UPDATE channels SET tracking_account = ?, tracking_account_status = 'active',
+                   ${privacy.hasTrackingAccountMemberStatus ? "tracking_account_member_status = 'member'," : ""}
                    tracking_account_last_success_at = NOW(), tracking_account_last_failure_at = NULL,
                    tracking_account_failure_reason = NULL WHERE id = ?`,
                 [mtprotoAccountNumber(result.account), post.channel_id]
@@ -256,9 +268,10 @@ export async function GET(request: NextRequest) {
             }
             if (privacy.hasTrackingAccountStatus && privacy.hasTrackingAccountLastFailureAt && privacy.hasTrackingAccountFailureReason) {
               await pool.query(
-                `UPDATE channels SET tracking_account_status = CASE WHEN tracking_account_status = 'active' THEN tracking_account_status ELSE 'failed' END,
+                `UPDATE channels SET tracking_account_status = 'failed',
+                   ${privacy.hasTrackingAccountMemberStatus ? "tracking_account_member_status = CASE WHEN ? IN ('channel_private','peer_id_invalid','tracking_account_missing','private_tracking_account_not_verified_member') THEN 'not_member' ELSE tracking_account_member_status END," : ""}
                    tracking_account_last_failure_at = NOW(), tracking_account_failure_reason = ? WHERE id = ?`,
-                [result.code.slice(0, 255), post.channel_id]
+                [...(privacy.hasTrackingAccountMemberStatus ? [result.code] : []), result.code.slice(0, 255), post.channel_id]
               );
             }
             console.error("Channel view MTProto error", {
@@ -271,9 +284,20 @@ export async function GET(request: NextRequest) {
           }
         } else {
           let username = String(post.channel_username || "").replace(/^@/, "");
-          let result = username ? await fetchPublicViews(username, post.message_id) : { ok: false as const, code: "missing_public_username" };
+          const peer = username ? `@${username}` : post.chat_id || "";
+          const mtproto = await getPrivatePostViews(peer, post.message_id, { rotationSeed: post.id });
+          if (mtproto.ok) {
+            fetchedViews = mtproto.views;
+            source = "mtproto_public";
+          }
+          let result: PublicViewResult = { ok: false, code: "mtproto_succeeded" };
 
-          if (!result.ok && (result.code === "channel-not-found" || result.code === "missing_public_username")) {
+          if (!mtproto.ok) {
+            stats.mtprotoErrors += 1;
+            result = username ? await fetchPublicViews(username, post.message_id) : { ok: false, code: "missing_public_username" };
+          }
+
+          if (!mtproto.ok && !result.ok && (result.code === "channel-not-found" || result.code === "missing_public_username")) {
             const refreshed = await refreshPublicUsername(post.chat_id);
             if (refreshed.username) {
               username = refreshed.username;
@@ -291,30 +315,24 @@ export async function GET(request: NextRequest) {
             }
           }
 
-          if (result.ok) {
+          if (!mtproto.ok && result.ok) {
             fetchedViews = result.views;
-          } else {
+            source = "public_api_fallback";
+          } else if (!mtproto.ok) {
+            const publicErrorCode = result.ok ? "unknown_public_error" : result.code;
             console.warn("Channel view public fetch error", {
               post_id: post.id,
               channel_id: post.channel_id,
               username,
-              reason: result.code,
+              reason: publicErrorCode,
             });
-            const peer = username ? `@${username}` : post.chat_id || "";
-            const fallback = await getPrivatePostViews(peer, post.message_id, { rotationSeed: post.id });
-            if (fallback.ok) {
-              fetchedViews = fallback.views;
-              source = "mtproto_public_fallback";
-            } else {
-              stats.mtprotoErrors += 1;
-              console.error("Channel view public and MTProto fallback error", {
-                post_id: post.id,
-                channel_id: post.channel_id,
-                public_error: result.code,
-                mtproto_error: fallback.code,
-              });
-              throw new Error(`${result.code}; mtproto:${fallback.code}`);
-            }
+            console.error("Channel view MTProto and public fallback error", {
+              post_id: post.id,
+              channel_id: post.channel_id,
+              mtproto_error: mtproto.code,
+              public_error: publicErrorCode,
+            });
+            throw new Error(`mtproto:${mtproto.code}; public:${publicErrorCode}`);
           }
         }
 

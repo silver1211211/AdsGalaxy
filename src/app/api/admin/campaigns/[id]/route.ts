@@ -17,6 +17,7 @@ const EDITABLE_CAMPAIGN_FIELDS = {
   category: { type: "string", maxLength: 64 },
   cpm: { type: "number", min: 0 },
   cpc: { type: "number", min: 0 },
+  is_prioritized: { type: "boolean" },
 } as const;
 
 type EditableCampaignField = keyof typeof EDITABLE_CAMPAIGN_FIELDS;
@@ -97,7 +98,22 @@ export async function GET(
       return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
     }
 
-    const [metricsRows] = await pool.query<GenericRow[]>(`
+    const isBroadcast = campaignRows[0].type === "broadcast";
+
+    const [metricsRows] = isBroadcast
+      ? await pool.query<GenericRow[]>(`
+        SELECT
+          COUNT(*) AS total_views,
+          COUNT(*) AS total_deliveries,
+          COALESCE(SUM(cost), 0) AS total_spend,
+          COALESCE(SUM(publisher_reward), 0) AS publisher_earnings,
+          COALESCE(SUM(platform_revenue), 0) AS platform_revenue,
+          COALESCE(SUM(reserve_amount), 0) AS reserve,
+          MAX(last_success_at) AS last_delivery_at
+        FROM broadcast_deliveries
+        WHERE campaign_id = ? AND status = 'sent'
+      `, [id])
+      : await pool.query<GenericRow[]>(`
       SELECT
         COUNT(*) as total_posts,
         SUM(CASE WHEN cp.status IN ('active', 'posted', 'sent') THEN 1 ELSE 0 END) as active_posts,
@@ -136,7 +152,7 @@ export async function GET(
       [id]
     );
 
-    const [placements] = await pool.query<GenericRow[]>(`
+    const [placements] = isBroadcast ? [[] as GenericRow[]] : await pool.query<GenericRow[]>(`
       SELECT
         cp.id,
         cp.channel_id,
@@ -231,12 +247,17 @@ export async function PATCH(
         if (value.length > config.maxLength) {
           return NextResponse.json({ error: `${field} exceeds ${config.maxLength} characters` }, { status: 400 });
         }
-      } else {
+      } else if (config.type === "number") {
         const numericValue = typeof rawValue === "number" ? rawValue : Number(rawValue);
         if (!Number.isFinite(numericValue) || numericValue < config.min) {
           return NextResponse.json({ error: `${field} must be a non-negative number` }, { status: 400 });
         }
         value = numericValue;
+      } else {
+        if (typeof rawValue !== "boolean") {
+          return NextResponse.json({ error: `${field} must be a boolean` }, { status: 400 });
+        }
+        value = rawValue ? 1 : 0;
       }
 
       if (String(campaign[field] ?? "") === String(value)) continue;

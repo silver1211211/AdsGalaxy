@@ -1,20 +1,28 @@
 import pool from "@/lib/db";
+import type { RowDataPacket } from "mysql2/promise";
 
 function toNumber(value: unknown) {
   return Number.parseFloat(String(value ?? 0)) || 0;
 }
 
 export async function getMiniAppGlobalRevenueSummary() {
-  const [rows]: any = await pool.query(`
+  const [rows] = await pool.query<RowDataPacket[]>(`
     SELECT
       COALESCE(SUM(CASE WHEN ds.network_name <> 'AdsGalaxyInternal' THEN ds.impressions ELSE 0 END), 0) as external_impressions,
       COALESCE(SUM(CASE WHEN ds.network_name <> 'AdsGalaxyInternal' THEN ds.gross_revenue ELSE 0 END), 0) as external_ad_revenue,
       COALESCE(SUM(CASE WHEN ds.network_name <> 'AdsGalaxyInternal' THEN ds.ads_galaxy_fee ELSE 0 END), 0) as platform_fee_revenue,
       COALESCE(SUM(CASE WHEN ds.network_name <> 'AdsGalaxyInternal' THEN ds.publisher_revenue ELSE 0 END), 0) as external_publisher_revenue,
+      COALESCE(SUM(CASE WHEN ds.network_name <> 'AdsGalaxyInternal' THEN ds.reserve_revenue ELSE 0 END), 0) as external_reserve_revenue,
       COALESCE(SUM(CASE WHEN ds.network_name = 'AdsGalaxyInternal' THEN ds.impressions ELSE 0 END), 0) as internal_impressions,
-      COALESCE(SUM(CASE WHEN ds.network_name = 'AdsGalaxyInternal' THEN ds.publisher_revenue ELSE 0 END), 0) as internal_ad_revenue,
+      COALESCE(SUM(CASE WHEN ds.network_name = 'AdsGalaxyInternal' THEN ds.gross_revenue ELSE 0 END), 0) as internal_gross_revenue,
+      COALESCE(SUM(CASE WHEN ds.network_name = 'AdsGalaxyInternal' THEN ds.publisher_revenue ELSE 0 END), 0) as internal_publisher_revenue,
+      COALESCE(SUM(CASE WHEN ds.network_name = 'AdsGalaxyInternal' THEN ds.reserve_revenue ELSE 0 END), 0) as internal_reserve_revenue,
+      COALESCE(SUM(CASE WHEN ds.network_name = 'AdsGalaxyInternal' THEN ds.ads_galaxy_fee ELSE 0 END), 0) as internal_platform_revenue,
       COALESCE(SUM(ds.impressions), 0) as total_impressions,
       COALESCE(SUM(ds.publisher_revenue), 0) as publisher_revenue,
+      COALESCE(SUM(ds.gross_revenue),0) as gross_economic_value,
+      COALESCE(SUM(ds.reserve_revenue),0) as reserve_revenue,
+      COALESCE(SUM(ds.ads_galaxy_fee),0) as platform_retained,
       CASE WHEN COALESCE(SUM(ds.impressions), 0) > 0 THEN (SUM(ds.publisher_revenue) / SUM(ds.impressions)) * 1000 ELSE 0 END as blended_cpm
     FROM miniapp_daily_stats ds
   `);
@@ -26,15 +34,23 @@ export async function getMiniAppGlobalRevenueSummary() {
     platform_fee_revenue: toNumber(row.platform_fee_revenue),
     external_publisher_revenue: toNumber(row.external_publisher_revenue),
     internal_impressions: toNumber(row.internal_impressions),
-    internal_ad_revenue: toNumber(row.internal_ad_revenue),
+    internal_gross_revenue: toNumber(row.internal_gross_revenue),
+    internal_publisher_revenue: toNumber(row.internal_publisher_revenue),
+    internal_reserve_revenue: toNumber(row.internal_reserve_revenue),
+    internal_platform_revenue: toNumber(row.internal_platform_revenue),
+    external_reserve_revenue: toNumber(row.external_reserve_revenue),
     total_impressions: toNumber(row.total_impressions),
     publisher_revenue: toNumber(row.publisher_revenue),
+    gross_economic_value: toNumber(row.gross_economic_value),
+    reserve_revenue: toNumber(row.reserve_revenue),
+    platform_retained: toNumber(row.platform_retained),
+    margin_percent: toNumber(row.gross_economic_value)>0?toNumber(row.platform_retained)/toNumber(row.gross_economic_value)*100:0,
     blended_cpm: toNumber(row.blended_cpm),
   };
 }
 
 export async function getMiniAppPublisherRevenueSummary(userId: number | string) {
-  const [rows]: any = await pool.query(`
+  const [rows] = await pool.query<RowDataPacket[]>(`
     SELECT
       COALESCE(SUM(CASE WHEN ds.network_name <> 'AdsGalaxyInternal' THEN ds.publisher_revenue ELSE 0 END), 0) as external_publisher_revenue,
       COALESCE(SUM(CASE WHEN ds.network_name = 'AdsGalaxyInternal' THEN ds.publisher_revenue ELSE 0 END), 0) as internal_ad_revenue,

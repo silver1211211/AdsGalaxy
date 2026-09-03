@@ -443,7 +443,7 @@ export async function createRewardEvent(input: {
   db: PoolConnection;
   requestId: string;
   miniappId: number;
-  applicationId: number;
+  applicationId: number | null;
   publisherId: number;
   telegramUserId: string | number;
   provider: string;
@@ -457,7 +457,7 @@ export async function createRewardEvent(input: {
 }) {
   const matchesRequestScope = (event: RewardEventRow) => (
     Number(event.miniapp_id) === Number(input.miniappId)
-    && Number(event.application_id) === Number(input.applicationId)
+    && (event.application_id === null ? input.applicationId === null : Number(event.application_id) === Number(input.applicationId))
     && Number(event.publisher_id) === Number(input.publisherId)
     && String(event.telegram_user_id) === String(input.telegramUserId)
     && event.provider === clean(input.provider)

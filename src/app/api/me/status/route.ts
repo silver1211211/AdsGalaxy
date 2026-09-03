@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { getAuthenticatedUserStatus } from "@/lib/auth";
 
 export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData, { allowBanned: true });
+    const user = await getAuthenticatedUserStatus(initData, { request });
 
     return NextResponse.json({
       id: user.id,

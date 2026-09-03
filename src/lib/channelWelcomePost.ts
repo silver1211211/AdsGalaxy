@@ -2,7 +2,7 @@ import type { Pool, PoolConnection, ResultSetHeader } from "mysql2/promise";
 import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
 
-const ADSGALAXY_REF_LINK = "https://t.me/Ads_Galaxy_bot?startapp=REF770190998629F";
+const ADSGALAXY_REF_LINK = "https://t.me/Ads_Galaxy_bot?start=REF770190998629F";
 
 // Plain-text URL (no <a> tag) so Telegram auto-links it instead of rendering
 // custom link text — this is a system welcome post, not a paid ad, so it must

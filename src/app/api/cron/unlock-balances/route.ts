@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { creditUserAvailableBalance, unlockUserBalance } from "@/lib/earnings";
+import { unlockUserBalance } from "@/lib/earnings";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 
 export const dynamic = 'force-dynamic';
@@ -121,16 +121,46 @@ export async function GET(req: NextRequest) {
 
             if (referralRow.length > 0) {
               const referrerId = referralRow[0].invited_by;
-              const referralReward = amountToTransfer * referralPercent;
-
-              if (referralReward > 0) {
-                const creditedReferrer = await creditUserAvailableBalance(conn, referrerId, referralReward);
-                if (creditedReferrer) {
-                  await conn.query(
-                    "UPDATE users SET total_referral_earnings = total_referral_earnings + ? WHERE id = ?",
-                    [referralReward, referrerId]
-                  );
-                  results.referral_rewards_sent += referralReward;
+              const sources = [
+                ...data.clickIds.map((id) => ({ type: "click", table: "ad_settlements", id })),
+                ...data.viewIds.map((id) => ({ type: "view", table: "ad_settlements_views", id })),
+              ];
+              for (const source of sources) {
+                const [[sourceRow]]: any = await conn.query(
+                  `SELECT publisher_reward FROM ${source.table} WHERE id=? FOR UPDATE`,
+                  [source.id]
+                );
+                if (!sourceRow) continue;
+                const idempotencyKey = `publisher_commission:${source.type}:${source.id}`;
+                const [[lifetime]]: any = await conn.query(
+                  "SELECT COALESCE(SUM(amount),0) total FROM referral_commission_ledger WHERE referred_publisher_id=? FOR UPDATE",
+                  [userId]
+                );
+                const [[calculated]]: any = await conn.query(
+                  "SELECT LEAST(GREATEST(1.00000000-?,0),ROUND(?*?,8)) amount",
+                  [lifetime?.total || "0", sourceRow.publisher_reward, referralPercent]
+                );
+                if (Number(calculated?.amount || 0) <= 0) continue;
+                const [commission]: any = await conn.query(
+                  `INSERT IGNORE INTO referral_commission_ledger
+                    (idempotency_key,referrer_user_id,referred_publisher_id,source_settlement_type,source_settlement_id,
+                     gross_publisher_amount,commission_rate,amount,status,eligibility_snapshot)
+                   VALUES (?,?,?,?,?,?,?,?,'pending',?)`,
+                  [idempotencyKey,referrerId,userId,source.type,source.id,sourceRow.publisher_reward,referralPercent,
+                    calculated.amount,JSON.stringify({ source_status: "locked", lifetime_cap: "1.00000000" })]
+                );
+                if (commission.affectedRows !== 1) continue;
+                const [ledger]: any = await conn.query(
+                  `INSERT IGNORE INTO referral_reward_ledger
+                    (idempotency_key,user_id,source_type,source_id,reward_type,amount,status,reason,metadata,eligibility_snapshot,eligible_at)
+                   VALUES (?,?,'publisher_commission',?,'publisher_commission',?,'pending','recurring_publisher_commission',?,?,NOW())`,
+                  [idempotencyKey,referrerId,commission.insertId,calculated.amount,
+                    JSON.stringify({ referred_publisher_id:userId,source_type:source.type,source_id:source.id }),
+                    JSON.stringify({ commission_rate:referralPercent,lifetime_cap:"1.00000000" })]
+                );
+                if (ledger.affectedRows === 1) {
+                  await conn.query("UPDATE referral_commission_ledger SET referral_ledger_id=? WHERE id=?", [ledger.insertId,commission.insertId]);
+                  results.referral_rewards_sent += Number(calculated.amount);
                 }
               }
             }

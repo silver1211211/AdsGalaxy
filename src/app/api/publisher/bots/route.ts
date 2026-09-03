@@ -53,7 +53,7 @@ export async function GET(request: Request) {
       columnExists("bot_users", "integration_first_seen_at"),
     ]);
     const botImpressionsExpr = hasBroadcastDeliveries
-      ? "COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent'), 0)"
+      ? "COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent'), 0)"
       : "0";
     const botDeliveredExpr = hasBroadcastDeliveries
       ? "COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.bot_id = b.id AND bd.status = 'sent'), 0)"

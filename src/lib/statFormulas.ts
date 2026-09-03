@@ -25,8 +25,10 @@ export function cpc(spend: unknown, clicks: unknown, digits = 8) {
   return safeRate(spend, clicks, 1, digits);
 }
 
-export const MIN_CPM_SAMPLE_SIZE = 100;
-export const MIN_CPC_SAMPLE_SIZE = 10;
+// Publisher rates become meaningful as soon as the underlying billable event
+// exists. View campaigns need one impression; click campaigns need one click.
+export const MIN_CPM_SAMPLE_SIZE = 1;
+export const MIN_CPC_SAMPLE_SIZE = 1;
 
 export function hasMinimumCpmSample(impressions: unknown) {
   return metricNumber(impressions) >= MIN_CPM_SAMPLE_SIZE;

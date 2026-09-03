@@ -105,7 +105,7 @@ export default function DeveloperCenterPage() {
           <div>
             <p className="text-[10px] font-black uppercase tracking-widest text-blue-600">Developer Platform</p>
             <h1 className="mt-1 text-2xl font-black text-slate-900 dark:text-white">Developer Center</h1>
-            <p className="mt-1 text-sm font-semibold text-slate-500 dark:text-slate-400">Manage API sandbox applications, keys, webhooks, and verified test events.</p>
+            <p className="mt-1 text-sm font-semibold text-slate-500 dark:text-slate-400">Advanced optional APIs for sandbox applications, keys, webhooks, and verified test events.</p>
           </div>
           <Link href="/docs/developers" className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-xs font-black uppercase tracking-widest text-white">
             <Code2 size={16} /> Docs
@@ -127,6 +127,10 @@ export default function DeveloperCenterPage() {
               <Link href="/publisher/bots" className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/10 px-4 py-3 text-xs font-black text-white"><TestTube2 size={15} /> Manage & Test</Link>
             </div>
           </div>
+        </section>
+
+        <section className="rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm font-semibold leading-6 text-blue-900">
+          <strong>Advanced Developer APIs:</strong> These tools are not required to load the Mini App SDK, display ads, handle SDK errors, or receive a direct Mini App reward callback. Ordinary publishers configure Reward callback in Publisher → Mini Apps → Mini App Details.
         </section>
 
         {message && <div className="rounded-xl border border-blue-100 bg-blue-50 p-3 text-sm font-bold text-blue-700">{message}</div>}
@@ -206,7 +210,7 @@ export default function DeveloperCenterPage() {
 
             <div className="grid gap-4 xl:grid-cols-2">
               <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Mini App bindings</h2>
+                <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Advanced Mini App API bindings</h2>
                 <p className="mt-2 text-sm font-semibold text-slate-500">Bind a publisher-owned Mini App to one application in the matching environment.</p>
                 <div className="mt-4 grid gap-3 sm:grid-cols-2">
                   <select value={bindingForm.application_id} onChange={(e) => setBindingForm({ ...bindingForm, application_id: e.target.value })} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
@@ -229,7 +233,7 @@ export default function DeveloperCenterPage() {
               </section>
 
               <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Production webhook controls</h2>
+                <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Advanced Developer webhook controls</h2>
                 <p className="mt-2 text-sm font-semibold text-slate-500">Reward webhooks support reward.eligible and reward.claimed. New secrets are displayed once.</p>
                 <div className="mt-4 grid gap-2">
                   {data.webhooks.map((webhook: any) => (
@@ -264,7 +268,7 @@ export default function DeveloperCenterPage() {
                       <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">API Application Reference</p>
                       <div className="mt-2 flex items-center gap-2">
                         <code className="min-w-0 flex-1 rounded-lg bg-slate-950 px-3 py-2 font-mono text-sm font-black text-white">{app.integration_id}</code>
-                        <button onClick={() => copyText(app.integration_id)} className="rounded-lg bg-blue-600 p-2 text-white" aria-label="Copy Integration ID"><Copy size={16} /></button>
+                        <button onClick={() => copyText(app.integration_id)} className="rounded-lg bg-blue-600 p-2 text-white" aria-label="Copy API application reference"><Copy size={16} /></button>
                       </div>
                     </div>
                     <div className="mt-3 grid gap-2 sm:grid-cols-2">

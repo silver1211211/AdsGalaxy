@@ -68,7 +68,7 @@ export function calculateBroadcastPayout(advertiserCpm: unknown, settings: Broad
 }
 
 export function broadcastDisplayedImpressions(successfulBroadcasts: unknown) {
-  return Math.floor(Math.max(0, Number(successfulBroadcasts) || 0) / 5);
+  return Math.floor(Math.max(0, Number(successfulBroadcasts) || 0));
 }
 
 export function broadcastReportingCpm(amount: unknown, displayedImpressions: unknown) {

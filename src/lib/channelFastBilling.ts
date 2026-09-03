@@ -7,6 +7,7 @@ import { getChannelUnitPrice, money } from "@/lib/channelBilling";
 import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
 import { deleteExhaustedChannelCampaignPosts, type CampaignPostDeletionSummary } from "@/lib/campaignPostDeletion";
 import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
+import { calculateCurrentCanonicalAllocation, shadowWriteChannelAllocation, unitsToDecimal } from "@/lib/channelAllocationLedger";
 
 type LockedPost = RowDataPacket & {
   campaign_id: number; channel_id: number; publisher_id: number; campaign_type: string;
@@ -181,7 +182,26 @@ export async function settlePendingChannelPublisherCredits(options: number | { l
       await conn.query("UPDATE campaign_posts SET publisher_earnings=publisher_earnings+?,platform_revenue=platform_revenue+?,reserve_amount=reserve_amount+? WHERE id=?", [publisherCredit,platformRevenue,reserveAmount,row.post_id]);
       await conn.query("UPDATE campaigns SET channel_publisher_earnings=channel_publisher_earnings+?,channel_platform_revenue=channel_platform_revenue+?,channel_reserve_amount=channel_reserve_amount+? WHERE id=?", [publisherCredit,platformRevenue,reserveAmount,row.campaign_id]);
       await conn.query("UPDATE channel_advertiser_debits SET publisher_status='settled',publisher_credit=?,publisher_settled_at=NOW() WHERE id=?", [publisherCredit,row.id]);
-      await conn.commit(); settled++; credited += publisherCredit;
+      await conn.commit();
+      try {
+        const canonical = calculateCurrentCanonicalAllocation({
+          advertiserDebit: String(row.advertiser_debit), platformMarginPercent: settings?.margin || "40",
+          safetyReservePercent: settings?.reserve || "10", qualityWeight: String(quality.qualityWeight),
+        });
+        await shadowWriteChannelAllocation(conn, {
+          sourceKey: `fast:${row.source_key}`,
+          sourceType: String(row.settlement_type) === "view" ? "view" : "click",
+          sourceRecordId: Number(row.id), campaignId: Number(row.campaign_id), postId: Number(row.post_id),
+          channelId: Number(row.channel_id), advertiserId: Number(row.advertiser_id), publisherId: Number(row.publisher_id),
+          billableUnits: Number(row.units), unitPrice: String(row.unit_price), advertiserDebit: unitsToDecimal(canonical.debit),
+          publisherAllocation: unitsToDecimal(canonical.publisher), platformAllocation: unitsToDecimal(canonical.platform),
+          reserveAllocation: unitsToDecimal(canonical.reserve), qualityAdjustment: unitsToDecimal(canonical.qualityAdjustment),
+          occurredAt: String(row.created_at), settledAt: new Date(),
+        });
+      } catch (error) {
+        console.error("Canonical fast allocation calculation failed", { debit_id: Number(row.id), error: error instanceof Error ? error.message : "unknown_error" });
+      }
+      settled++; credited += publisherCredit;
     } catch (error) { await conn.rollback(); console.error("Pending channel publisher settlement failed", { id: candidate.id, error }); }
     finally { conn.release(); }
   }

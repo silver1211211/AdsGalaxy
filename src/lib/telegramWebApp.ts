@@ -1,11 +1,14 @@
 type TelegramWebApp = {
   ready?: () => void;
   expand?: () => void;
+  enableVerticalSwipes?: () => void;
   initData?: string;
   showAlert?: (message: string) => void;
   setBackgroundColor?: (color: string) => void;
   setHeaderColor?: (color: string) => void;
 };
+
+import { miniappReloadDebug } from "./miniappReloadDebug";
 
 type TelegramWindow = Window & {
   Telegram?: {
@@ -13,8 +16,33 @@ type TelegramWindow = Window & {
   };
 };
 
-const INIT_DATA_RETRIES = 16;
+// Some Telegram Android/WebView sessions expose WebApp.initData several
+// seconds after the document starts. Keep the boot screen alive long enough
+// for those sessions instead of permanently failing after only 2.4 seconds.
+const INIT_DATA_RETRIES = 80;
 const INIT_DATA_INTERVAL_MS = 150;
+let sessionInitData = "";
+let activeInitDataWait: Promise<string> | null = null;
+
+function getLaunchParam(name: string) {
+  if (typeof window === "undefined") return "";
+  for (const source of [window.location.search, window.location.hash]) {
+    const value = new URLSearchParams(source.replace(/^[?#]/, "")).get(name);
+    if (value) return value;
+  }
+  return "";
+}
+
+function getSessionTelegramInitData() {
+  // Telegram also places the signed payload directly in the launch URL. Use
+  // that authoritative value when its SDK is delayed or blocked by a WebView.
+  const currentInitData = getTelegramWebApp()?.initData || getLaunchParam("tgWebAppData");
+  if (currentInitData) sessionInitData = currentInitData;
+  // Do not emit telemetry from this polling helper. Doing so creates one HTTP
+  // request per retry and can make a slow Mini App launch even slower. The
+  // caller records one start event and one completion event instead.
+  return currentInitData || sessionInitData;
+}
 
 export function getTelegramWebApp() {
   if (typeof window === "undefined") return undefined;
@@ -31,10 +59,12 @@ export function safePrepareTelegramWebApp() {
     console.warn("Telegram WebApp ready() failed:", error);
   }
 
+  // Keep Telegram's native swipe-down gesture available so users can collapse
+  // the Mini App without closing it. Do not force the WebView expanded here.
   try {
-    webApp.expand?.();
+    webApp.enableVerticalSwipes?.();
   } catch (error) {
-    console.warn("Telegram WebApp expand() failed:", error);
+    console.warn("Telegram WebApp enableVerticalSwipes() failed:", error);
   }
 
   // Force Telegram's native WebView chrome (header bar and any area outside
@@ -56,13 +86,7 @@ export function safePrepareTelegramWebApp() {
 
 export function hasTelegramLaunchParams() {
   if (typeof window === "undefined") return false;
-
-  const hash = window.location.hash || "";
-  const search = window.location.search || "";
-  return hash.includes("tgWebAppData")
-    || hash.includes("tgWebAppPlatform")
-    || search.includes("tgWebAppData")
-    || search.includes("tgWebAppPlatform");
+  return Boolean(getLaunchParam("tgWebAppData") || getLaunchParam("tgWebAppPlatform"));
 }
 
 export function isTelegramMiniApp() {
@@ -107,18 +131,47 @@ export function ensureFreshAppVersion() {
 
 export async function waitForTelegramInitData(options: { requireTelegram?: boolean } = {}) {
   if (typeof window === "undefined") return "";
+  const immediate = getSessionTelegramInitData();
+  if (immediate) return immediate;
+  if (activeInitDataWait) return activeInitDataWait;
+
+  activeInitDataWait = waitForTelegramInitDataInternal(options);
+  try {
+    return await activeInitDataWait;
+  } finally {
+    activeInitDataWait = null;
+  }
+}
+
+async function waitForTelegramInitDataInternal(options: { requireTelegram?: boolean } = {}) {
+
+  const waitStartedAt = Date.now();
+  miniappReloadDebug("telegram_init_data_wait_started", {
+    telegram_window_present: Boolean((window as TelegramWindow).Telegram),
+    webapp_present: Boolean(getTelegramWebApp()),
+    webapp_init_data_present: Boolean(getTelegramWebApp()?.initData),
+    cached_init_data_present: Boolean(sessionInitData),
+  });
 
   safePrepareTelegramWebApp();
 
   for (let attempt = 0; attempt < INIT_DATA_RETRIES; attempt += 1) {
-    const initData = getTelegramWebApp()?.initData || "";
-    if (initData) return initData;
+    const initData = getSessionTelegramInitData();
+    if (initData) {
+      miniappReloadDebug("telegram_init_data_wait_completed", { waited_ms: Date.now() - waitStartedAt, init_data_present: true, result: "present" });
+      return initData;
+    }
 
     await new Promise((resolve) => window.setTimeout(resolve, INIT_DATA_INTERVAL_MS));
   }
 
-  const initData = getTelegramWebApp()?.initData || "";
-  if (initData) return initData;
+  const initData = getSessionTelegramInitData();
+  if (initData) {
+    miniappReloadDebug("telegram_init_data_wait_completed", { waited_ms: Date.now() - waitStartedAt, init_data_present: true, result: "present" });
+    return initData;
+  }
+
+  miniappReloadDebug("telegram_init_data_wait_completed", { waited_ms: Date.now() - waitStartedAt, init_data_present: false, result: "missing" });
 
   if (options.requireTelegram && isTelegramMiniApp()) {
     throw new Error("Telegram initData was not available");

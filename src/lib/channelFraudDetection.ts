@@ -3,6 +3,8 @@ import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/prom
 import pool from "@/lib/db";
 import { getPublisherQuality } from "@/lib/publisherQuality";
 import { fraudBillingStateForSeverity } from "@/lib/channelFraudBilling";
+import { getFraudCoverageMetrics, persistPublisherRiskAssessment } from "@/lib/channelSafety";
+import { purgeExpiredChannelTrafficEvents } from "@/lib/channelTrafficTelemetry";
 
 export type FraudSeverity = "low" | "medium" | "high" | "critical";
 
@@ -63,6 +65,7 @@ export type ChannelFraudDetectionResult = {
   eventsCreated: number;
   publishersBanned: number;
   recoveredChannels: number;
+  coverage: Awaited<ReturnType<typeof getFraudCoverageMetrics>>;
 };
 
 const SEVERITY_POINTS: Record<FraudSeverity, number> = { low: 3, medium: 8, high: 18, critical: 30 };
@@ -188,9 +191,13 @@ export async function runChannelFraudDetection(limit = 200): Promise<ChannelFrau
   const bucket = evaluationBucket();
   const [channels] = await pool.query<ChannelRow[]>(
     `SELECT id,user_id,subscriber_count,traffic_quality_score,publisher_trust_score,channel_fraud_risk_score,fraud_clean_streak,trust_score_frozen_until
-     FROM channels WHERE is_deleted=FALSE AND status IN ('active','paused') ORDER BY id ASC LIMIT ${boundedLimit}`
+     FROM channels WHERE is_deleted=FALSE AND status IN ('active','paused')
+     ORDER BY COALESCE(fraud_last_evaluated_at,'1970-01-01 00:00:00') ASC,id ASC LIMIT ${boundedLimit}`
   );
   const affectedPublishers = new Set<number>();
+  await purgeExpiredChannelTrafficEvents().catch((error) => {
+    console.error("Channel telemetry retention cleanup failed", { error: error instanceof Error ? error.message : "unknown_error" });
+  });
   let channelsChecked = 0;
   let channelsSkipped = 0;
   let eventsCreated = 0;
@@ -233,7 +240,7 @@ export async function runChannelFraudDetection(limit = 200): Promise<ChannelFrau
             signal.fraudType, signal.severity, fraudBillingStateForSeverity(signal.severity), oldTrust, newTrust, oldRisk, newRisk,
             signal.reason, signal.metadata ? JSON.stringify(signal.metadata) : null]
         );
-        console.warn("Channel fraud event", { channel_id: channel.id, publisher_id: channel.user_id, campaign_id: signal.campaignId || null, post_id: signal.postId || null, fraud_type: signal.fraudType, severity: signal.severity, old_trust_score: oldTrust, new_trust_score: newTrust, old_risk_score: oldRisk, new_risk_score: newRisk, reason: signal.reason });
+        console.info("Channel fraud signal", { channel_id: channel.id, publisher_id: channel.user_id, campaign_id: signal.campaignId || null, post_id: signal.postId || null, fraud_type: signal.fraudType, severity: signal.severity, old_trust_score: oldTrust, new_trust_score: newTrust, old_risk_score: oldRisk, new_risk_score: newRisk, reason: signal.reason });
       }
 
       await connection.query(
@@ -267,9 +274,15 @@ export async function runChannelFraudDetection(limit = 200): Promise<ChannelFrau
       [publisherId]
     );
     await pool.query("UPDATE users SET publisher_trust_score=?,publisher_risk_score=? WHERE id=?", [rounded(numberValue(scores?.trust)), rounded(numberValue(scores?.risk)), publisherId]);
+    try {
+      await persistPublisherRiskAssessment(publisherId);
+    } catch (error) {
+      console.error("Publisher aggregate risk assessment failed", { publisher_id: publisherId, error: error instanceof Error ? error.message : "unknown_error" });
+    }
     const [publisherChannels] = await pool.query<Array<RowDataPacket & { id: number }>>("SELECT id FROM channels WHERE user_id=? AND is_deleted=FALSE", [publisherId]);
     for (const publisherChannel of publisherChannels) await getPublisherQuality(publisherChannel.id);
   }
 
-  return { evaluationBucket: bucket, channelsChecked, channelsSkipped, eventsCreated, publishersBanned: 0, recoveredChannels };
+  const coverage = await getFraudCoverageMetrics();
+  return { evaluationBucket: bucket, channelsChecked, channelsSkipped, eventsCreated, publishersBanned: 0, recoveredChannels, coverage };
 }

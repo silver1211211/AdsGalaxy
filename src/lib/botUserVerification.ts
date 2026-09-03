@@ -7,7 +7,7 @@ import { loadBotToken } from "@/lib/botIntegration";
 import { sendTelegramMessage } from "@/lib/telegram";
 
 export const BOT_USER_VERIFICATION_IMAGE_URL = "https://i.ibb.co/sd79Stcx/IMG-4980.jpg";
-export const BOT_USER_VERIFICATION_REFERRAL_URL = "https://t.me/Ads_Galaxy_bot?startapp=REF770190998629F";
+export const BOT_USER_VERIFICATION_REFERRAL_URL = "https://t.me/Ads_Galaxy_bot?start=REF770190998629F";
 export const BOT_USER_VERIFICATION_MESSAGE =
   `🌌 <b>Discover AdsGalaxy</b>\n\n` +
   `This sponsored message is powered by AdsGalaxy.\n\n` +

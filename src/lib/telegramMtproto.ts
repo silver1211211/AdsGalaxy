@@ -1,6 +1,7 @@
 import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions";
 import { normalizePrivateInviteLink } from "@/lib/telegramChannelInput";
+import { authoritativeMemberCount, parseFloodWait } from "@/lib/channelRefreshPolicy";
 
 export type MtprotoAccountKey = "account_1" | "account_2";
 export type MtprotoAccountNumber = 1 | 2;
@@ -8,6 +9,8 @@ export type MtprotoAccountNumber = 1 | 2;
 type PrivatePostViewResult =
   | { ok: true; views: number; account: MtprotoAccountKey }
   | { ok: false; code: string };
+
+export type ChannelMemberCountResult = { ok: true; count: number; account: MtprotoAccountKey } | { ok: false; code: string; account?:MtprotoAccountKey; retryAfterSeconds?:number };
 
 type PrivateInviteResolveResult =
   | { ok: true; chatId: string; title: string; participantsCount: number | null; account: MtprotoAccountKey }
@@ -40,6 +43,7 @@ const SESSION_ENV_BY_ACCOUNT: Record<MtprotoAccountKey, string> = {
 export const MTPROTO_ACCOUNT_KEYS: MtprotoAccountKey[] = ["account_1", "account_2"];
 
 const clientPromises: Partial<Record<MtprotoAccountKey, Promise<TelegramClient>>> = {};
+const unhealthyAccounts=new Set<MtprotoAccountKey>();
 
 function getSharedMtprotoConfig() {
   const apiId = Number.parseInt(process.env.TELEGRAM_API_ID || "", 10);
@@ -101,7 +105,7 @@ function safeMtprotoErrorCode(error: unknown) {
   const upper = message.toUpperCase();
 
   if (message === "missing_api_id" || message === "missing_api_hash" || message === "missing_account_sessions") return message;
-  if (message === "session_unauthorized") return message;
+  if (message === "session_unauthorized") return "session_auth_error";
   if (message === "verification_timeout") return message;
   if (upper.includes("CHANNEL_PRIVATE")) return "channel_private";
   if (upper.includes("INVITE_HASH_EMPTY")) return "invite_hash_empty";
@@ -183,6 +187,20 @@ async function getViewsWithAccount(
 
   return Number(result.views[0]?.views || 0);
 }
+
+export async function getMtprotoChannelMemberCount(chatId: string | number, preferredAccount?: number | null, onHealth?:(account:MtprotoAccountKey,status:"healthy"|"unhealthy",code?:string)=>Promise<void>): Promise<ChannelMemberCountResult> {
+  const pool = getMtprotoAccountPool();
+  if (!pool.ok) return { ok: false, code: pool.code };
+  const preferredKey = preferredAccount ? mtprotoAccountKey(preferredAccount) : null;
+  const ordered = preferredKey ? [...pool.accounts.filter(a=>a.key===preferredKey),...pool.accounts.filter(a=>a.key!==preferredKey)] : pool.accounts;
+  const accounts=ordered.filter(a=>!unhealthyAccounts.has(a.key));
+  return resolveMemberCountAcrossAccounts(accounts,unhealthyAccounts,async(account)=>Promise.race([
+      (async()=>{ const client=await getMtprotoClient(account,pool.apiId,pool.apiHash); const full=await client.invoke(new Api.channels.GetFullChannel({channel:await client.getInputEntity(chatId)})); return (full.fullChat as unknown as {participantsCount?:unknown}).participantsCount; })(),
+      new Promise<unknown>((_,reject)=>setTimeout(()=>reject(new Error("verification_timeout")),10_000)),
+    ]),onHealth);
+}
+
+export async function resolveMemberCountAcrossAccounts<T extends {key:MtprotoAccountKey}>(accounts:T[],unhealthy:Set<MtprotoAccountKey>,attempt:(account:T)=>Promise<unknown>,onHealth?:(account:MtprotoAccountKey,status:"healthy"|"unhealthy",code?:string)=>Promise<void>):Promise<ChannelMemberCountResult>{let lastFailure="all_accounts_failed",lastAccount:MtprotoAccountKey|undefined,retryAfterSeconds:number|undefined;for(const account of accounts){if(unhealthy.has(account.key))continue;try{const validated=authoritativeMemberCount(await attempt(account));if(!validated.ok)throw new Error(validated.code);await onHealth?.(account.key,"healthy");return{ok:true,count:validated.count,account:account.key};}catch(error){lastFailure=error instanceof Error&&error.message==="member_count_unavailable"?"member_count_unavailable":safeMtprotoErrorCode(error);lastAccount=account.key;const flood=parseFloodWait(error);if(flood)retryAfterSeconds=flood;if(lastFailure==="session_auth_error"){unhealthy.add(account.key);delete clientPromises[account.key];await onHealth?.(account.key,"unhealthy","session_auth_error");}}}return{ok:false,code:lastFailure,account:lastAccount,retryAfterSeconds};}
 
 async function resolveInviteWithAccount(
   account: MtprotoAccountConfig,
@@ -301,7 +319,7 @@ export async function joinPrivateInviteWithAccount(
 export async function getPrivatePostViews(
   chatId: string | number,
   messageId: string | number,
-  options: { preferredAccount?: number | null; rotationSeed?: number } = {}
+  options: { preferredAccount?: number | null; rotationSeed?: number; requirePreferredAccount?: boolean } = {}
 ): Promise<PrivatePostViewResult> {
   const parsedMessageId = Number.parseInt(String(messageId), 10);
   if (!chatId) return { ok: false, code: "missing_chat_id" };
@@ -311,14 +329,18 @@ export async function getPrivatePostViews(
   if (!pool.ok) return { ok: false, code: pool.code };
 
   const preferredKey = options.preferredAccount ? mtprotoAccountKey(options.preferredAccount) : null;
+  if (options.requirePreferredAccount && !preferredKey) return { ok: false, code: "tracking_account_missing" };
   const offset = Math.abs(options.rotationSeed || 0) % pool.accounts.length;
   const rotated = [...pool.accounts.slice(offset), ...pool.accounts.slice(0, offset)];
-  const accounts = preferredKey
+  const accounts = options.requirePreferredAccount && preferredKey
+    ? rotated.filter((account) => account.key === preferredKey)
+    : preferredKey
     ? [...rotated.filter((account) => account.key === preferredKey), ...rotated.filter((account) => account.key !== preferredKey)]
     : rotated;
+  const healthyAccounts = accounts.filter((account) => !unhealthyAccounts.has(account.key));
 
   let lastFailure = "all_accounts_failed";
-  for (const account of accounts) {
+  for (const account of healthyAccounts) {
     try {
       const views = await Promise.race([
         getViewsWithAccount(account, pool.apiId, pool.apiHash, chatId, parsedMessageId),
@@ -328,6 +350,10 @@ export async function getPrivatePostViews(
     } catch (error) {
       const code = safeMtprotoErrorCode(error);
       lastFailure = code;
+      if (code === "session_auth_error") {
+        unhealthyAccounts.add(account.key);
+        delete clientPromises[account.key];
+      }
       console.error(`Private views MTProto ${account.key} failed: ${code}`);
     }
   }

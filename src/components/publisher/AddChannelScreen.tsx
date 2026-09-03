@@ -6,28 +6,31 @@ import {
   Loader2,
   CheckCircle2,
   ExternalLink,
-  Info,
-  ChevronLeft,
   Tv,
-  Plus
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
+import { getApiErrorCode, getApiErrorMessage } from "@/lib/apiErrorMessage";
 import { motion, AnimatePresence } from "framer-motion";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Toast from "@/components/ui/Toast";
 import { getDefaultPostingTimes, normalizePostingTimes, POSTING_TIME_OPTIONS } from "@/lib/postingTimes";
+import { classifyChannelAudience } from "@/lib/channelAudience";
 
 const CATEGORIES = ["Crypto", "Finance", "NSFW +18", "Tech", "Gambling", "Entertainment", "Education", "Shopping", "Other"];
 const CONTINENTS = [
-  { name: "Global", countries: "All countries" },
-  { name: "Africa", countries: "Nigeria, South Africa, Egypt, Kenya" },
-  { name: "Asia", countries: "India, China, Japan, Indonesia" },
-  { name: "Europe", countries: "UK, Germany, France, Italy, Spain" },
-  { name: "North America", countries: "USA, Canada, Mexico" },
-  { name: "South America", countries: "Brazil, Argentina, Colombia" },
-  { name: "Oceania", countries: "Australia, New Zealand" }
+  { value: "africa", name: "Africa", countries: "Nigeria, South Africa, Egypt, Kenya" },
+  { value: "asia", name: "Asia", countries: "India, China, Japan" },
+  { value: "europe", name: "Europe", countries: "United Kingdom, Germany, France, Italy, Spain" },
+  { value: "north_america", name: "North America", countries: "United States, Canada, Mexico" },
+  { value: "south_america", name: "South America", countries: "Brazil, Argentina, Colombia" },
+  { value: "oceania", name: "Oceania", countries: "Australia, New Zealand" }
 ];
+
+function getInitialChannelAudience(channel: { audience_continents?: unknown } | undefined) {
+  const audience = classifyChannelAudience(channel?.audience_continents);
+  return audience && audience !== "global" ? [audience] : [];
+}
 
 function getInitialPostingTimes(channel: { posting_times?: unknown } | undefined, postsPerDay: number) {
   try {
@@ -40,8 +43,24 @@ function getInitialPostingTimes(channel: { posting_times?: unknown } | undefined
 interface AddChannelScreenProps {
   onClose: () => void;
   onSuccess: () => void;
-  channel?: any; // Optional for edit mode
+  channel?: ChannelDetails; // Optional for edit mode
 }
+
+type ChannelDetails = {
+  id: number;
+  chat_id?: string;
+  username?: string | null;
+  title?: string;
+  subscriber_count?: number;
+  posts_per_day?: number;
+  posting_times?: unknown;
+  audience_continents?: unknown;
+  categories?: string | string[];
+};
+
+type TelegramWebAppWindow = Window & {
+  Telegram?: { WebApp?: { BackButton?: { show(): void; hide(): void; onClick(callback: () => void): void; offClick(callback: () => void): void } } };
+};
 
 export default function AddChannelScreen({ onClose, onSuccess, channel }: AddChannelScreenProps) {
   const isEdit = !!channel;
@@ -49,7 +68,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
   const [username, setUsername] = useState(channel?.username || "");
   const [isLoading, setIsLoading] = useState(false);
   const [notification, setNotification] = useState<{ type: "success" | "error"; title: string; message: string } | null>(null);
-  const [channelInfo, setChannelInfo] = useState<any>(channel || null);
+  const [channelInfo, setChannelInfo] = useState<ChannelDetails | null>(channel || null);
   
   // Modal states
   const [permissionModal, setPermissionModal] = useState<{
@@ -66,18 +85,17 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
   const [postingTimes, setPostingTimes] = useState<string[]>(() => getInitialPostingTimes(channel, channel?.posts_per_day || 1));
   const [postingTimeSelectionOrder, setPostingTimeSelectionOrder] = useState<string[]>(() => getInitialPostingTimes(channel, channel?.posts_per_day || 1));
   const [postingTimesError, setPostingTimesError] = useState("");
-  const [selectedContinents, setSelectedContinents] = useState<string[]>(
-    channel?.audience_continents ? (typeof channel.audience_continents === 'string' ? JSON.parse(channel.audience_continents) : channel.audience_continents) : []
-  );
+  const [selectedContinents, setSelectedContinents] = useState<string[]>(() => getInitialChannelAudience(channel));
   const [selectedCategories, setSelectedCategories] = useState<string[]>(
     channel?.categories ? (typeof channel.categories === 'string' ? JSON.parse(channel.categories) : channel.categories) : []
   );
 
   // Telegram Back Button Logic
   useEffect(() => {
-    const twa = (window as any).Telegram?.WebApp;
-    if (twa?.BackButton) {
-      twa.BackButton.show();
+    const twa = (window as TelegramWebAppWindow).Telegram?.WebApp;
+    const backButton = twa?.BackButton;
+    if (backButton) {
+      backButton.show();
       const handleBack = () => {
         if (!isEdit && step > 1) {
           setStep(1);
@@ -85,11 +103,11 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
           onClose();
         }
       };
-      twa.BackButton.onClick(handleBack);
+      backButton.onClick(handleBack);
 
       return () => {
-        twa.BackButton.offClick(handleBack);
-        twa.BackButton.hide();
+        backButton.offClick(handleBack);
+        backButton.hide();
       };
     }
   }, [step, onClose, isEdit]);
@@ -100,27 +118,29 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
     setNotification(null);
     try {
       const res = await apiFetch(`/api/telegram/chat-info?username=${username}`);
-      const data = await res.json();
+      const data: unknown = await res.json();
       
       if (!res.ok) {
-        if (data.error === "PERMISSION_REQUIRED") {
+        const legacyData = data as { error?: unknown; message?: string };
+        if (getApiErrorCode(data) === "PERMISSION_REQUIRED" || legacyData.error === "PERMISSION_REQUIRED") {
           setPermissionModal({
             isOpen: true,
-            message: data.message
+            message: legacyData.message || "The required channel permission is missing."
           });
           return;
         }
-        throw new Error(data.error || "Failed to fetch channel info");
+        throw new Error(getApiErrorMessage(data, "Failed to fetch channel info"));
       }
 
-      setChannelInfo(data);
-      setEditedTitle(data.title);
+      const details = data as ChannelDetails;
+      setChannelInfo(details);
+      setEditedTitle(details.title || "");
       setStep(2);
-    } catch (err: any) {
+    } catch (err: unknown) {
       setNotification({
         type: "error",
         title: "Search Failed",
-        message: err.message
+        message: err instanceof Error ? err.message : "Failed to fetch channel info"
       });
     } finally {
       setIsLoading(false);
@@ -137,23 +157,8 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
     });
   };
 
-  const toggleContinent = (name: string) => {
-    setSelectedContinents(prev => {
-      if (name === "Global") {
-        return prev.includes("Global") ? [] : CONTINENTS.map(c => c.name);
-      }
-
-      let next: string[];
-      if (prev.includes(name)) {
-        next = prev.filter(c => c !== name && c !== "Global");
-      } else {
-        next = [...prev, name];
-        if (next.length === CONTINENTS.length - 1) {
-          next = CONTINENTS.map(c => c.name);
-        }
-      }
-      return next;
-    });
+  const toggleContinent = (value: string) => {
+    setSelectedContinents((previous) => previous.includes(value) ? [] : [value]);
   };
 
   const handlePostsPerDayChange = (value: number) => {
@@ -204,6 +209,10 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
   };
 
   const handleSubmit = async () => {
+    if (!channelInfo) {
+      setNotification({ type: "error", title: "Registration Failed", message: "Fetch the channel information before registering it." });
+      return;
+    }
     const trimmedTitle = editedTitle.trim();
     if (trimmedTitle.length < 3) {
       setNotification({
@@ -228,8 +237,8 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
       const res = await apiFetch(isEdit ? `/api/publisher/channels/${channel.id}` : "/api/publisher/channels", {
         method: isEdit ? "PATCH" : "POST",
         body: JSON.stringify({
-          chat_id: isEdit ? channel.chat_id : channelInfo.id,
-          username: isEdit ? channel.username : channelInfo.username,
+          chat_id: isEdit ? channel?.chat_id : channelInfo.id,
+          username: isEdit ? channel?.username : channelInfo.username,
           channel_type: "public",
           title: trimmedTitle,
           posts_per_day: postsPerDay,
@@ -241,16 +250,16 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
 
       if (!res.ok) {
         const data = await res.json();
-        throw new Error(data.error || `Failed to ${isEdit ? 'update' : 'add'} channel`);
+        throw new Error(getApiErrorMessage(data, `Failed to ${isEdit ? 'update' : 'add'} channel`));
       }
 
       onSuccess();
       onClose();
-    } catch (err: any) {
+    } catch (err: unknown) {
       setNotification({
         type: "error",
         title: isEdit ? "Update Failed" : "Registration Failed",
-        message: err.message
+        message: err instanceof Error ? err.message : `Failed to ${isEdit ? "update" : "add"} channel`
       });
     } finally {
       setIsLoading(false);
@@ -350,7 +359,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                     </div>
                     <div>
                       <h2 className="text-2xl font-black text-slate-900">Configure</h2>
-                      <p className="text-sm text-slate-500">Reviewing @{channelInfo.username}</p>
+                      <p className="text-sm text-slate-500">Reviewing @{channelInfo?.username}</p>
                     </div>
                   </div>
 
@@ -368,7 +377,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                       <div className="space-y-1 opacity-60">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Chat ID</label>
                         <div className="px-4 py-2.5 bg-slate-100 rounded-xl font-mono text-xs font-bold text-slate-600 overflow-hidden truncate">
-                          {isEdit ? channelInfo.chat_id : channelInfo.id}
+                          {isEdit ? channelInfo?.chat_id : channelInfo?.id}
                         </div>
                       </div>
                     </div>
@@ -457,22 +466,22 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                       <div className="grid grid-cols-1 gap-2">
                         {CONTINENTS.map((cont) => (
                           <button
-                            key={cont.name}
-                            onClick={() => toggleContinent(cont.name)}
+                            key={cont.value}
+                            onClick={() => toggleContinent(cont.value)}
                             className={cn(
                               "px-5 py-3 text-sm font-bold rounded-2xl transition-all flex flex-col items-start gap-1 text-left border-2",
-                              selectedContinents.includes(cont.name)
+                              selectedContinents.includes(cont.value)
                                 ? "bg-blue-50 border-blue-500/30 text-blue-700"
                                 : "bg-slate-50 border-transparent text-slate-500 hover:bg-slate-100"
                             )}
                           >
                             <div className="flex items-center justify-between w-full">
                               <span className="font-black text-base">{cont.name}</span>
-                              {selectedContinents.includes(cont.name) && <CheckCircle2 size={18} />}
+                              {selectedContinents.includes(cont.value) && <CheckCircle2 size={18} />}
                             </div>
                             <span className={cn(
                               "text-[10px] font-bold uppercase tracking-wider",
-                              selectedContinents.includes(cont.name) ? "text-blue-400" : "text-slate-400"
+                              selectedContinents.includes(cont.value) ? "text-blue-400" : "text-slate-400"
                             )}>
                               {cont.countries}
                             </span>

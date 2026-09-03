@@ -29,8 +29,8 @@ function add(issues: HealthIssue[], area: HealthIssue["area"], severity: HealthI
 export async function runChannelHealthMonitor(limit = 200) {
   const startedAt = Date.now();
   const boundedLimit = Math.min(500, Math.max(1, Math.floor(limit || 200)));
-  const [[setting]] = await pool.query<Array<RowDataPacket & { value: string }>>("SELECT value FROM settings WHERE `key`='channel_health_auto_pause_critical' LIMIT 1");
-  const autoPauseCritical = String(setting?.value || "0") === "1";
+  const [[cursorSetting]] = await pool.query<Array<RowDataPacket & { value: string }>>("SELECT value FROM settings WHERE `key`='channel_health_monitor_cursor' LIMIT 1");
+  const cursor = Math.max(0, Number(cursorSetting?.value || 0));
   const [duplicateRows] = await pool.query<Array<RowDataPacket & { channel_id: number; duplicate_settlements: number | string }>>(
     `SELECT dp.channel_id,COUNT(*) duplicate_settlements
      FROM (
@@ -61,7 +61,9 @@ export async function runChannelHealthMonitor(limit = 200) {
        (SELECT COUNT(*) FROM channel_fraud_events fe WHERE fe.channel_id=ch.id AND fe.severity='critical' AND fe.false_positive_at IS NULL AND fe.created_at>=DATE_SUB(NOW(),INTERVAL 7 DAY)) critical_fraud_events,
        (SELECT SUM(cva.status='invalid') FROM campaign_views_audit cva WHERE cva.channel_id=ch.id AND cva.check_time>=DATE_SUB(NOW(),INTERVAL 30 DAY)) invalid_audits,
        (SELECT COUNT(*) FROM campaign_views_audit cva WHERE cva.channel_id=ch.id AND cva.check_time>=DATE_SUB(NOW(),INTERVAL 30 DAY)) total_audits
-     FROM channels ch JOIN users u ON u.id=ch.user_id ORDER BY ch.id ASC LIMIT ${boundedLimit}`
+     FROM channels ch JOIN users u ON u.id=ch.user_id
+     WHERE ch.is_deleted=FALSE AND ch.status NOT IN ('pending','rejected','deleted')
+     ORDER BY (ch.id>${cursor}) DESC,ch.id ASC LIMIT ${boundedLimit}`
   );
   const results: ChannelHealthResult[] = [];
   for (const channel of channels) {
@@ -70,7 +72,7 @@ export async function runChannelHealthMonitor(limit = 200) {
     const disabled = Boolean(channel.is_deleted) || ["deleted", "rejected"].includes(channel.status);
     if (!channel.chat_id) { scores.access -= 20; add(issues, "access", "critical", "missing_chat_id", "Channel chat ID is missing.", "Reconnect the channel and save a valid Telegram chat ID."); }
     if (channel.channel_type === "public" && !channel.username) { scores.access -= 8; add(issues, "access", "warning", "missing_username", "Public channel username is missing.", "Restore the public username or reconnect the channel."); }
-    if (channel.channel_type === "private" && channel.tracking_account_member_status && channel.tracking_account_member_status !== "member") { scores.access -= 15; add(issues, "access", "critical", "private_tracking_not_member", "Private tracking account is not a channel member.", "Re-add the assigned MTProto tracking account to the private channel."); }
+    if (channel.channel_type === "private" && !["member", "already_member"].includes(String(channel.tracking_account_member_status || ""))) { scores.access -= 15; add(issues, "access", "critical", "private_tracking_not_member", "Assigned MTProto tracking account membership is not verified.", "Add the assigned MTProto account to the private channel and complete tracking onboarding."); }
 
     if (!disabled && channel.chat_id) {
       const telegramHealth = await checkChannelHealth({ id: channel.id, chat_id: channel.chat_id });
@@ -106,15 +108,17 @@ export async function runChannelHealthMonitor(limit = 200) {
     const score = disabled ? 0 : Object.values(scores).reduce((sum, value) => sum + value, 0);
     const critical = issues.some((issue) => issue.severity === "critical");
     const status: OperationalHealthStatus = disabled ? "disabled" : critical || score < 60 ? "critical" : score < 85 ? "warning" : "healthy";
-    const autoPaused = status === "critical" && autoPauseCritical && channel.status === "active";
+    // The monitor is diagnostic only. It records health and recommended action,
+    // but channel status changes require an explicit operational workflow.
+    const autoPaused = false;
     const primary = issues[0];
     await pool.query(
       `UPDATE channels SET health_status=?,health_score=?,health_checked_at=NOW(),health_failure_reason=?,
        suggested_fix=?,health_details=?,last_successful_view_fetch_at=COALESCE(last_successful_view_fetch_at,?),
-       last_successful_settlement_at=COALESCE(last_successful_settlement_at,?),
-       status=IF(?,'paused',status),paused_reason=IF(?, 'Critical operational health',paused_reason),auto_paused_at=IF(?,NOW(),auto_paused_at)
+       last_successful_settlement_at=COALESCE(last_successful_settlement_at,?)
        WHERE id=?`,
-      [status, score, primary?.message || null, primary?.fix || null, JSON.stringify({ scores, issues }), channel.latest_view_success, channel.latest_settlement, autoPaused, autoPaused, autoPaused, channel.id]
+      [status, score, primary?.message || null, primary?.fix || null, JSON.stringify({ scores, issues }), channel.latest_view_success, channel.latest_settlement,
+        channel.id]
     );
     await pool.query(
       `INSERT INTO channel_health_checks(channel_id,status,health_score,posting_score,view_fetch_score,settlement_score,quality_score,access_score,issues,suggested_fix,auto_paused)
@@ -124,8 +128,15 @@ export async function runChannelHealthMonitor(limit = 200) {
     results.push({ channel_id: channel.id, status, health_score: score, auto_paused: autoPaused, issues });
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  if (channels.length > 0) {
+    await pool.query(
+      `INSERT INTO settings (\`key\`,value,description) VALUES ('channel_health_monitor_cursor',?,'Last channel ID checked by rotating channel health monitor')
+       ON DUPLICATE KEY UPDATE value=VALUES(value),description=VALUES(description)`,
+      [String(channels[channels.length - 1].id)]
+    );
+  }
   const summary = { checked: results.length, healthy: results.filter((r) => r.status === "healthy").length, warning: results.filter((r) => r.status === "warning").length, critical: results.filter((r) => r.status === "critical").length, disabled: results.filter((r) => r.status === "disabled").length, auto_paused: results.filter((r) => r.auto_paused).length, global_ledger_duplicate_status: globalLedgerHasDuplicates ? "duplicates_detected" : "clean", failed_checks: results.reduce((total, result) => total + result.issues.length, 0), runtime_ms: Date.now() - startedAt };
   console.info("Channel health monitor summary", { channels_checked: summary.checked, global_ledger_duplicate_status: summary.global_ledger_duplicate_status, failed_checks: summary.failed_checks, runtime_ms: summary.runtime_ms });
   await createSystemLog({ logType: "channel_health", status: summary.critical ? "partial_failure" : "success", title: "Hourly channel health monitor", attemptedCount: summary.checked, successCount: summary.healthy + summary.warning, failedCount: summary.critical, skippedCount: summary.disabled, autoPausedCount: summary.auto_paused, metadata: summary });
-  return { ...summary, auto_pause_critical: autoPauseCritical, channels: results };
+  return { ...summary, auto_pause_critical: false, status_mutation_enabled: false, channels: results };
 }

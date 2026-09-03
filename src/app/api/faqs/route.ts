@@ -78,7 +78,7 @@ const publisherFaqsDefault = [
     id: -2013,
     type: "publisher",
     question: "How do I monetize a Telegram mini app?",
-    answer: "Go to Publisher > Monetize, tap + and select Mini App. Enter the mini app name, username, linked bot ID, Web App URL, and direct mini app URL, then submit for review. After approval, add the AdsGalaxy SDK script tag to your mini app HTML and call window.showAdsGalaxy() wherever you want to trigger an ad. The full integration guide is in Publisher > Docs > Mini Apps.",
+    answer: "Go to Publisher > Monetize, tap + and select Mini App. After approval, use the numeric Mini App ID from Publisher > Mini Apps > Mini App Details in the AdsGalaxy SDK script and call window.showAdsGalaxy(). An optional signed reward callback can be configured there without a Developer application or private API key.",
   },
   {
     id: -2014,
@@ -126,7 +126,7 @@ const publisherFaqsDefault = [
     id: -2021,
     type: "publisher",
     question: "How does ad delivery work for mini apps?",
-    answer: "Mini app ads are triggered by your code — you call window.showAdsGalaxy() inside your mini app when you want to show an ad, for example when a user requests a reward. AdsGalaxy returns an available ad if one exists for your audience. Earnings are recorded per confirmed impression. If no ad is available, the SDK returns a no-fill signal so your app can handle it gracefully.",
+    answer: "Call window.showAdsGalaxy(). then() means AdsGalaxy confirmed a completed internal ad; catch() handles no-fill, invalid context, load failure, or confirmation failure. For valuable rewards, use the signed backend callback, store event_id uniquely, and credit once in the same database transaction.",
   },
   {
     id: -2022,

@@ -38,7 +38,7 @@ test("verification payload and success, permanent failure, and retry states are 
   assert.match(worker, /https:\/\/i\.ibb\.co\/sd79Stcx\/IMG-4980\.jpg/);
   assert.match(worker, /🌌 <b>Discover AdsGalaxy<\/b>/);
   assert.match(worker, /parse_mode: "HTML"/);
-  assert.match(worker, /https:\/\/t\.me\/Ads_Galaxy_bot\?startapp=REF770190998629F/);
+  assert.match(worker, /https:\/\/t\.me\/Ads_Galaxy_bot\?start=REF770190998629F/);
   assert.match(worker, /SET status = 'active', is_active = TRUE/);
   assert.match(worker, /SET status = 'inactive', is_active = FALSE/);
   assert.match(worker, /export function classifyTelegramRecipientFailure/);

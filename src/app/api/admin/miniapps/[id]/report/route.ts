@@ -2,6 +2,13 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedAdmin } from "@/lib/adminAuth";
 import { buildMiniAppAdminBreakdown, buildMiniAppReport, getMiniAppReportParams } from "@/lib/miniappReports";
+import type { RowDataPacket } from "mysql2/promise";
+
+type DiagnosticRow = RowDataPacket & {
+  request_id: string; selected_network: string | null; candidate_networks: unknown;
+  skipped_networks: unknown; fallback_attempts: unknown; decision_reason: string | null;
+  final_result: string | null; mediation_diagnostics: unknown; created_at: string | Date;
+};
 
 function parseJsonArray(value: unknown) {
   if (!value) return [];
@@ -36,7 +43,7 @@ export async function GET(
 
   try {
     const { id } = await params;
-    const [rows]: any = await pool.query(
+    const [rows] = await pool.query<RowDataPacket[]>(
       "SELECT id FROM miniapps WHERE id = ? AND is_deleted = FALSE",
       [id]
     );
@@ -50,7 +57,7 @@ export async function GET(
       buildMiniAppReport(id, startDate, endDate, dateSearch),
       buildMiniAppAdminBreakdown(id, startDate, endDate, dateSearch),
     ]);
-    const [diagnosticRows]: any = await pool.query(`
+    const [diagnosticRows] = await pool.query<DiagnosticRow[]>(`
       SELECT request_id, selected_network, candidate_networks, skipped_networks, fallback_attempts, decision_reason, final_result, mediation_diagnostics, created_at
       FROM miniapp_mediation_requests
       WHERE miniapp_id = ?
@@ -61,7 +68,7 @@ export async function GET(
     return NextResponse.json({
       ...report,
       ...breakdown,
-      network_diagnostics: diagnosticRows.map((row: any) => ({
+      network_diagnostics: diagnosticRows.map((row) => ({
         request_id: row.request_id,
         selected_network: row.selected_network || null,
         candidate_pool: parseJsonArray(row.candidate_networks).map(String),

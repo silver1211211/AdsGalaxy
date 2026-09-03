@@ -24,7 +24,7 @@ import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronS
 import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
 import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { botUserBroadcastEligibleCondition } from "@/lib/botAudience";
-import { composeCampaignCreativeText } from "@/lib/campaignCreative";
+import { composeCampaignCreativeTelegramHtml } from "@/lib/campaignCreative";
 import { campaignCategoryMatches } from "@/lib/campaignCategories";
 import { calculateBroadcastPayout, getBroadcastPayoutSettings, type BroadcastPayout } from "@/lib/broadcastPublisherCpmEngine";
 import {
@@ -75,7 +75,7 @@ function parseTargetList(value: unknown): string[] {
   }
 }
 
-export async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: any; cost: number }, db = pool) {
+async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: any; cost: number }, db = pool) {
   if (!Number.isFinite(input.cost) || input.cost <= 0) {
     return { ok: false as const, reason: "invalid_campaign_cost" };
   }
@@ -152,7 +152,7 @@ export async function reserveBroadcastDelivery(input: { campaign: any; bot: any;
   }
 }
 
-export async function finalizeBroadcastDelivery(input: {
+async function finalizeBroadcastDelivery(input: {
   deliveryId: number;
   campaign: any;
   bot: any;
@@ -195,7 +195,7 @@ export async function finalizeBroadcastDelivery(input: {
   }
 }
 
-export async function refundBroadcastReservation(input: {
+async function refundBroadcastReservation(input: {
   deliveryId: number;
   campaignId: number;
   failureReason: string;
@@ -534,9 +534,9 @@ export async function GET(req: NextRequest) {
 
         let sendResult;
         try {
-          sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, composeCampaignCreativeText(campaign.campaign_title, campaign.message_text), {
+          sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, composeCampaignCreativeTelegramHtml(campaign.campaign_title, campaign.message_text), {
             photo: campaign.image_url,
-            parse_mode: SAFE_TELEGRAM_PARSE_MODE,
+            parse_mode: "HTML",
             reply_markup: replyMarkup,
             token: bot.bot_token
           }));

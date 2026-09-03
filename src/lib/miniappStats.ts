@@ -2,6 +2,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { MINIAPP_NETWORKS, isMiniAppNetworkName } from "@/lib/miniappNetworkAdapters";
 import { validateMiniappRevenue } from "@/lib/miniappRevenueValidation";
+import { calculateDynamicPublisherEconomics, fraudValueFactor, getMiniAppPublisherCpmSettings, trustValueFactor } from "@/lib/miniappPublisherCpmEngine";
 
 export { MINIAPP_NETWORKS, isMiniAppNetworkName };
 export type { MiniAppNetworkName } from "@/lib/miniappNetworkAdapters";
@@ -106,6 +107,7 @@ export async function recordMiniAppStats(input: MiniAppStatInput) {
   const feePercent = await getMiniAppFeePercent();
   const conn = await pool.getConnection();
   let validation;
+  let economics;
   try {
     validation = await validateMiniappRevenue({
       conn,
@@ -113,6 +115,10 @@ export async function recordMiniAppStats(input: MiniAppStatInput) {
       impressions: wholeImpressions,
       grossRevenue,
     });
+    const settings=await getMiniAppPublisherCpmSettings(conn);
+    const [[signals]]=await conn.query<Array<RowDataPacket&{publisher_trust_score:number|string|null;publisher_risk_score:number|string|null;traffic_quality_score:number|string|null;traffic_risk_level:string|null}>>(`SELECT COALESCE(u.publisher_trust_score,60) publisher_trust_score,COALESCE(u.publisher_risk_score,0) publisher_risk_score,COALESCE(m.traffic_quality_score,50) traffic_quality_score,COALESCE(m.traffic_risk_level,'low') traffic_risk_level FROM miniapps m JOIN users u ON u.id=m.user_id WHERE m.id=? LIMIT 1`,[input.miniapp_id]);
+    const risk=Math.max(Number(signals?.publisher_risk_score||0),signals?.traffic_risk_level==="critical"?100:signals?.traffic_risk_level==="high"?80:0);
+    economics=calculateDynamicPublisherEconomics({economicValue:grossRevenue,impressionCount:wholeImpressions,country,demandYieldFactor:1,uniquenessFactor:.8,frequencyFactor:1,qualityFactor:Math.max(0,Math.min(1,Number(signals?.traffic_quality_score||50)/100)),trustFactor:trustValueFactor(Number(signals?.publisher_trust_score||60),settings),fraudFactor:fraudValueFactor(risk,false,settings)},settings);
   } finally {
     conn.release();
   }
@@ -120,16 +126,17 @@ export async function recordMiniAppStats(input: MiniAppStatInput) {
     throw new Error(`Revenue validation failed: ${validation.reason}`);
   }
 
-  const adsGalaxyFee = grossRevenue * feePercent / 100;
-  const publisherRevenue = grossRevenue - adsGalaxyFee;
+  const adsGalaxyFee = economics?.platform_retained ?? grossRevenue * feePercent / 100;
+  const reserveRevenue = economics?.reserve ?? 0;
+  const publisherRevenue = economics?.publisher_payout ?? grossRevenue - adsGalaxyFee;
   const grossCpm = wholeImpressions > 0 ? (grossRevenue / wholeImpressions) * 1000 : 0;
   const netCpm = wholeImpressions > 0 ? (publisherRevenue / wholeImpressions) * 1000 : 0;
 
   await pool.query(
     `INSERT INTO miniapp_daily_stats
-      (miniapp_id, network_name, date, impressions, gross_revenue, ads_galaxy_fee, publisher_revenue, gross_cpm, net_cpm,
+      (miniapp_id, network_name, date, impressions, gross_revenue, ads_galaxy_fee, reserve_revenue, publisher_revenue, gross_cpm, net_cpm,
        revenue_validation_status, revenue_validation_reason, revenue_validation_metadata, revenue_validated_at, revenue_review_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)
      ON DUPLICATE KEY UPDATE
       gross_cpm = CASE
         WHEN (impressions + VALUES(impressions)) > 0
@@ -144,6 +151,7 @@ export async function recordMiniAppStats(input: MiniAppStatInput) {
       impressions = impressions + VALUES(impressions),
       gross_revenue = gross_revenue + VALUES(gross_revenue),
       ads_galaxy_fee = ads_galaxy_fee + VALUES(ads_galaxy_fee),
+      reserve_revenue = reserve_revenue + VALUES(reserve_revenue),
       publisher_revenue = publisher_revenue + VALUES(publisher_revenue),
       revenue_validation_status = CASE
         WHEN revenue_validation_status = 'rejected' OR VALUES(revenue_validation_status) = 'rejected' THEN 'rejected'
@@ -165,12 +173,13 @@ export async function recordMiniAppStats(input: MiniAppStatInput) {
       wholeImpressions,
       grossRevenue,
       adsGalaxyFee,
+      reserveRevenue,
       publisherRevenue,
       grossCpm,
       netCpm,
       validation.status,
       validation.reason,
-      JSON.stringify(validation.metadata),
+      JSON.stringify({ ...validation.metadata, formula_version:economics?.formula_version||null, economic_value:grossRevenue, publisher_cap:economics?.publisher_cap||0, factors:economics?.factors||null }),
       validation.status === "suspicious" ? "pending_review" : "not_required",
     ]
   );
@@ -192,6 +201,7 @@ export async function recordMiniAppStats(input: MiniAppStatInput) {
     impressions: wholeImpressions,
     gross_revenue: grossRevenue,
     ads_galaxy_fee: adsGalaxyFee,
+    reserve_revenue: reserveRevenue,
     publisher_revenue: publisherRevenue,
     gross_cpm: grossCpm,
     net_cpm: netCpm,

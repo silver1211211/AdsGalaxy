@@ -11,6 +11,7 @@ import {
   recordReferralSprintAudit,
   settlePendingReferralRewards,
 } from "@/lib/referralSprint";
+import { REFERRAL_REWARDS, SPRINT_PRIZES, TEAM_SPRINT_POOLS } from "@/lib/referralHardening";
 
 function clean(value: unknown) {
   return String(value || "").trim();
@@ -78,11 +79,21 @@ export async function PATCH(request: Request) {
     }
 
     if (action === "update_setting") {
+      const lockedValues: Record<string, string> = {
+        referral_join_reward_amount: REFERRAL_REWARDS.registration,
+        referral_verification_reward_amount: REFERRAL_REWARDS.verification,
+        referral_reward_amount: REFERRAL_REWARDS.ordinaryMaximum,
+        sprint_first_place_reward: SPRINT_PRIZES[0], sprint_second_place_reward: SPRINT_PRIZES[1], sprint_third_place_reward: SPRINT_PRIZES[2],
+        team_best_reward: TEAM_SPRINT_POOLS[0], team_second_reward: TEAM_SPRINT_POOLS[1], team_third_reward: TEAM_SPRINT_POOLS[2],
+        referral_user_daily_cap: "0.50000000", referral_user_monthly_cap: "5.00000000", referral_platform_monthly_cap: "25.00000000",
+      };
+      const settingKey = clean(body.key);
+      const settingValue = lockedValues[settingKey] ?? clean(body.value);
       await pool.query(
         `INSERT INTO referral_growth_settings (\`key\`, value, description)
          VALUES (?, ?, ?)
          ON DUPLICATE KEY UPDATE value = VALUES(value), description = VALUES(description)`,
-        [clean(body.key), clean(body.value), clean(body.description)]
+        [settingKey, settingValue, clean(body.description)]
       );
       if (clean(body.key) === "required_channel_url") {
         const username = clean(body.value).replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").replace(/\/$/, "");
@@ -106,12 +117,12 @@ export async function PATCH(request: Request) {
 
     if (action === "start_sprint") {
       const duration = Math.max(1, Number(body.duration_days || 14));
-      const first = toNumber(body.first_place_reward);
-      const second = toNumber(body.second_place_reward);
-      const third = toNumber(body.third_place_reward);
-      const teamFirst = toNumber(body.best_team_reward || body.team_best_reward || 15);
-      const teamSecond = toNumber(body.second_team_reward || body.team_second_reward || 8);
-      const teamThird = toNumber(body.third_team_reward || body.team_third_reward || 4);
+      const first = toNumber(SPRINT_PRIZES[0]);
+      const second = toNumber(SPRINT_PRIZES[1]);
+      const third = toNumber(SPRINT_PRIZES[2]);
+      const teamFirst = toNumber(TEAM_SPRINT_POOLS[0]);
+      const teamSecond = toNumber(TEAM_SPRINT_POOLS[1]);
+      const teamThird = toNumber(TEAM_SPRINT_POOLS[2]);
       const autoRestart = body.auto_restart ? 1 : 0;
       await pool.query(
         `INSERT INTO referral_growth_settings (\`key\`, value, description)
@@ -186,12 +197,12 @@ export async function PATCH(request: Request) {
     if (action === "delete_milestone") {
       const id = Number(body.id || 0);
       if (id <= 0) return NextResponse.json({ error: "Missing milestone id" }, { status: 400 });
-      const [result]: any = await pool.query("DELETE FROM referral_milestones WHERE id = ?", [id]);
+      const [result]: any = await pool.query("UPDATE referral_milestones SET status='inactive' WHERE id = ?", [id]);
       if (result.affectedRows === 0) return NextResponse.json({ error: "Milestone not found" }, { status: 404 });
       await recordReferralSprintAudit({
         actorType: "admin",
         actorId: admin.id,
-        action: "milestone_deleted",
+        action: "milestone_deactivated",
         entityType: "referral_milestone",
         entityId: id,
         reason: "manual_admin_delete",

@@ -1,7 +1,14 @@
 import DocsArticle, { type DocsSection } from "@/components/docs/DocsArticle";
 import CopyCodeBlock from "@/components/docs/CopyCodeBlock";
+import {
+  canonicalMiniappDisplayExample,
+  canonicalMiniappScriptExample,
+  directRewardCallbackPayloadExample,
+  minimalMiniappDisplayExample,
+  nodeRewardCallbackVerificationExample,
+} from "@/lib/miniappIntegrationExamples";
 
-const publicSdkUrl = (process.env.NEXT_PUBLIC_SDK_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_ADSGALAXY_APP_URL || "https://app.adsgalaxy.online").replace(/\/$/, "");
+const publicSdkUrl = "https://app.adsgalaxy.online/sdk.js?id=YOUR_NUMERIC_MINI_APP_ID";
 
 const miniAppValidationExample = `Mini App Name: Your Mini App Name
 Mini App Username: @YourMiniAppBot
@@ -9,18 +16,17 @@ Bot ID: 1234567890
 Web App URL: https://your-webapp-url.example.com
 Direct Mini App URL: https://t.me/YourMiniAppBot/app`;
 
-const miniAppScriptExample = `<script src="${publicSdkUrl}/sdk.js?id=YOUR_MINI_APP_ID"></script>`;
+const miniAppScriptExample = canonicalMiniappScriptExample;
 
 const miniAppButtonExample = `<button onclick="showAd()">Show Ad</button>
 <script>
   function showAd() {
     window.showAdsGalaxy()
       .then(function (result) {
-        // Continue your app logic here
-        console.log("Ad completed", result);
+        // Send result.request_id to your backend.
+        // Do not credit a valuable wallet here.
       })
       .catch(function (error) {
-        // Handle no ad or error here
         console.log(error.code, error.message);
       });
   }
@@ -31,7 +37,7 @@ const miniAppFullHtmlExample = `<!doctype html>
 <head>
   <meta charset="utf-8" />
   <title>AdsGalaxy Integration Example</title>
-  <script src="${publicSdkUrl}/sdk.js?id=YOUR_MINI_APP_ID"></script>
+  <script src="${publicSdkUrl}"></script>
 </head>
 <body>
   <button onclick="showAd()">Show Ad</button>
@@ -39,10 +45,11 @@ const miniAppFullHtmlExample = `<!doctype html>
     function showAd() {
       window.showAdsGalaxy()
         .then(function (result) {
-          // Continue your app logic here
+          // Send result.request_id to your backend.
+          // Do not credit a valuable wallet here.
         })
         .catch(function (error) {
-          // Handle no-fill or errors here
+          console.log(error.code, error.message);
         });
     }
   </script>
@@ -75,6 +82,55 @@ console.log(error.message);
 });`;
 
 const sections: DocsSection[] = [
+  {
+    id: "quick-start",
+    title: "1. Find your Numeric Mini App ID and add the script",
+    body: [
+      "Find the Numeric Mini App ID in Publisher → Mini Apps → Mini App Details. Add it to this public script URL; no Developer application, private API key, or manual server-side ad request is required.",
+    ],
+    code: { language: "html", value: canonicalMiniappScriptExample },
+  },
+  {
+    id: "display",
+    title: "2. Minimum display: call showAdsGalaxy()",
+    body: [
+      "window.showAdsGalaxy() alone requests and displays an ad. Promise handlers, a callback URL, Developer application, API key, webhook, and publisher backend are not required.",
+      "The Promise handlers below are optional but recommended for application UI, request mapping, confirmed completion, and structured errors.",
+      "then() runs only after AdsGalaxy confirms the completed internal ad. The browser result is useful for UI and request mapping.",
+      "catch() handles structured failures such as NO_FILL, invalid Telegram context, loading failure, or completion-confirmation failure. Do not credit a valuable or withdrawable reward from browser code alone.",
+    ],
+    code: { language: "javascript", value: `${minimalMiniappDisplayExample}\n\n// Optional robust handling:\n${canonicalMiniappDisplayExample}` },
+  },
+  {
+    id: "reward-callback",
+    title: "3. Optionally receive the verified reward callback",
+    body: [
+      "Configure one Reward callback URL directly in Publisher → Mini Apps → Mini App Details. AdsGalaxy generates the signing secret; you do not need Developer Center setup.",
+      "Enter a public HTTPS URL, choose Save, and copy the generated signing secret immediately. The secret is shown only on creation or rotation. Active means delivery is enabled; Saved means the configuration is retained while the platform feature is disabled; Unavailable means platform database setup is pending, not that you disabled it.",
+      "The callback is optional for displaying ads but required when you want a trustworthy server notification for valuable user rewards.",
+      "user_id is the verified Telegram user ID derived by AdsGalaxy from Telegram initData. Publishers do not choose or submit it. It is encoded as a string to avoid JavaScript integer precision loss; no username, name, photo, wallet, or profile data is included.",
+      "x-adsgalaxy-event: reward.eligible names the callback event type. Payload status: completed is the verified ad-watch state. AdsGalaxy sends this callback after validating the completed internal ad; process event_id idempotently.",
+    ],
+    code: { language: "json", value: directRewardCallbackPayloadExample },
+  },
+  {
+    id: "verify-callback",
+    title: "4. Verify and process the callback safely",
+    body: [
+      "Verify with the AdsGalaxy-generated callback signing secret. rawBody is the exact byte sequence received and must be verified before JSON reserialization. Require a recent timestamp and require the header event ID to match payload event_id.",
+      "Delivery is at least once and retries keep the same event_id and payload. Insert event_id under a UNIQUE constraint and credit the user in the same database transaction. Duplicate deliveries must not create duplicate rewards. Return HTTP 2xx only after successful processing.",
+      "AdsGalaxy attempts delivery immediately, then after 1, 5, 15, 60, and 360 minutes. Common failures are a non-public or non-HTTPS URL, an invalid signature or stale timestamp, a receiver timeout/non-2xx response, and temporary platform setup unavailability.",
+    ],
+    code: { language: "javascript", value: nodeRewardCallbackVerificationExample },
+  },
+  {
+    id: "results",
+    title: "5. Understand success and error results",
+    body: [
+      "A confirmed internal result includes request_id, event_id, completed: true, reward_eligible: true, and status: completed. Use request_id to map browser UI to your backend callback.",
+      "NO_FILL means no eligible ad is available. INVALID_INIT_DATA means the Mini App lacks a valid Telegram context. SDK_LOAD_FAILED and CONFIRMATION_FAILED indicate loading or authoritative completion failures.",
+    ],
+  },
   {
     id: "overview",
     title: "How Mini App monetization works",
@@ -127,12 +183,13 @@ const sections: DocsSection[] = [
     ],
   },
   {
-    id: "quick-start",
-    title: "Quick Start",
+    id: "integration-notes",
+    title: "Integration notes",
     body: [
       "After approval, add the AdsGalaxy public script to your Telegram Mini App and call window.showAdsGalaxy() when the user chooses to show ads.",
-      "Use the Mini App ID shown in Publisher > Monetize > Mini Apps > View Details.",
+      "Use the Numeric Mini App ID shown in Publisher → Mini Apps → Mini App Details.",
       "Continue your app logic only when the promise resolves. If it rejects, use the structured error code and message to show a retry, no-fill, or Telegram-only message.",
+      "Optionally configure one signed Reward callback in Mini App Details. No Developer application or private API key is required for basic display or this direct callback.",
       "The SDK uses Telegram initData automatically and binds each ad request to the authenticated Telegram user. Never call mediation endpoints without initData.",
       "Use the script example, add a Show Ad button, then call window.showAdsGalaxy() from your app action.",
     ],
@@ -145,7 +202,7 @@ const sections: DocsSection[] = [
   },
   {
     id: "button-example",
-    title: "Body and button example",
+    title: "Remaining example: button integration",
     body: ["Call window.showAdsGalaxy() from a user action such as a button click."],
     code: { language: "html", value: miniAppButtonExample },
   },
@@ -183,24 +240,32 @@ const sections: DocsSection[] = [
     id: "reward-security",
     title: "Reward security",
     body: [
-      "Promise resolution means the browser flow completed; it is not proof for valuable wallet credit. Send the existing request_id to your backend and verify it with a bound Developer Center application and private key.",
-      "Storing request_id prevents only your own duplicate operation. It becomes trustworthy only after backend verification. Your backend controls the reward amount; never accept it from browser input.",
+      "then() means AdsGalaxy confirmed the completed internal ad. catch() handles no-fill, invalid context, load failure, or confirmation failure.",
+      "Do not credit a valuable wallet from browser code alone. Credit from the signed backend callback: insert event_id uniquely and credit in one database transaction.",
     ],
     bullets: [
       "Internal AdsGalaxy completion can produce an eligible, server-validated event.",
       "External browser completion is client-confirmed and remains ineligible without request-level provider proof.",
-      "Claim an eligible event once, then credit your wallet and store event_id atomically.",
+      "Credit a verified callback event once by storing event_id atomically with the wallet update.",
       "Do not submit revenue, provider credentials, or API keys from browser code.",
-      "Use the numeric Mini App ID for sdk.js and the Developer application only for private backend verification.",
+      "Use the Numeric Mini App ID for sdk.js. A Developer application is not part of ordinary Mini App setup.",
     ],
   },
   {
     id: "backend-callbacks",
     title: "Backend callbacks",
     body: [
-      "In Developer Center, create the matching application, bind it to this Mini App, create a private reward_validation key, and configure reward.eligible and reward.claimed webhooks.",
+      "Configure the optional Reward callback directly in Publisher > Mini Apps > Mini App Details. AdsGalaxy generates the signing secret and shows it only after creation or rotation.",
       "Verify signatures against the exact raw body, reject timestamps older than five minutes, deduplicate event_id under a unique constraint, and credit the wallet in the same transaction.",
-      "See the canonical Developer documentation for verify, claim, lookup, retry, secret rotation, and server examples.",
+      "See the Developer documentation for callback verification in Node.js, PHP, and Python, retry behavior, raw-body handling, and optional advanced API references.",
+    ],
+  },
+  {
+    id: "advanced-developer-apis",
+    title: "Advanced Developer APIs",
+    body: [
+      "These APIs are not required to load the Mini App SDK, display ads, handle SDK errors, or receive a direct Mini App reward callback.",
+      "Private API keys, reward claim, reward verify, event lookup, Developer applications, and advanced Developer webhooks remain available for specialized integrations.",
     ],
   },
   {

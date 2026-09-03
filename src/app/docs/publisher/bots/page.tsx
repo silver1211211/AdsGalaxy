@@ -2,28 +2,8 @@ import DocsArticle, { type DocsSection } from "@/components/docs/DocsArticle";
 
 const integrationUrl = "https://app.adsgalaxy.online/api/bot/integration/YOUR_BOT_ID/YOUR_SECRET";
 
-const phpExample = `// Inside your existing /start handler. Keep all of your current bot logic.
-$payload = [
-    'telegram_user_id' => $message['from']['id'],
-    'chat_id' => $message['chat']['id'],
-    'username' => $message['from']['username'] ?? null,
-    'first_name' => $message['from']['first_name'] ?? null,
-    'language_code' => $message['from']['language_code'] ?? null,
-    'bot_id' => 'YOUR_BOT_ID',
-    'timestamp' => time(),
-    'request_id' => bin2hex(random_bytes(16)),
-];
-
-$ch = curl_init('YOUR_INTEGRATION_URL');
-curl_setopt_array($ch, [
-    CURLOPT_POST => true,
-    CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-    CURLOPT_POSTFIELDS => json_encode($payload),
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_TIMEOUT => 3,
-]);
-curl_exec($ch);
-curl_close($ch);`;
+const phpExample = `// Paste this one line inside your existing /start handler.
+@file_get_contents('YOUR_INTEGRATION_URL?user_id=' . $message['from']['id']);`;
 
 const phpStreamExample = `// Paste this inside your /start command handler.
 $payload = json_encode([
@@ -41,26 +21,18 @@ $context = stream_context_create(['http' => [
 ]]);
 @file_get_contents('YOUR_INTEGRATION_URL', false, $context);`;
 
-const nodeExample = `// Telegraf example: add this without removing your existing start logic.
-bot.start(async (ctx) => {
-  // Your existing /start response and business logic stay here.
+const nodeExample = `// Paste this one line inside your existing /start handler.
+fetch("YOUR_INTEGRATION_URL?user_id=" + ctx.from.id).catch(() => {});`;
 
-  fetch('YOUR_INTEGRATION_URL', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      telegram_user_id: ctx.from.id,
-      chat_id: ctx.chat.id,
-      username: ctx.from.username,
-      first_name: ctx.from.first_name,
-      language_code: ctx.from.language_code,
-      bot_id: 'YOUR_BOT_ID',
-      timestamp: Math.floor(Date.now() / 1000),
-      request_id: crypto.randomUUID(),
-    }),
-    signal: AbortSignal.timeout(3000),
-  }).catch(console.error);
-});`;
+const curlSimpleExample = `curl "YOUR_INTEGRATION_URL?user_id=TELEGRAM_USER_ID"`;
+
+const pythonSimpleExample = `requests.get("YOUR_INTEGRATION_URL", params={"user_id": update.effective_user.id}, timeout=3)`;
+
+const laravelSimpleExample = `Http::timeout(3)->get('YOUR_INTEGRATION_URL', ['user_id' => $message['from']['id']]);`;
+
+const goSimpleExample = `http.Get("YOUR_INTEGRATION_URL?user_id=" + strconv.FormatInt(user.ID, 10))`;
+
+const bjsSimpleExample = `HTTP.get({ url: "YOUR_INTEGRATION_URL?user_id=" + user.telegramid });`;
 
 const expressExample = `// Place this call inside the existing /start branch of your Express webhook route.
 app.post('/telegram/webhook', async (req, res) => {
@@ -192,7 +164,7 @@ const sections: DocsSection[] = [
     ],
     bullets: [
       "Your bot receives and answers /start.",
-      "Your code sends one JSON POST to the bot's unique Integration URL.",
+      "Your code sends the Telegram user ID to the bot's unique Integration URL.",
       "AdsGalaxy validates the per-bot secret and records or reactivates the user.",
       "Your bot continues its normal flow independently of the Integration response.",
     ],
@@ -243,32 +215,22 @@ const sections: DocsSection[] = [
       "Open Publisher > Monetize > Bots and select View Details.",
       "Copy the Integration URL and store it in your bot's server environment.",
       "Locate the existing /start command handler in your bot code or bot builder.",
-      "Keep the existing handler logic and add a JSON POST using one of the examples below.",
+      "Choose a language in Bot Details, copy the prepared one-line code, and paste it into the handler.",
       "Deploy your bot, then start it with a test Telegram account.",
       "Return to Bot Details and confirm Integration Status changes to Active.",
     ],
   },
-  { id: "php", title: "PHP example", body: ["This cURL call can be added to a plain PHP handler. A short timeout prevents the Integration from delaying your bot."], code: { language: "php", value: phpExample } },
-  { id: "php-stream", title: "PHP file_get_contents example", body: ["Paste this inside your /start command handler when cURL is unavailable. allow_url_fopen must be enabled."], code: { language: "php", value: phpStreamExample } },
-  { id: "node", title: "Node.js example", body: ["This example uses the built-in fetch API with Telegraf-style context values."], code: { language: "javascript", value: nodeExample } },
-  { id: "express", title: "Express example", body: ["Paste the Integration call inside the /start branch of your existing Express Telegram webhook route."], code: { language: "javascript", value: expressExample } },
-  { id: "python", title: "Python example", body: ["This example uses requests with python-telegram-bot-style update objects."], code: { language: "python", value: pythonExample } },
-  { id: "go", title: "Go example", body: ["Use an HTTP client with a short timeout and preserve your existing handler response."], code: { language: "go", value: goExample } },
-  { id: "laravel", title: "Laravel example", body: ["Keep the Integration URL in server-side configuration and call it from the existing command handler."], code: { language: "php", value: laravelExample } },
+  { id: "php", title: "PHP example", body: ["Copy this one line into the existing /start handler. The URL shown in Bot Details is already personalized for the selected bot."], code: { language: "php", value: phpExample } },
+  { id: "node", title: "Node.js example", body: ["Copy this one line into the existing Telegraf /start handler."], code: { language: "javascript", value: nodeExample } },
+  { id: "curl", title: "cURL example", body: ["Replace TELEGRAM_USER_ID with the current user's numeric Telegram ID."], code: { language: "bash", value: curlSimpleExample } },
+  { id: "python", title: "Python example", body: ["Paste this inside the existing python-telegram-bot /start handler."], code: { language: "python", value: pythonSimpleExample } },
+  { id: "laravel", title: "Laravel example", body: ["Paste this inside the existing /start handler."], code: { language: "php", value: laravelSimpleExample } },
+  { id: "go", title: "Go example", body: ["Call this from the existing /start handler."], code: { language: "go", value: goSimpleExample } },
+  { id: "botbusiness", title: "BotBusiness / BJS example", body: ["Paste this one line into the /start command."], code: { language: "javascript", value: bjsSimpleExample } },
   {
     id: "botmother",
     title: "BotMother",
-    body: [
-      "BotMother can be used when your plan and bot flow support an external HTTP request action. In the existing /start flow, add an API Request/HTTP Request step without removing the current response blocks.",
-      "Choose POST, paste the Integration URL, set Content-Type to application/json, and map the Telegram user ID, chat ID, username, first name, language code, bot ID, current Unix timestamp, and a unique request ID to the documented JSON fields. Configure the flow to continue even if the request fails.",
-      "BotMother labels and available variables can vary by product version. If your workspace cannot send a dynamic timestamp, unique request ID, or JSON POST, use a small server-side relay; never place your bot token in the request body.",
-    ],
-  },
-  {
-    id: "botbusiness",
-    title: "BotBusiness / BJS example",
-    body: ["Paste this inside your /start command handler. Bot builder APIs can vary by version; map the equivalent current-user variables and keep your existing response actions."],
-    code: { language: "javascript", value: bjsExample },
+    body: ["Add one GET request action to the existing /start flow. Use YOUR_INTEGRATION_URL and add user_id as the only query parameter, mapped to the current Telegram user ID."],
   },
   {
     id: "security",
@@ -283,7 +245,7 @@ const sections: DocsSection[] = [
       "Use HTTPS and a short request timeout.",
       "Use Regenerate Secret in Bot Details if the URL may be exposed.",
       "Requests with invalid bot IDs or secrets are rejected; valid endpoints are rate-limited against abuse.",
-      "Every request needs a fresh Unix timestamp and a unique request_id. Request IDs cannot be replayed.",
+      "The simple integration needs only user_id. The unique URL securely identifies the correct bot.",
     ],
   },
   {
@@ -291,9 +253,8 @@ const sections: DocsSection[] = [
     title: "Common errors",
     body: ["The endpoint returns JSON and standard HTTP status codes."],
     bullets: [
-      "400 Invalid request: include telegram_user_id or chat_id, bot_id, a current Unix timestamp, and a unique request_id.",
-      "403 Bot mismatch: bot_id does not belong to the Integration URL, or the integration is disabled.",
-      "409 Replay rejected: request_id was already processed. Expired timestamps return 400.",
+      "400 Invalid request: user_id is missing or is not a numeric Telegram user ID.",
+      "403 Integration disabled: the bot is paused or unavailable.",
       "404 Integration not found: the bot ID or secret in the URL is incorrect, expired, or belongs to a deleted bot.",
       "500 Server error: keep your bot running, log the failure, and retry later rather than blocking /start.",
       "Status remains Installed: confirm the request is sent as JSON to the exact URL copied from Bot Details.",
@@ -313,9 +274,9 @@ const sections: DocsSection[] = [
     title: "Troubleshooting",
     body: ["Log the HTTP status and response body on your server, but never log the full Integration URL or bot token."],
     bullets: [
-      "Verify the request runs only from the /start path and uses POST with Content-Type: application/json.",
-      "Check that IDs are numeric strings or numbers. timestamp is required in Unix seconds and request_id must be unique for every call.",
-      "Confirm bot_id exactly matches the bot shown in AdsGalaxy.",
+      "Verify the prepared line runs inside the /start handler and passes the current Telegram user ID.",
+      "Check that user_id is a numeric Telegram user ID.",
+      "Always copy the prepared code from the correct bot's Details screen.",
       "Use a three-second timeout and catch network errors so your welcome message is never interrupted.",
       "If the URL may have leaked, contact AdsGalaxy support to rotate the Integration secret.",
       "Do not troubleshoot by changing your Telegram webhook; it is unrelated to this Integration.",
@@ -329,7 +290,7 @@ const sections: DocsSection[] = [
       "Do I replace my Telegram webhook? No. Keep your webhook and all existing bot logic unchanged.",
       "Does AdsGalaxy need my webhook URL? No. Publishers never provide their webhook URL.",
       "Does the Integration answer users? No. It records registration data only.",
-      "Should I send my bot token? No. Send only bot_id; AdsGalaxy never needs the token in registration payloads.",
+      "Should I send my bot token or bot ID? No. Send only the user ID; the unique Integration URL identifies the bot.",
       "Can I call the Integration asynchronously? Yes. This is recommended as long as your runtime completes the request reliably.",
       "What happens when a user sends /start again? Their existing record is refreshed and marked active.",
       "Does broadcasting change? No. AdsGalaxy continues using the stored bot token and registered Telegram user IDs.",

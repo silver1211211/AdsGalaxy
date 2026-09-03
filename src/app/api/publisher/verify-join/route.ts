@@ -32,7 +32,7 @@ export async function POST(request: Request) {
 
     // Call Telegram Bot API to check membership
     const tgApiUrl = `https://api.telegram.org/bot${botToken}/getChatMember?chat_id=@${channelUsername}&user_id=${user.telegram_id}`;
-    const tgRes = await fetch(tgApiUrl);
+    const tgRes = await fetch(tgApiUrl, { signal: AbortSignal.timeout(8_000) });
     const tgData = await tgRes.json();
 
     if (!tgData.ok) {

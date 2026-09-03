@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
+import { channelCampaignMatchesInventory, serializeExplicitCampaignAudience } from "@/lib/channelAudience";
 
 export async function GET(request: Request) {
   if (!(await checkAdminAuth())) {
@@ -64,28 +65,29 @@ export async function GET(request: Request) {
         userCount: totalUsers,
       });
     } else {
+      let explicitAudience: string;
+      try {
+        explicitAudience = serializeExplicitCampaignAudience(selectedContinents);
+      } catch (error) {
+        return NextResponse.json({
+          error: error instanceof Error ? error.message : "Target audience is invalid",
+        }, { status: 400 });
+      }
       const [channels]: any = await pool.query(`
         SELECT c.*, 
         (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id = c.id AND cp.created_at > (NOW() + INTERVAL ? MINUTE) - INTERVAL 1 DAY) as daily_posts,
         (SELECT MAX(created_at) FROM campaign_posts cp WHERE cp.channel_id = c.id) as last_post_at
         FROM channels c
         WHERE c.status = 'active' AND c.is_deleted = FALSE
-        AND COALESCE(c.health_status, 'healthy') IN ('healthy','warning')
       `, [predictionMinutes]);
 
       const filteredChannels = channels.filter((ch: any) => {
-        let catMatch = true;
-        let contMatch = true;
-
-        if (category) {
-          const chCats = ch.categories ? (typeof ch.categories === 'string' ? JSON.parse(ch.categories) : ch.categories) : [];
-          catMatch = chCats.includes(category);
-        }
-
-        if (continentsParam && !selectedContinents.includes("Global")) {
-          const chConts = ch.audience_continents ? (typeof ch.audience_continents === 'string' ? JSON.parse(ch.audience_continents) : ch.audience_continents) : [];
-          contMatch = chConts.includes("Global") || selectedContinents.some(c => chConts.includes(c));
-        }
+        const targetingMatches = channelCampaignMatchesInventory({
+          campaignCategory: category || "all",
+          campaignAudience: explicitAudience,
+          channelCategories: ch.categories,
+          channelAudience: ch.audience_continents,
+        });
 
         // Channels already use 6 hours
         const isEligible = ch.daily_posts < ch.posts_per_day && (
@@ -93,7 +95,7 @@ export async function GET(request: Request) {
           new Date(ch.last_post_at).getTime() < (Date.now() + predictionMinutes * 60000) - (6 * 60 * 60 * 1000)
         );
 
-        return catMatch && contMatch && isEligible;
+        return targetingMatches && isEligible;
       });
 
       const totalSubscribers = filteredChannels.reduce((acc: number, ch: any) => acc + (ch.subscriber_count || 0), 0);

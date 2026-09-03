@@ -6,7 +6,7 @@ import { useParams } from "next/navigation";
 import AdminLayout from "@/components/layout/AdminLayout";
 import Modal from "@/components/ui/Modal";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
-import { ArrowLeft, CheckCircle2, Loader2, Pause, Play, RotateCcw, Trash2, Zap } from "lucide-react";
+import { ArrowLeft, CheckCircle2, CircleHelp, Loader2, Pause, Play, RotateCcw, Star, Trash2, Zap } from "lucide-react";
 
 function formatValue(value: unknown) {
   if (value === null || value === undefined || value === "") return "N/A";
@@ -16,7 +16,11 @@ function formatValue(value: unknown) {
 function renderContinents(value: string) {
   try {
     const parsed = JSON.parse(value || "[]");
-    return Array.isArray(parsed) ? parsed.join(", ") : value;
+    if (Array.isArray(parsed)) return parsed.join(", ");
+    if (parsed && typeof parsed === "object" && Array.isArray(parsed.audiences)) {
+      return parsed.audiences.join(", ");
+    }
+    return value;
   } catch {
     return value || "N/A";
   }
@@ -25,6 +29,7 @@ function renderContinents(value: string) {
 type EmergencyPushSummary = {
   mode: string;
   eligibleChannels: number;
+  eligibleBotUsers?: number;
   attempted: number;
   posted: number;
   failed: number;
@@ -69,6 +74,7 @@ type CampaignDetailsCampaign = {
   telegram_cleanup_attempted_at?: string | null;
   archived_at?: string | null;
   auto_reactivate?: boolean | number;
+  is_prioritized?: boolean | number;
   spend?: string | number;
   approved_count?: string | number;
   rejected_count?: string | number;
@@ -188,6 +194,9 @@ export default function AdminCampaignDetailsPage() {
   const [pendingEmergency, setPendingEmergency] = useState<PendingEmergency>(null);
   const [actionResult, setActionResult] = useState<CampaignActionResult>(null);
   const [typedConfirmation, setTypedConfirmation] = useState("");
+  const [emergencySendAll, setEmergencySendAll] = useState(true);
+  const [emergencyRecipientCount, setEmergencyRecipientCount] = useState("100");
+  const [ignoreEmergencyRules, setIgnoreEmergencyRules] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [editData, setEditData] = useState<EditCampaignData>({});
   const [editLoading, setEditLoading] = useState(false);
@@ -199,6 +208,12 @@ export default function AdminCampaignDetailsPage() {
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || "Failed to load campaign");
       setData(body as CampaignDetailsData);
+      if (body.campaign?.type === "broadcast") {
+        setSettlementSummary(null);
+        setDeliveryStatus(null);
+        setCleanupErrors([]);
+        return;
+      }
       const [settlementRes, deliveryRes, cleanupRes] = await Promise.all([
         fetch(`/api/admin/campaigns/${params.id}/settlement-summary`),
         fetch(`/api/admin/campaigns/${params.id}/delivery-status`),
@@ -256,7 +271,15 @@ export default function AdminCampaignDetailsPage() {
       const res = await fetch(`/api/admin/campaigns/${params.id}/emergency-push`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, confirmation }),
+        body: JSON.stringify({
+          mode,
+          confirmation,
+          ignore_rules: ignoreEmergencyRules,
+          ...(campaign?.type === "broadcast" ? {
+            send_all: emergencySendAll,
+            recipient_count: emergencySendAll ? undefined : Number(emergencyRecipientCount),
+          } : {}),
+        }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `${label} failed`);
@@ -313,7 +336,29 @@ export default function AdminCampaignDetailsPage() {
 
   const openEmergencyConfirm = (mode: "fill_empty_slots" | "replace_everything") => {
     setTypedConfirmation("");
+    setEmergencySendAll(true);
+    setEmergencyRecipientCount("100");
+    setIgnoreEmergencyRules(false);
     setPendingEmergency(mode);
+  };
+
+  const togglePriority = async () => {
+    if (!campaign) return;
+    setActionLoading("priority");
+    try {
+      const res = await fetch(`/api/admin/campaigns/${params.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_prioritized: !Boolean(campaign.is_prioritized) }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || "Priority update failed");
+      await fetchDetails();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Priority update failed");
+    } finally {
+      setActionLoading("");
+    }
   };
 
   const confirmEmergency = async () => {
@@ -412,8 +457,10 @@ export default function AdminCampaignDetailsPage() {
         isOpen={!!pendingEmergency}
         onClose={() => { setPendingEmergency(null); setTypedConfirmation(""); }}
         onConfirm={confirmEmergency}
-        title={pendingEmergency === "replace_everything" ? "Emergency Push: Replace Everything" : "Emergency Push: Fill Empty Slots"}
-        message={pendingEmergency === "replace_everything"
+        title={campaign?.type === "broadcast" ? "Emergency Broadcast Push" : pendingEmergency === "replace_everything" ? "Emergency Push: Replace Everything" : "Emergency Push: Fill Empty Slots"}
+        message={campaign?.type === "broadcast"
+          ? "Send this bot campaign immediately to active eligible bot users. This bypasses the normal broadcast posting interval."
+          : pendingEmergency === "replace_everything"
           ? "Danger: This will delete all currently active ads from Telegram channels, then immediately push this campaign to eligible channels. This may affect all advertisers. Type CONFIRM to continue."
           : "You are about to immediately push this campaign to all eligible empty channels. Normal posting schedules will be bypassed for this emergency action only. Continue?"}
         confirmBtnText={pendingEmergency === "replace_everything" ? "Replace Everything" : "Push Now"}
@@ -424,14 +471,44 @@ export default function AdminCampaignDetailsPage() {
           value: typedConfirmation,
           onChange: setTypedConfirmation,
         } : undefined}
-      />
+      >
+        {campaign?.type !== "broadcast" && (
+          <div className="space-y-2 rounded-lg border border-blue-200 bg-blue-50 p-3">
+            <label className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+              <input type="checkbox" checked={ignoreEmergencyRules} onChange={(event) => setIgnoreEmergencyRules(event.target.checked)} />
+              Bypass timing and spacing rules
+              <span title="Pushes immediately without the 3-hour schedule window, recent-post spacing, or same-campaign 24-hour cooldown.">
+                <CircleHelp size={14} className="text-blue-600" />
+              </span>
+            </label>
+            <p className="text-xs text-slate-600">
+              Daily channel post caps and campaign/channel exclusions are always enforced. Leave unchecked to follow all normal placement rules.
+            </p>
+          </div>
+        )}
+        {campaign?.type === "broadcast" && (
+          <div className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+            <label className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+              <input type="checkbox" checked={emergencySendAll} onChange={(event) => setEmergencySendAll(event.target.checked)} />
+              Send to all active eligible bot users
+            </label>
+            {!emergencySendAll && (
+              <label className="block text-sm font-semibold text-slate-800">
+                Number of broadcasts
+                <input type="number" min="1" step="1" value={emergencyRecipientCount} onChange={(event) => setEmergencyRecipientCount(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2" />
+                <span className="mt-1 block text-xs font-normal text-slate-600">The request is rejected if it exceeds the currently eligible active users.</span>
+              </label>
+            )}
+          </div>
+        )}
+      </ConfirmationModal>
       <Modal isOpen={!!summary} onClose={() => setSummary(null)} type="success" title="Emergency Push Summary">
         {summary && (
           <div className="space-y-3 text-sm">
             <div className="grid grid-cols-2 gap-2">
               {[
                 ["Mode", summary.mode],
-                ["Eligible", summary.eligibleChannels],
+                ["Eligible", summary.eligibleBotUsers ?? summary.eligibleChannels],
                 ["Attempted", summary.attempted],
                 ["Posted", summary.posted],
                 ["Failed", summary.failed],
@@ -575,7 +652,16 @@ export default function AdminCampaignDetailsPage() {
               <button onClick={openEditModal} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-purple-50 text-purple-700 border border-purple-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                 Edit Details
               </button>
-              {campaign.status === "active" && (
+              {campaign.type !== "broadcast" && (
+                <button onClick={togglePriority} disabled={!!actionLoading} className={`shrink-0 px-3 py-1.5 rounded-md text-xs font-medium inline-flex items-center gap-1 border ${campaign.is_prioritized ? "bg-amber-100 text-amber-800 border-amber-300" : "bg-slate-50 text-slate-700 border-slate-200"}`} title="Prioritized campaigns exclusively share all eligible scheduled channel slots, balanced by total delivery count; older campaigns win ties.">
+                  {actionLoading === "priority" ? <Loader2 size={14} className="animate-spin" /> : <Star size={14} fill={campaign.is_prioritized ? "currentColor" : "none"} className={campaign.is_prioritized ? "text-amber-500" : undefined} />} {campaign.is_prioritized ? "Prioritized" : "Prioritize"}
+                </button>
+              )}
+              {campaign.status === "active" && campaign.type === "broadcast" ? (
+                <button onClick={() => openEmergencyConfirm("fill_empty_slots")} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
+                  {actionLoading === "emergency-fill" ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />} Emergency Broadcast Push
+                </button>
+              ) : campaign.status === "active" && (
                 <>
                   <button onClick={() => openEmergencyConfirm("fill_empty_slots")} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                     {actionLoading === "emergency-fill" ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />} Emergency Push: Fill Empty Slots
@@ -590,12 +676,12 @@ export default function AdminCampaignDetailsPage() {
                   {actionLoading === "pause_only" ? <Loader2 size={14} className="animate-spin" /> : <Pause size={14} />} Pause
                 </button>
               )}
-              {campaign.status !== "deleted" && (
+              {campaign.status !== "deleted" && campaign.type !== "broadcast" && (
                 <button onClick={() => openActionConfirm("pause_finalize")} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                   {actionLoading === "pause_finalize" ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />} Pause + Finalize
                 </button>
               )}
-              {campaign.status !== "deleted" && (
+              {campaign.status !== "deleted" && campaign.type !== "broadcast" && (
                 <>
                   <button onClick={() => openActionConfirm("force_refresh_stats")} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-cyan-50 text-cyan-700 border border-cyan-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                     {actionLoading === "force_refresh_stats" ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />} Force Refresh Statistics
@@ -613,9 +699,11 @@ export default function AdminCampaignDetailsPage() {
                   <button onClick={() => openActionConfirm("resume")} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                     {actionLoading === "resume" ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />} Resume
                   </button>
-                  <button onClick={() => openActionConfirm("retry_cleanup")} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-slate-50 text-slate-700 border border-slate-200 rounded-md text-xs font-medium inline-flex items-center gap-1">
-                    {actionLoading === "retry_cleanup" ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />} Retry Failed Cleanup
-                  </button>
+                  {campaign.type !== "broadcast" && (
+                    <button onClick={() => openActionConfirm("retry_cleanup")} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-slate-50 text-slate-700 border border-slate-200 rounded-md text-xs font-medium inline-flex items-center gap-1">
+                      {actionLoading === "retry_cleanup" ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />} Retry Failed Cleanup
+                    </button>
+                  )}
                 </>
               )}
               {campaign.status !== "deleted" && (
@@ -649,9 +737,11 @@ export default function AdminCampaignDetailsPage() {
                   ["Lifetime Spend", `$${campaign.spend || 0}`],
                   [campaign.type === "clicks" ? "CPC" : "CPM", `$${campaign.type === "clicks" ? (campaign.cpc || campaign.cpm) : campaign.cpm}`],
                   ["Impressions", metrics.total_views || 0],
-                  ["Clicks", metrics.total_clicks || 0],
-                  ["Approved Count", campaign.approved_count || 0],
-                  ["Rejected Count", campaign.rejected_count || 0],
+                  ...(campaign.type === "broadcast" ? [] : [
+                    ["Clicks", metrics.total_clicks || 0],
+                    ["Approved Count", campaign.approved_count || 0],
+                    ["Rejected Count", campaign.rejected_count || 0],
+                  ]),
                   ["Created", campaign.created_at],
                   ["Updated", campaign.updated_at],
                   ["Paused At", campaign.paused_at],
@@ -659,9 +749,11 @@ export default function AdminCampaignDetailsPage() {
                   ["Pause Reason", campaign.pause_reason],
                   ["Budget Exhausted At", campaign.budget_exhausted_at],
                   ["Completed At", campaign.completed_at],
-                  ["Final Settlement", campaign.channel_settlement_finalized_at],
-                  ["Cleanup Status", campaign.telegram_cleanup_status],
-                  ["Cleanup Attempted", campaign.telegram_cleanup_attempted_at],
+                  ...(campaign.type === "broadcast" ? [] : [
+                    ["Final Settlement", campaign.channel_settlement_finalized_at],
+                    ["Cleanup Status", campaign.telegram_cleanup_status],
+                    ["Cleanup Attempted", campaign.telegram_cleanup_attempted_at],
+                  ]),
                   ["Archived At", campaign.archived_at],
                   ["Auto Reactivate", campaign.auto_reactivate ? "Yes" : "No"],
                 ].map(([label, value]) => (
@@ -673,6 +765,28 @@ export default function AdminCampaignDetailsPage() {
               </div>
             </div>
 
+            {campaign.type === "broadcast" ? (
+              <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-200">
+                  <h2 className="text-sm font-semibold text-slate-900">Bot Broadcast Performance</h2>
+                </div>
+                <div className="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+                  {[
+                    ["Successful Impressions", metrics.total_deliveries || 0],
+                    ["Advertiser Spend", `$${metrics.total_spend || 0}`],
+                    ["Publisher Earnings", `$${metrics.publisher_earnings || 0}`],
+                    ["Platform Revenue", `$${metrics.platform_revenue || 0}`],
+                    ["Reserve", `$${metrics.reserve || 0}`],
+                    ["Last Delivery", metrics.last_delivery_at],
+                  ].map(([label, value]) => (
+                    <div key={label} className="bg-slate-50 p-3 rounded-md border border-slate-200">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{label}</p>
+                      <p className="font-medium text-slate-900 break-words">{formatValue(value)}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : <>
             <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
               <div className="px-4 py-3 border-b border-slate-200">
                 <h2 className="text-sm font-semibold text-slate-900">Placement Statistics</h2>
@@ -807,6 +921,7 @@ export default function AdminCampaignDetailsPage() {
                 </table>
               </div>
             </div>
+            </>}
           </>
         ) : null}
       </div>

@@ -45,17 +45,15 @@ test("normal broadcasts and Emergency Push share the same Bot payout calculator"
   assert.doesNotMatch(emergencyPush, /broadcast_ad_reward_percentage/);
 });
 
-test("Bot reporting CPM uses real money over displayed impressions and remains safe below five sends", () => {
-  const displayed = Math.floor(5 / 5);
-  assert.equal(displayed, 1);
-  assert.equal((0.0045 / displayed) * 1000, 4.5);
-  assert.equal((0.015 / displayed) * 1000, 15);
-  assert.equal(Math.floor(4 / 5), 0);
-  assert.equal(0, 0);
-  assert.match(engine, /Math\.floor\(Math\.max\(0, Number\(successfulBroadcasts\) \|\| 0\) \/ 5\)/);
+test("each successful bot send is one reported impression", () => {
+  const displayed = Math.floor(5);
+  assert.equal(displayed, 5);
+  assert.equal(Math.floor(1), 1);
+  assert.match(engine, /Math\.floor\(Math\.max\(0, Number\(successfulBroadcasts\) \|\| 0\)\)/);
   assert.match(engine, /impressions > 0 \? money\(\(Math\.max\(0, Number\(amount\) \|\| 0\) \/ impressions\) \* 1000\) : 0/);
   assert.match(publisherAnalytics, /publisher_cpm: impressions > 0 \? earnings \/ impressions \* 1000 : 0/);
-  assert.match(advertiserDetails, /FLOOR\(COUNT\(\*\) \/ 5\)/);
+  assert.match(advertiserDetails, /SELECT COUNT\(\*\) as count/);
+  assert.doesNotMatch(advertiserDetails, /FLOOR\(COUNT\(\*\) \/ 5\)/);
   assert.match(advertiserDetails, /SUM\(cost\) as total_cost/);
   assert.doesNotMatch(botAnalyticsUi, /Clicks|CTR|CTA/);
 });

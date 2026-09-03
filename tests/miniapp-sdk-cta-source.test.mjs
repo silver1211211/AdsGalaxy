@@ -16,7 +16,7 @@ test("internal CTA uses Telegram link APIs and one pending click request", () =>
 });
 
 test("internal display tracks only after its display threshold and CTA only records clicks", () => {
-  assert.match(sdk, /impTimer=setTimeout\(function\(\)\{impressionSent=true;track\(\{event_type:"impression_recorded",watch_duration_seconds:1\.5\}\);\},1500\)/);
+  assert.match(sdk, /impTimer=setTimeout\(function\(\)\{impressionSent=true;track\(\{event_type:"impression_recorded",watch_duration_seconds:1\.5\}\)\.catch\(function\(\)\{\}\);\},1500\)/);
   assert.doesNotMatch(sdk, /media\.onclick=openAd/);
   assert.match(sdk, /cta\.onclick=openAd/);
   assert.match(sdk, /-webkit-line-clamp:3/);

@@ -12,6 +12,7 @@ const advertiserWizard = readFileSync("src/app/advertiser/campaigns/new/[kind]/p
 const channelReports = readFileSync("src/lib/channelReports.ts", "utf8");
 const miniappReports = readFileSync("src/lib/miniappReports.ts", "utf8");
 const miniappDashboard = readFileSync("src/components/publisher/MiniAppAnalyticsDashboard.tsx", "utf8");
+const statFormulas = readFileSync("src/lib/statFormulas.ts", "utf8");
 const sidebar = readFileSync("src/components/layout/Sidebar.tsx", "utf8");
 const cpcMigration = readFileSync("db/migrations/20260708_0098_campaign_cpc_billing.sql", "utf8");
 const adminDeposits = readFileSync("src/app/api/admin/deposits/route.ts", "utf8");
@@ -69,19 +70,20 @@ test("CPC schema and campaign forms agree without opening financial counters", (
 
 test("publisher channel earnings remain merged for views and clicks", () => {
   assert.match(channelReports, /const earnings = rows\.reduce\(\(sum, row\) => sum \+ metricNumber\(row\.earnings\), 0\)/);
-  assert.match(channelReports, /viewEarnings/);
   assert.match(channelReports, /clickEarnings/);
   assert.match(channelReports, /publisher_revenue: fixedMetric\(earnings, 8\)/);
 });
 
-test("Mini App CPM display and selected average use daily CPM values", () => {
-  const dailyCpms = [1.2, 5, 3, 2, 8, 2, 1.2];
-  assert.equal(Number((dailyCpms.reduce((sum, value) => sum + value, 0) / dailyCpms.length).toFixed(8)), 3.2);
+test("publisher CPM and CPC display from the first qualifying event", () => {
   assert.match(miniappReports, /averageSelectedDailyCpm/);
-  assert.match(miniappReports, /metricNumber\(row\.total_impressions\) > 0 && metricNumber\(row\.total_revenue\) > 0/);
-  assert.match(miniappDashboard, /kind === "cpm" \? sample > 0 && value > 0 : hasMinimumCpcSample\(sample\)/);
+  assert.match(miniappReports, /return cpm\(totals\.revenue, totals\.impressions\)/);
+  assert.match(miniappDashboard, /kind === "cpm" \? hasMinimumCpmSample\(sample\) : hasMinimumCpcSample\(sample\)/);
   assert.match(miniappDashboard, /formatDisplayedCpmFromRevenue\(row\.publisher_revenue, row\.impressions\)/);
-  assert.match(miniappDashboard, /roundedDisplayMoneyValue\(revenue\) \/ impressions\) \* 1000/);
+  assert.match(statFormulas, /MIN_CPM_SAMPLE_SIZE = 1/);
+  assert.match(statFormulas, /MIN_CPC_SAMPLE_SIZE = 1/);
+  assert.match(channelReports, /average_cpm: cpm\(earnings, views\)/);
+  assert.match(channelReports, /cpm_eligible: views > 0 && \(viewEarnings > 0 \|\| clicks > 0\)/);
+  assert.match(miniappDashboard, /\(revenue \/ impressions\) \* 1000/);
 });
 
 test("publisher Earnings sidebar item is removed", () => {
@@ -97,7 +99,9 @@ test("admin production blockers stay fixed", () => {
   assert.match(adminDeposits, /d\.txn_id LIKE \?/);
   assert.match(adminDeposits, /d\.status LIKE \?/);
   assert.match(emergencyPush, /hasActiveUndeletedCampaignPost/);
-  assert.match(emergencyPush, /mode === "fill_empty_slots" && await hasActiveUndeletedPost/);
+  assert.match(emergencyPush, /mode === "fill_empty_slots" && followRules/);
+  assert.match(emergencyPush, /await hasRecentChannelPost\(channel\.id\)/);
+  assert.match(emergencyPush, /await hasCampaignPostWithin24Hours\(campaign\.id, channel\.id\)/);
   assert.match(emergencyPush, /mode === "replace_everything" && await hasActiveUndeletedCampaignPost/);
-  assert.doesNotMatch(emergencyPush, /return campaignMatchesChannel\(campaign, channel\)/);
+  assert.match(emergencyPush, /channelCampaignMatchesInventory\(\{/);
 });

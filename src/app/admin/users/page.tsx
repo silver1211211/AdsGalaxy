@@ -87,6 +87,9 @@ export default function AdminUsersPage() {
   const [isUpdating, setIsUpdating] = useState(false);
   const [userAction, setUserAction] = useState<UserAction>(null);
   const [banReason, setBanReason] = useState("");
+  const [unbanDisposition, setUnbanDisposition] = useState("trust_remediation");
+  const [exemptionType, setExemptionType] = useState("test_account");
+  const [exemptionExpiresAt, setExemptionExpiresAt] = useState("");
 
   const fetchUsers = async (p: number, q: string, trust = trustFilter) => {
     setLoading(true);
@@ -154,6 +157,9 @@ export default function AdminUsersPage() {
   const openUserAction = (type: "ban" | "unban", user: UserRow) => {
     setUserAction({ type, user });
     setBanReason("");
+    setUnbanDisposition("trust_remediation");
+    setExemptionType("test_account");
+    setExemptionExpiresAt("");
   };
 
   const runUserAction = async () => {
@@ -167,6 +173,9 @@ export default function AdminUsersPage() {
           id: userAction.user.id,
           action: userAction.type,
           reason: banReason,
+          unban_disposition: userAction.type === "unban" ? unbanDisposition : undefined,
+          exemption_type: userAction.type === "unban" && unbanDisposition === "enforcement_exemption" ? exemptionType : undefined,
+          exemption_expires_at: userAction.type === "unban" && unbanDisposition === "enforcement_exemption" ? exemptionExpiresAt || null : undefined,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -270,6 +279,41 @@ export default function AdminUsersPage() {
               className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm outline-none focus:border-blue-500"
               placeholder="Optional admin note..."
             />
+          </div>
+        )}
+        {userAction?.type === "unban" && (
+          <div className="space-y-3">
+            <div>
+              <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Unban disposition</label>
+              <select value={unbanDisposition} onChange={(e) => setUnbanDisposition(e.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm">
+                <option value="trust_remediation">Trust remediation — reset trust to 60</option>
+                <option value="enforcement_exemption">Test/account exemption — keep current trust</option>
+                <option value="no_remediation">No remediation — keep current trust</option>
+              </select>
+            </div>
+            {unbanDisposition === "enforcement_exemption" && (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Exemption type</label>
+                  <select value={exemptionType} onChange={(e) => setExemptionType(e.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm">
+                    <option value="test_account">Test account</option>
+                    <option value="support_investigation">Support investigation</option>
+                    <option value="authorized_exception">Authorized exception</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Expires (optional)</label>
+                  <input type="datetime-local" value={exemptionExpiresAt} onChange={(e) => setExemptionExpiresAt(e.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm" />
+                </div>
+              </div>
+            )}
+            {unbanDisposition === "no_remediation" && (
+              <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-800">Warning: the low trust score is unchanged, so automated enforcement may ban this user again.</p>
+            )}
+            <div>
+              <label className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Admin reason {unbanDisposition === "trust_remediation" ? "(optional)" : "(required)"}</label>
+              <textarea value={banReason} onChange={(e) => setBanReason(e.target.value)} rows={3} className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm outline-none focus:border-blue-500" placeholder="Record why this disposition is appropriate..." />
+            </div>
           </div>
         )}
       </ConfirmationModal>

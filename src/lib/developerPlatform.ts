@@ -1,4 +1,6 @@
 import crypto from "crypto";
+import { directMiniappRewardCallbacksEnabled } from "@/lib/miniappDirectRewardCallbacks";
+import { dispatchPinnedHttpsCallback } from "@/lib/directCallbackTransport.mjs";
 import type { PoolConnection } from "mysql2/promise";
 import pool from "@/lib/db";
 
@@ -501,7 +503,9 @@ export async function resetDeveloperApiKey(keyId: number, userId: number) {
 const V2_RETRY_DELAYS_MINUTES = [1, 5, 15, 60, 360] as const;
 const MAX_WEBHOOK_RESPONSE_BYTES = 64 * 1024;
 
-export async function claimWebhookDeliveryBatch() {
+export async function claimWebhookDeliveryBatch(
+  directCallbacksEnabled = directMiniappRewardCallbacksEnabled()
+) {
   const conn = await pool.getConnection();
   const token = crypto.randomBytes(24).toString("hex");
   try {
@@ -510,11 +514,13 @@ export async function claimWebhookDeliveryBatch() {
       `SELECT id
        FROM developer_webhook_deliveries
        WHERE status IN ('pending', 'retrying')
+         AND (? = 1 OR miniapp_reward_callback_id IS NULL)
          AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
          AND (claim_expires_at IS NULL OR claim_expires_at <= NOW())
        ORDER BY created_at ASC
        LIMIT 25
-       FOR UPDATE`
+       FOR UPDATE`,
+      [directCallbacksEnabled ? 1 : 0]
     );
     const ids = rows.map((row: any) => Number(row.id)).filter(Boolean);
     if (ids.length > 0) {
@@ -534,10 +540,14 @@ export async function claimWebhookDeliveryBatch() {
     conn.release();
   }
   const [claimed]: any = await pool.query(
-    `SELECT d.*, w.url, w.secret, w.previous_secret, w.previous_secret_version,
-            w.previous_secret_expires_at
+    `SELECT d.*, COALESCE(w.url, c.callback_url) AS url,
+            COALESCE(w.secret, c.signing_secret) AS secret,
+            COALESCE(w.previous_secret, c.previous_signing_secret) AS previous_secret,
+            COALESCE(w.previous_secret_version, c.previous_secret_version) AS previous_secret_version,
+            COALESCE(w.previous_secret_expires_at, c.previous_secret_expires_at) AS previous_secret_expires_at
      FROM developer_webhook_deliveries d
-     JOIN developer_webhooks w ON w.id = d.webhook_id
+     LEFT JOIN developer_webhooks w ON w.id = d.webhook_id
+     LEFT JOIN miniapp_reward_callbacks c ON c.id = d.miniapp_reward_callback_id
      WHERE d.claim_token = ?`,
     [token]
   );
@@ -614,7 +624,10 @@ export async function processPendingWebhookDeliveries() {
   const settings = await getSettings();
   const maxAttempts = settingNumber(settings, "webhook_retry_max_attempts", 5);
   const retryDelay = settingNumber(settings, "webhook_retry_delay_minutes", 10);
-  const { token, deliveries } = await claimWebhookDeliveryBatch();
+  // When the platform flag is off, direct rows are deliberately left pending
+  // and unleased. Developer webhook rows continue through the same worker.
+  const directCallbacksEnabled = directMiniappRewardCallbacksEnabled();
+  const { token, deliveries } = await claimWebhookDeliveryBatch(directCallbacksEnabled);
 
   let delivered = 0;
   let failed = 0;
@@ -632,35 +645,47 @@ export async function processPendingWebhookDeliveries() {
     const signingInput = isV2 ? `${timestamp}.${delivery.event_id}.${body}` : body;
     const signature = crypto.createHmac("sha256", deliverySecret(delivery)).update(signingInput).digest("hex");
     try {
-      const response = await fetch(String(delivery.url), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-adsgalaxy-event": String(delivery.event_type),
-          ...(isV2 ? {
-            "x-adsgalaxy-event-id": String(delivery.event_id),
-            "x-adsgalaxy-timestamp": timestamp,
-            "x-adsgalaxy-signature-version": "v2",
-          } : {}),
-          "x-adsgalaxy-signature": signature,
-        },
-        body,
-        signal: AbortSignal.timeout(10_000),
-      });
-      const responseBody = await hashBoundedWebhookResponse(response);
-      const responseHash = `${responseBody.hash};bytes=${responseBody.bytesRead};truncated=${responseBody.truncated ? 1 : 0}`;
-      if (response.ok) {
+      const headers = {
+        "Content-Type": "application/json",
+        "x-adsgalaxy-event": String(delivery.event_type),
+        ...(isV2 ? {
+          "x-adsgalaxy-event-id": String(delivery.event_id),
+          "x-adsgalaxy-timestamp": timestamp,
+          "x-adsgalaxy-signature-version": "v2",
+        } : {}),
+        "x-adsgalaxy-signature": signature,
+      };
+      let responseStatus: number;
+      let responseHash: string;
+      let responseOk: boolean;
+      if (delivery.miniapp_reward_callback_id) {
+        const result = await dispatchPinnedHttpsCallback({
+          url: String(delivery.url), body, headers,
+        });
+        responseStatus = result.status;
+        responseHash = result.responseHash;
+        responseOk = result.ok;
+      } else {
+        const response = await fetch(String(delivery.url), {
+          method: "POST", headers, body, signal: AbortSignal.timeout(10_000),
+        });
+        const responseBody = await hashBoundedWebhookResponse(response);
+        responseStatus = response.status;
+        responseHash = `${responseBody.hash};bytes=${responseBody.bytesRead};truncated=${responseBody.truncated ? 1 : 0}`;
+        responseOk = response.ok;
+      }
+      if (responseOk) {
         await pool.query(
           `UPDATE developer_webhook_deliveries
            SET status = 'delivered', attempts = attempts + 1, response_status = ?,
                response_body = ?, delivered_at = NOW(), last_attempt_at = NOW(),
                claim_token = NULL, claimed_at = NULL, claim_expires_at = NULL
            WHERE id = ? AND claim_token = ?`,
-          [response.status, responseHash, delivery.id, token]
+          [responseStatus, responseHash, delivery.id, token]
         );
         delivered += 1;
       } else {
-        throw new Error(`HTTP ${response.status}`);
+        throw new Error(`HTTP ${responseStatus}`);
       }
     } catch (error: any) {
       const attempts = toInt(delivery.attempts) + 1;

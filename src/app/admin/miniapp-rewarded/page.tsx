@@ -3,7 +3,7 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { AlertTriangle, Check, Edit3, Loader2, Pause, Play, X } from "lucide-react";
+import { AlertTriangle, Check, Edit3, Loader2, Pause, Play, RefreshCw, X } from "lucide-react";
 
 const MINIAPP_CREATIVE_CATEGORIES = [
   "General",
@@ -50,9 +50,12 @@ type Campaign = {
   admin_cpm: string | number;
   cpm_mode?: string | null;
   fixed_publisher_cpm?: string | number | null;
+  fixed_cpm_override_reason?: string | null;
+  fixed_cpm_override_expires_at?: string | null;
   campaign_budget_mode?: string | null;
   daily_budget_mode?: string | null;
   impressions: string | number;
+  clicks?: string | number;
   spend: string | number;
   publisher_revenue?: string | number;
   ads_galaxy_revenue?: string | number;
@@ -141,12 +144,18 @@ export default function AdminMiniAppRewardedPage() {
   const [cpms, setCpms] = useState<Record<number, string>>({});
   const [cpmModes, setCpmModes] = useState<Record<number, string>>({});
   const [fixedCpms, setFixedCpms] = useState<Record<number, string>>({});
+  const [fixedCpmReasons, setFixedCpmReasons] = useState<Record<number, string>>({});
+  const [fixedCpmExpiries, setFixedCpmExpiries] = useState<Record<number, string>>({});
   const [moderationNotes, setModerationNotes] = useState<Record<number, string>>({});
   const [message, setMessage] = useState("");
   const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
   const [editForm, setEditForm] = useState<Record<string, string>>({});
   const [editCats, setEditCats] = useState<string[]>([]);
   const [editLoading, setEditLoading] = useState(false);
+  const [syncCampaign, setSyncCampaign] = useState<Campaign | null>(null);
+  const [syncState, setSyncState] = useState<any>(null);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncForm, setSyncForm] = useState({ target_impressions: "", target_clicks: "", duration_minutes: "60" });
 
   const fetchCampaigns = async () => {
     setLoading(true);
@@ -179,6 +188,8 @@ export default function AdminMiniAppRewardedPage() {
           admin_cpm: cpms[id] ?? campaign?.admin_cpm ?? campaign?.advertiser_cpm_bid,
           cpm_mode: cpmModes[id] ?? campaign?.cpm_mode ?? "live",
           fixed_publisher_cpm: fixedCpms[id] ?? campaign?.fixed_publisher_cpm ?? "",
+          fixed_cpm_override_reason: fixedCpmReasons[id] ?? campaign?.fixed_cpm_override_reason ?? "",
+          fixed_cpm_override_expires_at: fixedCpmExpiries[id] ?? campaign?.fixed_cpm_override_expires_at ?? "",
           moderation_notes: moderationNotes[id] || "",
         }),
       });
@@ -245,6 +256,69 @@ export default function AdminMiniAppRewardedPage() {
       setEditLoading(false);
     }
   };
+
+  const loadSync = async (campaign: Campaign, quiet = false) => {
+    if (!quiet) setSyncLoading(true);
+    try {
+      const res = await fetch(`/api/admin/miniapp-rewarded-campaigns/${campaign.id}/external-delivery-sync`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Unable to load delivery sync");
+      setSyncState(data);
+      setSyncForm((current) => ({
+        ...current,
+        target_impressions: current.target_impressions || String(data.campaign.current_impressions),
+        target_clicks: current.target_clicks || String(data.campaign.current_clicks),
+      }));
+    } catch (error: any) {
+      setMessage(error.message);
+    } finally {
+      if (!quiet) setSyncLoading(false);
+    }
+  };
+
+  const openSync = (campaign: Campaign) => {
+    setSyncCampaign(campaign);
+    setSyncState(null);
+    setSyncForm({ target_impressions: "", target_clicks: "", duration_minutes: "60" });
+    void loadSync(campaign);
+  };
+
+  const submitSync = async () => {
+    if (!syncCampaign) return;
+    setSyncLoading(true);
+    try {
+      const res = await fetch(`/api/admin/miniapp-rewarded-campaigns/${syncCampaign.id}/external-delivery-sync`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_impressions: Number(syncForm.target_impressions), target_clicks: Number(syncForm.target_clicks), duration_seconds: Number(syncForm.duration_minutes) * 60 }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Unable to start delivery sync");
+      setSyncState(data);
+      setMessage("External delivery sync started.");
+    } catch (error: any) { setMessage(error.message); }
+    finally { setSyncLoading(false); }
+  };
+
+  const controlSync = async (action: "pause" | "resume" | "cancel") => {
+    if (!syncCampaign) return;
+    setSyncLoading(true);
+    try {
+      const res = await fetch(`/api/admin/miniapp-rewarded-campaigns/${syncCampaign.id}/external-delivery-sync`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Unable to ${action} sync`);
+      setSyncState(data);
+      setMessage(`Delivery sync ${action}d.`);
+    } catch (error: any) { setMessage(error.message); }
+    finally { setSyncLoading(false); }
+  };
+
+  useEffect(() => {
+    if (!syncCampaign || !["running", "paused"].includes(syncState?.sync?.status)) return;
+    const timer = window.setInterval(() => void loadSync(syncCampaign, true), 5000);
+    return () => window.clearInterval(timer);
+  }, [syncCampaign, syncState?.sync?.status]);
 
   const ef = (field: string, value: string) => setEditForm((prev) => ({ ...prev, [field]: value }));
 
@@ -422,6 +496,25 @@ export default function AdminMiniAppRewardedPage() {
                           />
                         </div>
                         <div>
+                          <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Fixed Override Reason</label>
+                          <textarea
+                            value={fixedCpmReasons[campaign.id] ?? String(campaign.fixed_cpm_override_reason || "")}
+                            onChange={(e) => setFixedCpmReasons((prev) => ({ ...prev, [campaign.id]: e.target.value }))}
+                            className="w-32 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-blue-500"
+                            placeholder="Required for fixed"
+                            rows={2}
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Override Expiry</label>
+                          <input
+                            type="datetime-local"
+                            value={fixedCpmExpiries[campaign.id] ?? (campaign.fixed_cpm_override_expires_at ? new Date(campaign.fixed_cpm_override_expires_at).toISOString().slice(0, 16) : "")}
+                            onChange={(e) => setFixedCpmExpiries((prev) => ({ ...prev, [campaign.id]: e.target.value }))}
+                            className="w-40 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-blue-500"
+                          />
+                        </div>
+                        <div>
                           <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Reason (optional)</label>
                           <textarea
                             value={moderationNotes[campaign.id] || ""}
@@ -466,6 +559,9 @@ export default function AdminMiniAppRewardedPage() {
                           >
                             <Edit3 size={14} />
                           </button>
+                          <button onClick={() => openSync(campaign)} className="rounded-lg border border-cyan-200 bg-cyan-50 p-2 text-cyan-700 hover:bg-cyan-100" title="Update delivery totals">
+                            <RefreshCw size={14} />
+                          </button>
                         </div>
                         <button
                           onClick={() => runAction(campaign.id, "update_cpm")}
@@ -485,6 +581,61 @@ export default function AdminMiniAppRewardedPage() {
           </div>
         )}
       </div>
+
+      {syncCampaign && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-900/60 p-3 sm:p-6">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white shadow-2xl">
+            <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-5 py-4">
+              <div><h2 className="font-bold text-slate-900">Update delivery totals</h2><p className="text-sm text-slate-500">{syncCampaign.campaign_name}</p></div>
+              <button onClick={() => setSyncCampaign(null)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-100"><X size={18} /></button>
+            </div>
+            <div className="space-y-5 p-5">
+              {syncLoading && !syncState ? <div className="flex justify-center p-8"><Loader2 className="animate-spin" /></div> : syncState && <>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  {[['Impressions', syncState.campaign.current_impressions], ['Clicks', syncState.campaign.current_clicks], ['Platform', syncState.campaign.platform_impressions], ['External', syncState.campaign.external_impressions]].map(([label, value]) => (
+                    <div key={String(label)} className="rounded-lg bg-slate-50 p-3"><div className="text-xs text-slate-500">{label}</div><div className="font-bold text-slate-900">{numberValue(value)}</div></div>
+                  ))}
+                </div>
+                {syncState.sync && (
+                  <div className="space-y-3 rounded-xl border border-cyan-200 bg-cyan-50 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-bold capitalize text-cyan-900">{String(syncState.sync.status).replaceAll('_', ' ')}</span><span className="text-sm text-cyan-800">{syncState.sync.progress_percent}% · {numberValue(syncState.sync.time_remaining_seconds)}s remaining</span></div>
+                    <div className="h-2 overflow-hidden rounded-full bg-cyan-100"><div className="h-full bg-cyan-600" style={{ width: `${Math.min(100, syncState.sync.progress_percent)}%` }} /></div>
+                    <div className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
+                      <div>Target impressions: <b>{numberValue(syncState.sync.target_impressions)}</b></div><div>Target clicks: <b>{numberValue(syncState.sync.target_clicks)}</b></div>
+                      <div>External added: <b>{numberValue(syncState.sync.external_impressions_added)}</b></div><div>Platform during sync: <b>{numberValue(syncState.sync.platform_impressions_during)}</b></div>
+                      <div>External spend: <b>{money(syncState.sync.external_spend)}</b></div><div>Budget remaining: <b>{money(syncState.campaign.remaining_budget)}</b></div>
+                    </div>
+                    {["running", "paused"].includes(syncState.sync.status) && <div className="flex gap-2">
+                      <button disabled={syncLoading} onClick={() => controlSync(syncState.sync.status === "paused" ? "resume" : "pause")} className="rounded-lg bg-cyan-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{syncState.sync.status === "paused" ? "Resume" : "Pause"}</button>
+                      <button disabled={syncLoading} onClick={() => controlSync("cancel")} className="rounded-lg border border-red-200 px-4 py-2 text-sm font-semibold text-red-700 disabled:opacity-50">Cancel</button>
+                    </div>}
+                  </div>
+                )}
+                {!syncState.sync || !["running", "paused"].includes(syncState.sync.status) ? <div className="space-y-4">
+                  <p className="text-sm text-slate-600">Set final cumulative totals. Platform traffic continues to count and automatically reduces the external amount added.</p>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <label className="text-xs font-semibold text-slate-600">Final impressions<input type="number" min={syncState.campaign.current_impressions} value={syncForm.target_impressions} onChange={(e) => setSyncForm({ ...syncForm, target_impressions: e.target.value })} className={inputCls} /></label>
+                    <label className="text-xs font-semibold text-slate-600">Final clicks<input type="number" min={syncState.campaign.current_clicks} value={syncForm.target_clicks} onChange={(e) => setSyncForm({ ...syncForm, target_clicks: e.target.value })} className={inputCls} /></label>
+                    <label className="text-xs font-semibold text-slate-600">Duration (minutes)<input type="number" min="1" max="43200" value={syncForm.duration_minutes} onChange={(e) => setSyncForm({ ...syncForm, duration_minutes: e.target.value })} className={inputCls} /></label>
+                  </div>
+                  <button disabled={syncLoading} onClick={submitSync} className="flex items-center gap-2 rounded-lg bg-cyan-700 px-5 py-2.5 text-sm font-bold text-white disabled:opacity-50">{syncLoading && <Loader2 size={15} className="animate-spin" />} Start update</button>
+                </div> : null}
+                {syncState.history?.length > 0 && <div>
+                  <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500">Sync history</h3>
+                  <div className="space-y-2">
+                    {syncState.history.map((item: any) => <div key={item.id} className="grid grid-cols-2 gap-2 rounded-lg border border-slate-200 p-3 text-xs sm:grid-cols-4">
+                      <span className="font-semibold capitalize">{String(item.status).replaceAll('_', ' ')}</span>
+                      <span>{numberValue(item.external_impressions_added)} external impressions</span>
+                      <span>{numberValue(item.external_clicks_added)} external clicks</span>
+                      <span>{money(item.external_spend)} spent</span>
+                    </div>)}
+                  </div>
+                </div>}
+              </>}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Edit Campaign Modal */}
       {editingCampaign && (

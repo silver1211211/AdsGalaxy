@@ -2,11 +2,13 @@ import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { logPublisherChannelError, publisherChannelError } from "@/lib/publisherChannelErrors";
 import { normalizePostingTimes, normalizePostsPerDay } from "@/lib/postingTimes";
 import { reactivateChannelAfterHealthCheck } from "@/lib/channelLifecycle";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import { clearPrivateTrackingAssignment } from "@/lib/privateChannelTrackingOnboarding";
 import { notifyChannelRemoved } from "@/lib/publisherNotifications";
+import { normalizeChannelAudience } from "@/lib/channelAudience";
 
 async function hasPostingTimesColumn() {
   const [rows]: any = await pool.query(`
@@ -41,7 +43,7 @@ export async function PATCH(
         [visible, id, user.id]
       );
       if (result.affectedRows === 0) {
-        return NextResponse.json({ error: "Channel not found" }, { status: 404 });
+        return publisherChannelError("CHANNEL_NOT_ACCESSIBLE", 404);
       }
       return NextResponse.json({ success: true, marketplace_visible: visible });
     }
@@ -54,16 +56,13 @@ export async function PATCH(
       );
 
       if (rows.length === 0) {
-        return NextResponse.json({ error: "Channel not found" }, { status: 404 });
+        return publisherChannelError("CHANNEL_NOT_ACCESSIBLE", 404);
       }
 
       const currentStatus = rows[0].status;
       const publisherResumableStatuses = ["paused", "bot_removed", "channel_not_found", "permission_missing"];
       if (currentStatus !== "active" && !publisherResumableStatuses.includes(currentStatus)) {
-        return NextResponse.json(
-          { error: "This channel cannot be activated by the publisher. It must be approved by an admin." },
-          { status: 403 }
-        );
+        return publisherChannelError("PERMISSION_REQUIRED", 403);
       }
 
       const newStatus = currentStatus === "active" ? "paused" : "active";
@@ -82,6 +81,14 @@ export async function PATCH(
 
     // Otherwise, handle general edit
     if (title || posts_per_day || audience_continents || categories || posting_times) {
+      let normalizedAudience: string;
+      try {
+        normalizedAudience = normalizeChannelAudience(audience_continents);
+      } catch (error) {
+        return NextResponse.json({
+          error: error instanceof Error ? error.message : "Channel audience is invalid",
+        }, { status: 400 });
+      }
       const canStorePostingTimes = await hasPostingTimesColumn();
       const [existingRows]: any = await pool.query(
         `SELECT posts_per_day${canStorePostingTimes ? ", posting_times" : ""} FROM channels WHERE id = ? AND user_id = ?`,
@@ -89,7 +96,7 @@ export async function PATCH(
       );
 
       if (existingRows.length === 0) {
-        return NextResponse.json({ error: "Channel not found" }, { status: 404 });
+        return publisherChannelError("CHANNEL_NOT_ACCESSIBLE", 404);
       }
 
       const normalizedPostsPerDay = normalizePostsPerDay(posts_per_day ?? existingRows[0].posts_per_day);
@@ -105,7 +112,7 @@ export async function PATCH(
       const updateParams = [
         title,
         normalizedPostsPerDay,
-        JSON.stringify(audience_continents),
+        JSON.stringify([normalizedAudience]),
         JSON.stringify(categories || [])
       ];
 
@@ -125,10 +132,10 @@ export async function PATCH(
       return NextResponse.json({ success: true, message: "Channel updated successfully" });
     }
 
-    return NextResponse.json({ error: "No update fields provided" }, { status: 400 });
-  } catch (error: any) {
-    console.error("PATCH Channel Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to update channel" }, { status: getAuthErrorStatus(error) });
+    return publisherChannelError("INVALID_CHANNEL", 400);
+  } catch (error: unknown) {
+    logPublisherChannelError("update", error);
+    return publisherChannelError("CHANNEL_UPDATE_FAILED", getAuthErrorStatus(error));
   }
 }
 
@@ -158,8 +165,8 @@ export async function DELETE(
     }
 
     return NextResponse.json({ success: true });
-  } catch (error: any) {
-    console.error("DELETE Channel Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to delete channel" }, { status: getAuthErrorStatus(error) });
+  } catch (error: unknown) {
+    logPublisherChannelError("delete", error);
+    return publisherChannelError("CHANNEL_DELETE_FAILED", getAuthErrorStatus(error));
   }
 }

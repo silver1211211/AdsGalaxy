@@ -89,6 +89,12 @@ function aggregateSummary(row: Record<string, unknown>, clicks = 0, requests = 0
     internal_impressions: metricNumber(row.internal_impressions),
     internal_gross_revenue: metricNumber(row.internal_gross_revenue),
     internal_revenue: metricNumber(row.internal_revenue),
+    internal_publisher_revenue: metricNumber(row.internal_revenue),
+    internal_platform_revenue: metricNumber(row.internal_fee),
+    internal_reserve_revenue: metricNumber(row.internal_reserve_revenue),
+    external_publisher_revenue: metricNumber(row.external_net_revenue),
+    external_platform_revenue: metricNumber(row.external_fee),
+    external_reserve_revenue: metricNumber(row.external_reserve_revenue),
     gross_revenue: grossRevenue,
     ads_galaxy_fee: metricNumber(row.ads_galaxy_fee),
     ads_galaxy_revenue: metricNumber(row.ads_galaxy_fee),
@@ -114,15 +120,16 @@ function aggregateSummary(row: Record<string, unknown>, clicks = 0, requests = 0
     average_cpm: cpm(publisherRevenue, totalImpressions),
     gross_cpm: cpm(grossRevenue, totalImpressions),
     net_cpm: cpm(publisherRevenue, totalImpressions),
+    margin_percent: grossRevenue>0?fixedMetric(metricNumber(row.ads_galaxy_fee)/grossRevenue*100):0,
   };
 }
 
 export function averageSelectedDailyCpm(rows: Array<{ total_impressions?: unknown; total_revenue?: unknown; net_cpm?: unknown }>) {
-  const selectedDailyCpms = rows
-    .filter((row) => metricNumber(row.total_impressions) > 0 && metricNumber(row.total_revenue) > 0)
-    .map((row) => metricNumber(row.net_cpm));
-  if (selectedDailyCpms.length === 0) return 0;
-  return fixedMetric(selectedDailyCpms.reduce((sum, value) => sum + value, 0) / selectedDailyCpms.length, 8);
+  const totals = rows.reduce((result, row) => ({
+    impressions: result.impressions + metricNumber(row.total_impressions),
+    revenue: result.revenue + metricNumber(row.total_revenue),
+  }), { impressions: 0, revenue: 0 });
+  return cpm(totals.revenue, totals.impressions);
 }
 
 export async function getMiniAppAggregateStatsByIds(miniappIds: Array<number | string>) {
@@ -179,41 +186,47 @@ export async function getMiniAppAggregateStatsByIds(miniappIds: Array<number | s
 }
 
 export async function getMiniAppPlatformStats() {
-  const [[today]]: any = await pool.query(`SELECT ${aggregateSelect()} FROM miniapp_daily_stats WHERE date = CURDATE()`);
-  const [[yesterday]]: any = await pool.query(`SELECT ${aggregateSelect()} FROM miniapp_daily_stats WHERE date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)`);
-  const [[lifetime]]: any = await pool.query(`SELECT ${aggregateSelect()} FROM miniapp_daily_stats`);
-  const [[todayRequests]]: any = await pool.query(
+  const [
+    [[today]],
+    [[yesterday]],
+    [[lifetime]],
+    [[todayRequests]],
+    [[yesterdayRequests]],
+    [[lifetimeRequests]],
+    [[todayClicks]],
+    [[yesterdayClicks]],
+    [[lifetimeClicks]],
+  ]: any = await Promise.all([
+    pool.query(`SELECT ${aggregateSelect()} FROM miniapp_daily_stats WHERE date = CURDATE()`),
+    pool.query(`SELECT ${aggregateSelect()} FROM miniapp_daily_stats WHERE date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)`),
+    pool.query(`SELECT ${aggregateSelect()} FROM miniapp_daily_stats`),
+    pool.query(
     `SELECT
        COUNT(CASE WHEN parent_request_id IS NULL THEN 1 END) as requests,
        COALESCE(SUM(CASE WHEN parent_request_id IS NULL AND (impression_confirmed = 1 OR final_result IN ('completed', 'impression_confirmed', 'displayed')) THEN 1 ELSE 0 END), 0) as successful_fills,
        COALESCE(SUM(CASE WHEN parent_request_id IS NULL AND final_result = 'no_fill' THEN 1 ELSE 0 END), 0) as no_fills
      FROM miniapp_mediation_requests
      WHERE created_at >= CURDATE()`
-  );
-  const [[yesterdayRequests]]: any = await pool.query(
+    ),
+    pool.query(
     `SELECT
        COUNT(CASE WHEN parent_request_id IS NULL THEN 1 END) as requests,
        COALESCE(SUM(CASE WHEN parent_request_id IS NULL AND (impression_confirmed = 1 OR final_result IN ('completed', 'impression_confirmed', 'displayed')) THEN 1 ELSE 0 END), 0) as successful_fills,
        COALESCE(SUM(CASE WHEN parent_request_id IS NULL AND final_result = 'no_fill' THEN 1 ELSE 0 END), 0) as no_fills
      FROM miniapp_mediation_requests
      WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND created_at < CURDATE()`
-  );
-  const [[lifetimeRequests]]: any = await pool.query(
+    ),
+    pool.query(
     `SELECT
        COUNT(CASE WHEN parent_request_id IS NULL THEN 1 END) as requests,
        COALESCE(SUM(CASE WHEN parent_request_id IS NULL AND (impression_confirmed = 1 OR final_result IN ('completed', 'impression_confirmed', 'displayed')) THEN 1 ELSE 0 END), 0) as successful_fills,
        COALESCE(SUM(CASE WHEN parent_request_id IS NULL AND final_result = 'no_fill' THEN 1 ELSE 0 END), 0) as no_fills
      FROM miniapp_mediation_requests`
-  );
-  const [[todayClicks]]: any = await pool.query(
-    "SELECT COUNT(*) as clicks FROM ad_click_attribution WHERE campaign_type = 'miniapp' AND created_at >= CURDATE()"
-  );
-  const [[yesterdayClicks]]: any = await pool.query(
-    "SELECT COUNT(*) as clicks FROM ad_click_attribution WHERE campaign_type = 'miniapp' AND created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND created_at < CURDATE()"
-  );
-  const [[lifetimeClicks]]: any = await pool.query(
-    "SELECT COUNT(*) as clicks FROM ad_click_attribution WHERE campaign_type = 'miniapp'"
-  );
+    ),
+    pool.query("SELECT COUNT(*) as clicks FROM ad_click_attribution WHERE campaign_type = 'miniapp' AND created_at >= CURDATE()"),
+    pool.query("SELECT COUNT(*) as clicks FROM ad_click_attribution WHERE campaign_type = 'miniapp' AND created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND created_at < CURDATE()"),
+    pool.query("SELECT COUNT(*) as clicks FROM ad_click_attribution WHERE campaign_type = 'miniapp'"),
+  ]);
   return {
     today: aggregateSummary(today || {}, metricNumber(todayClicks?.clicks), metricNumber(todayRequests?.requests), metricNumber(todayRequests?.successful_fills), metricNumber(todayRequests?.no_fills)),
     yesterday: aggregateSummary(yesterday || {}, metricNumber(yesterdayClicks?.clicks), metricNumber(yesterdayRequests?.requests), metricNumber(yesterdayRequests?.successful_fills), metricNumber(yesterdayRequests?.no_fills)),
@@ -462,6 +475,21 @@ export async function buildMiniAppAdminBreakdown(miniappId: number | string, sta
     [miniappId]
   );
 
+  const [[cpmDiagnostics]]: any = await pool.query(
+    `SELECT COUNT(*) impressions,COALESCE(SUM(economic_value),0) economic_base,
+       COALESCE(AVG(geo_factor),0) geo_factor,COALESCE(AVG(demand_yield_factor),0) demand_yield_factor,
+       COALESCE(AVG(uniqueness_factor),0) uniqueness_factor,COALESCE(AVG(frequency_factor),0) frequency_factor,
+       COALESCE(AVG(traffic_quality_factor),0) quality_factor,COALESCE(AVG(trust_factor),0) trust_factor,
+       COALESCE(AVG(fraud_factor),0) fraud_factor,COALESCE(SUM(publisher_cap),0) payout_envelope,
+       COALESCE(SUM(publisher_revenue),0) final_publisher_payout,
+       CASE WHEN COUNT(*)>0 THEN SUM(publisher_revenue)/COUNT(*)*1000 ELSE 0 END final_publisher_cpm,
+       COALESCE(SUM(reserve_revenue),0) reserve,COALESCE(SUM(ads_galaxy_revenue),0) platform_retained,
+       MAX(formula_version) formula_version
+     FROM miniapp_internal_ad_impressions
+     WHERE miniapp_id=? AND DATE(created_at) BETWEEN ? AND ? AND CAST(DATE(created_at) AS CHAR) LIKE ?`,
+    params
+  );
+
   return {
     networks: networkRows.map((row: any) => ({
       network_name: row.network_name,
@@ -478,5 +506,14 @@ export async function buildMiniAppAdminBreakdown(miniappId: number | string, sta
       enabled: Boolean(row.enabled),
       network_placement_id: row.network_placement_id || "",
     })),
+    cpm_diagnostics: {
+      formula_version: cpmDiagnostics?.formula_version || null,
+      impressions: metricNumber(cpmDiagnostics?.impressions), economic_base: metricNumber(cpmDiagnostics?.economic_base),
+      geo_factor: metricNumber(cpmDiagnostics?.geo_factor), demand_yield_factor: metricNumber(cpmDiagnostics?.demand_yield_factor),
+      uniqueness_factor: metricNumber(cpmDiagnostics?.uniqueness_factor), frequency_factor: metricNumber(cpmDiagnostics?.frequency_factor),
+      quality_factor: metricNumber(cpmDiagnostics?.quality_factor), trust_factor: metricNumber(cpmDiagnostics?.trust_factor), fraud_factor: metricNumber(cpmDiagnostics?.fraud_factor),
+      payout_envelope: metricNumber(cpmDiagnostics?.payout_envelope), final_publisher_payout: metricNumber(cpmDiagnostics?.final_publisher_payout),
+      final_publisher_cpm: metricNumber(cpmDiagnostics?.final_publisher_cpm), reserve: metricNumber(cpmDiagnostics?.reserve), platform_retained: metricNumber(cpmDiagnostics?.platform_retained),
+    },
   };
 }

@@ -6,22 +6,22 @@ import Header from "./Header";
 import Sidebar from "./Sidebar";
 import { apiFetch } from "@/lib/api";
 import BannedScreen from "@/components/auth/BannedScreen";
-import AppBootState from "@/components/shared/AppBootState";
 import SelfPromotionAd from "@/components/shared/SelfPromotionAd";
 import ReferralSprintPopup from "@/components/shared/ReferralSprintPopup";
 import { isTelegramMiniApp, safePrepareTelegramWebApp, waitForTelegramInitData } from "@/lib/telegramWebApp";
+import { miniappReloadDebug } from "@/lib/miniappReloadDebug";
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
   type: "publisher" | "advertiser";
 }
 
-type BootState = "checking" | "ready" | "banned" | "error";
+type BootState = "ready" | "banned";
 
 export default function DashboardLayout({ children, type }: DashboardLayoutProps) {
   const pathname = usePathname();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [bootState, setBootState] = useState<BootState>("checking");
+  const [bootState, setBootState] = useState<BootState>("ready");
   const isPublisherDashboard = type === "publisher" && pathname === "/publisher";
   const [referralPopupBlockingPromo, setReferralPopupBlockingPromo] = useState(isPublisherDashboard);
 
@@ -41,30 +41,49 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
     };
 
     async function bootDashboard() {
+      miniappReloadDebug("dashboard_boot_started", { phase: "started" });
       window.addEventListener("adsgalaxy:account-restricted", handleRestricted);
       safePrepareTelegramWebApp();
 
       try {
-        await waitForTelegramInitData({ requireTelegram: isTelegramMiniApp() });
+        const initData = await waitForTelegramInitData({ requireTelegram: isTelegramMiniApp() });
+        miniappReloadDebug("dashboard_boot_init_data", { init_data_present: Boolean(initData) });
 
-        const res = await apiFetch("/api/me/status", { timeoutMs: 12000 });
-        const data = await res.json().catch(() => ({}));
+        let res: Response | null = null;
+        let data: Record<string, unknown> = {};
+        let lastError: unknown = null;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            miniappReloadDebug("dashboard_me_status_started", { route: "/api/me/status", phase: "started", attempt: attempt + 1 });
+            res = await apiFetch("/api/me/status", { timeoutMs: 8000 });
+            miniappReloadDebug("dashboard_me_status_completed", { route: "/api/me/status", status: res.status, phase: "completed", attempt: attempt + 1 });
+            data = await res.json().catch(() => ({}));
+            if (res.ok || res.status === 401 || res.status === 403) break;
+          } catch (error) {
+            lastError = error;
+          }
+          if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 500 * (2 ** attempt)));
+        }
+        if (!res) throw lastError || new Error("Unable to verify account status");
 
         if (cancelled) return;
-        if (res.status === 403 || data.status === "banned" || data.is_banned) {
+        if (res.status === 403 || data.status === "banned" || data.is_banned === true) {
           setBootState("banned");
           return;
         }
 
         if (!res.ok && isTelegramMiniApp()) {
-          throw new Error(data.error || "Unable to verify account status");
+          throw new Error(String(data.error || "Unable to verify account status"));
         }
 
         window.localStorage.setItem("last_dashboard", type);
+        miniappReloadDebug("dashboard_ready", { result: "ready" });
         setBootState("ready");
       } catch (error) {
+        miniappReloadDebug("dashboard_failed", { result: "failed", error_name: error instanceof Error ? error.name : "UnknownError", error_message: error instanceof Error ? error.message : "Dashboard boot failed" });
         console.error("Dashboard boot failed:", error);
-        if (!cancelled) setBootState("error");
+        // Authentication retries run in the background. API routes still enforce
+        // authorization, so a transient dependency failure must not blank the shell.
       }
     }
 
@@ -75,26 +94,6 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
       window.removeEventListener("adsgalaxy:account-restricted", handleRestricted);
     };
   }, [type]);
-
-  if (bootState === "checking") {
-    return (
-      <AppBootState
-        title="Loading AdsGalaxy"
-        message="Verifying your Mini App session..."
-      />
-    );
-  }
-
-  if (bootState === "error") {
-    return (
-      <AppBootState
-        mode="error"
-        title="Unable to load AdsGalaxy"
-        message="We couldn't start the Mini App. Please reload and try again."
-        detail="If this continues, contact support."
-      />
-    );
-  }
 
   if (bootState === "banned") {
     return <BannedScreen />;

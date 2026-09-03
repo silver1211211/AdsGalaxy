@@ -3,11 +3,12 @@ import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { campaignCategoryMatches } from "@/lib/campaignCategories";
+import { channelCampaignMatchesInventory } from "@/lib/channelAudience";
 import { deleteCampaignPosts, type CampaignPostDeletionSummary } from "@/lib/campaignPostDeletion";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { settleChannelCampaigns } from "@/lib/channelSettlement";
 import { acquireCronLock, releaseCronLock } from "@/lib/cronSecurity";
-import { SAFE_TELEGRAM_PARSE_MODE, sendTelegramMessage } from "@/lib/telegram";
+import { sendTelegramMessage } from "@/lib/telegram";
 import {
   autoPauseBot,
   checkBotHealth,
@@ -20,18 +21,27 @@ import {
 import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
 import { createSystemLog } from "@/lib/systemLogs";
 import { botUserBroadcastEligibleCondition } from "@/lib/botAudience";
-import { composeCampaignCreativeText } from "@/lib/campaignCreative";
+import { composeCampaignCreativeTelegramHtml } from "@/lib/campaignCreative";
 import { campaignExcludesChannel, campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { calculateBroadcastPayout, getBroadcastPayoutSettings, type BroadcastPayout, type BroadcastPayoutSettings } from "@/lib/broadcastPublisherCpmEngine";
+import { processBoundedQueue } from "@/lib/concurrency";
 
 export const dynamic = "force-dynamic";
 
 const MAX_EMERGENCY_CHANNELS = 1000;
-const MAX_EMERGENCY_BROADCAST_USERS = 1000;
 const ACTIVE_POST_STATUSES = ["active", "posted", "sent"];
 const VALID_MODES = new Set(["fill_empty_slots", "replace_everything"]);
 
 type EmergencyMode = "fill_empty_slots" | "replace_everything";
+
+function parseEmergencyBroadcastLimit(body: Record<string, unknown>) {
+  if (body.send_all === true) return { ok: true as const, limit: null, sendAll: true };
+  const requested = Number(body.recipient_count);
+  if (!Number.isSafeInteger(requested) || requested < 1) {
+    return { ok: false as const, error: "Recipient count must be a positive whole number" };
+  }
+  return { ok: true as const, limit: requested, sendAll: false };
+}
 
 type CampaignRow = RowDataPacket & {
   id: number;
@@ -58,6 +68,9 @@ type ChannelRow = RowDataPacket & {
   invite_link_hash?: string | null;
   categories: string | string[] | null;
   audience_continents: string | string[] | null;
+  posts_per_day: number;
+  posting_times?: string | string[] | null;
+  scheduler_slot?: string | null;
 };
 
 type BotRow = RowDataPacket & {
@@ -271,6 +284,25 @@ async function hasActiveUndeletedPost(channelId: number, schema: EmergencySchema
   return rows.length > 0;
 }
 
+async function hasRecentChannelPost(channelId: number) {
+  const [rows] = await pool.query<IdRow[]>(`
+    SELECT id FROM campaign_posts
+    WHERE channel_id=? AND status IN ('active','posted','sent')
+      AND created_at>DATE_SUB(UTC_TIMESTAMP(),INTERVAL 3 HOUR)
+    LIMIT 1`, [channelId]);
+  return rows.length > 0;
+}
+
+async function hasCampaignPostWithin24Hours(campaignId: number, channelId: number) {
+  const [rows] = await pool.query<IdRow[]>(`
+    SELECT id FROM campaign_posts
+    WHERE campaign_id=? AND channel_id=?
+      AND status IN ('active','posted','sent','replaced','deleted','already_missing')
+      AND created_at>DATE_SUB(UTC_TIMESTAMP(),INTERVAL 24 HOUR)
+    LIMIT 1`, [campaignId, channelId]);
+  return rows.length > 0;
+}
+
 async function hasActiveUndeletedCampaignPost(campaignId: number, channelId: number, schema: EmergencySchema) {
   const [rows] = await pool.query<IdRow[]>(`
     SELECT id
@@ -284,13 +316,39 @@ async function hasActiveUndeletedCampaignPost(campaignId: number, channelId: num
   return rows.length > 0;
 }
 
-async function getEligibleChannels(campaign: CampaignRow, schema: EmergencySchema, mode: EmergencyMode) {
+function minutesFromTime(value: string) {
+  const match = value.match(/^(\d{1,2}):(\d{2})/);
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+}
+
+function channelIsWithinThreeHours(channel: ChannelRow, now = new Date()) {
+  const configured = parseJsonArray(channel.posting_times);
+  if (channel.scheduler_slot) configured.push(String(channel.scheduler_slot));
+  if (configured.length === 0) configured.push(...(Number(channel.posts_per_day || 1) <= 1 ? ["12:00"] : Number(channel.posts_per_day) === 2 ? ["12:00", "18:00"] : ["00:00", "12:00", "18:00"]));
+  const current = now.getUTCHours() * 60 + now.getUTCMinutes();
+  return configured.some((time) => {
+    const scheduled = minutesFromTime(time);
+    if (scheduled === null) return false;
+    const distance = Math.abs(current - scheduled);
+    return Math.min(distance, 1440 - distance) <= 180;
+  });
+}
+
+async function getEligibleChannels(campaign: CampaignRow, schema: EmergencySchema, mode: EmergencyMode, followRules: boolean) {
   const activeCondition = getActiveUndeletedCondition(schema);
-  const emptySlotCondition = mode === "fill_empty_slots"
+  const emptySlotCondition = mode === "fill_empty_slots" && followRules
     ? `AND NOT EXISTS (
         SELECT 1 FROM campaign_posts cp
         WHERE cp.channel_id = c.id
           AND ${activeCondition}
+          AND cp.created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 3 HOUR)
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM campaign_posts same_campaign
+        WHERE same_campaign.channel_id = c.id
+          AND same_campaign.campaign_id = ?
+          AND same_campaign.status IN ('active','posted','sent','replaced','deleted','already_missing')
+          AND same_campaign.created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
       )`
     : "";
 
@@ -302,16 +360,32 @@ async function getEligibleChannels(campaign: CampaignRow, schema: EmergencySchem
       AND c.user_id != ?
       AND c.chat_id IS NOT NULL
       AND c.chat_id != ''
+      AND (
+        SELECT COUNT(*) FROM campaign_posts daily_cp
+        WHERE daily_cp.channel_id = c.id
+          AND daily_cp.created_at >= UTC_DATE()
+          AND daily_cp.created_at < DATE_ADD(UTC_DATE(), INTERVAL 1 DAY)
+          AND daily_cp.status NOT IN ('delivery_failed')
+      ) < GREATEST(COALESCE(c.posts_per_day, 1), 1)
       ${emptySlotCondition}
     ORDER BY c.id ASC
     LIMIT ?
-  `, mode === "fill_empty_slots"
-    ? [campaign.user_id, ACTIVE_POST_STATUSES, MAX_EMERGENCY_CHANNELS + 1]
+  `, mode === "fill_empty_slots" && followRules
+    ? [campaign.user_id, ACTIVE_POST_STATUSES, campaign.id, MAX_EMERGENCY_CHANNELS + 1]
     : [campaign.user_id, MAX_EMERGENCY_CHANNELS + 1]
   );
 
   const channelExclusions = await loadCampaignExclusions(pool, "campaign", [Number(campaign.id)], "channel");
-  const eligibleChannels = channels.filter((channel) => !campaignExcludesChannel(channelExclusions, Number(campaign.id), channel));
+  const eligibleChannels = channels.filter((channel) =>
+    channelCampaignMatchesInventory({
+      campaignCategory: campaign.category,
+      campaignAudience: campaign.continents,
+      channelCategories: channel.categories,
+      channelAudience: channel.audience_continents,
+    })
+    && !campaignExcludesChannel(channelExclusions, Number(campaign.id), channel)
+    && (!followRules || channelIsWithinThreeHours(channel))
+  );
 
   return {
     eligibleChannels: eligibleChannels.slice(0, MAX_EMERGENCY_CHANNELS),
@@ -370,9 +444,9 @@ async function postCampaignToChannel(options: {
     ],
   };
 
-  const result = await sendTelegramMessage(channel.chat_id, composeCampaignCreativeText(campaign.campaign_title, campaign.message_text), {
+  const result = await sendTelegramMessage(channel.chat_id, composeCampaignCreativeTelegramHtml(campaign.campaign_title, campaign.message_text), {
     photo: campaign.image_url,
-    parse_mode: SAFE_TELEGRAM_PARSE_MODE,
+    parse_mode: "HTML",
     reply_markup: replyMarkup,
   }) as TelegramSendResponse | undefined;
 
@@ -430,7 +504,7 @@ async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: Bro
     FROM bots
     WHERE status = 'active'
       AND is_deleted = FALSE
-      AND COALESCE(health_status, 'active') = 'active'
+      AND COALESCE(health_status, 'active') IN ('active', 'healthy')
       AND user_id != ?
     ORDER BY id ASC
   `, [campaign.user_id]);
@@ -465,9 +539,6 @@ async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: Bro
   const dispatches: Array<{ bot: BotRow; user: BroadcastUserRow }> = [];
 
   for (const bot of eligibleBots) {
-    if (dispatches.length >= MAX_EMERGENCY_BROADCAST_USERS + 1) break;
-
-    const hoursInterval = 24 / Math.max(1, Number(bot.posts_per_day) || 1);
     const chatIdExpression = schema.hasBotUserChatId ? "bu.chat_id" : "bu.user_id";
       const [users] = await pool.query<BroadcastUserRow[]>(`
         SELECT bu.id, ${chatIdExpression} as chat_id
@@ -475,27 +546,17 @@ async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: Bro
         JOIN bots b ON b.id = bu.bot_id
         WHERE bu.bot_id = ?
         AND ${botUserBroadcastEligibleCondition("bu", "b")}
-        AND (bu.last_broadcast_at IS NULL OR bu.last_broadcast_at < NOW() - INTERVAL ? HOUR)
-        AND (
-          SELECT COUNT(*)
-          FROM broadcast_deliveries bd
-          WHERE bd.user_id = bu.id
-            AND bd.created_at > NOW() - INTERVAL 1 DAY
-        ) < ?
       ORDER BY CASE WHEN bu.status='active' THEN 0 ELSE 1 END, bu.id ASC
-      LIMIT ?
-    `, [bot.id, hoursInterval, Math.max(1, Number(bot.posts_per_day) || 1), MAX_EMERGENCY_BROADCAST_USERS + 1 - dispatches.length]);
+    `, [bot.id]);
 
     for (const user of users) {
       dispatches.push({ bot, user });
-      if (dispatches.length >= MAX_EMERGENCY_BROADCAST_USERS + 1) break;
     }
   }
 
   return {
-    dispatches: dispatches.slice(0, MAX_EMERGENCY_BROADCAST_USERS),
+    dispatches,
     skippedByExclusion: healthyBots.length - exclusionFilteredBots.length,
-    skippedByLimit: Math.max(0, dispatches.length - MAX_EMERGENCY_BROADCAST_USERS),
   };
 }
 
@@ -676,9 +737,9 @@ async function postBroadcastToBotUser(options: {
 
   let sendResult;
   try {
-    sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, composeCampaignCreativeText(campaign.campaign_title, campaign.message_text), {
+    sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, composeCampaignCreativeTelegramHtml(campaign.campaign_title, campaign.message_text), {
       photo: campaign.image_url,
-      parse_mode: SAFE_TELEGRAM_PARSE_MODE,
+      parse_mode: "HTML",
       reply_markup: replyMarkup,
       token: bot.bot_token,
     }) as Promise<TelegramSendResponse | undefined>);
@@ -736,18 +797,25 @@ async function postBroadcastToBotUser(options: {
   return { ok: false, reason };
 }
 
-async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode) {
+async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode, deliveryLimit: number | null, sendAll: boolean) {
   const schema = await getBroadcastSchema();
   requireBillableBroadcastSchema(schema);
   const payoutSettings = await getBroadcastPayoutSettings();
-  const { dispatches, skippedByLimit, skippedByExclusion } = await getEligibleBroadcastDispatches(campaign, schema);
+  const eligible = await getEligibleBroadcastDispatches(campaign, schema);
+  if (deliveryLimit !== null && deliveryLimit > eligible.dispatches.length) {
+    return NextResponse.json({
+      error: `Requested ${deliveryLimit.toLocaleString()} broadcasts, but only ${eligible.dispatches.length.toLocaleString()} active eligible bot users are available.`,
+      eligibleBotUsers: eligible.dispatches.length,
+    }, { status: 400 });
+  }
+  const dispatches = deliveryLimit === null ? eligible.dispatches : eligible.dispatches.slice(0, deliveryLimit);
   const failedUsers: Array<{ botId: number; userId: number; reason: string }> = [];
   let attempted = 0;
   let posted = 0;
 
-  for (const dispatch of dispatches) {
-    attempted++;
-
+  const requestedWorkers = Number.parseInt(process.env.EMERGENCY_BROADCAST_WORKERS || "20", 10);
+  const workerCount = Math.min(50, Math.max(1, Number.isFinite(requestedWorkers) ? requestedWorkers : 20));
+  const results = await processBoundedQueue(dispatches, workerCount, async (dispatch) => {
     try {
       const result = await postBroadcastToBotUser({
         campaign,
@@ -758,18 +826,21 @@ async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode
       });
 
       if (result.ok) {
-        posted++;
+        return { ok: true as const };
       } else {
-        failedUsers.push({ botId: dispatch.bot.id, userId: dispatch.user.id, reason: result.reason || "Telegram send failed" });
+        return { ok: false as const, botId: dispatch.bot.id, userId: dispatch.user.id, reason: result.reason || "Telegram send failed" };
       }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Emergency broadcast failed";
-      failedUsers.push({ botId: dispatch.bot.id, userId: dispatch.user.id, reason: message });
+      return { ok: false as const, botId: dispatch.bot.id, userId: dispatch.user.id, reason: message };
     }
-  }
+  });
+  attempted = results.length;
+  posted = results.filter((result) => result.ok).length;
+  failedUsers.push(...results.filter((result) => !result.ok).map((result) => ({ botId: result.botId, userId: result.userId, reason: result.reason })));
 
   const failed = failedUsers.length;
-  const skipped = skippedByLimit + skippedByExclusion;
+  const skipped = Math.max(0, eligible.dispatches.length - dispatches.length) + eligible.skippedByExclusion;
 
   await recordAdminActionAudit({
     action: "emergency_push",
@@ -779,6 +850,8 @@ async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode
     metadata: {
       mode,
       delivery_type: "broadcast",
+      send_all: sendAll,
+      requested_recipient_count: sendAll ? null : deliveryLimit,
       eligible_bot_users: dispatches.length,
       attempted,
       success: posted,
@@ -793,6 +866,8 @@ async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode
     mode,
     campaignId: campaign.id,
     deliveryType: "broadcast",
+    sendAll,
+    requestedRecipientCount: sendAll ? null : deliveryLimit,
     eligibleBotUsers: dispatches.length,
     eligibleChannels: 0,
     attempted,
@@ -815,6 +890,7 @@ export async function POST(
   const { id } = await params;
   const body = await request.json().catch(() => ({})) as Record<string, unknown>;
   const mode = body.mode as EmergencyMode;
+  const followRules = body.ignore_rules !== true;
 
   if (!VALID_MODES.has(mode)) {
     return NextResponse.json({ error: "Invalid emergency push mode" }, { status: 400 });
@@ -826,7 +902,7 @@ export async function POST(
 
   let lock: { lockName: string; ownerToken: string } | null = null;
   try {
-    lock = await acquireCronLock(`admin-emergency-push-${id}`, 900);
+    lock = await acquireCronLock(`admin-emergency-push-${id}`, 7200);
     if (!lock) {
       return NextResponse.json({
         error: "Emergency push is already running for this campaign. Please wait for it to finish.",
@@ -854,7 +930,9 @@ export async function POST(
     }
 
     if (campaign.type === "broadcast") {
-      return emergencyPushBroadcast(campaign, mode);
+      const selection = parseEmergencyBroadcastLimit(body);
+      if (!selection.ok) return NextResponse.json({ error: selection.error }, { status: 400 });
+      return emergencyPushBroadcast(campaign, mode, selection.limit, selection.sendAll);
     }
 
     const schema = await getEmergencySchema();
@@ -906,16 +984,16 @@ export async function POST(
         settlementSummary = { ...settlementSummary, warnings: safeSettlementWarnings };
       }
     }
-    const { eligibleChannels, skippedByLimit, skippedByExclusion } = await getEligibleChannels(campaign, schema, mode);
+    const { eligibleChannels, skippedByLimit, skippedByExclusion } = await getEligibleChannels(campaign, schema, mode, followRules);
     const failedChannels: Array<{ channelId: number; reason: string }> = [];
     let attempted = 0;
     let posted = 0;
     let skipped = skippedByLimit + skippedByExclusion;
 
     for (const channel of eligibleChannels) {
-      if (mode === "fill_empty_slots" && await hasActiveUndeletedPost(channel.id, schema)) {
+      if (followRules && (await hasRecentChannelPost(channel.id) || await hasCampaignPostWithin24Hours(campaign.id, channel.id))) {
         skipped++;
-        failedChannels.push({ channelId: channel.id, reason: "active_undeleted_post_exists" });
+        failedChannels.push({ channelId: channel.id, reason: "three_hour_slot_or_campaign_24h_cooldown" });
         continue;
       }
 
@@ -965,6 +1043,7 @@ export async function POST(
       reason: mode,
       metadata: {
         mode,
+        follow_rules: followRules,
         eligible_channels: eligibleChannels.length,
         attempted,
         success: posted,
@@ -979,6 +1058,7 @@ export async function POST(
     return NextResponse.json({
       success: true,
       mode,
+      followRules,
       campaignId: campaign.id,
       eligibleChannels: eligibleChannels.length,
       attempted,

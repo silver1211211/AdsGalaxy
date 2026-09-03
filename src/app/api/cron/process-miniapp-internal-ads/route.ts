@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
+import { dispatchMiniAppCampaignNotifications } from "@/lib/miniappCampaignNotifications";
+import { reconcileMiniAppBudgetExhaustion } from "@/lib/miniappExternalDeliverySync";
 
 export const dynamic = "force-dynamic";
 
@@ -19,13 +21,7 @@ export async function GET(request: Request) {
   }
 
   try {
-    const [completed] = await pool.query(`
-      UPDATE miniapp_rewarded_campaigns
-      SET status = 'completed'
-      WHERE status = 'approved'
-        AND remaining_budget <= 0
-        AND campaign_budget_mode != 'unlimited'
-    `);
+    const exhausted = await reconcileMiniAppBudgetExhaustion();
 
     const [readyCampaigns] = await pool.query<CampaignRow[]>(`
       SELECT id
@@ -40,10 +36,11 @@ export async function GET(request: Request) {
     return NextResponse.json({
       success: true,
       ready_campaigns: readyCampaigns.length,
-      completed_exhausted: (completed as any).affectedRows || 0,
+      paused_exhausted: exhausted,
+      notifications: await dispatchMiniAppCampaignNotifications(20),
     });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Mini App internal ad processing failed" }, { status: 500 });
+  } catch (error: unknown) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Mini App internal ad processing failed" }, { status: 500 });
   } finally {
     await releaseCronLock(lock);
   }

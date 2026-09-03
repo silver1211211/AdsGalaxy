@@ -35,6 +35,7 @@ import {
   publicChannelUrl,
 } from "@/lib/telegramChannelInput";
 import { logPrivateChannelDiagnostic } from "@/lib/privateChannelDiagnostics";
+import { subscriberFreshness, telegramAudienceLabel } from "@/lib/channelRefreshPolicy";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -1846,12 +1847,36 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
+type MonetizeInventory = {
+  channels: any[];
+  miniapps: any[];
+  bots: any[];
+};
+
+let lastSuccessfulInventory: MonetizeInventory | null = null;
+
+async function loadInventoryResource(path: string): Promise<any[] | null> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await apiFetch(path, { cache: "no-store" });
+      if (response.ok) {
+        const payload = await response.json();
+        return Array.isArray(payload) ? payload : null;
+      }
+      if (response.status < 500 || attempt === 1) return null;
+    } catch {
+      if (attempt === 1) return null;
+    }
+  }
+  return null;
+}
+
 export default function MonetizePage() {
   const { setTitle } = useHeader();
-  const [channels,  setChannels]  = useState<any[]>([]);
-  const [miniapps,  setMiniapps]  = useState<any[]>([]);
-  const [bots,      setBots]      = useState<any[]>([]);
-  const [loading,   setLoading]   = useState(true);
+  const [channels,  setChannels]  = useState<any[]>(() => lastSuccessfulInventory?.channels || []);
+  const [miniapps,  setMiniapps]  = useState<any[]>(() => lastSuccessfulInventory?.miniapps || []);
+  const [bots,      setBots]      = useState<any[]>(() => lastSuccessfulInventory?.bots || []);
+  const [loading,   setLoading]   = useState(!lastSuccessfulInventory);
   const [showFlow,  setShowFlow]  = useState(false);
   const [openMenu,     setOpenMenu]     = useState<string | null>(null);
   const [viewingChannel,  setViewingChannel]  = useState<any | null>(null);
@@ -1960,30 +1985,27 @@ export default function MonetizePage() {
   const canReactivate = (status: string) =>
     ["paused", "bot_removed", "channel_not_found", "permission_missing"].includes(status);
 
-  function refetch() {
-    Promise.all([
-      apiFetch("/api/publisher/channels").then(r => r.ok ? r.json() : []).catch(() => []),
-      apiFetch("/api/publisher/miniapps").then(r => r.ok ? r.json() : []).catch(() => []),
-      apiFetch("/api/publisher/bots").then(r => r.ok ? r.json() : []).catch(() => []),
-    ]).then(([ch, ma, bt]) => {
-      setChannels(Array.isArray(ch) ? ch : []);
-      setMiniapps(Array.isArray(ma) ? ma : []);
-      setBots(Array.isArray(bt) ? bt : []);
-    });
+  async function refetch() {
+    const [ch, ma, bt] = await Promise.all([
+      loadInventoryResource("/api/publisher/channels"),
+      loadInventoryResource("/api/publisher/miniapps"),
+      loadInventoryResource("/api/publisher/bots"),
+    ]);
+    const nextInventory: MonetizeInventory = {
+      channels: ch ?? lastSuccessfulInventory?.channels ?? channels,
+      miniapps: ma ?? lastSuccessfulInventory?.miniapps ?? miniapps,
+      bots: bt ?? lastSuccessfulInventory?.bots ?? bots,
+    };
+    if (ch !== null) setChannels(ch);
+    if (ma !== null) setMiniapps(ma);
+    if (bt !== null) setBots(bt);
+    if (ch !== null || ma !== null || bt !== null) lastSuccessfulInventory = nextInventory;
+    setLoading(false);
   }
 
   useEffect(() => {
     setTitle("Monetize");
-    Promise.all([
-      apiFetch("/api/publisher/channels").then(r => r.ok ? r.json() : []).catch(() => []),
-      apiFetch("/api/publisher/miniapps").then(r => r.ok ? r.json() : []).catch(() => []),
-      apiFetch("/api/publisher/bots").then(r => r.ok ? r.json() : []).catch(() => []),
-    ]).then(([ch, ma, bt]) => {
-      setChannels(Array.isArray(ch) ? ch : []);
-      setMiniapps(Array.isArray(ma) ? ma : []);
-      setBots(Array.isArray(bt) ? bt : []);
-      setLoading(false);
-    });
+    void refetch();
   }, []);
 
   const isEmpty    = !loading && !channels.length && !miniapps.length && !bots.length;
@@ -2247,7 +2269,7 @@ export default function MonetizePage() {
               {channels.map(ch => {
                 const cats = parseJSON<string[]>(ch.categories, []);
                 return (
-                  <div key={ch.id} className="rounded-3xl border border-slate-200/80 bg-white px-4 py-4 shadow-sm space-y-3 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50">
+                  <div key={ch.id} className={cn("relative rounded-3xl border border-slate-200/80 bg-white px-4 py-4 shadow-sm space-y-3 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50", openMenu === `ch-${ch.id}` && "z-20")}>
                     {/* Top row */}
                     <div className="flex items-center gap-3">
                       <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-blue-50">
@@ -2313,8 +2335,12 @@ export default function MonetizePage() {
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-slate-50 pt-2.5 text-[11px] font-semibold text-slate-500">
                       <span className="flex items-center gap-1">
                         <Users size={11} />
-                        {formatCount(ch.subscriber_count)} subscribers
+                        {formatCount(ch.subscriber_count)} {telegramAudienceLabel(ch.channel_type)}
                       </span>
+                      <span className="text-slate-300">·</span>
+                      <span>{ch.subscribers_last_success_at ? `Refreshed ${new Date(ch.subscribers_last_success_at).toLocaleString()}` : "Refresh pending"}</span>
+                      {subscriberFreshness(ch.subscribers_last_success_at)==="delayed" && <span className="text-amber-600">Refresh delayed</span>}
+                      {(ch.subscribers_fetch_status === "failed" || subscriberFreshness(ch.subscribers_last_success_at)==="stale") && <span className="text-amber-600">Count may be stale</span>}
                       <span className="text-slate-300">·</span>
                       <span>{ch.posts_per_day ?? 1}/day</span>
                       {cats.length > 0 && (
@@ -2324,6 +2350,9 @@ export default function MonetizePage() {
                         </>
                       )}
                     </div>
+                    {ch.below_minimum_since && ch.monetization_paused_reason !== "below_minimum" && <p className="text-[11px] font-semibold text-amber-700">This channel is below the minimum subscriber requirement. Monetization will pause if it remains below the minimum after the 48-hour grace period.</p>}
+                    {ch.monetization_paused_reason === "below_minimum" && <p className="text-[11px] font-semibold text-red-600">Monetization is paused because the channel remains below the subscriber minimum. It will restore automatically after a successful refresh above the minimum.</p>}
+                    {Boolean(ch.below_minimum_review_required) && <p className="text-[11px] font-semibold text-red-700">This channel has remained below the minimum for seven days and requires requalification. A verified count above the minimum can restore it when no other restriction applies.</p>}
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold text-slate-500">
                         <span>{formatCount(ch.total_impressions)} impressions</span>
                         <span className="text-slate-300">·</span>
@@ -2352,7 +2381,7 @@ export default function MonetizePage() {
               {miniapps.map(app => {
                 const hasActivity = Number(app.total_clicks) > 0 || Number(app.total_impressions) > 0;
                 return (
-                  <div key={app.id} className="rounded-3xl border border-slate-200/80 bg-white px-4 py-4 shadow-sm space-y-3 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50">
+                  <div key={app.id} className={cn("relative rounded-3xl border border-slate-200/80 bg-white px-4 py-4 shadow-sm space-y-3 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50", openMenu === `ma-${app.id}` && "z-20")}>
                     <div className="flex items-center gap-3">
                       <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-50">
                         <Smartphone size={19} className="text-emerald-500" />
@@ -2443,7 +2472,7 @@ export default function MonetizePage() {
               {bots.map(bot => {
                 const cats = parseJSON<string[]>(bot.categories, []);
                 return (
-                <div key={bot.id} className="rounded-3xl border border-slate-200/80 bg-white px-4 py-4 shadow-sm space-y-3 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50">
+                <div key={bot.id} className={cn("relative rounded-3xl border border-slate-200/80 bg-white px-4 py-4 shadow-sm space-y-3 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50", openMenu === `bt-${bot.id}` && "z-20")}>
                   <div className="flex items-center gap-3">
                     <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-violet-50">
                       <Bot size={19} className="text-violet-500" />

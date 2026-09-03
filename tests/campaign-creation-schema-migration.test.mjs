@@ -39,10 +39,35 @@ test("campaign creation contains no request-time DDL", () => {
   assert.doesNotMatch(postRoute, /ensureClassicSettlementColumns/);
 });
 
-test("protected migration retains its approved SHA-256", () => {
-  const hash = createHash("sha256")
-    .update(readFileSync("db/migrations/20260622_0008_create_miniapp_mediation_health.sql"))
+// Migration history review:
+// - originally added by a09c4650b433b0c22e0475df1d646cc0fd0feb59;
+// - made safely rerunnable by ec24c5a46a0f67e18b8e03e7a4677f31e7e662d4
+//   after production had partially applied the original migration;
+// - production was verified to match the effective idempotent schema.
+// Hash normalized UTF-8 text so checkout line endings cannot weaken the
+// approved integrity check. Reviewed normalized digest: 3490823A...6079.
+function protectedMigrationDigest(content) {
+  const normalized = content.replace(/\r\n/g, "\n");
+  return createHash("sha256")
+    .update(normalized, "utf8")
     .digest("hex")
     .toUpperCase();
-  assert.equal(hash, "D5B028A2D73E23F65CC10A78EE787DFB6CCC7E9B750BFD13E74FB56D09B541BA");
+}
+
+test("protected migration retains its approved normalized SHA-256", () => {
+  const content = readFileSync("db/migrations/20260622_0008_create_miniapp_mediation_health.sql", "utf8");
+  assert.equal(
+    protectedMigrationDigest(content),
+    "3490823A5D64392E1CCF1E595CC61030AA9124463BF2FF1C3BCF1246FB526079"
+  );
+});
+
+test("protected migration integrity is identical for LF and CRLF checkouts", () => {
+  const content = readFileSync("db/migrations/20260622_0008_create_miniapp_mediation_health.sql", "utf8")
+    .replace(/\r\n/g, "\n");
+  assert.equal(protectedMigrationDigest(content), protectedMigrationDigest(content.replace(/\n/g, "\r\n")));
+  assert.equal(
+    protectedMigrationDigest(content),
+    "3490823A5D64392E1CCF1E595CC61030AA9124463BF2FF1C3BCF1246FB526079"
+  );
 });

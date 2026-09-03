@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy mediation query results are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
+import { withTransactionRetry } from "@/lib/dbResilience";
 import {
   createMediationAttempt,
   getMediationRequestForFallback,
@@ -28,7 +29,6 @@ function normalizeAdFormat(value: string): MiniAppAdFormat {
 }
 
 export async function POST(request: Request) {
-  const conn = await pool.getConnection();
   try {
     const blocked = await requireAdServingAllowed();
     if (blocked) return blocked;
@@ -47,43 +47,30 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error_code: "NO_FILL", message: "No advertisements are available at the moment. Please try again shortly." });
     }
 
-    await conn.beginTransaction();
-    const mediationRequest: any = await getMediationRequestForFallback(requestId, conn);
-    if (!mediationRequest) {
-      await conn.rollback();
-      return NextResponse.json({ success: false, error_code: "REQUEST_FAILED", message: "Ad request not found" }, { status: 404 });
-    }
-    if (Number(mediationRequest.miniapp_id) !== miniappId) {
-      await conn.rollback();
-      return NextResponse.json({ success: false, error_code: "INVALID_APP", message: "Ad request does not belong to this Mini App" }, { status: 403 });
-    }
-    if (String(mediationRequest.telegram_user_id) !== sdkUser.telegramUserId) {
-      await conn.rollback();
-      return NextResponse.json({ success: false, error_code: "INVALID_INIT_DATA", message: "Ad request does not match this user" }, { status: 403 });
-    }
-    if (String(mediationRequest.final_result) !== "selected") {
-      await conn.rollback();
-      return NextResponse.json({ success: false, error_code: "REQUEST_FAILED", message: "Fallback was already processed" }, { status: 409 });
-    }
-    if (!isMiniAppNetworkName(String(mediationRequest.selected_network))) {
-      await conn.rollback();
-      return NextResponse.json({ success: false, error_code: "NO_FILL", message: "No advertisements are available at the moment. Please try again shortly." });
-    }
+    const result = await withTransactionRetry(async (conn) => {
+      // Match the request route's canonical Mini App-first lock order.
+      await conn.query("SELECT id FROM miniapps WHERE id = ? FOR UPDATE", [miniappId]);
+      const mediationRequest: any = await getMediationRequestForFallback(requestId, conn);
+      if (!mediationRequest) return { error: "not_found" as const };
+      if (Number(mediationRequest.miniapp_id) !== miniappId) return { error: "wrong_app" as const };
+      if (String(mediationRequest.telegram_user_id) !== sdkUser.telegramUserId) return { error: "wrong_user" as const };
+      if (String(mediationRequest.final_result) !== "selected") return { error: "already_processed" as const };
+      if (!isMiniAppNetworkName(String(mediationRequest.selected_network))) return { error: "no_fill" as const };
 
-    await recordMiniappNetworkFailure({
-      conn,
-      miniappId: Number(mediationRequest.miniapp_id),
-      networkName: mediationRequest.selected_network,
-      requestId,
-      errorCode,
-      errorMessage,
-      adFormat: mediationRequest.ad_format || "rewarded",
-    });
-    await conn.query("UPDATE miniapp_mediation_requests SET final_result = 'failed' WHERE request_id = ?", [requestId]);
+      await recordMiniappNetworkFailure({
+        conn,
+        miniappId: Number(mediationRequest.miniapp_id),
+        networkName: mediationRequest.selected_network,
+        requestId,
+        errorCode,
+        errorMessage,
+        adFormat: mediationRequest.ad_format || "rewarded",
+      });
+      await conn.query("UPDATE miniapp_mediation_requests SET final_result = 'failed' WHERE request_id = ?", [requestId]);
 
-    const state = readAttemptState(mediationRequest);
-    const attemptedNetworks = Array.from(new Set([...state.attemptedNetworks, mediationRequest.selected_network]));
-    const nextDecision = await createMediationAttempt({
+      const state = readAttemptState(mediationRequest);
+      const attemptedNetworks = Array.from(new Set([...state.attemptedNetworks, mediationRequest.selected_network]));
+      const nextDecision = await createMediationAttempt({
       conn,
       miniappId: Number(mediationRequest.miniapp_id),
       telegramUserId: String(mediationRequest.telegram_user_id),
@@ -107,8 +94,20 @@ export async function POST(request: Request) {
         render_failed: errorCode === "RENDER_FAILED",
       }],
     });
-    if (await isMiniappNetworkGloballyDisabled(nextDecision.selected_network, conn)) {
-      await conn.commit();
+      const globallyDisabled = await isMiniappNetworkGloballyDisabled(nextDecision.selected_network, conn);
+      return { nextDecision, globallyDisabled };
+    }, { operation: "public_miniapp_fallback" });
+
+    if ("error" in result) {
+      if (result.error === "not_found") return NextResponse.json({ success: false, error_code: "REQUEST_FAILED", message: "Ad request not found" }, { status: 404 });
+      if (result.error === "wrong_app") return NextResponse.json({ success: false, error_code: "INVALID_APP", message: "Ad request does not belong to this Mini App" }, { status: 403 });
+      if (result.error === "wrong_user") return NextResponse.json({ success: false, error_code: "INVALID_INIT_DATA", message: "Ad request does not match this user" }, { status: 403 });
+      if (result.error === "already_processed") return NextResponse.json({ success: false, error_code: "REQUEST_FAILED", message: "Fallback was already processed" }, { status: 409 });
+      return NextResponse.json({ success: false, error_code: "NO_FILL", message: "No advertisements are available at the moment. Please try again shortly." });
+    }
+
+    if (result.globallyDisabled) {
+      const { nextDecision } = result;
       return NextResponse.json({
         success: false,
         error_code: "NO_FILL",
@@ -119,18 +118,12 @@ export async function POST(request: Request) {
         decision_reason: "globally_disabled",
       });
     }
-    await conn.commit();
-    return NextResponse.json(toPublicMediationDecision(nextDecision));
+    return NextResponse.json(toPublicMediationDecision(result.nextDecision));
   } catch (error: any) {
-    try {
-      await conn.rollback();
-    } catch {}
     console.error("Public SDK Mini App fallback failed", error);
     return NextResponse.json(
       { ...publicSdkErrorResponse(error, "REQUEST_FAILED", "Fallback failed"), message: "Network temporarily unavailable." },
       { status: Number(error?.status || 400) }
     );
-  } finally {
-    conn.release();
   }
 }

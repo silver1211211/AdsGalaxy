@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { addReferralDecimals, getPaidReferralEarnings } from "@/lib/paidReferralEarnings";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { ensureWithdrawalSubmissionColumns } from "@/lib/schemaGuards";
 import { notifyWithdrawalPaid, notifyWithdrawalRejected } from "@/lib/publisherNotifications";
+import { assessWithdrawalPreclearance } from "@/lib/channelSafety";
 
 type ColumnRow = RowDataPacket & {
   COLUMN_NAME: string;
@@ -131,7 +133,7 @@ export async function GET(request: Request) {
         : "0";
     const bannedAtExpr = userColumns.has("banned_at") ? "u.banned_at" : "NULL";
     const banReasonExpr = userColumns.has("ban_reason") ? "u.ban_reason" : "NULL";
-    const referralEarningsExpr = userColumns.has("total_referral_earnings") ? "u.total_referral_earnings" : "0";
+    const referralCacheExpr = userColumns.has("total_referral_earnings") ? "u.total_referral_earnings" : "NULL";
 
     // Real platform earnings only: never manual/admin credits, deposits, or
     // current balance snapshots. Each term is one actual reward source.
@@ -140,7 +142,6 @@ export async function GET(request: Request) {
         + COALESCE((SELECT SUM(adsv.publisher_reward) FROM ad_settlements_views adsv WHERE adsv.publisher_id = w.user_id), 0)
         + COALESCE((SELECT SUM(bd.publisher_reward) FROM broadcast_deliveries bd JOIN bots b ON bd.bot_id = b.id WHERE b.user_id = w.user_id), 0)
         + COALESCE((SELECT SUM(mes.publisher_revenue) FROM miniapp_earnings_settlements mes WHERE mes.user_id = w.user_id), 0)
-        + COALESCE(${referralEarningsExpr}, 0)
       )`;
 
     let query = `
@@ -163,6 +164,7 @@ export async function GET(request: Request) {
         ${isBannedExpr} as is_banned,
         ${bannedAtExpr} as banned_at,
         ${banReasonExpr} as ban_reason,
+        ${referralCacheExpr} as referral_earnings_cache,
         COALESCE((SELECT COUNT(*) FROM channels c WHERE c.user_id = w.user_id AND c.is_deleted = FALSE AND c.status = 'active'), 0) as channel_count,
         COALESCE((SELECT SUM(c.subscriber_count) FROM channels c WHERE c.user_id = w.user_id AND c.is_deleted = FALSE AND c.status = 'active'), 0) as total_audience,
         COALESCE((SELECT COUNT(*) FROM miniapps ma WHERE ma.user_id = w.user_id AND ma.is_deleted = FALSE), 0) as miniapp_count,
@@ -170,7 +172,7 @@ export async function GET(request: Request) {
         COALESCE((SELECT SUM(mes.publisher_revenue) FROM miniapp_earnings_settlements mes WHERE mes.user_id = w.user_id), 0) as miniapp_earnings,
         COALESCE((SELECT SUM(w2.amount) FROM withdrawals w2 WHERE w2.user_id = w.user_id), 0) as total_withdrawal_amount,
         COALESCE((SELECT COUNT(*) FROM withdrawals w2 WHERE w2.user_id = w.user_id), 0) as withdrawal_count,
-        ${realEarningsExpr} as total_earnings
+        ${realEarningsExpr} as non_referral_earnings
       FROM withdrawals w
       LEFT JOIN users u ON w.user_id = u.id
     `;
@@ -205,12 +207,38 @@ export async function GET(request: Request) {
     query += whereClause + " ORDER BY w.id DESC LIMIT ? OFFSET ?";
     countQuery += whereClause;
 
-    const [rows] = await pool.query(query, [...queryParams, limit, offset]);
+    const [rows] = await pool.query<Array<RowDataPacket & Record<string, unknown>>>(query, [...queryParams, limit, offset]);
+    const immutableByUser = new Map<number, { value: string; complete: boolean }>();
+    await Promise.all([...new Set(rows.map((row) => Number(row.user_id)))].map(async (userId) => {
+      try {
+        immutableByUser.set(userId, { value: await getPaidReferralEarnings(pool, userId), complete: true });
+      } catch {
+        console.error("Withdrawal referral aggregate unavailable", { user_id: userId, error_code: "REFERRAL_AGGREGATE_FAILED" });
+        immutableByUser.set(userId, { value: "0.00000000", complete: false });
+      }
+    }));
+    const reviewRows = await Promise.all(rows.map(async (row) => {
+      const referral = immutableByUser.get(Number(row.user_id)) || { value: "0.00000000", complete: false };
+      let preclearance;
+      try {
+        preclearance = await assessWithdrawalPreclearance(Number(row.id));
+      } catch (error) {
+        console.error("Withdrawal pre-clearance unavailable", { withdrawal_id: Number(row.id), error: error instanceof Error ? error.message : "unknown_error" });
+        preclearance = { state: "manual_review_required", reasons: ["assessment_unavailable"], reason_details: [{ code: "assessment_unavailable", detail: "Safety assessment could not be completed." }] };
+      }
+      return {
+        ...row,
+        referral_earnings: referral.value,
+        total_earnings: addReferralDecimals(row.non_referral_earnings, referral.value),
+        earnings_review_complete: referral.complete,
+        preclearance,
+      };
+    }));
     const [countRows] = await pool.query<CountRow[]>(countQuery, queryParams);
     const countRow = countRows[0] || { total: 0 };
 
     return NextResponse.json({
-      withdrawals: rows,
+      withdrawals: reviewRows,
       total: countRow.total,
       page,
       totalPages: Math.ceil(countRow.total / limit),
@@ -260,6 +288,11 @@ export async function PATCH(request: Request) {
 
     if (action === "approve") {
       if (!wasPaidOut) {
+        const preclearance = await assessWithdrawalPreclearance(Number(id), conn);
+        if (preclearance.state !== "cleared") {
+          await conn.rollback();
+          return NextResponse.json({ error: "Withdrawal requires manual review before approval", preclearance }, { status: 409 });
+        }
         if (wasRefunded) {
           const available = toNumber(withdrawal.balance_available);
           if (available < amount) {

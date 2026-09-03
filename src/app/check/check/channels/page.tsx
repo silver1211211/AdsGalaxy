@@ -76,9 +76,8 @@ async function getChannels(page: number) {
     : columns.has("subscribers")
       ? "c.subscribers"
       : "NULL";
-  const healthFilter = columns.has("health_status")
-    ? "AND COALESCE(c.health_status, 'healthy') IN ('healthy','warning')"
-    : "";
+  // Operational health remains visible but does not remove an active channel from delivery.
+  const healthFilter = "";
   const channelTypeExpr = columns.has("channel_type") ? "c.channel_type" : "'public'";
   const privateInviteExpr = columns.has("private_invite_link_encrypted") ? "c.private_invite_link_encrypted" : "NULL";
 

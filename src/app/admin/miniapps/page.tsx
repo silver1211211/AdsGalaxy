@@ -93,6 +93,7 @@ type MiniAppReport = {
   countries: Array<{ country: string; impressions: number }>;
   networks: Array<Record<string, number | string>>;
   enabled_networks: NetworkConfig[];
+  cpm_diagnostics?: Record<string, string | number | null>;
   network_diagnostics?: Array<{
     request_id: string;
     selected_network: string | null;
@@ -218,7 +219,7 @@ function missingNetworkConfigWarnings(network: NetworkConfig) {
   if (network.network_name === "AdExium" && !placementId) warnings.push("Missing AdExium Widget ID");
   if (network.network_name === "Monetag") {
     if (!placementId) warnings.push("Missing Monetag Zone ID");
-    if (!network.diagnostics?.sdk_script_url_present || required.includes("SDK URL")) warnings.push("Missing Monetag SDK URL");
+    if (network.diagnostics?.sdk_script_url_present === false || required.includes("SDK URL")) warnings.push("Missing Monetag SDK URL");
   }
   if (network.network_name === "RichAds") {
     if (!network.richads_publisher_id?.trim()) warnings.push("Missing RichAds Publisher ID");
@@ -916,8 +917,10 @@ export default function AdminMiniAppsPage() {
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
                       {[
                         ["External Ad Revenue", money(report.summary.external_revenue)],
-                        ["Platform Fee", money(report.summary.ads_galaxy_fee)],
-                        ["Internal Ad Revenue", money(report.summary.internal_revenue)],
+                        ["Platform Retained", money(report.summary.ads_galaxy_fee)],
+                        ["Internal Advertiser Gross", money(report.summary.internal_gross_revenue)],
+                        ["Internal Publisher Payout", money(report.summary.internal_publisher_revenue)],
+                        ["Reserve", money(report.summary.reserve_revenue)],
                         ["Publisher Revenue", money(report.summary.net_revenue)],
                         ["Settled Amount", money(report.summary.total_settled_earnings)],
                         ["Locked Amount", money(report.summary.locked_earnings)],
@@ -933,6 +936,28 @@ export default function AdminMiniAppsPage() {
                   </div>
 
                   {/* Network Breakdown + Enabled Networks */}
+                  {report.cpm_diagnostics && (
+                    <div>
+                      <h4 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-400">Dynamic CPM diagnostics</h4>
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+                        {[
+                          ["Formula", report.cpm_diagnostics.formula_version || "Historical / v1"],
+                          ["Economic Base", money(report.cpm_diagnostics.economic_base)],
+                          ["Payout Envelope", money(report.cpm_diagnostics.payout_envelope)],
+                          ["Publisher Payout", money(report.cpm_diagnostics.final_publisher_payout)],
+                          ["Publisher CPM", money(report.cpm_diagnostics.final_publisher_cpm)],
+                          ["Platform Retained", money(report.cpm_diagnostics.platform_retained)],
+                          ["GEO Factor", numberValue(report.cpm_diagnostics.geo_factor)],
+                          ["Frequency", numberValue(report.cpm_diagnostics.frequency_factor)],
+                          ["Uniqueness", numberValue(report.cpm_diagnostics.uniqueness_factor)],
+                          ["Quality", numberValue(report.cpm_diagnostics.quality_factor)],
+                          ["Trust", numberValue(report.cpm_diagnostics.trust_factor)],
+                          ["Fraud", numberValue(report.cpm_diagnostics.fraud_factor)],
+                        ].map(([label,value])=><div key={label} className="rounded-xl border border-slate-200 bg-slate-50 p-3"><div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</div><div className="mt-1.5 text-sm font-bold text-slate-900">{value}</div></div>)}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="grid gap-4 lg:grid-cols-2">
                     <div className="rounded-xl border border-slate-200 bg-white">
                       <div className="border-b border-slate-200 px-4 py-3">
@@ -1106,8 +1131,10 @@ export default function AdminMiniAppsPage() {
         <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-5">
           {[
             ["External Ad Revenue", money(revenueSummary.external_ad_revenue)],
-            ["Platform Fee Revenue", money(revenueSummary.platform_fee_revenue)],
-            ["Internal Ad Revenue", money(revenueSummary.internal_ad_revenue)],
+            ["Platform Retained", money(revenueSummary.platform_retained)],
+            ["Internal Advertiser Gross", money(revenueSummary.internal_gross_revenue)],
+            ["Internal Publisher Payout", money(revenueSummary.internal_publisher_revenue)],
+            ["Reserve", money(revenueSummary.reserve_revenue)],
             ["Publisher Revenue", money(revenueSummary.publisher_revenue)],
             ["Blended CPM", money(revenueSummary.blended_cpm)],
           ].map(([label, value]) => (

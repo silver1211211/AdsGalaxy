@@ -2,11 +2,9 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { assertCampaignLifecycleColumns } from "@/lib/campaignLifecycle";
-import { deleteActiveCampaignPosts } from "@/lib/campaignPostDeletion";
-import { settleCampaignEngagementBeforeDeletion } from "@/lib/channelSettlement";
-import { columnExists } from "@/lib/schemaGuards";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { normalizeCampaignCategory } from "@/lib/campaignCategories";
+import { serializeExplicitCampaignAudience } from "@/lib/channelAudience";
 import { normalizeAdvertiserTargeting, targetingDbParams } from "@/lib/advertiserTargeting";
 import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { validatePostbackUrl } from "@/lib/conversionTracking";
@@ -39,7 +37,7 @@ async function uploadCampaignImage(imageFile: File | null) {
   imgApiFormData.append("action", "upload");
   imgApiFormData.append("image", imageFile);
 
-  const imgRes = await fetch(endpoint, { method: "POST", body: imgApiFormData });
+  const imgRes = await fetch(endpoint, { method: "POST", body: imgApiFormData, signal: AbortSignal.timeout(10_000) });
   const imgData = await imgRes.json().catch(() => ({}));
   if (!imgData.success || !imgData.data?.url) {
     throw new Error(imgData.message || "Image upload failed");
@@ -110,14 +108,14 @@ export async function GET(
     if (campaign.type === 'broadcast') {
       // Get broadcast summary
       const [broadcastSummary]: any = await pool.query(
-        "SELECT FLOOR(COUNT(*) / 5) as count, SUM(cost) as total_cost FROM broadcast_deliveries WHERE campaign_id = ? AND status = 'sent'",
+        "SELECT COUNT(*) as count, SUM(cost) as total_cost FROM broadcast_deliveries WHERE campaign_id = ? AND status = 'sent'",
         [id]
       );
       
       // Get stats by bot
       const [botStats]: any = await pool.query(
         `SELECT b.bot_name, b.bot_username, 
-         FLOOR(COUNT(*) / 5) as delivery_count,
+         COUNT(*) as delivery_count,
          SUM(bd.cost) as total_spent
          FROM broadcast_deliveries bd
          JOIN bots b ON bd.bot_id = b.id
@@ -175,7 +173,7 @@ export async function GET(
     // Get click/broadcast chart data (last 7 days)
     const chartTable = campaign.type === 'broadcast' ? 'broadcast_deliveries' : 'campaign_clicks';
     const [chartData]: any = await pool.query(
-      `SELECT DATE(created_at) as date, FLOOR(COUNT(*) / 5) as count
+      `SELECT DATE(created_at) as date, COUNT(*) as count
        FROM ${chartTable}
        WHERE campaign_id = ? ${campaign.type === 'broadcast' ? "AND status = 'sent'" : ""} AND created_at > NOW() - INTERVAL 7 DAY
        GROUP BY DATE(created_at)
@@ -237,7 +235,16 @@ export async function PATCH(
       const nextPostbackUrl = validatePostbackUrl(body.postback_url ?? campaign.postback_url);
       const nextButtonText = cleanString(body.button_text || campaign.button_text);
       const nextCategory = normalizeCampaignCategory(body.category ?? campaign.category);
-      const nextContinents = cleanString(body.continents || campaign.continents || "[]");
+      let nextContinents = cleanString(body.continents || campaign.continents || "[]");
+      if (campaign.type !== "broadcast") {
+        try {
+          nextContinents = serializeExplicitCampaignAudience(body.continents);
+        } catch (error) {
+          return NextResponse.json({
+            error: error instanceof Error ? error.message : "Target audience is invalid",
+          }, { status: 400 });
+        }
+      }
       const imageFile = formData?.get("image") instanceof File ? formData.get("image") as File : null;
       const uploadedImageUrl = await uploadCampaignImage(imageFile);
       const nextImageUrl = uploadedImageUrl || cleanString(body.image_url || campaign.image_url || "");
@@ -363,40 +370,19 @@ export async function PATCH(
           return NextResponse.json({ success: true, status: "paused" });
         }
 
-        const settlement = await settleCampaignEngagementBeforeDeletion(Number(id), "advertiser_pause");
-        if (!settlement.ok) {
-          return NextResponse.json({
-            error: "Could not settle outstanding engagement for this campaign before pausing it. Please try again in a moment.",
-            settlement,
-          }, { status: 409 });
-        }
-
-        await pool.query(`
+        const [pauseResult] = await pool.query<ResultSetHeader>(`
           UPDATE campaigns
           SET status = 'paused',
             paused_at = NOW(),
             resume_locked_until = DATE_ADD(NOW(), INTERVAL 1 HOUR),
-            pause_reason = 'user_paused'
-          WHERE id = ? AND user_id = ?
+            pause_reason = 'user_paused',
+            channel_settlement_finalized_at = NULL
+          WHERE id = ? AND user_id = ? AND status = 'active'
         `, [id, user.id]);
-
-        if (await columnExists(pool, "campaigns", "channel_settlement_finalized_at")) {
-          await pool.query(
-            "UPDATE campaigns SET channel_settlement_finalized_at = COALESCE(channel_settlement_finalized_at, NOW()) WHERE id = ? AND user_id = ?",
-            [id, user.id]
-          );
+        if (pauseResult.affectedRows !== 1) {
+          return NextResponse.json({ error: "Campaign status changed. Please refresh and try again." }, { status: 409 });
         }
-
-        let deletion: Awaited<ReturnType<typeof deleteActiveCampaignPosts>> | null = null;
-        try {
-          deletion = await deleteActiveCampaignPosts(id);
-        } catch (cleanupError) {
-          console.warn("Advertiser pause Telegram cleanup failed after settlement", {
-            campaign_id: id,
-            error: cleanupError instanceof Error ? cleanupError.message : "unknown_cleanup_error",
-          });
-        }
-        return NextResponse.json({ success: true, status: "paused", deletion, settlement });
+        return NextResponse.json({ success: true, status: "paused", cleanup_queued: true });
       }
 
       if (campaign.status === "paused") {

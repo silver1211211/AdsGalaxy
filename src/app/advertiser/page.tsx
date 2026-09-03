@@ -27,6 +27,10 @@ import { apiFetch } from "@/lib/api";
 import AppBootState from "@/components/shared/AppBootState";
 import { AnimatePresence, motion } from "framer-motion";
 import { useRouter } from "next/navigation";
+import {
+  selectAdvertiserDashboardMetric,
+  type AdvertiserCampaignType,
+} from "@/lib/advertiserDashboardMetrics";
 
 const CREATE_OPTIONS = [
   {
@@ -55,7 +59,7 @@ const CREATE_OPTIONS = [
 type AdvertiserCampaign = {
   id: number;
   name: string;
-  type?: string;
+  type?: AdvertiserCampaignType;
   category?: string;
   status?: string;
   budget?: string | number;
@@ -64,6 +68,7 @@ type AdvertiserCampaign = {
   yesterday_impressions?: string | number;
   spend?: string | number;
   today_spend?: string | number;
+  clicks?: string | number;
   conversions?: string | number;
   conversion_value?: string | number;
 };
@@ -141,10 +146,22 @@ export default function AdvertiserDashboard() {
     try {
       setIsLoading(true);
       setLoadError(false);
-      const res = await apiFetch("/api/advertiser/stats");
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Failed to load advertiser stats");
-      setStats(data);
+      let res: Response | null = null;
+      let data: Record<string, unknown> = {};
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          res = await apiFetch("/api/advertiser/stats", { timeoutMs: 20000 });
+          data = await res.json().catch(() => ({}));
+          if (res.ok || res.status === 401 || res.status === 403) break;
+        } catch (error) {
+          lastError = error;
+        }
+        if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 750 * (2 ** attempt)));
+      }
+      if (!res) throw lastError || new Error("Failed to load advertiser stats");
+      if (!res.ok) throw new Error(String(data.error || "Failed to load advertiser stats"));
+      setStats(data as unknown as AdvertiserStats);
     } catch (err) {
       console.error("Failed to fetch stats:", err);
       setLoadError(true);
@@ -345,6 +362,7 @@ export default function AdvertiserDashboard() {
               stats.recent_campaigns.map((campaign) => {
                 const typeMeta = getCampaignTypeMeta(campaign.type);
                 const isLive = LIVE_STATUSES.has(campaign.status || "");
+                const engagementMetric = selectAdvertiserDashboardMetric(campaign);
                 return (
                   <div key={`${campaign.type}-${campaign.id}`} className="flex flex-col gap-4 rounded-xl border border-slate-50 bg-slate-50/50 p-4 md:flex-row md:items-center md:justify-between">
                     <div className="flex items-center gap-4">
@@ -387,8 +405,8 @@ export default function AdvertiserDashboard() {
                         <p className="text-[10px] text-slate-400 uppercase font-black">Today Spend</p>
                       </div>
                       <div>
-                        <p className="text-sm font-bold text-slate-900">{numberValue(campaign.conversions)}</p>
-                        <p className="text-[10px] text-slate-400 uppercase font-black">Conversions</p>
+                        <p className="text-sm font-bold text-slate-900">{numberValue(engagementMetric.value)}</p>
+                        <p className="text-[10px] text-slate-400 uppercase font-black">{engagementMetric.label}</p>
                       </div>
                     </div>
                   </div>

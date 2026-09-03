@@ -2,6 +2,8 @@ import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { POSTING_TIME_OPTIONS } from "@/lib/postingTimes";
 import { createSystemLog, maskEntityId } from "@/lib/systemLogs";
+import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
+import { onboardPrivateChannelTracking } from "@/lib/privateChannelTrackingOnboarding";
 
 export type ChannelStatusType =
   | "pending"
@@ -30,6 +32,7 @@ type HealthResult = {
   reason: string | null;
   suggestedFix: string | null;
   permanent: boolean;
+  retryAfterMs?: number;
 };
 
 function deterministicWeight(id: number) {
@@ -77,6 +80,26 @@ async function telegram(method: string, payload: Record<string, unknown>) {
   return response.json();
 }
 
+let botIdPromise: Promise<number> | null = null;
+
+async function getBotId() {
+  if (!botIdPromise) {
+    botIdPromise = telegram("getMe", {}).then((result) => {
+      if (!result.ok || !result.result?.id) throw new Error(result.description || "Unable to verify AdsGalaxy bot.");
+      return Number(result.result.id);
+    }).catch((error) => {
+      botIdPromise = null;
+      throw error;
+    });
+  }
+  return botIdPromise;
+}
+
+function telegramRetryAfterMs(result: { parameters?: { retry_after?: unknown } } | null | undefined) {
+  const seconds = Number(result?.parameters?.retry_after || 0);
+  return seconds > 0 ? (seconds + 1) * 1000 : 0;
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -89,7 +112,7 @@ export function channelLifecycleLogHook(_event: string, _payload: Record<string,
 
 export async function ensureDefaultChannelDistribution(db: Db = pool) {
   const [channels] = await db.query<ChannelScheduleRow[]>(
-    "SELECT id FROM channels WHERE status = 'active' AND is_deleted = FALSE AND COALESCE(health_status, 'healthy') IN ('healthy','warning') ORDER BY id ASC"
+    "SELECT id FROM channels WHERE status = 'active' AND is_deleted = FALSE ORDER BY id ASC"
   );
 
   const randomized = [...channels].sort((a, b) => deterministicWeight(Number(a.id)) - deterministicWeight(Number(b.id)));
@@ -116,7 +139,6 @@ export async function ensureDefaultChannelDistribution(db: Db = pool) {
        WHERE id = ?
          AND status = 'active'
          AND is_deleted = FALSE
-         AND COALESCE(health_status, 'healthy') IN ('healthy','warning')
          AND (
            scheduler_slot IS NULL
            OR scheduler_slot <> ?
@@ -146,7 +168,7 @@ export async function checkChannelHealth(channel: ChannelHealthInput): Promise<H
 
     lastResult = result;
     if (attempt < 3) {
-      await sleep(500 * attempt);
+      await sleep(Math.max(lastResult.retryAfterMs || 0, 500 * attempt));
     }
   }
 
@@ -163,18 +185,18 @@ async function checkChannelHealthOnce(channel: ChannelHealthInput): Promise<Heal
   try {
     const chat = await telegram("getChat", { chat_id: channel.chat_id });
     if (!chat.ok) {
+      const retryAfterMs = telegramRetryAfterMs(chat);
+      if (retryAfterMs) return { ok: false, status: "paused", reason: chat.description || "Telegram rate limit.", suggestedFix: "Retry after Telegram's requested delay.", permanent: false, retryAfterMs };
       const permanent = permanentFailure(chat.description || "");
       if (permanent) return { ok: false, permanent: true, ...permanent };
       return { ok: false, status: "paused", reason: chat.description || "Unable to verify channel.", suggestedFix: "Try again later or verify channel access.", permanent: false };
     }
 
-    const me = await telegram("getMe", {});
-    if (!me.ok || !me.result?.id) {
-      return { ok: false, status: "paused", reason: "Unable to verify AdsGalaxy bot.", suggestedFix: "Try again later.", permanent: false };
-    }
-
-    const member = await telegram("getChatMember", { chat_id: channel.chat_id, user_id: me.result.id });
+    const botId = await getBotId();
+    const member = await telegram("getChatMember", { chat_id: channel.chat_id, user_id: botId });
     if (!member.ok) {
+      const retryAfterMs = telegramRetryAfterMs(member);
+      if (retryAfterMs) return { ok: false, status: "paused", reason: member.description || "Telegram rate limit.", suggestedFix: "Retry after Telegram's requested delay.", permanent: false, retryAfterMs };
       const permanent = permanentFailure(member.description || "");
       if (permanent) return { ok: false, permanent: true, ...permanent };
       return { ok: false, status: "paused", reason: member.description || "Unable to verify bot permissions.", suggestedFix: "Try again later.", permanent: false };
@@ -289,6 +311,21 @@ export async function reactivateChannelAfterHealthCheck(channelId: number | stri
       await recordChannelPostFailure(channelId, health.reason || "Temporary health check failure", db);
     }
     throw new Error(health.reason || "Channel health check failed");
+  }
+
+  const [channelRows] = await db.query<RowDataPacket[]>(
+    "SELECT channel_type FROM channels WHERE id = ? LIMIT 1",
+    [channelId]
+  );
+  const channelType = channelRows[0]?.channel_type === "private" ? "private" : "public";
+  const tracking = await onboardPrivateChannelTracking({
+    channelId,
+    chatId,
+    channelType,
+    schema: await getChannelPrivacySchema(),
+  });
+  if (channelType === "private" && tracking.status !== "active") {
+    throw new Error(`Private channel MTProto membership is not verified: ${tracking.status === "pending_manual" ? tracking.reason : "tracking_not_active"}`);
   }
 
   await db.query(

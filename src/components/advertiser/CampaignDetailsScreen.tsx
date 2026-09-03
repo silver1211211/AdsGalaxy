@@ -67,6 +67,19 @@ function targetingList(value: unknown) {
   return String(value) || "All";
 }
 
+function campaignAudienceList(value: unknown): string[] {
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value || "[]") : value;
+    if (Array.isArray(parsed)) return parsed.map(String);
+    if (parsed && typeof parsed === "object" && Array.isArray((parsed as { audiences?: unknown }).audiences)) {
+      return (parsed as { audiences: unknown[] }).audiences.map(String);
+    }
+  } catch {
+    // Invalid legacy data is displayed as unrestricted below.
+  }
+  return [];
+}
+
 function policyLabel(value: unknown) {
   const labels: Record<string, string> = {
     allow_all: "Allow all traffic",
@@ -223,7 +236,7 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
     }
   }, [onClose]);
 
-  const continents = JSON.parse(campaign.continents || "[]");
+  const continents = campaignAudienceList(campaign.continents);
   const ctr = computeCtr(campaign);
   const cpc = computeCpc(campaign);
   const progress = computeProgress(campaign);
@@ -519,7 +532,7 @@ export default function CampaignDetailsScreen({ campaign: initialCampaign, onClo
                   <div className="flex-1 min-w-0">
                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none mb-1">Targeting</p>
                     <p className="text-sm font-black text-slate-900 truncate">
-                      {continents.length === 7 ? "Global" : continents.join(", ")}
+                      {continents.length === 7 ? "Global" : continents.map((continent) => continent.replace(/_/g, " ")).join(", ") || "Legacy unrestricted"}
                     </p>
                   </div>
                 </div>

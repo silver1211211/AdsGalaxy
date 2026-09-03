@@ -34,6 +34,7 @@ type AdminReferralData = {
   abuse: Array<any>;
   audits: Array<any>;
   totals: any;
+  payout_controls: any;
 };
 
 const emptyData: AdminReferralData = {
@@ -51,6 +52,7 @@ const emptyData: AdminReferralData = {
   abuse: [],
   audits: [],
   totals: {},
+  payout_controls: {},
 };
 
 const SETTING_LABELS: Record<string, string> = {
@@ -209,7 +211,7 @@ export default function AdminReferralsPage() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
   const [setting, setSetting] = useState({ key: "referral_reward_amount", value: "0.015", description: "" });
-  const [sprint, setSprint] = useState({ name: "Referral Sprint", duration_days: "14", first_place_reward: "10", second_place_reward: "5", third_place_reward: "2", best_team_reward: "15", second_team_reward: "8", third_team_reward: "4", auto_restart: true });
+  const [sprint, setSprint] = useState({ name: "Referral Sprint", duration_days: "14", first_place_reward: "1.00", second_place_reward: "0.50", third_place_reward: "0.25", best_team_reward: "1.50", second_team_reward: "0.75", third_team_reward: "0.25", auto_restart: true });
   const defaultMilestone = { id: "", scope: "user", threshold_count: "10", reward_type: "withdrawable_balance", reward_amount: "0.25", reward_label: "10 verified referrals", status: "active" };
   const [milestone, setMilestone] = useState(defaultMilestone);
   const [backfillLoading, setBackfillLoading] = useState(false);
@@ -393,6 +395,22 @@ export default function AdminReferralsPage() {
               <StatCard label="Rewards Paid" value={money(data.totals?.referral_rewards_paid || 0)} icon={Gift} tone="amber" />
               <StatCard label="Open Abuse Flags" value={data.abuse.length || 0} icon={AlertTriangle} tone={data.abuse.length ? "amber" : "slate"} />
             </div>
+
+            <Section title="Payout Verification" subtitle="Server-authoritative prices, caps, live monthly budget, pending liabilities, and source consistency." icon={ShieldCheck}>
+              <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+                <StatCard label="Ordinary Reward" value="$0.005 + $0.010 = $0.015" icon={Gift} tone="green" />
+                <StatCard label="Individual Prizes" value="$1 / $0.50 / $0.25" icon={Trophy} tone="amber" />
+                <StatCard label="Team Pools" value="$1.50 / $0.75 / $0.25" icon={Users} />
+                <StatCard label="User Caps" value="$0.50 day / $5 month" icon={ShieldCheck} />
+                <StatCard label="Monthly Budget" value={`${money(data.payout_controls?.spent_this_month)} / $25`} icon={Activity} tone="amber" />
+                <StatCard label="Budget Remaining" value={money(data.payout_controls?.budget_remaining)} icon={Activity} tone="green" />
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-3">
+                <div className="rounded-2xl bg-slate-50 p-4 text-sm font-bold text-slate-700">Pending rewards: {money(data.payout_controls?.pending_rewards, 3)}</div>
+                <div className="rounded-2xl bg-slate-50 p-4 text-sm font-bold text-slate-700">Fraud-held rewards: {money(data.payout_controls?.fraud_held_rewards, 3)}</div>
+                <div className="rounded-2xl bg-slate-50 p-4 text-sm font-bold text-slate-700">Paid/source inconsistencies: {data.payout_controls?.paid_source_inconsistencies || 0}</div>
+              </div>
+            </Section>
 
             <Section title="Core Referral Controls" subtitle="User-facing reward amounts, popup frequency, required channel, and sprint state." icon={Settings2}>
               <div className="grid gap-4 xl:grid-cols-4">

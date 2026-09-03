@@ -40,6 +40,14 @@ function isFuture(value: Date | string | null) {
 }
 
 async function ensureState(executor: Executor, miniappId: number | string) {
+  const [existing] = await executor.query<Array<RowDataPacket & { id: number }>>(
+    "SELECT id FROM miniapp_network_frequency_state WHERE miniapp_id = ? AND network_name = ? LIMIT 1",
+    [miniappId, MONETAG_NETWORK]
+  );
+  if (existing.length > 0) {
+    return;
+  }
+
   await executor.query(
     `INSERT IGNORE INTO miniapp_network_frequency_state
       (miniapp_id, network_name, opportunity_count, consecutive_user_count, next_allowed_opportunity)

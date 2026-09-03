@@ -118,7 +118,6 @@ test("lookup and pending behavior require publisher-scoped Mini App ownership", 
 
 test("locked SDK runtime and mediation sources retain canonical Git blob identity across checkout line endings", () => {
   const protectedPaths = [
-    "src/app/sdk.js/route.ts",
     "src/lib/miniappSdkRuntime.ts",
     "src/lib/miniappMediationEngine.ts",
   ];

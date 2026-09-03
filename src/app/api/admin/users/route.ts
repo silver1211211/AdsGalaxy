@@ -4,6 +4,7 @@ import pool from "@/lib/db";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { ADVERTISER_TRUST_LEVELS, normalizeAdvertiserTrustLevel } from "@/lib/advertiserTrust";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
+import { setUserEnforcementExemption } from "@/lib/userEnforcementExemptions";
 
 type ColumnRow = RowDataPacket & {
   COLUMN_NAME: string;
@@ -157,12 +158,13 @@ export async function PATCH(request: Request) {
   const conn = await pool.getConnection();
 
   try {
-    const { id, balance_locked, balance_available, ad_balance, action, reason, trust_level } = await request.json();
+    const { id, balance_locked, balance_available, ad_balance, action, reason, trust_level,
+      unban_disposition, exemption_type, exemption_expires_at } = await request.json();
 
     if (!id) return NextResponse.json({ error: "User ID required" }, { status: 400 });
 
     const [beforeRows] = await conn.query<RowDataPacket[]>(
-      "SELECT balance_locked, balance_available, ad_balance, status, advertiser_trust_level FROM users WHERE id = ? LIMIT 1",
+      "SELECT balance_locked, balance_available, ad_balance, status, advertiser_trust_level, publisher_trust_score FROM users WHERE id = ? LIMIT 1",
       [id]
     );
     const before = beforeRows[0];
@@ -200,16 +202,49 @@ export async function PATCH(request: Request) {
     }
 
     if (action === "unban") {
+      const disposition = String(unban_disposition || "trust_remediation");
+      if (!["enforcement_exemption", "trust_remediation", "no_remediation"].includes(disposition)) {
+        return NextResponse.json({ error: "A valid unban disposition is required" }, { status: 400 });
+      }
+      if ((disposition === "enforcement_exemption" || disposition === "no_remediation") && !String(reason || "").trim()) {
+        return NextResponse.json({ error: "An admin reason is required for this unban disposition" }, { status: 400 });
+      }
+      if (disposition === "enforcement_exemption" && !String(exemption_type || "").trim()) {
+        return NextResponse.json({ error: "Exemption type is required" }, { status: 400 });
+      }
+      const resetTrust = disposition === "trust_remediation";
+      await conn.beginTransaction();
       await conn.query(
-        "UPDATE users SET status = 'active', is_banned = 0, banned_at = NULL, ban_reason = NULL WHERE id = ?",
-        [id]
+        `UPDATE users SET status='active',is_banned=0,banned_at=NULL,ban_reason=NULL,
+          publisher_trust_score=CASE WHEN ? THEN 60 ELSE publisher_trust_score END WHERE id=?`,
+        [resetTrust ? 1 : 0, id]
       );
+      await setUserEnforcementExemption({
+        db: conn,
+        userId: Number(id),
+        exemptionType: disposition === "enforcement_exemption" ? String(exemption_type) : "none",
+        reason: String(reason || (resetTrust ? "Trust remediated to platform default" : "Exemption disabled")),
+        adminId: admin?.id,
+        expiresAt: disposition === "enforcement_exemption" ? exemption_expires_at || null : null,
+        active: disposition === "enforcement_exemption",
+      });
       await conn.query(
         `UPDATE channels SET status='active',paused_reason=NULL,auto_paused_at=NULL
          WHERE user_id=? AND is_deleted=FALSE AND status='paused' AND paused_reason='fraudulent_or_low_quality_traffic'`,
         [id]
       );
-      await audit("publisher_unban", { previous_status: before.status, new_status: "active" });
+      await conn.commit();
+      await audit("publisher_unban", {
+        previous_status: before.status,
+        new_status: "active",
+        previous_publisher_trust_score: Number(before.publisher_trust_score ?? 60),
+        new_publisher_trust_score: resetTrust ? 60 : Number(before.publisher_trust_score ?? 60),
+        unban_disposition: disposition,
+        enforcement_exemption: disposition === "enforcement_exemption" ? {
+          exemption_type: String(exemption_type),
+          expires_at: exemption_expires_at || null,
+        } : null,
+      });
       return NextResponse.json({ success: true });
     }
 
@@ -247,6 +282,7 @@ export async function PATCH(request: Request) {
 
     return NextResponse.json({ success: true });
   } catch (error: unknown) {
+    await conn.rollback().catch(() => undefined);
     console.error("Admin Users Update Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   } finally {

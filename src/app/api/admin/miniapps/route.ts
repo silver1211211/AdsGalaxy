@@ -196,7 +196,9 @@ export async function GET(request: Request) {
   const networkCountFilter = searchParams.get("network_count") || "all";
   const qualityFilter = searchParams.get("quality") || "all";
   const riskFilter = searchParams.get("risk") || "all";
-  const search = searchParams.get("search") || "";
+  const search = (searchParams.get("search") || "").trim();
+  const idSearch = search.replace(/^#+/, "").trim();
+  const numericMiniappId = /^\d+$/.test(idSearch) ? Number(idSearch) : null;
   const offset = (page - 1) * limit;
 
   try {
@@ -290,10 +292,11 @@ export async function GET(request: Request) {
         u.first_name LIKE ? OR
         u.last_name LIKE ? OR
         u.username LIKE ? OR
-        u.telegram_id LIKE ?
+        u.telegram_id LIKE ?${numericMiniappId !== null ? " OR m.id = ?" : ""}
       )`;
       const searchVal = `%${search}%`;
       queryParams.push(searchVal, searchVal, searchVal, searchVal, searchVal, searchVal, searchVal);
+      if (numericMiniappId !== null) queryParams.push(numericMiniappId);
     }
 
     query += whereClause + " ORDER BY m.id DESC LIMIT ? OFFSET ?";

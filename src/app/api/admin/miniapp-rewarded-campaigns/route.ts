@@ -8,6 +8,7 @@ import { recordAutomationAudit } from "@/lib/approvalAutomation";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { getMiniAppPublisherCpmSettings, maxPublisherCpm, normalizeMiniAppCpmMode, validateAdvertiserCpmBid } from "@/lib/miniappPublisherCpmEngine";
 import { validateOptionalDailyBudget } from "@/lib/campaignBudget";
+import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByIds } from "@/lib/miniappCampaignMetrics";
 
 function cleanText(value: unknown) {
   return String(value || "").trim();
@@ -70,8 +71,6 @@ export async function GET(request: Request) {
       COALESCE((SELECT SUM(atx.amount) FROM advertiser_transactions atx WHERE atx.user_id = c.advertiser_id AND atx.type = 'debit'), 0) as advertiser_total_spend,
       COALESCE((SELECT COUNT(*) FROM miniapp_rewarded_campaigns h WHERE h.advertiser_id = c.advertiser_id AND h.status IN ('approved', 'completed')), 0) as advertiser_approved_campaigns,
       COALESCE((SELECT COUNT(*) FROM miniapp_rewarded_campaigns h WHERE h.advertiser_id = c.advertiser_id AND h.status = 'rejected'), 0) as advertiser_rejected_campaigns,
-      COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as impressions,
-      COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as spend,
       COALESCE((SELECT SUM(i.publisher_revenue) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as publisher_revenue,
       COALESCE((SELECT SUM(i.ads_galaxy_revenue) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as ads_galaxy_revenue,
       COALESCE((SELECT SUM(i.reserve_revenue) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as reserve_revenue,
@@ -85,7 +84,11 @@ export async function GET(request: Request) {
     params
   );
 
-  return NextResponse.json({ campaigns: rows, cpm_configuration: "global" });
+  const metrics = await getMiniAppCampaignMetricsByIds((rows as Array<{ id: number }>).map((row) => row.id));
+  return NextResponse.json({
+    campaigns: (rows as Array<Record<string, unknown>>).map((row) => applyMiniAppCampaignMetrics(row, metrics)),
+    cpm_configuration: "global",
+  });
 }
 
 export async function PATCH(request: Request) {
@@ -100,6 +103,15 @@ export async function PATCH(request: Request) {
     const adminCpm = body.admin_cpm === undefined ? null : Number(body.admin_cpm);
     const cpmMode = normalizeMiniAppCpmMode(body.cpm_mode);
     const fixedPublisherCpm = body.fixed_publisher_cpm === undefined || body.fixed_publisher_cpm === "" ? null : Number(body.fixed_publisher_cpm);
+    const fixedCpmOverrideReason = cleanText(body.fixed_cpm_override_reason);
+    let fixedCpmOverrideExpiresAt: string | null = null;
+    if (body.fixed_cpm_override_expires_at) {
+      const expiry = new Date(String(body.fixed_cpm_override_expires_at));
+      if (Number.isNaN(expiry.getTime()) || expiry.getTime() <= Date.now()) {
+        return NextResponse.json({ error: "Fixed CPM override expiry must be a valid future date" }, { status: 400 });
+      }
+      fixedCpmOverrideExpiresAt = expiry.toISOString().slice(0, 19).replace("T", " ");
+    }
 
     if (!Number.isInteger(id) || id <= 0) {
       return NextResponse.json({ error: "Valid campaign id is required" }, { status: 400 });
@@ -123,6 +135,7 @@ export async function PATCH(request: Request) {
       const cpmSettings = await getMiniAppPublisherCpmSettings();
       validateAdvertiserCpmBid(approvalCpm, cpmSettings);
       if (cpmMode === "fixed") {
+        if (fixedCpmOverrideReason.length < 3) return NextResponse.json({ error: "Fixed CPM override reason is required" }, { status: 400 });
         if (!Number.isFinite(fixedPublisherCpm) || Number(fixedPublisherCpm) <= 0) {
           return NextResponse.json({ error: "Fixed Publisher CPM must be greater than 0" }, { status: 400 });
         }
@@ -137,13 +150,15 @@ export async function PATCH(request: Request) {
             advertiser_cpm_bid = ?,
            cpm_mode = ?,
            fixed_publisher_cpm = ?,
+           fixed_cpm_override_reason = ?,
+           fixed_cpm_override_expires_at = ?,
            required_cpm = ?,
            creative_review_status = 'approved',
            requires_re_moderation = 0,
            creative_review_notes = ?,
            approved_at = COALESCE(approved_at, NOW())
           WHERE id = ?`,
-        [approvalCpm, approvalCpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, cpmSettings.min_cpm, moderationNotes || null, id]
+        [approvalCpm, approvalCpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, cpmMode === "fixed" ? fixedCpmOverrideReason : null, cpmMode === "fixed" ? fixedCpmOverrideExpiresAt : null, cpmSettings.min_cpm, moderationNotes || null, id]
       );
       await safeNotify(owner?.telegram_id, `✅ Your Mini App ad "${beforeRows[0].campaign_name}" was approved.`);
     } else if (action === "reject") {
@@ -180,6 +195,7 @@ export async function PATCH(request: Request) {
       const cpmSettings = await getMiniAppPublisherCpmSettings();
       validateAdvertiserCpmBid(Number(adminCpm), cpmSettings);
       if (cpmMode === "fixed") {
+        if (fixedCpmOverrideReason.length < 3) return NextResponse.json({ error: "Fixed CPM override reason is required" }, { status: 400 });
         if (!Number.isFinite(fixedPublisherCpm) || Number(fixedPublisherCpm) <= 0) {
           return NextResponse.json({ error: "Fixed Publisher CPM must be greater than 0" }, { status: 400 });
         }
@@ -188,8 +204,8 @@ export async function PATCH(request: Request) {
         }
       }
       await pool.query(
-        "UPDATE miniapp_rewarded_campaigns SET admin_cpm = ?, advertiser_cpm_bid = ?, required_cpm = ?, cpm_mode = ?, fixed_publisher_cpm = ? WHERE id = ?",
-        [adminCpm, adminCpm, cpmSettings.min_cpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, id]
+        "UPDATE miniapp_rewarded_campaigns SET admin_cpm = ?, advertiser_cpm_bid = ?, required_cpm = ?, cpm_mode = ?, fixed_publisher_cpm = ?, fixed_cpm_override_reason = ?, fixed_cpm_override_expires_at = ? WHERE id = ?",
+        [adminCpm, adminCpm, cpmSettings.min_cpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, cpmMode === "fixed" ? fixedCpmOverrideReason : null, cpmMode === "fixed" ? fixedCpmOverrideExpiresAt : null, id]
       );
     } else if (action === "edit") {
       const campaign_name = cleanText(body.campaign_name) || beforeRows[0].campaign_name;
@@ -246,7 +262,7 @@ export async function PATCH(request: Request) {
       entityType: "miniapp_rewarded_campaign",
       entityId: id,
       decision: action,
-      reason: moderationNotes || `admin_${action}`,
+      reason: fixedCpmOverrideReason || moderationNotes || `admin_${action}`,
       metadata: { admin_username: admin.username },
     });
 

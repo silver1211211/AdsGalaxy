@@ -23,7 +23,10 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
   }
   function telegramUser(options){var webApp=tg(),unsafeUser=webApp&&webApp.initDataUnsafe&&webApp.initDataUnsafe.user;return unsafeUser||parseInitDataUser(initData(options||{}));}
   function userId(options){var user=telegramUser(options||{});return options&&options.telegramUserId||options&&options.userId||user&&user.id||"";}
-  function country(options){var user=telegramUser(options||{});return options&&options.country||user&&user.language_code||"";}
+  function country(options){return options&&options.country||"";}
+  function privateId(storage,key){try{var value=storage.getItem(key);if(!value){value=(window.crypto&&window.crypto.randomUUID?window.crypto.randomUUID():String(Date.now())+Math.random());storage.setItem(key,value);}return value;}catch(e){return "";}}
+  function deviceId(){return privateId(localStorage,"agx_device_v2");}
+  function sessionId(){return privateId(sessionStorage,"agx_session_v2");}
   function providerName(provider){
     return provider==="a"?"AdsGram":provider==="m"?"Monetag":provider==="x"?"AdExium":provider==="r"?"RichAds":provider==="g"?"GigaPub":provider==="i"?"AdsGalaxyInternal":provider||null;
   }
@@ -131,21 +134,21 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
   function showInternalAd(decision,options){
     var ad=decision.ad||{};
     if(!ad.title||!ad.landing_url)return Promise.reject(sdkError("Unable to load this advertisement. Please try again.","AD_UNAVAILABLE"));
-    return new Promise(function(resolve){
+    return new Promise(function(resolve,reject){
       var max=15,started=Date.now(),completed=false,closed=false,impressionSent=false;
       var previousOverflow=document.body.style.overflow;
       var interval,completeTimer,impTimer,autoTimer;
       function elapsed(){return Math.min(max,(Date.now()-started)/1000);}
-      function track(event){return request("/api/miniapp/internal-ads/impression",{request_id:decision.request_id,miniapp_id:Number(options.miniappId),telegram_user_id:String(userId(options)),event_type:event.event_type,watch_duration_seconds:event.watch_duration_seconds,completed:!!event.completed,abandonment_reason:event.abandonment_reason||""},options).catch(function(){});}
+      function track(event){return request("/api/miniapp/internal-ads/impression",{request_id:decision.request_id,miniapp_id:Number(options.miniappId),telegram_user_id:String(userId(options)),event_type:event.event_type,watch_duration_seconds:event.watch_duration_seconds,completed:!!event.completed,abandonment_reason:event.abandonment_reason||"",device_id:deviceId(),session_id:sessionId()},options);}
       var ctaPending=false,cta;
       function clickUrl(){return request("/api/conversions/click",{campaign_type:"miniapp",campaign_id:ad.id,miniapp_id:Number(options.miniappId),request_id:decision.request_id,session_id:String(userId(options))},options).then(function(data){return data.url||ad.landing_url;});}
       function openDestination(url){var webApp=window.Telegram&&window.Telegram.WebApp;try{if(/^https?:\\/\\/(?:www\\.)?(?:t\\.me|telegram\\.me)\\//i.test(url)&&webApp&&typeof webApp.openTelegramLink==="function"){webApp.openTelegramLink(url);return true;}if(webApp&&typeof webApp.openLink==="function"){webApp.openLink(url);return true;}var opened=window.open(url,"_blank","noopener,noreferrer");if(opened)return true;if(/^https?:\\/\\//i.test(url)){window.location.href=url;return true;}}catch(e){}return false;}
       function openAd(){if(ctaPending)return;ctaPending=true;if(cta)cta.disabled=true;clickUrl().then(function(url){if(!openDestination(url))throw sdkError("Unable to open advertisement","OPEN_FAILED");}).catch(function(){ctaPending=false;if(cta)cta.disabled=false;});}
       function cleanup(){document.removeEventListener("visibilitychange",vis);window.removeEventListener("pagehide",hide);clearInterval(interval);clearTimeout(completeTimer);clearTimeout(impTimer);clearTimeout(autoTimer);}
       function closeOverlay(){if(closed)return;closed=true;cleanup();document.body.style.overflow=previousOverflow;overlay.remove();}
-      function complete(){if(completed)return;completed=true;track({event_type:"completed",watch_duration_seconds:15,completed:true});countdownBox.hidden=true;close.hidden=false;close.disabled=false;clearInterval(interval);resolve({request_id:decision.request_id,reward_eligible:true,completed:true});autoTimer=setTimeout(closeOverlay,2000);}
-      function vis(){if(document.visibilityState==="hidden"&&!completed&&!closed)track({event_type:"app_backgrounded",watch_duration_seconds:elapsed(),abandonment_reason:"app_backgrounded"});}
-      function hide(){if(!completed&&!closed)track({event_type:"session_abandoned",watch_duration_seconds:elapsed(),abandonment_reason:"session_abandoned"});}
+      function complete(){if(completed)return;completed=true;clearInterval(interval);track({event_type:"completed",watch_duration_seconds:15,completed:true}).then(function(result){if(!result||!result.event_id)throw sdkError("Ad completion could not be confirmed","CONFIRMATION_FAILED");countdownBox.hidden=true;close.hidden=false;close.disabled=false;resolve({request_id:result.request_id,event_id:result.event_id,completed:true,reward_eligible:true,status:"completed"});autoTimer=setTimeout(closeOverlay,2000);}).catch(function(error){completed=false;closeOverlay();reject(error&&error.code?error:sdkError("Ad completion could not be confirmed","CONFIRMATION_FAILED"));});}
+      function vis(){if(document.visibilityState==="hidden"&&!completed&&!closed)track({event_type:"app_backgrounded",watch_duration_seconds:elapsed(),abandonment_reason:"app_backgrounded"}).catch(function(){});}
+      function hide(){if(!completed&&!closed)track({event_type:"session_abandoned",watch_duration_seconds:elapsed(),abandonment_reason:"session_abandoned"}).catch(function(){});}
       var botUrl="https://t.me/${botUsername}";
       var displayTitle=String(ad.title||"").trim().slice(0,50),displayDesc=String(ad.description||"").trim().slice(0,200),displayCta=String(ad.cta_text||"Learn More").trim().slice(0,24)||"Learn More",defaultLogoUrl=(SCRIPT_ORIGIN||FALLBACK_ORIGIN)+"/logo.svg",logoUrl=String(ad.advertiser_logo_url||ad.logo_url||defaultLogoUrl).trim();
       var overlay=document.createElement("div");overlay.className="agx-rewarded-overlay";
@@ -201,8 +204,8 @@ function sdkSource(defaultMiniappId: string, requestOrigin: string) {
       var sponsor=document.createElement("a");sponsor.href=botUrl;sponsor.target="_blank";sponsor.rel="noopener noreferrer";sponsor.className="agx-rewarded-sponsored";sponsor.innerHTML="<span class='agx-rewarded-mark' aria-hidden='true'></span><span>Ad &middot; Sponsored by</span><strong>AdsGalaxy</strong>";
       var countdownBox=document.createElement("div");countdownBox.className="agx-rewarded-countdown";var label=document.createElement("div");label.className="agx-rewarded-countdown-label";label.innerHTML="<span>Skip in <strong>15s</strong></span>";var ring=document.createElement("div");ring.className="agx-rewarded-ring-wrap";ring.innerHTML="<svg class='agx-rewarded-ring' viewBox='0 0 48 48' aria-hidden='true'><circle class='agx-rewarded-ring-track' cx='24' cy='24' r='20'></circle><circle class='agx-rewarded-ring-progress' cx='24' cy='24' r='20'></circle></svg><span class='agx-rewarded-ring-text'>15</span>";var progress=ring.querySelector(".agx-rewarded-ring-progress"),ringText=ring.querySelector(".agx-rewarded-ring-text"),ringLength=2*Math.PI*20;progress.style.strokeDasharray=String(ringLength);progress.style.strokeDashoffset="0";countdownBox.appendChild(label);countdownBox.appendChild(ring);
       content.appendChild(sponsor);head.appendChild(countdownBox);panel.appendChild(content);overlay.appendChild(style);overlay.appendChild(panel);document.body.style.overflow="hidden";document.body.appendChild(overlay);
-      impTimer=setTimeout(function(){impressionSent=true;track({event_type:"impression_recorded",watch_duration_seconds:1.5});},1500);
-      interval=setInterval(function(){var remaining=Math.max(0,Math.ceil(max-elapsed())),passed=Math.min(max,elapsed());label.innerHTML="<span>Skip in <strong>"+remaining+"s</strong></span>";ringText.textContent=String(remaining);progress.style.strokeDashoffset=String(ringLength*(passed/max));if(remaining<=0)complete();else if(impressionSent&&remaining%5===0)track({event_type:"watch_update",watch_duration_seconds:elapsed()});},250);
+      impTimer=setTimeout(function(){impressionSent=true;track({event_type:"impression_recorded",watch_duration_seconds:1.5}).catch(function(){});},1500);
+      interval=setInterval(function(){var remaining=Math.max(0,Math.ceil(max-elapsed())),passed=Math.min(max,elapsed());label.innerHTML="<span>Skip in <strong>"+remaining+"s</strong></span>";ringText.textContent=String(remaining);progress.style.strokeDashoffset=String(ringLength*(passed/max));if(remaining<=0)complete();else if(impressionSent&&remaining%5===0)track({event_type:"watch_update",watch_duration_seconds:elapsed()}).catch(function(){});},250);
       completeTimer=setTimeout(complete,max*1000);close.onclick=closeOverlay;document.addEventListener("visibilitychange",vis);window.addEventListener("pagehide",hide);
     });
   }
@@ -328,4 +331,3 @@ export async function GET(request: Request) {
     },
   });
 }
-

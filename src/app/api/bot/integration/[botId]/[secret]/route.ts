@@ -56,6 +56,8 @@ function requestIdHash(value: string) {
 
 function validRequestMetadata(body: Payload) {
   const requestId = clean(body.request_id, 128);
+  const hasTimestamp = body.timestamp !== undefined && body.timestamp !== null && body.timestamp !== "";
+  if (!requestId && !hasTimestamp) return { requestId: null, hash: null } as const;
   const timestamp = Number(body.timestamp);
   const now = Math.floor(Date.now() / 1000);
   if (requestId.length < 16 || !/^[A-Za-z0-9._:-]+$/.test(requestId)) return { error: "A valid request_id is required" } as const;
@@ -104,14 +106,16 @@ async function handleIntegration(request: Request, params: Promise<{ botId: stri
   const metadata = validRequestMetadata(body);
   if ("error" in metadata) return recordError(bot.id, metadata.error!, request, 400);
   const suppliedBotId = clean(body.bot_id);
-  if (!suppliedBotId || suppliedBotId !== String(bot.id)) {
+  if (suppliedBotId && suppliedBotId !== String(bot.id)) {
     return recordError(bot.id, "Bot identifier does not match this Integration URL", request, 403);
   }
-  const [replays] = await pool.query<RowDataPacket[]>(
-    "SELECT id FROM bot_integration_events WHERE bot_id = ? AND request_id_hash = ? LIMIT 1",
-    [bot.id, metadata.hash]
-  );
-  if (replays[0]) return recordError(bot.id, "Request has already been processed", request, 409);
+  if (metadata.hash) {
+    const [replays] = await pool.query<RowDataPacket[]>(
+      "SELECT id FROM bot_integration_events WHERE bot_id = ? AND request_id_hash = ? LIMIT 1",
+      [bot.id, metadata.hash]
+    );
+    if (replays[0]) return recordError(bot.id, "Request has already been processed", request, 409);
+  }
   if (body.test === true || clean(body.test) === "1" || clean(body.test).toLowerCase() === "true") {
     await Promise.all([
       pool.query("UPDATE bots SET integration_installed_at = COALESCE(integration_installed_at, NOW()), integration_last_error_at = NULL, integration_last_error = NULL WHERE id = ?", [bot.id]),
@@ -124,7 +128,7 @@ async function handleIntegration(request: Request, params: Promise<{ botId: stri
     return NextResponse.json({ success: true, message: "Integration test successful", test: true });
   }
 
-  const telegramUserId = numericId(body.telegram_user_id);
+  const telegramUserId = numericId(body.telegram_user_id ?? body.user_id);
   const chatId = numericId(body.chat_id);
   const effectiveUserId = telegramUserId || chatId;
   const effectiveChatId = chatId || telegramUserId;
@@ -201,6 +205,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ bot
 }
 
 export async function GET(request: Request, { params }: { params: Promise<{ botId: string; secret: string }> }) {
-  void request; void params;
-  return NextResponse.json({ success: false, message: "Use POST with a JSON body" }, { status: 405, headers: { Allow: "POST" } });
+  const response = await handleIntegration(request, params, "GET");
+  response.headers.set("Cache-Control", "no-store, max-age=0");
+  return response;
 }

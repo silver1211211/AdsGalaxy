@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { SAFE_TELEGRAM_PARSE_MODE, sendTelegramMessage } from "@/lib/telegram";
+import { sendTelegramMessage } from "@/lib/telegram";
 import { getCurrentPostingSlot } from "@/lib/postingTimes";
 import {
   autoPauseChannel,
@@ -11,7 +11,7 @@ import {
   recordChannelPostSuccess,
   markChannelHealthSuccess,
 } from "@/lib/channelLifecycle";
-import { campaignCategoryMatches } from "@/lib/campaignCategories";
+import { channelCampaignMatchesInventory } from "@/lib/channelAudience";
 import { calculateCampaignScore, getWindowDominanceCap } from "@/lib/campaignPlacement";
 import { getAdvertiserTrustMultipliers } from "@/lib/advertiserTrust";
 import {
@@ -25,7 +25,7 @@ import { createSystemLog, logStatus } from "@/lib/systemLogs";
 import { requireAdServingAllowed, upsertAdminAlert } from "@/lib/productionSafety";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 import { campaignExcludesChannel, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
-import { composeCampaignCreativeText } from "@/lib/campaignCreative";
+import { composeCampaignCreativeTelegramHtml } from "@/lib/campaignCreative";
 import { getChannelUnitPrice } from "@/lib/channelBilling";
 import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
 
@@ -55,6 +55,8 @@ interface CampaignRow {
   original_budget?: string | number;
   pending_liability?: number;
   available_budget_for_placement?: number;
+  is_prioritized?: number | boolean;
+  created_at?: string | Date;
 }
 
 interface ChannelRow {
@@ -133,35 +135,6 @@ async function sendTelegramMessageWithRetries(chatId: string | number, text: str
   }
 
   return { ok: false, result: lastResult, attempts: 3, permanent: null };
-}
-
-function parseJsonArray(value: unknown): string[] {
-  if (!value) return [];
-  if (Array.isArray(value)) return value.map(String);
-
-  try {
-    const parsed = JSON.parse(String(value));
-    return Array.isArray(parsed) ? parsed.map(String) : [];
-  } catch {
-    return [];
-  }
-}
-
-function normalizeTarget(value: string) {
-  return value.toLowerCase().replace(/[_\s-]+/g, "");
-}
-
-function campaignMatchesChannel(campaign: CampaignRow, channel: ChannelRow) {
-  const categoryMatches = campaignCategoryMatches(campaign.category, parseJsonArray(channel.categories));
-
-  if (!categoryMatches) return false;
-
-  const campaignContinents = parseJsonArray(campaign.continents).map(normalizeTarget);
-  const channelContinents = parseJsonArray(channel.audience_continents).map(normalizeTarget);
-
-  return campaignContinents.includes("global")
-    || channelContinents.includes("global")
-    || campaignContinents.some((continent) => channelContinents.includes(continent));
 }
 
 function buildPostMaps(posts: RecentPostRow[], hasDeletedAtColumn: boolean) {
@@ -287,10 +260,12 @@ export async function GET(req: NextRequest) {
             WHERE d.campaign_id = c.id AND d.created_at >= CURDATE()), 0)) < c.daily_budget_limit
         )
         AND COALESCE(u.advertiser_trust_level, 'new') != 'restricted'
-      ORDER BY budget DESC
+      ORDER BY COALESCE(c.is_prioritized, 0) DESC, budget DESC
       LIMIT ?
     `, [campaignLimit]);
     let campaigns = campaignRows as CampaignRow[];
+    const prioritizedCampaigns = campaigns.filter((campaign) => Boolean(campaign.is_prioritized));
+    if (prioritizedCampaigns.length > 0) campaigns = prioritizedCampaigns;
 
     if (campaigns.length > 0) {
       const activePostDeleteFilter = schedulerSchema.hasPostDeletedAtColumn ? "AND cp.deleted_at IS NULL" : "";
@@ -438,11 +413,10 @@ export async function GET(req: NextRequest) {
       SELECT c.*
       FROM channels c
       WHERE c.status = 'active' AND c.is_deleted = FALSE
-      AND COALESCE(c.health_status, 'healthy') IN ('healthy','warning')
       AND (
         SELECT COUNT(*) FROM campaign_posts cp
         WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 1 DAY
-        ${schedulerSchema.hasPostPostingModeColumn ? "AND cp.posting_mode = 'scheduled'" : ""}
+          AND cp.status != 'delivery_failed'
       ) < c.posts_per_day
       ${timingConditions}
       ORDER BY c.id ASC
@@ -508,6 +482,16 @@ export async function GET(req: NextRequest) {
       dailyRows.map((row: any) => [Number(row.campaign_id), Number(row.count)])
     );
 
+    const [lifetimeRows]: any = await pool.query(`
+      SELECT campaign_id, COUNT(*) count
+      FROM campaign_posts
+      WHERE campaign_id IN (?) AND status IN ('active','posted','sent','replaced','deleted','already_missing')
+      GROUP BY campaign_id
+    `, [campaignIds]);
+    const lifetimeCounts = new Map<number, number>(
+      lifetimeRows.map((row: any) => [Number(row.campaign_id), Number(row.count)])
+    );
+
     const [recentPosts]: any = await pool.query(`
       SELECT campaign_id, channel_id, created_at, status${schedulerSchema.hasPostDeletedAtColumn ? ", deleted_at" : ""}
       FROM campaign_posts
@@ -566,7 +550,12 @@ export async function GET(req: NextRequest) {
           return false;
         }
 
-        if (!campaignMatchesChannel(campaign, channel)) {
+        if (!channelCampaignMatchesInventory({
+          campaignCategory: campaign.category,
+          campaignAudience: campaign.continents,
+          channelCategories: channel.categories,
+          channelAudience: channel.audience_continents,
+        })) {
           incrementSkip("targeting_mismatch");
           return false;
         }
@@ -606,9 +595,21 @@ export async function GET(req: NextRequest) {
             inventoryScore: Number(channel.inventory_score || 50)
           })
         }))
-        .sort((a, b) => b.score.score - a.score.score);
+        .sort((a, b) => {
+          if (prioritizedCampaigns.length > 0) {
+            const aDelivered = (lifetimeCounts.get(a.campaign.id) || 0) + (placementCounts.get(a.campaign.id) || 0);
+            const bDelivered = (lifetimeCounts.get(b.campaign.id) || 0) + (placementCounts.get(b.campaign.id) || 0);
+            if (aDelivered !== bDelivered) return aDelivered - bDelivered;
+            const createdDifference = new Date(a.campaign.created_at || 0).getTime() - new Date(b.campaign.created_at || 0).getTime();
+            if (createdDifference !== 0) return createdDifference;
+            return a.campaign.id - b.campaign.id;
+          }
+          return b.score.score - a.score.score;
+        });
 
-      const dominanceEligible = eligibleCampaigns.length > 1
+      const dominanceEligible = prioritizedCampaigns.length > 0
+        ? scoredCampaigns
+        : eligibleCampaigns.length > 1
         ? scoredCampaigns.filter(({ campaign }) => (placementCounts.get(campaign.id) || 0) < dominanceCap)
         : scoredCampaigns;
 
@@ -702,9 +703,9 @@ export async function GET(req: NextRequest) {
       };
 
       attemptedPosts++;
-      const result = await sendTelegramMessageWithRetries(channel.chat_id, composeCampaignCreativeText(campaign.campaign_title, campaign.message_text), {
+      const result = await sendTelegramMessageWithRetries(channel.chat_id, composeCampaignCreativeTelegramHtml(campaign.campaign_title, campaign.message_text), {
         photo: campaign.image_url,
-        parse_mode: SAFE_TELEGRAM_PARSE_MODE,
+        parse_mode: "HTML",
         reply_markup: replyMarkup
       });
 

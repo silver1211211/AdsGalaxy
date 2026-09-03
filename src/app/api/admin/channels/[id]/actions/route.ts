@@ -4,7 +4,7 @@ import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { checkChannelHealth, markChannelHealthSuccess, autoPauseChannel } from "@/lib/channelLifecycle";
-import { clearPrivateTrackingAssignment } from "@/lib/privateChannelTrackingOnboarding";
+import { clearPrivateTrackingAssignment, onboardPrivateChannelTracking } from "@/lib/privateChannelTrackingOnboarding";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import { refreshChannelViews } from "@/lib/channelAdminViewRefresh";
 import { settleChannelCampaigns } from "@/lib/channelSettlement";
@@ -13,7 +13,7 @@ import { notifyChannelApproved, notifyChannelRejected, notifyChannelRemoved } fr
 
 type ChannelRow = RowDataPacket & {
   id: number; user_id: number; status: string; is_deleted: number;
-  chat_id: string; publisher_trust_score: number | string;
+  chat_id: string; channel_type: "public" | "private"; publisher_trust_score: number | string;
   trust_score_frozen_until: Date | null; under_review: number;
   settlement_excluded_until: Date | null; publisher_status: string; publisher_is_banned: number;
   title: string; telegram_id: string | number | null;
@@ -80,7 +80,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (REASON_REQUIRED.has(action) && reason.length < 3) return NextResponse.json({ error: "A reason is required" }, { status: 400 });
 
   const [rows] = await pool.query<ChannelRow[]>(
-    `SELECT ch.id,ch.user_id,ch.status,ch.is_deleted,ch.chat_id,ch.publisher_trust_score,
+    `SELECT ch.id,ch.user_id,ch.status,ch.is_deleted,ch.chat_id,ch.channel_type,ch.publisher_trust_score,
        ch.trust_score_frozen_until,ch.under_review,ch.settlement_excluded_until,ch.title,
        u.status publisher_status,u.is_banned publisher_is_banned,u.telegram_id
      FROM channels ch JOIN users u ON u.id=ch.user_id WHERE ch.id=? LIMIT 1`, [channelId]
@@ -95,6 +95,18 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     await pool.query("UPDATE channels SET status='paused',paused_reason='Paused by admin control center' WHERE id=?", [channelId]);
     newValue = { status: "paused" };
   } else if (action === "resume") {
+    const tracking = await onboardPrivateChannelTracking({
+      channelId,
+      chatId: channel.chat_id,
+      channelType: channel.channel_type === "private" ? "private" : "public",
+      schema: await getChannelPrivacySchema(),
+    });
+    if (channel.channel_type === "private" && tracking.status !== "active") {
+      return NextResponse.json({
+        error: "Private channel activation requires a verified MTProto tracking-account membership.",
+        tracking,
+      }, { status: 409 });
+    }
     // The status<>'active' guard makes this a compare-and-swap: a retried or
     // double-submitted request only ever sees affectedRows=0 the second time,
     // so the approval notification never fires twice.

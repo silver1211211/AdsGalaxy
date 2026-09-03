@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { normalizeCampaignCategory } from "@/lib/campaignCategories";
+import { serializeExplicitCampaignAudience } from "@/lib/channelAudience";
 import { normalizeAdvertiserTargeting, targetingDbParams } from "@/lib/advertiserTargeting";
 import { calculateCampaignQualityScore } from "@/lib/advertiserTrust";
 import { validatePostbackUrl } from "@/lib/conversionTracking";
@@ -58,7 +59,17 @@ export async function POST(request: Request) {
     const cpc = type === "clicks" ? submittedCpc : 0;
     const cpm = type === "clicks" ? cpc : submittedCpm;
     const category = normalizeCampaignCategory(formData.get("category"));
-    const continents = formData.get("continents") as string;
+    let continents = String(formData.get("continents") || "");
+    if (type !== "broadcast") {
+      try {
+        continents = serializeExplicitCampaignAudience(continents);
+      } catch (error) {
+        throw new CampaignCreatePublicError(
+          "INVALID_TARGETING",
+          error instanceof Error ? error.message : "Target audience is invalid."
+        );
+      }
+    }
     const imageFile = formData.get("image") as File | null;
     const directPlacementMode = String(formData.get("direct_placement_mode") || "network") === "direct" ? "direct" : "network";
     const directInventoryScope = String(formData.get("direct_inventory_scope") || "network");
@@ -316,15 +327,15 @@ export async function GET(request: Request) {
          created_at, ${campaignUpdatedAtExpr} AS updated_at,
          CASE WHEN type = 'broadcast' THEN GREATEST(COALESCE(budget, 0), 0) ELSE budget END as remaining_budget,
          CASE
-           WHEN type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
+           WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
            ELSE ${campaignPostImpressionsExpr}
          END as impressions,
          CASE
-           WHEN type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= CURDATE()), 0)
+           WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= CURDATE()), 0)
            ELSE ${campaignPostTodayImpressionsExpr}
          END as today_impressions,
          CASE
-           WHEN type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND bd.created_at < CURDATE()), 0)
+           WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND bd.created_at < CURDATE()), 0)
            ELSE ${campaignPostYesterdayImpressionsExpr}
          END as yesterday_impressions,
          CASE
@@ -364,28 +375,28 @@ export async function GET(request: Request) {
          END as active_bots,
          CASE
            WHEN (
-             CASE WHEN type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
+             CASE WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
              ELSE ${campaignPostImpressionsExpr} END
            ) > 0
            THEN (
              CASE WHEN type = 'broadcast' THEN 0
              ELSE COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0) END
            ) / (
-             CASE WHEN type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
+             CASE WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
              ELSE ${campaignPostImpressionsExpr} END
            ) * 100
            ELSE 0
          END as ctr,
          CASE
            WHEN (
-             CASE WHEN type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
+             CASE WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
              ELSE ${campaignPostImpressionsExpr} END
            ) > 0
            THEN (
              CASE WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
              ELSE COALESCE(c.channel_spend, 0) END
            ) / (
-             CASE WHEN type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
+             CASE WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
              ELSE ${campaignPostImpressionsExpr} END
            ) * 1000
            ELSE 0

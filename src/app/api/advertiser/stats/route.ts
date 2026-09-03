@@ -1,19 +1,28 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy advertiser aggregate payloads are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 import { advertiserConversionSummary } from "@/lib/conversionTracking";
 import { columnExists } from "@/lib/schemaGuards";
+import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByAdvertiser } from "@/lib/miniappCampaignMetrics";
 
 export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
-    const hasCampaignPostViews = await columnExists(pool, "campaign_posts", "views");
-    const hasBroadcastDeliveryCost = await columnExists(pool, "broadcast_deliveries", "cost");
-    const hasClickSettlementAdvertiserPaid = await columnExists(pool, "ad_settlements", "advertiser_paid");
-    const hasViewSettlementAdvertiserPaid = await columnExists(pool, "ad_settlements_views", "advertiser_paid");
-    const hasViewSettlementCampaignId = await columnExists(pool, "ad_settlements_views", "campaign_id");
+    const user = await getAuthenticatedUserStatus(initData, { request });
+    const [
+      hasCampaignPostViews,
+      hasBroadcastDeliveryCost,
+      hasClickSettlementAdvertiserPaid,
+      hasViewSettlementAdvertiserPaid,
+      hasViewSettlementCampaignId,
+    ] = await Promise.all([
+      columnExists(pool, "campaign_posts", "views"),
+      columnExists(pool, "broadcast_deliveries", "cost"),
+      columnExists(pool, "ad_settlements", "advertiser_paid"),
+      columnExists(pool, "ad_settlements_views", "advertiser_paid"),
+      columnExists(pool, "ad_settlements_views", "campaign_id"),
+    ]);
     const canUseViewSettlementSpend = hasViewSettlementAdvertiserPaid && hasViewSettlementCampaignId;
     const campaignPostImpressionsExpr = hasCampaignPostViews
       ? "COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.campaign_id = c.id), 0)"
@@ -58,7 +67,6 @@ export async function GET(request: Request) {
       ...(hasClickSettlementAdvertiserPaid ? [user.id] : []),
       ...(canUseViewSettlementSpend ? [user.id] : []),
       ...(hasBroadcastDeliveryCost ? [user.id] : []),
-      user.id,
     ];
 
     // 1. Get Ad Balance from user table
@@ -107,15 +115,15 @@ export async function GET(request: Request) {
         COALESCE((SELECT COUNT(*) FROM ad_conversions conv WHERE conv.campaign_type = 'campaign' AND conv.campaign_id = c.id), 0) as conversions,
         COALESCE((SELECT SUM(conv.conversion_value) FROM ad_conversions conv WHERE conv.campaign_type = 'campaign' AND conv.campaign_id = c.id), 0) as conversion_value,
         CASE
-          WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
+          WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
           ELSE ${campaignPostImpressionsExpr}
         END as impressions,
         CASE
-          WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= CURDATE()), 0)
+          WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= CURDATE()), 0)
           ELSE ${campaignPostTodayImpressionsExpr}
         END as today_impressions,
         CASE
-          WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND bd.created_at < CURDATE()), 0)
+          WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND bd.created_at < CURDATE()), 0)
           ELSE ${campaignPostYesterdayImpressionsExpr}
         END as yesterday_impressions,
         CASE
@@ -138,28 +146,28 @@ export async function GET(request: Request) {
         END as today_spend,
         CASE
           WHEN (
-            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
+            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
             ELSE ${campaignPostImpressionsExpr} END
           ) > 0
           THEN (
             CASE WHEN c.type = 'broadcast' THEN 0
             ELSE COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0) END
           ) / (
-            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
+            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
             ELSE ${campaignPostImpressionsExpr} END
           ) * 100
           ELSE 0
         END as ctr,
         CASE
           WHEN (
-            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
+            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
             ELSE ${campaignPostImpressionsExpr} END
           ) > 0
           THEN (
             CASE WHEN c.type = 'broadcast' THEN ${broadcastSpendExpr}
             ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) END
           ) / (
-            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT FLOOR(COUNT(*) / 5) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
+            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
             ELSE ${campaignPostImpressionsExpr} END
           ) * 1000
           ELSE 0
@@ -188,35 +196,20 @@ export async function GET(request: Request) {
         c.status,
         c.remaining_budget as budget,
         c.remaining_budget,
+        c.advertiser_cpm_bid as cpm,
         c.created_at,
         COALESCE((SELECT COUNT(*) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0) as conversions,
         COALESCE((SELECT SUM(conv.conversion_value) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0) as conversion_value,
-        COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as impressions,
-        COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= CURDATE()), 0) as today_impressions,
-        COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND i.created_at < CURDATE()), 0) as yesterday_impressions,
-        COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0) as clicks,
-        COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) as spend,
-        COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id AND i.created_at >= CURDATE()), 0) as today_spend,
-        CASE WHEN COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) > 0
-          THEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0)
-            / COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 1) * 100
-          ELSE 0 END as ctr,
-        CASE WHEN COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0) > 0
-          THEN COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0)
-            / COALESCE((SELECT COUNT(*) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 1) * 1000
-          ELSE 0 END as average_cpm,
-        CASE WHEN COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 0) > 0
-          THEN COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id), 0)
-            / COALESCE((SELECT COUNT(*) FROM ad_click_attribution ac WHERE ac.campaign_type = 'miniapp' AND ac.campaign_id = c.id), 1)
-          ELSE 0 END as average_cpc,
-        (SELECT MAX(i.created_at) FROM miniapp_internal_ad_impressions i WHERE i.campaign_id = c.id) as last_displayed_at
+        0 as delivery_metrics_loaded_separately
        FROM miniapp_rewarded_campaigns c
        WHERE c.advertiser_id = ?
        ORDER BY c.created_at DESC
        LIMIT 3`,
       [user.id]
     );
-    const recentCampaigns = [...channelAndBotCampaigns, ...miniAppCampaigns]
+    const miniAppMetrics = await getMiniAppCampaignMetricsByAdvertiser(user.id);
+    const normalizedMiniAppCampaigns = miniAppCampaigns.map((row: any) => applyMiniAppCampaignMetrics(row, miniAppMetrics));
+    const recentCampaigns = [...channelAndBotCampaigns, ...normalizedMiniAppCampaigns]
       .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
       .slice(0, 3);
 
@@ -247,25 +240,10 @@ export async function GET(request: Request) {
       [user.id]
     );
     const totalDeposited = parseFloat(depositResult[0]?.total || "0");
-    // Get total miniapp impressions for this advertiser
-    const [miniappImpressionsResult]: any = await pool.query(
-      `SELECT COUNT(i.id) as total
-       FROM miniapp_internal_ad_impressions i
-       JOIN miniapp_rewarded_campaigns mrc ON i.campaign_id = mrc.id
-       WHERE mrc.advertiser_id = ?`,
-      [user.id]
-    );
-    const miniappImpressions = Number(miniappImpressionsResult[0]?.total || 0);
-    const [miniappClicksResult]: any = await pool.query(
-      `SELECT COUNT(*) as total
-       FROM ad_click_attribution ac
-       JOIN miniapp_rewarded_campaigns mrc ON ac.campaign_type = 'miniapp' AND ac.campaign_id = mrc.id
-       WHERE mrc.advertiser_id = ?`,
-      [user.id]
-    );
-    const miniappClicks = Number(miniappClicksResult[0]?.total || 0);
+    const miniappImpressions = [...miniAppMetrics.values()].reduce((sum, metric) => sum + metric.impressions, 0);
+    const miniappClicks = [...miniAppMetrics.values()].reduce((sum, metric) => sum + metric.clicks, 0);
     const [broadcastViewsResult]: any = await pool.query(
-      `SELECT FLOOR(COUNT(*) / 5) as total_views
+      `SELECT COUNT(*) as total_views
        FROM broadcast_deliveries bd
        JOIN campaigns c ON bd.campaign_id = c.id
        WHERE c.user_id = ? AND bd.status = 'sent'`,
@@ -283,11 +261,12 @@ export async function GET(request: Request) {
           ${totalClickSettlementSpendExpr}
           + ${totalViewSettlementSpendExpr}
           + ${totalBroadcastSpendExpr}
-          + COALESCE((SELECT SUM(i.cost) FROM miniapp_internal_ad_impressions i JOIN miniapp_rewarded_campaigns mrc ON i.campaign_id = mrc.id WHERE mrc.advertiser_id = ?), 0)
+          + 0
         ) as spend`,
       adSpendParams
     );
-    const adSpend = Number(adSpendRows[0]?.[0]?.spend || 0);
+    const miniappSpend = [...miniAppMetrics.values()].reduce((sum, metric) => sum + metric.spend, 0);
+    const adSpend = Number(adSpendRows[0]?.[0]?.spend || 0) + miniappSpend;
 
     return NextResponse.json({
       ad_balance: adBalance,

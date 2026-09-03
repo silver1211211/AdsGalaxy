@@ -2,9 +2,10 @@ import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { createSystemLog } from "@/lib/systemLogs";
+import { hasActiveUserEnforcementExemption } from "@/lib/userEnforcementExemptions";
 
 export const PUBLISHER_TRUST_BAN_THRESHOLD = 20;
-export const PUBLISHER_AVAILABLE_BALANCE_THRESHOLD = 9.8;
+export const PUBLISHER_AVAILABLE_BALANCE_THRESHOLD = 8.4;
 export const PUBLISHER_TRUST_BAN_REASON = "Low Trust Score with Withdrawable Balance Threshold Reached";
 
 type CandidateRow = RowDataPacket & { id: number };
@@ -72,6 +73,10 @@ export async function enforcePublisherTrust(limit = 500): Promise<PublisherTrust
   for (const candidate of candidates) {
     const connection = await pool.getConnection();
     try {
+      if (await hasActiveUserEnforcementExemption(pool, candidate.id)) {
+        result.skipped++;
+        continue;
+      }
       await connection.beginTransaction();
       const [rows] = await connection.query<PublisherRow[]>(
         `SELECT id,publisher_trust_score,publisher_risk_score,balance_available,status,is_banned
@@ -88,6 +93,14 @@ export async function enforcePublisherTrust(limit = 500): Promise<PublisherTrust
       const trustScore = numberValue(publisher.publisher_trust_score);
       const availableBalance = numberValue(publisher.balance_available);
       if (trustScore > PUBLISHER_TRUST_BAN_THRESHOLD) {
+        await connection.rollback();
+        result.skipped++;
+        continue;
+      }
+
+      // Recheck inside the same locked transaction immediately before any ban
+      // transition so a concurrent admin exemption always wins.
+      if (await hasActiveUserEnforcementExemption(connection, publisher.id)) {
         await connection.rollback();
         result.skipped++;
         continue;

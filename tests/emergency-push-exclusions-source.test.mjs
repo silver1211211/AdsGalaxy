@@ -9,7 +9,7 @@ const exclusions = readFileSync("src/lib/campaignInventoryExclusions.ts", "utf8"
 test("emergency channel push enforces campaign channel exclusions before posting", () => {
   assert.match(route, /campaignExcludesChannel, campaignExcludesIdentifier, loadCampaignExclusions/);
   assert.match(route, /loadCampaignExclusions\(pool, "campaign", \[Number\(campaign\.id\)\], "channel"\)/);
-  assert.match(route, /channels\.filter\(\(channel\) => !campaignExcludesChannel\(channelExclusions, Number\(campaign\.id\), channel\)\)/);
+  assert.match(route, /channels\.filter\(\(channel\) =>[\s\S]*?&& !campaignExcludesChannel\(channelExclusions, Number\(campaign\.id\), channel\)/);
   assert.match(route, /skippedByExclusion: channels\.length - eligibleChannels\.length/);
   assert.match(route, /let skipped = skippedByLimit \+ skippedByExclusion/);
 });
@@ -39,7 +39,7 @@ test("emergency broadcast push enforces campaign bot exclusions before posting",
   assert.match(route, /loadCampaignExclusions\(pool, "campaign", \[Number\(campaign\.id\)\], "bot"\)/);
   assert.match(route, /healthyBots\.filter\(\(bot\) => !campaignExcludesIdentifier\(botExclusions, Number\(campaign\.id\), bot\.bot_username\)\)/);
   assert.match(route, /skippedByExclusion: healthyBots\.length - exclusionFilteredBots\.length/);
-  assert.match(route, /const skipped = skippedByLimit \+ skippedByExclusion/);
+  assert.match(route, /eligible\.skippedByExclusion/);
 });
 
 test("emergency exclusions do not change lifecycle settlement billing moderation or UI routes", () => {

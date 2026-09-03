@@ -199,6 +199,14 @@ async function fetchDeletionBatch(options: {
     params.push(MAX_CLEANUP_RETRY_RUNS);
   }
 
+  if (!options.retryOnly && !options.olderThan24Hours && options.hasCleanupStatus) {
+    filters.push("COALESCE(cp.cleanup_status, '') <> 'failed'");
+  }
+
+  if (options.retryOnly) {
+    filters.push("(c.status <> 'paused' OR COALESCE(c.pause_reason, '') <> 'user_paused' OR c.channel_settlement_finalized_at IS NOT NULL)");
+  }
+
   if (options.olderThan24Hours) {
     const ageExpression = options.hasDeliveryConfirmedAt
       ? "COALESCE(cp.delivery_confirmed_at, cp.created_at)"

@@ -9,16 +9,12 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import MiniAppAnalyticsDashboard from "@/components/publisher/MiniAppAnalyticsDashboard";
+import { buildMiniappSdkUrl } from "@/lib/miniappSdkUrl";
+import MiniAppRewardCallbackPanel from "@/components/publisher/MiniAppRewardCallbackPanel";
+import { canonicalMiniappDisplayExample, directRewardCallbackPayloadExample, minimalMiniappDisplayExample } from "@/lib/miniappIntegrationExamples";
 
 const appOrigin = (
   process.env.NEXT_PUBLIC_APP_URL
-  || process.env.NEXT_PUBLIC_ADSGALAXY_APP_URL
-  || "https://app.adsgalaxy.online"
-).replace(/\/$/, "");
-
-const sdkOrigin = (
-  process.env.NEXT_PUBLIC_SDK_URL
-  || process.env.NEXT_PUBLIC_APP_URL
   || process.env.NEXT_PUBLIC_ADSGALAXY_APP_URL
   || "https://app.adsgalaxy.online"
 ).replace(/\/$/, "");
@@ -49,7 +45,7 @@ interface MiniAppDetailsScreenProps {
   isResuming?: boolean;
 }
 
-type CopiedCode = "id" | "header" | "body" | "bot_url" | "miniapp_url" | "webapp_url" | null;
+type CopiedCode = "id" | "header" | "body" | "callback" | "bot_url" | "miniapp_url" | "webapp_url" | null;
 type HelpField = "bot_url" | "miniapp_url" | "webapp_url" | null;
 
 type TelegramWebApp = {
@@ -232,8 +228,14 @@ export default function MiniAppDetailsScreen({
   const miniappId = Number(miniapp.id);
   const isValidMiniappId = Number.isInteger(miniappId) && miniappId > 0;
   const canUseIntegrationCode = isValidMiniappId && ["active", "approved"].includes(String(miniapp.status));
-  const headerCode = `<script src="${sdkOrigin}/sdk.js?id=${miniappId}"></script>`;
-  const bodyCode = `<button onclick="window.showAdsGalaxy({ miniappId: ${miniappId} })">\n  Watch Ad\n</button>`;
+  const sdkUrl = buildMiniappSdkUrl(
+    miniappId,
+    process.env.NEXT_PUBLIC_SDK_URL,
+    process.env.NEXT_PUBLIC_APP_URL,
+    process.env.NEXT_PUBLIC_ADSGALAXY_APP_URL,
+  );
+  const headerCode = sdkUrl ? `<script src="${sdkUrl}"></script>` : "";
+  const bodyCode = `${minimalMiniappDisplayExample}\n\n// Optional robust handling:\n${canonicalMiniappDisplayExample}`;
 
   return (
     <motion.div
@@ -351,6 +353,13 @@ export default function MiniAppDetailsScreen({
                           copied={copiedCode === "body"}
                           onCopy={() => copyCode("body", bodyCode)}
                         />
+                        <IntegrationCodeBlock
+                          title="Reward Callback Payload"
+                          code={directRewardCallbackPayloadExample}
+                          copyLabel="Copy Callback"
+                          copied={copiedCode === "callback"}
+                          onCopy={() => copyCode("callback", directRewardCallbackPayloadExample)}
+                        />
                       </>
                     ) : (
                       <div className="rounded-2xl border border-amber-100 bg-amber-50 px-4 py-4 text-sm font-bold text-amber-700">
@@ -370,6 +379,8 @@ export default function MiniAppDetailsScreen({
               )}
             </AnimatePresence>
           </div>
+
+          {isValidMiniappId && <MiniAppRewardCallbackPanel miniappId={miniappId} />}
 
           {/* ── General Information ── */}
           <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm transition-shadow duration-200 hover:shadow-md">

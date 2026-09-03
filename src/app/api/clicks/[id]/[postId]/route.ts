@@ -5,6 +5,7 @@ import { appendClickId, recordAdClick } from "@/lib/conversionTracking";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { debitChannelClick } from "@/lib/channelFastBilling";
 import { parsePositiveIntegerId } from "@/lib/routeIds";
+import { recordChannelTrafficEvent, telemetryCountry } from "@/lib/channelTrafficTelemetry";
 
 type CampaignPostRow = RowDataPacket & {
   id: number;
@@ -143,9 +144,10 @@ export async function GET(
     return redirectToFallback();
   }
 
+  let clickRecorded: { id: number; isNew: boolean } | null = null;
   try {
     const isBot = /bot|spider|crawl|slurp|github-camo|googlebot|bingbot|yandex|baidu/i.test(userAgent);
-    const clickRecorded = await recordLegacyCampaignClick({ campaignId, postId, ip, userAgent, fingerprint, isBot });
+    clickRecorded = await recordLegacyCampaignClick({ campaignId, postId, ip, userAgent, fingerprint, isBot });
 
     if (clickRecorded && campaignPost) {
       await debitChannelClick(Number(postId), clickRecorded.id);
@@ -168,6 +170,26 @@ export async function GET(
     }
   } catch (error) {
     console.error("Click tracking failed; redirect preserved", { campaign_id: campaignId, post_id: postId, error: error instanceof Error ? error.message : "unknown_error" });
+  }
+  if (campaignPost?.channel_id) {
+    try {
+      const requestKey = req.headers.get("x-request-id") || ["channel-click", campaignId, postId, fingerprint, Math.floor(Date.now() / 300_000)].join(":");
+      await recordChannelTrafficEvent({
+        eventKey: requestKey,
+        eventType: "click",
+        channelId: Number(campaignPost.channel_id),
+        campaignId,
+        postId,
+        ip,
+        userAgent,
+        sessionId: req.cookies.get("session_id")?.value || req.cookies.get("user_session")?.value,
+        fingerprint,
+        country: telemetryCountry(req.headers),
+        duplicate: Boolean(clickRecorded && !clickRecorded.isNew),
+      });
+    } catch (error) {
+      console.error("Channel telemetry failed; click flow preserved", { campaign_id: campaignId, post_id: postId, error: error instanceof Error ? error.message : "unknown_error" });
+    }
   }
   return NextResponse.redirect(targetUrl, 302);
 }

@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Zap, Megaphone } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Zap, Megaphone, CircleHelp } from "lucide-react";
 import EmptyState from "@/components/ui/EmptyState";
 import { SkeletonTableRows } from "@/components/ui/Skeleton";
 import Modal from "@/components/ui/Modal";
@@ -23,6 +23,7 @@ type ConfirmAction = {
 type EmergencyAction = {
   id: number;
   mode: "fill_empty_slots" | "replace_everything";
+  isBroadcast: boolean;
 } | null;
 
 type AdminCampaignRow = {
@@ -47,6 +48,9 @@ type AdminCampaignRow = {
   device_policy?: string;
   os_policy?: string;
   frequency_cap_per_user?: string | number;
+  direct_placement_mode?: string;
+  direct_inventory_scope?: string;
+  direct_inventory_metadata?: string;
   start_at?: string | null;
   end_at?: string | null;
   daily_budget_limit?: string | number | null;
@@ -91,6 +95,48 @@ function renderTargetingList(value: unknown) {
   return String(value) || "All";
 }
 
+function targetingValues(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(String(value));
+    if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean);
+  } catch {
+    return String(value).split(",").map((item) => item.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+function countryName(code: string) {
+  try {
+    return new Intl.DisplayNames(["en"], { type: "region" }).of(code.toUpperCase()) || code;
+  } catch {
+    return code;
+  }
+}
+
+function CompactCountries({ value }: { value: unknown }) {
+  const countries = targetingValues(value).map(countryName);
+  if (countries.length === 0) return <span className="font-medium text-slate-900">All (Worldwide)</span>;
+  const preview = countries.slice(0, 3).join(", ");
+  if (countries.length <= 3) return <span className="font-medium text-slate-900">{preview}</span>;
+  return (
+    <details className="group">
+      <summary className="cursor-pointer list-none font-medium text-slate-900">
+        {preview} <span className="text-blue-600">+{countries.length - 3} more</span>
+      </summary>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {countries.map((country) => <span key={country} className="rounded-full border border-blue-100 bg-blue-50 px-2 py-1 text-[10px] font-semibold text-blue-700">{country}</span>)}
+      </div>
+    </details>
+  );
+}
+
+function placementLabel(campaign: AdminCampaignRow) {
+  if (campaign.direct_placement_mode !== "direct") return `All ${campaign.type_label === "MINI APP" ? "Mini Apps" : campaign.type_label === "BOT" ? "Bots" : "Channels"}`;
+  return campaign.direct_inventory_scope === "inventory" ? "Selected inventory" : "Filtered inventory";
+}
+
 function renderPolicy(value: unknown) {
   const labels: Record<string, string> = {
     allow_all: "Allow all traffic",
@@ -124,6 +170,9 @@ export default function AdminCampaignsPage() {
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [emergencyAction, setEmergencyAction] = useState<EmergencyAction>(null);
   const [typedConfirmation, setTypedConfirmation] = useState("");
+  const [emergencySendAll, setEmergencySendAll] = useState(true);
+  const [emergencyRecipientCount, setEmergencyRecipientCount] = useState("100");
+  const [ignoreEmergencyRules, setIgnoreEmergencyRules] = useState(false);
   const [rejectionReason, setRejectionReason] = useState("");
   const [toast, setToast] = useState<{ type: "success" | "error"; title: string; message: string } | null>(null);
   
@@ -198,7 +247,7 @@ export default function AdminCampaignsPage() {
     }
   };
 
-  const handleEmergencyPush = async (id: number, mode: "fill_empty_slots" | "replace_everything", confirmation = "") => {
+  const handleEmergencyPush = async (id: number, mode: "fill_empty_slots" | "replace_everything", confirmation = "", isBroadcast = false) => {
     const label = mode === "fill_empty_slots" ? "Fill Empty Slots" : "Replace Everything";
 
     setActionLoading(id);
@@ -206,7 +255,15 @@ export default function AdminCampaignsPage() {
       const res = await fetch(`/api/admin/campaigns/${id}/emergency-push`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, confirmation })
+        body: JSON.stringify({
+          mode,
+          confirmation,
+          ignore_rules: ignoreEmergencyRules,
+          ...(isBroadcast ? {
+            send_all: emergencySendAll,
+            recipient_count: emergencySendAll ? undefined : Number(emergencyRecipientCount),
+          } : {}),
+        })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -228,9 +285,22 @@ export default function AdminCampaignsPage() {
     }
   };
   
-  const openViewModal = (campaign: AdminCampaignRow) => {
+  const openViewModal = async (campaign: AdminCampaignRow) => {
     setSelectedCampaign(campaign);
     setViewModalOpen(true);
+    try {
+      const response = await fetch(campaign.campaign_kind === "miniapp"
+        ? "/api/admin/miniapp-rewarded-campaigns"
+        : `/api/admin/campaigns/${campaign.id}`);
+      if (!response.ok) return;
+      const data = await response.json();
+      const details = campaign.campaign_kind === "miniapp"
+        ? data.campaigns?.find((item: AdminCampaignRow) => Number(item.id) === Number(campaign.id))
+        : data.campaign;
+      if (details) setSelectedCampaign((current) => current?.id === campaign.id ? { ...current, ...details } : current);
+    } catch (error) {
+      console.error("Campaign targeting details could not be loaded", error);
+    }
   };
 
   const openConfirmAction = (id: number, kind: string, action: CampaignConfirmActionType, title: string, message: string, danger = false) => {
@@ -250,31 +320,39 @@ export default function AdminCampaignsPage() {
     }
   };
 
-  const openEmergencyConfirm = (id: number, mode: "fill_empty_slots" | "replace_everything") => {
+  const openEmergencyConfirm = (id: number, mode: "fill_empty_slots" | "replace_everything", isBroadcast: boolean) => {
     setTypedConfirmation("");
-    setEmergencyAction({ id, mode });
+    setEmergencySendAll(true);
+    setEmergencyRecipientCount("100");
+    setIgnoreEmergencyRules(false);
+    setEmergencyAction({ id, mode, isBroadcast });
   };
 
   const runEmergencyConfirm = async () => {
     if (!emergencyAction) return;
-    const { id, mode } = emergencyAction;
+    const { id, mode, isBroadcast } = emergencyAction;
     const confirmation = mode === "replace_everything" ? typedConfirmation : "";
     setEmergencyAction(null);
     setTypedConfirmation("");
-    await handleEmergencyPush(id, mode, confirmation);
+    await handleEmergencyPush(id, mode, confirmation, isBroadcast);
   };
 
   const renderContinents = (continentsStr: unknown) => {
-    if (!continentsStr) return <span className="font-medium text-slate-900">All</span>;
+    if (!continentsStr) return <span className="font-medium text-slate-900">All (Worldwide)</span>;
     const continentsText = String(continentsStr);
     try {
       const parsed = JSON.parse(continentsText);
-      if (Array.isArray(parsed) && parsed.length > 0) {
+      const audiences = Array.isArray(parsed)
+        ? parsed
+        : parsed && typeof parsed === "object" && Array.isArray(parsed.audiences)
+          ? parsed.audiences
+          : [];
+      if (audiences.length > 0) {
         return (
           <div className="flex flex-wrap gap-1 mt-1">
-            {parsed.map((continent: string) => (
+            {audiences.map((continent: string) => (
               <span key={continent} className="px-2 py-0.5 bg-blue-50 text-blue-600 border border-blue-100 rounded text-[10px] font-semibold uppercase tracking-wider">
-                {continent.replace(/_/g, " ")}
+                {continent === "global" ? "All (Worldwide)" : continent.replace(/_/g, " ")}
               </span>
             ))}
           </div>
@@ -319,8 +397,10 @@ export default function AdminCampaignsPage() {
         isOpen={!!emergencyAction}
         onClose={() => { setEmergencyAction(null); setTypedConfirmation(""); }}
         onConfirm={runEmergencyConfirm}
-        title={emergencyAction?.mode === "replace_everything" ? "Emergency Push: Replace Everything" : "Emergency Push: Fill Empty Slots"}
-        message={emergencyAction?.mode === "replace_everything"
+        title={emergencyAction?.isBroadcast ? "Emergency Broadcast Push" : emergencyAction?.mode === "replace_everything" ? "Emergency Push: Replace Everything" : "Emergency Push: Fill Empty Slots"}
+        message={emergencyAction?.isBroadcast
+          ? "Send immediately to active eligible bot users, bypassing the normal posting interval."
+          : emergencyAction?.mode === "replace_everything"
           ? "This deletes currently active ads before pushing this campaign. Type CONFIRM to continue."
           : "Emergency push this campaign to eligible empty channel slots now?"}
         confirmBtnText={emergencyAction?.mode === "replace_everything" ? "Replace Everything" : "Push Now"}
@@ -331,7 +411,37 @@ export default function AdminCampaignsPage() {
           value: typedConfirmation,
           onChange: setTypedConfirmation,
         } : undefined}
-      />
+      >
+        {emergencyAction && !emergencyAction.isBroadcast && (
+          <div className="space-y-2 rounded-lg border border-blue-200 bg-blue-50 p-3">
+            <label className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+              <input type="checkbox" checked={ignoreEmergencyRules} onChange={(event) => setIgnoreEmergencyRules(event.target.checked)} />
+              Bypass timing and spacing rules
+              <span title="Pushes immediately without the 3-hour schedule window, recent-post spacing, or same-campaign 24-hour cooldown.">
+                <CircleHelp size={14} className="text-blue-600" />
+              </span>
+            </label>
+            <p className="text-xs text-slate-600">
+              Daily channel post caps and campaign/channel exclusions are always enforced. Leave unchecked to follow all normal placement rules.
+            </p>
+          </div>
+        )}
+        {emergencyAction?.isBroadcast && (
+          <div className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+            <label className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+              <input type="checkbox" checked={emergencySendAll} onChange={(event) => setEmergencySendAll(event.target.checked)} />
+              Send to all active eligible bot users
+            </label>
+            {!emergencySendAll && (
+              <label className="block text-sm font-semibold text-slate-800">
+                Number of broadcasts
+                <input type="number" min="1" step="1" value={emergencyRecipientCount} onChange={(event) => setEmergencyRecipientCount(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2" />
+                <span className="mt-1 block text-xs font-normal text-slate-600">Requests above the currently eligible active-user count are rejected.</span>
+              </label>
+            )}
+          </div>
+        )}
+      </ConfirmationModal>
 
       {/* View Campaign Modal */}
       {viewModalOpen && selectedCampaign && (
@@ -399,15 +509,13 @@ export default function AdminCampaignsPage() {
                     <div><span className="text-slate-500">Approved:</span> <span className="font-medium text-slate-900">{selectedCampaign.advertiser_approved_campaigns || 0}</span></div>
                     <div><span className="text-slate-500">Rejected:</span> <span className="font-medium text-slate-900">{selectedCampaign.advertiser_rejected_campaigns || 0}</span></div>
                     {selectedCampaign.status === "rejected" && selectedCampaign.rejection_reason && <div className="col-span-2 rounded-md border border-red-100 bg-red-50 p-2 text-red-700"><span className="font-semibold">Rejection reason:</span> {selectedCampaign.rejection_reason}</div>}
-                    <div className="col-span-2">
-                      <span className="text-slate-500 block">Continents:</span> 
-                      {renderContinents(selectedCampaign.continents)}
-                    </div>
-                    <div className="col-span-2"><span className="text-slate-500">Category:</span> <span className="font-medium text-slate-900">{selectedCampaign.category || "All"}</span></div>
                     <div className="col-span-2 border-t border-slate-200 pt-3">
-                      <span className="text-slate-500 block mb-2">Full Targeting Configuration:</span>
-                      <div className="grid grid-cols-2 gap-2 rounded-md bg-white p-3 text-xs">
-                        <div><span className="text-slate-500">Countries:</span> <span className="font-medium text-slate-900">{renderTargetingList(selectedCampaign.countries)}</span></div>
+                      <span className="text-slate-500 block mb-2">Full Targeting Configuration</span>
+                      <div className="grid grid-cols-1 gap-2 rounded-md bg-white p-3 text-xs sm:grid-cols-2">
+                        <div><span className="text-slate-500 block">Target audience</span>{selectedCampaign.continents ? renderContinents(selectedCampaign.continents) : <span className="font-medium text-slate-900">{targetingValues(selectedCampaign.countries).length > 0 ? "Specific countries" : "All (Worldwide)"}</span>}</div>
+                        <div><span className="text-slate-500">Placement:</span> <span className="font-medium text-slate-900">{placementLabel(selectedCampaign)}</span></div>
+                        <div className="sm:col-span-2"><span className="text-slate-500 block mb-1">Countries</span><CompactCountries value={selectedCampaign.countries} /></div>
+                        <div><span className="text-slate-500">Category:</span> <span className="font-medium text-slate-900">{renderTargetingList(selectedCampaign.category)}</span></div>
                         <div><span className="text-slate-500">Languages:</span> <span className="font-medium text-slate-900">{renderTargetingList(selectedCampaign.languages)}</span></div>
                         <div><span className="text-slate-500">VPN:</span> <span className="font-medium text-slate-900">{renderPolicy(selectedCampaign.vpn_policy)}</span></div>
                         <div><span className="text-slate-500">Device:</span> <span className="font-medium text-slate-900">{renderPolicy(selectedCampaign.device_policy)}</span></div>
@@ -562,21 +670,21 @@ export default function AdminCampaignsPage() {
                             {campaign.campaign_kind === 'campaign' && (
                               <>
                                 <button
-                                  onClick={() => openEmergencyConfirm(campaign.id, "fill_empty_slots")}
+                                  onClick={() => openEmergencyConfirm(campaign.id, "fill_empty_slots", campaign.type === "broadcast")}
                                   disabled={actionLoading === campaign.id}
                                   className="p-1.5 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-md transition-colors border border-blue-100 cursor-pointer disabled:cursor-not-allowed"
-                                  title="Emergency Push: Fill Empty Slots"
+                                  title={campaign.type === "broadcast" ? "Emergency Broadcast Push" : "Emergency Push: Fill Empty Slots"}
                                 >
                                   {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Zap size={16} />}
                                 </button>
-                                <button
-                                  onClick={() => openEmergencyConfirm(campaign.id, "replace_everything")}
+                                {campaign.type !== "broadcast" && <button
+                                  onClick={() => openEmergencyConfirm(campaign.id, "replace_everything", campaign.type === "broadcast")}
                                   disabled={actionLoading === campaign.id}
                                   className="px-2 py-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed text-[10px] font-bold"
                                   title="Emergency Push: Replace Everything"
                                 >
                                   Replace
-                                </button>
+                                </button>}
                               </>
                             )}
                             <button

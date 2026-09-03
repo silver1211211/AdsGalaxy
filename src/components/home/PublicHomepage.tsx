@@ -699,7 +699,7 @@ export default function PublicHomepage() {
                 For Developers
               </div>
               <h2 className="text-3xl font-black leading-tight tracking-tight text-white sm:text-5xl">
-                One Integration ID.
+                One numeric Mini App ID.
                 <br />
                 <span
                   className="bg-clip-text text-transparent"
@@ -713,12 +713,12 @@ export default function PublicHomepage() {
               </h2>
               <p className="mt-5 max-w-xl text-sm leading-7 sm:text-base" style={{ color: "#9bc4da" }}>
                 Integrate AdsGalaxy into your Telegram Mini App with a single
-                script tag and one function call. Get your Integration ID from the
-                Developer Center, add the script, and you&apos;re live.
+                script tag and one function call. Get your numeric Mini App ID from
+                Publisher → Mini Apps → Mini App Details, add the script, and you&apos;re live.
               </p>
               <div className="mt-7 space-y-3.5">
                 <CheckItemDark>
-                  Get a unique Integration ID from your developer dashboard
+                  Get the numeric Mini App ID from Publisher → Mini Apps → Mini App Details
                 </CheckItemDark>
                 <CheckItemDark>
                   Add one script tag to your Mini App HTML
@@ -737,7 +737,7 @@ export default function PublicHomepage() {
                   rel="noopener noreferrer"
                   className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#13aef5] to-[#0b86d6] px-6 py-3.5 text-sm font-black text-white shadow-lg shadow-[#0c9de8]/30 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-xl active:scale-[0.97]"
                 >
-                  Get Integration ID
+                  Get Mini App ID
                   <ArrowRight size={15} />
                 </a>
                 <a
@@ -775,7 +775,7 @@ export default function PublicHomepage() {
                     <span className="text-slate-400">{"=\""}</span>
                     <span className="text-green-300">
                       {SDK_HOST}
-                      {"/sdk.js?id=YOUR_INTEGRATION_ID"}
+                      {"/sdk.js?id=YOUR_NUMERIC_MINI_APP_ID"}
                     </span>
                     <span className="text-slate-400">{"\">"}</span>
                     <span className="text-purple-400">{"</script>"}</span>
@@ -789,7 +789,7 @@ export default function PublicHomepage() {
                     <span className="text-blue-300">window</span>
                     <span className="text-slate-400">.</span>
                     <span className="text-yellow-300">showAdsGalaxy</span>
-                    <span className="text-slate-400">{"()"}</span>
+                    <span className="text-slate-400">{"().then(function (result) { /* confirmed */ }).catch(function (error) { console.log(error.code, error.message); })"}</span>
                   </div>
                 </div>
                 {/* Status bar */}
@@ -811,7 +811,7 @@ export default function PublicHomepage() {
               {/* Integration steps */}
               <div className="mt-5 grid grid-cols-3 gap-3">
                 {[
-                  { n: "01", label: "Get Integration ID" },
+                  { n: "01", label: "Get Mini App ID" },
                   { n: "02", label: "Add Script Tag" },
                   { n: "03", label: "Call showAdsGalaxy()" },
                 ].map((s) => (
@@ -875,7 +875,7 @@ export default function PublicHomepage() {
             <FeatureCard
               icon={Code2}
               title="Developer SDK"
-              description="One Integration ID and one SDK call. Webhook delivery, impression events, and sandbox mode included."
+              description="One numeric Mini App ID and one SDK call. An optional signed reward callback is configured in Mini App Details."
             />
             <FeatureCard
               icon={Gift}
@@ -1008,7 +1008,7 @@ export default function PublicHomepage() {
               </h3>
               <p className="text-sm text-slate-500 leading-relaxed flex-1">
                 Integrate the AdsGalaxy SDK into your Mini App with one
-                Integration ID and a single function call.
+                numeric Mini App ID and a single function call.
               </p>
               <div className="mt-5 flex items-center gap-1.5 text-sm font-bold text-emerald-500 group-hover:gap-3 transition-all duration-200">
                 Read Docs
