@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
+/* eslint-disable @typescript-eslint/no-explicit-any -- FAQ database rows are dynamically shaped */
 import pool from "@/lib/db";
+import faqRu from "@/i18n/faqRu.json";
 
 const publisherFaqsDefault = [
   {
@@ -383,7 +385,14 @@ const referralFaqs = [
 ];
 
 function mergeFaqs(rows: any[], type: string, defaults: { id: number; type: string; question: string; answer: string }[]) {
-  const existing = rows.filter((faq: any) => faq.type === type);
+  const seen = new Set<string>();
+  const existing = rows.filter((faq: any) => {
+    if (faq.type !== type) return false;
+    const key = String(faq.question || "").trim().toLocaleLowerCase("en-US").replace(/\s+/g, " ");
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   const existingQuestions = new Set(existing.map((faq: any) => String(faq.question || "").trim().toLowerCase()));
   return [
     ...existing,
@@ -391,14 +400,23 @@ function mergeFaqs(rows: any[], type: string, defaults: { id: number; type: stri
   ];
 }
 
-export async function GET() {
+function localizeFaqs(items: Array<{ id: number; question: string; answer: string }>, locale: string) {
+  if (locale !== "ru") return items;
+  return items.map((item) => {
+    const translated = (faqRu as Record<string, { question: string; answer: string }>)[String(item.id)];
+    return translated ? { ...item, question: translated.question, answer: translated.answer } : item;
+  });
+}
+
+export async function GET(request: Request) {
   try {
     const [rows]: any = await pool.query("SELECT * FROM faqs ORDER BY id ASC");
 
+    const locale = new URL(request.url).searchParams.get("locale") === "ru" ? "ru" : "en";
     return NextResponse.json({
-      publisher:  mergeFaqs(rows, "publisher",  publisherFaqsDefault),
-      advertiser: mergeFaqs(rows, "advertiser", advertiserFaqsDefault),
-      referral:   mergeFaqs(rows, "referral",   referralFaqs),
+      publisher:  localizeFaqs(mergeFaqs(rows, "publisher", publisherFaqsDefault), locale),
+      advertiser: localizeFaqs(mergeFaqs(rows, "advertiser", advertiserFaqsDefault), locale),
+      referral:   localizeFaqs(mergeFaqs(rows, "referral", referralFaqs), locale),
     });
   } catch (error: any) {
     console.error("FAQs API Error:", error);

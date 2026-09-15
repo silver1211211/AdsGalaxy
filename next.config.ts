@@ -9,7 +9,13 @@ const sdkCorsHeaders = [
 
 const nextConfig: NextConfig = {
   distDir: process.env.NEXT_DIST_DIR || ".next",
-  allowedDevOrigins: ["curious-necessarily-hyacinth.ngrok-free.dev"],
+  // The private preview runs from this source tree in development mode.
+  // Allow its browser origin so Turbopack HMR can update an open preview
+  // without rebuilding or restarting the production application.
+  allowedDevOrigins: [
+    "preview.adsgalaxy.online",
+    "curious-necessarily-hyacinth.ngrok-free.dev",
+  ],
   async headers() {
     return [
       { source: "/api/sdk/:path*", headers: sdkCorsHeaders },

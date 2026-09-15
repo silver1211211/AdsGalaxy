@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import { OXAPAY_DEPOSIT_NETWORKS, getOxaPayDepositNetwork } from "@/lib/oxapayNetworks";
 import type { RowDataPacket } from "mysql2/promise";
@@ -40,23 +40,35 @@ async function readProviderJson(response: Response) {
 export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await getAuthenticatedUserStatus(initData, { request });
 
-    // Auto-cancel expired deposits
+    // Reflect expiry without mutating state during a read-only navigation.
     const now = Math.floor(Date.now() / 1000);
-    await pool.query(
-      "UPDATE deposits SET status = 'expired' WHERE user_id = ? AND status IN ('pending', 'waiting', 'paying') AND expired_at < ?",
-      [user.id, now]
-    );
 
-    const [rows] = await pool.query<DepositRow[]>(
+    const cursorValue = new URL(request.url).searchParams.get("cursor");
+    let cursor: { createdAt: string; id: number } | null = null;
+    try {
+      const parsed = cursorValue ? JSON.parse(Buffer.from(cursorValue, "base64url").toString("utf8")) : null;
+      if (typeof parsed?.createdAt === "string" && Number(parsed.id) > 0) cursor = { createdAt: parsed.createdAt, id: Number(parsed.id) };
+    } catch { cursor = null; }
+    const [depositRows] = await pool.query<DepositRow[]>(
       `SELECT id, track_id, order_id, amount, pay_amount, currency, pay_currency,
-         network, address, status, expired_at, confirmed_at, created_at,
+         network, address,
+         CASE WHEN status IN ('pending','waiting','paying') AND expired_at < ? THEN 'expired' ELSE status END status,
+         expired_at, confirmed_at, created_at,
          (SELECT bonus_amount FROM deposit_bonuses WHERE deposit_id = deposits.id) AS bonus_amount,
          (SELECT rate_basis_points FROM deposit_bonuses WHERE deposit_id = deposits.id) AS bonus_rate_basis_points
-       FROM deposits WHERE user_id = ? ORDER BY created_at DESC`,
-      [user.id]
+       FROM deposits WHERE user_id = ?
+         AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?))
+       ORDER BY created_at DESC, id DESC LIMIT 21`,
+      [now, user.id, cursor?.createdAt || null, cursor?.createdAt || null, cursor?.createdAt || null, cursor?.id || 0]
     );
+    const hasMore = depositRows.length > 20;
+    const rows = depositRows.slice(0, 20);
+    const last = rows[rows.length - 1] as (DepositRow & { created_at?: Date | string }) | undefined;
+    const nextCursor = hasMore && last
+      ? Buffer.from(JSON.stringify({ createdAt: new Date(last.created_at!).toISOString(), id: Number(last.id) })).toString("base64url")
+      : null;
     const [promotionRows] = await pool.query<Array<RowDataPacket & {
       starts_at: string;
       ends_at: string;
@@ -75,6 +87,8 @@ export async function GET(request: Request) {
       minDeposit,
       networks: OXAPAY_DEPOSIT_NETWORKS,
       promotion: promotionRows[0] || null,
+      has_more: hasMore,
+      next_cursor: nextCursor,
     });
   } catch (error) {
     return NextResponse.json({ error: "Unable to load deposits" }, { status: getAuthErrorStatus(error) });

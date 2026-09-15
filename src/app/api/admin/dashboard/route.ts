@@ -6,31 +6,39 @@ import { getGlobalBotAudienceStats } from "@/lib/botAudience";
 import { getMiniAppPlatformStats } from "@/lib/miniappReports";
 import { columnExists } from "@/lib/schemaGuards";
 import { getAdminChannelSafetyMetrics } from "@/lib/channelSafety";
+import { logSlowRequest } from "@/lib/performanceTiming";
+import { CACHE_TTL_SECONDS, cacheGetOrSet, cacheSet, redisKeys } from "@/lib/redisCache";
 
-const DASHBOARD_CACHE_MS = 60_000;
+const DASHBOARD_CACHE_MS = CACHE_TTL_SECONDS.ADMIN_DASHBOARD * 1_000;
 const DASHBOARD_STALE_MS = 24 * 60 * 60 * 1000;
 let dashboardCache: { expiresAt: number; payload: Record<string, unknown> } | null = null;
 
-export async function GET() {
+export async function GET(request: Request) {
+  const startedAt = Date.now();
+  const forceFresh = new URL(request.url).searchParams.get("fresh") === "1";
   if (!(await checkAdminAuth())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  if (dashboardCache && dashboardCache.expiresAt > Date.now()) {
+  if (!forceFresh && dashboardCache && dashboardCache.expiresAt > Date.now()) {
     return NextResponse.json(dashboardCache.payload, {
       headers: { "Cache-Control": "private, max-age=60, stale-while-revalidate=300", "X-AdsGalaxy-Cache": "HIT" },
     });
   }
 
   try {
+    const payload = await cacheGetOrSet(
+      redisKeys.adminDashboard(),
+      CACHE_TTL_SECONDS.ADMIN_DASHBOARD,
+      async () => {
     const [
       [[usersAggregate]], [campaignsQuery], [[campaignTypeStats]], [miniappCampaignsQuery],
-      [channelsQuery], [[approvedChannels]], [[deliveryEligibleChannels]], [withdrawalsQuery],
-      [[depositsPaid]], [[withdrawalsPaid]], [[totalSubscribers]], [[botsTotal]],
-      [[botsDeliveryEligible]], [[botsPaused]], botAudienceStats, [[conversionTotals]],
+      [channelsQuery], [[approvedChannels]], [withdrawalsQuery],
+      [[depositsPaid]], [[withdrawalsPaid]], [[totalSubscribers]], [[botCounts]],
+      botAudienceStats, [[conversionTotals]],
       [topConversionCampaigns], [topConversionCategories], [topConversionInventory],
-      [[conversionReviews]], [[attributionSetting]], [[miniappsActive]], [[impressionsToday]],
-      [[impressionsYesterday]], miniappStats, [[channelPlatformStats]],
+      [[conversionReviews]], [[attributionSetting]], [[miniappsActive]], [[miniAppDailyImpressions]],
+      miniappStats, [[channelPlatformStats]],
       hasBotPlatformRevenue, hasBotReserveAmount, safetyMetrics,
     ]: any = await Promise.all([
       pool.query(`SELECT COUNT(*) AS total,
@@ -42,14 +50,15 @@ export async function GET() {
       pool.query("SELECT status, COUNT(*) as count FROM miniapp_rewarded_campaigns GROUP BY status"),
       pool.query("SELECT status, COUNT(*) as count FROM channels WHERE is_deleted = FALSE GROUP BY status"),
       pool.query("SELECT COUNT(*) as count, COALESCE(SUM(subscriber_count), 0) as subscribers FROM channels WHERE is_deleted = FALSE AND status = 'active'"),
-      pool.query("SELECT COUNT(*) as count, COALESCE(SUM(subscriber_count), 0) as subscribers FROM channels WHERE is_deleted = FALSE AND status = 'active'"),
       pool.query("SELECT status, COUNT(*) as count FROM withdrawals GROUP BY status"),
       pool.query("SELECT SUM(amount) as total FROM deposits WHERE status IN ('Paid', 'paid', 'success')"),
       pool.query("SELECT SUM(amount) as total FROM withdrawals WHERE status = 'success'"),
       pool.query("SELECT COALESCE(SUM(subscriber_count), 0) as total FROM channels WHERE is_deleted = FALSE"),
-      pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status = 'active'"),
-      pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status = 'active' AND COALESCE(health_status, 'active') IN ('active', 'healthy')"),
-      pool.query("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status IN ('paused', 'token_invalid', 'bot_deleted', 'unreachable')"),
+      pool.query(`SELECT
+        SUM(status='active') active,
+        SUM(status='active' AND COALESCE(health_status,'active') IN ('active','healthy')) delivery_eligible,
+        SUM(status IN ('paused','token_invalid','bot_deleted','unreachable')) paused
+        FROM bots WHERE is_deleted=FALSE`),
       getGlobalBotAudienceStats(),
       pool.query("SELECT COUNT(*) as conversions, COALESCE(SUM(conversion_value), 0) as conversion_value FROM ad_conversions"),
       pool.query(`SELECT campaign_type, campaign_id, COUNT(*) as conversions, COALESCE(SUM(conversion_value), 0) as conversion_value
@@ -63,8 +72,10 @@ export async function GET() {
       pool.query("SELECT COUNT(*) as open_count FROM conversion_review_queue WHERE status IN ('open', 'monitor')"),
       pool.query("SELECT value FROM settings WHERE `key` = 'conversion_attribution_window_days' LIMIT 1"),
       pool.query("SELECT COUNT(*) as count FROM miniapps WHERE is_deleted = FALSE AND status IN ('approved', 'monetized')"),
-      pool.query("SELECT COALESCE(SUM(impressions), 0) as count FROM miniapp_daily_stats WHERE date = CURDATE()"),
-      pool.query("SELECT COALESCE(SUM(impressions), 0) as count FROM miniapp_daily_stats WHERE date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)"),
+      pool.query(`SELECT
+        COALESCE(SUM(CASE WHEN date=CURDATE() THEN impressions ELSE 0 END),0) today,
+        COALESCE(SUM(CASE WHEN date=DATE_SUB(CURDATE(),INTERVAL 1 DAY) THEN impressions ELSE 0 END),0) yesterday
+        FROM miniapp_daily_stats WHERE date>=DATE_SUB(CURDATE(),INTERVAL 1 DAY)`),
       getMiniAppPlatformStats(),
       pool.query(`SELECT COALESCE(SUM(views), 0) as impressions, COALESCE(SUM(clicks), 0) as clicks,
         COALESCE(SUM(spend), 0) as revenue, COALESCE(SUM(earnings), 0) as publisher_earnings,
@@ -84,6 +95,7 @@ export async function GET() {
     const miniappCampaignTotal = Object.values(miniappCampaignsStats).reduce((sum: number, value: any) => sum + Number(value || 0), 0);
 
     const channelsStats = channelsQuery.reduce((acc: any, row: any) => ({ ...acc, [row.status]: row.count }), {});
+    const deliveryEligibleChannels = approvedChannels;
     const withdrawalsStats = withdrawalsQuery.reduce((acc: any, row: any) => ({ ...acc, [row.status]: row.count }), {});
     const [[botPlatformStats]]: any = await pool.query(`
       SELECT
@@ -112,7 +124,7 @@ export async function GET() {
       + Number(miniappStats.lifetime.total_impressions || 0);
     const platformClicks = Number(channelPlatformStats?.clicks || 0) + Number(miniappStats.lifetime.total_clicks || 0);
 
-    const payload = {
+    const builtPayload = {
       users: {
         total: usersTotal.count,
         today: usersToday.count,
@@ -144,18 +156,18 @@ export async function GET() {
         totalSubscribers: Number(totalSubscribers.total || 0)
       },
       bots: {
-        total: botsTotal.count,
-        deliveryEligible: botsDeliveryEligible.count,
+        total: Number(botCounts.active || 0),
+        deliveryEligible: Number(botCounts.delivery_eligible || 0),
         totalUsers: botAudienceStats.total_users,
         activeUsers: botAudienceStats.active_users,
         deliveryEligibleUsers: botAudienceStats.delivery_eligible_users,
-        paused: botsPaused.count,
+        paused: Number(botCounts.paused || 0),
         inactiveUsers: botAudienceStats.inactive_users
       },
       miniapps: {
         active: miniappsActive.count || 0,
-        impressionsToday: impressionsToday.count || 0,
-        impressionsYesterday: impressionsYesterday.count || 0,
+        impressionsToday: miniAppDailyImpressions.today || 0,
+        impressionsYesterday: miniAppDailyImpressions.yesterday || 0,
         today: miniappStats.today,
         yesterday: miniappStats.yesterday,
         lifetime: miniappStats.lifetime,
@@ -205,17 +217,28 @@ export async function GET() {
       },
       trust_safety: safetyMetrics,
     };
+    return builtPayload;
+      },
+      { bypass: forceFresh },
+    );
+    if (forceFresh) {
+      await cacheSet(redisKeys.adminDashboard(), payload, CACHE_TTL_SECONDS.ADMIN_DASHBOARD);
+    }
     dashboardCache = { expiresAt: Date.now() + DASHBOARD_CACHE_MS, payload };
     return NextResponse.json(payload, {
-      headers: { "Cache-Control": "private, max-age=60, stale-while-revalidate=300", "X-AdsGalaxy-Cache": "MISS" },
+      headers: forceFresh
+        ? { "Cache-Control": "private, no-store, max-age=0", "X-AdsGalaxy-Cache": "REFRESH" }
+        : { "Cache-Control": "private, max-age=60, stale-while-revalidate=300", "X-AdsGalaxy-Cache": "MISS" },
     });
   } catch (error: any) {
     console.error("Admin Dashboard API Error:", error);
-    if (dashboardCache && dashboardCache.expiresAt + DASHBOARD_STALE_MS > Date.now()) {
+    if (!forceFresh && dashboardCache && dashboardCache.expiresAt + DASHBOARD_STALE_MS > Date.now()) {
       return NextResponse.json(dashboardCache.payload, {
         headers: { "Cache-Control": "private, no-store", "X-AdsGalaxy-Cache": "STALE" },
       });
     }
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+  } finally {
+    logSlowRequest("/api/admin/dashboard", startedAt);
   }
 }

@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { AlertCircle, AlertTriangle, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { usePopupQueue } from "@/context/PopupQueueContext";
+import { useTranslations } from "@/i18n/client";
 
 interface ConfirmationModalProps {
   isOpen: boolean;
@@ -32,12 +33,13 @@ export default function ConfirmationModal({
   title,
   message,
   children,
-  confirmBtnText = "Confirm",
-  closeBtnText = "Cancel",
+  confirmBtnText,
+  closeBtnText,
   confirmBtnVariant = "primary",
   isLoading = false,
   typedConfirmation,
 }: ConfirmationModalProps) {
+  const { t } = useTranslations();
   const isQueueActive = usePopupQueue(isOpen, `confirmation:${title}:${message}`);
   if (!isOpen || !isQueueActive) return null;
 
@@ -74,7 +76,7 @@ export default function ConfirmationModal({
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close"
+            aria-label={t("common.close")}
             className="absolute top-4 right-4 z-10 h-8 w-8 flex items-center justify-center rounded-full bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-slate-700 transition-colors"
           >
             <X size={16} />
@@ -117,7 +119,7 @@ export default function ConfirmationModal({
               <div className="space-y-2">
                 <label className="block text-[11px] font-black uppercase tracking-widest text-slate-400">
                   {typedConfirmation.label ||
-                    `Type "${typedConfirmation.phrase}" to continue`}
+                    t("shared.typeToContinue", { phrase: typedConfirmation.phrase })}
                 </label>
                 <input
                   value={typedConfirmation.value}
@@ -136,7 +138,7 @@ export default function ConfirmationModal({
                 onClick={onClose}
                 className="flex-1 py-3.5 rounded-2xl text-sm font-black bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {closeBtnText}
+                {closeBtnText || t("common.cancel")}
               </button>
               <button
                 type="button"
@@ -154,7 +156,7 @@ export default function ConfirmationModal({
                 {isLoading ? (
                   <div className="h-5 w-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 ) : (
-                  confirmBtnText
+                  confirmBtnText || t("common.confirm")
                 )}
               </button>
             </div>

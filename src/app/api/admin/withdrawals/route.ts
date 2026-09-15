@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { addReferralDecimals, getPaidReferralEarnings } from "@/lib/paidReferralEarnings";
+import { addReferralDecimals, normalizeReferralDecimal } from "@/lib/paidReferralEarnings";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
-import { ensureWithdrawalSubmissionColumns } from "@/lib/schemaGuards";
 import { notifyWithdrawalPaid, notifyWithdrawalRejected } from "@/lib/publisherNotifications";
 import { assessWithdrawalPreclearance } from "@/lib/channelSafety";
+import { parseAdminPagination } from "@/lib/adminPagination";
 
 type ColumnRow = RowDataPacket & {
   COLUMN_NAME: string;
@@ -41,55 +41,6 @@ async function getTableColumns(table: string) {
   return new Set(rows.map((row) => row.COLUMN_NAME));
 }
 
-async function columnExists(conn: PoolConnection, table: string, column: string) {
-  const [rows] = await conn.query<RowDataPacket[]>(`
-    SELECT 1
-    FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_SCHEMA = DATABASE()
-      AND TABLE_NAME = ?
-      AND COLUMN_NAME = ?
-    LIMIT 1
-  `, [table, column]);
-
-  return rows.length > 0;
-}
-
-async function ensureUserBanColumns(conn: PoolConnection) {
-  if (!(await columnExists(conn, "users", "status"))) {
-    await conn.query("ALTER TABLE users ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'active'");
-  }
-
-  if (!(await columnExists(conn, "users", "is_banned"))) {
-    await conn.query("ALTER TABLE users ADD COLUMN is_banned TINYINT(1) NOT NULL DEFAULT 0");
-  }
-
-  if (!(await columnExists(conn, "users", "banned_at"))) {
-    await conn.query("ALTER TABLE users ADD COLUMN banned_at DATETIME NULL");
-  }
-
-  if (!(await columnExists(conn, "users", "ban_reason"))) {
-    await conn.query("ALTER TABLE users ADD COLUMN ban_reason VARCHAR(255) NULL");
-  }
-}
-
-async function ensureWithdrawalActionColumns(conn: PoolConnection) {
-  if (!(await columnExists(conn, "withdrawals", "refunded"))) {
-    await conn.query("ALTER TABLE withdrawals ADD COLUMN refunded TINYINT(1) NOT NULL DEFAULT 0");
-  }
-
-  if (!(await columnExists(conn, "withdrawals", "reject_reason"))) {
-    await conn.query("ALTER TABLE withdrawals ADD COLUMN reject_reason VARCHAR(255) NULL");
-  }
-
-  if (!(await columnExists(conn, "withdrawals", "paid_out"))) {
-    await conn.query("ALTER TABLE withdrawals ADD COLUMN paid_out TINYINT(1) NOT NULL DEFAULT 0");
-  }
-
-  if (!(await columnExists(conn, "withdrawals", "paid_at"))) {
-    await conn.query("ALTER TABLE withdrawals ADD COLUMN paid_at DATETIME NULL");
-  }
-}
-
 function toNumber(value: unknown) {
   return Number.parseFloat(String(value ?? 0)) || 0;
 }
@@ -104,11 +55,22 @@ export async function GET(request: Request) {
   }
 
   const { searchParams } = new URL(request.url);
-  const page = parseInt(searchParams.get("page") || "1");
-  const limit = parseInt(searchParams.get("limit") || "10");
+  const preclearanceId = Number.parseInt(searchParams.get("preclearance_id") || "", 10);
+  if (Number.isSafeInteger(preclearanceId) && preclearanceId > 0) {
+    try {
+      return NextResponse.json({ preclearance: await assessWithdrawalPreclearance(preclearanceId) });
+    } catch (error) {
+      console.error("Withdrawal pre-clearance unavailable", {
+        withdrawal_id: preclearanceId,
+        error: error instanceof Error ? error.message : "unknown_error",
+      });
+      return NextResponse.json({ error: "Safety assessment is temporarily unavailable" }, { status: 503 });
+    }
+  }
+
+  const { page, limit, offset } = parseAdminPagination(searchParams, { defaultLimit: 10 });
   const statusFilter = searchParams.get("status") || "all";
   const search = searchParams.get("search") || "";
-  const offset = (page - 1) * limit;
 
   try {
     const [withdrawalColumns, userColumns] = await Promise.all([
@@ -135,15 +97,6 @@ export async function GET(request: Request) {
     const banReasonExpr = userColumns.has("ban_reason") ? "u.ban_reason" : "NULL";
     const referralCacheExpr = userColumns.has("total_referral_earnings") ? "u.total_referral_earnings" : "NULL";
 
-    // Real platform earnings only: never manual/admin credits, deposits, or
-    // current balance snapshots. Each term is one actual reward source.
-    const realEarningsExpr = `(
-        COALESCE((SELECT SUM(ads.publisher_reward) FROM ad_settlements ads WHERE ads.publisher_id = w.user_id), 0)
-        + COALESCE((SELECT SUM(adsv.publisher_reward) FROM ad_settlements_views adsv WHERE adsv.publisher_id = w.user_id), 0)
-        + COALESCE((SELECT SUM(bd.publisher_reward) FROM broadcast_deliveries bd JOIN bots b ON bd.bot_id = b.id WHERE b.user_id = w.user_id), 0)
-        + COALESCE((SELECT SUM(mes.publisher_revenue) FROM miniapp_earnings_settlements mes WHERE mes.user_id = w.user_id), 0)
-      )`;
-
     let query = `
       SELECT
         w.*,
@@ -164,15 +117,7 @@ export async function GET(request: Request) {
         ${isBannedExpr} as is_banned,
         ${bannedAtExpr} as banned_at,
         ${banReasonExpr} as ban_reason,
-        ${referralCacheExpr} as referral_earnings_cache,
-        COALESCE((SELECT COUNT(*) FROM channels c WHERE c.user_id = w.user_id AND c.is_deleted = FALSE AND c.status = 'active'), 0) as channel_count,
-        COALESCE((SELECT SUM(c.subscriber_count) FROM channels c WHERE c.user_id = w.user_id AND c.is_deleted = FALSE AND c.status = 'active'), 0) as total_audience,
-        COALESCE((SELECT COUNT(*) FROM miniapps ma WHERE ma.user_id = w.user_id AND ma.is_deleted = FALSE), 0) as miniapp_count,
-        COALESCE((SELECT SUM(mes.impressions) FROM miniapp_earnings_settlements mes WHERE mes.user_id = w.user_id), 0) as miniapp_impressions,
-        COALESCE((SELECT SUM(mes.publisher_revenue) FROM miniapp_earnings_settlements mes WHERE mes.user_id = w.user_id), 0) as miniapp_earnings,
-        COALESCE((SELECT SUM(w2.amount) FROM withdrawals w2 WHERE w2.user_id = w.user_id), 0) as total_withdrawal_amount,
-        COALESCE((SELECT COUNT(*) FROM withdrawals w2 WHERE w2.user_id = w.user_id), 0) as withdrawal_count,
-        ${realEarningsExpr} as non_referral_earnings
+        ${referralCacheExpr} as referral_earnings_cache
       FROM withdrawals w
       LEFT JOIN users u ON w.user_id = u.id
     `;
@@ -207,34 +152,78 @@ export async function GET(request: Request) {
     query += whereClause + " ORDER BY w.id DESC LIMIT ? OFFSET ?";
     countQuery += whereClause;
 
-    const [rows] = await pool.query<Array<RowDataPacket & Record<string, unknown>>>(query, [...queryParams, limit, offset]);
-    const immutableByUser = new Map<number, { value: string; complete: boolean }>();
-    await Promise.all([...new Set(rows.map((row) => Number(row.user_id)))].map(async (userId) => {
-      try {
-        immutableByUser.set(userId, { value: await getPaidReferralEarnings(pool, userId), complete: true });
-      } catch {
-        console.error("Withdrawal referral aggregate unavailable", { user_id: userId, error_code: "REFERRAL_AGGREGATE_FAILED" });
-        immutableByUser.set(userId, { value: "0.00000000", complete: false });
+    const [[rows], [countRows]] = await Promise.all([
+      pool.query<Array<RowDataPacket & Record<string, unknown>>>(query, [...queryParams, limit, offset]),
+      pool.query<CountRow[]>(countQuery, queryParams),
+    ]);
+    const userIds = [...new Set(rows.map((row) => Number(row.user_id)).filter(Number.isSafeInteger))];
+    const immutableByUser = new Map<number, string>();
+    const channelByUser = new Map<number, RowDataPacket>();
+    const miniAppByUser = new Map<number, RowDataPacket>();
+    const miniAppEarningsByUser = new Map<number, RowDataPacket>();
+    const withdrawalByUser = new Map<number, RowDataPacket>();
+    const earningsByUser = new Map<number, RowDataPacket>();
+    if (userIds.length > 0) {
+      const [[referralRows], [channelRows], [miniAppRows], [miniAppEarningsRows], [withdrawalRows], [earningsRows]] = await Promise.all([
+        pool.query<Array<RowDataPacket & { user_id: number; paid_referral_earnings: string }>>(
+          `SELECT user_id, CAST(COALESCE(SUM(amount),0) AS DECIMAL(24,8)) paid_referral_earnings
+           FROM referral_reward_ledger WHERE status='paid' AND user_id IN (?) GROUP BY user_id`, [userIds]),
+        pool.query<RowDataPacket[]>(
+          `SELECT user_id,COUNT(*) channel_count,COALESCE(SUM(subscriber_count),0) total_audience
+           FROM channels WHERE is_deleted=FALSE AND status='active' AND user_id IN (?) GROUP BY user_id`, [userIds]),
+        pool.query<RowDataPacket[]>(
+          `SELECT user_id,COUNT(*) miniapp_count FROM miniapps
+           WHERE is_deleted=FALSE AND user_id IN (?) GROUP BY user_id`, [userIds]),
+        pool.query<RowDataPacket[]>(
+          `SELECT user_id,COALESCE(SUM(impressions),0) miniapp_impressions,COALESCE(SUM(publisher_revenue),0) miniapp_earnings
+           FROM miniapp_earnings_settlements WHERE user_id IN (?) GROUP BY user_id`, [userIds]),
+        pool.query<RowDataPacket[]>(
+          `SELECT user_id,COALESCE(SUM(amount),0) total_withdrawal_amount,COUNT(*) withdrawal_count
+           FROM withdrawals WHERE user_id IN (?) GROUP BY user_id`, [userIds]),
+        pool.query<RowDataPacket[]>(
+          `SELECT user_id,COALESCE(SUM(amount),0) non_referral_earnings FROM (
+             SELECT publisher_id user_id,publisher_reward amount FROM ad_settlements WHERE publisher_id IN (?)
+             UNION ALL SELECT publisher_id,publisher_reward FROM ad_settlements_views WHERE publisher_id IN (?)
+             UNION ALL SELECT b.user_id,bd.publisher_reward FROM broadcast_deliveries bd JOIN bots b ON b.id=bd.bot_id WHERE b.user_id IN (?)
+             UNION ALL SELECT user_id,publisher_revenue FROM miniapp_earnings_settlements WHERE user_id IN (?)
+           ) earned GROUP BY user_id`, [userIds, userIds, userIds, userIds]),
+      ]);
+      for (const referralRow of referralRows) {
+        immutableByUser.set(Number(referralRow.user_id), normalizeReferralDecimal(referralRow.paid_referral_earnings));
       }
-    }));
-    const reviewRows = await Promise.all(rows.map(async (row) => {
-      const referral = immutableByUser.get(Number(row.user_id)) || { value: "0.00000000", complete: false };
-      let preclearance;
-      try {
-        preclearance = await assessWithdrawalPreclearance(Number(row.id));
-      } catch (error) {
-        console.error("Withdrawal pre-clearance unavailable", { withdrawal_id: Number(row.id), error: error instanceof Error ? error.message : "unknown_error" });
-        preclearance = { state: "manual_review_required", reasons: ["assessment_unavailable"], reason_details: [{ code: "assessment_unavailable", detail: "Safety assessment could not be completed." }] };
-      }
+      const loadMap = (target: Map<number, RowDataPacket>, source: RowDataPacket[]) => {
+        for (const row of source) target.set(Number(row.user_id), row);
+      };
+      loadMap(channelByUser, channelRows);
+      loadMap(miniAppByUser, miniAppRows);
+      loadMap(miniAppEarningsByUser, miniAppEarningsRows);
+      loadMap(withdrawalByUser, withdrawalRows);
+      loadMap(earningsByUser, earningsRows);
+    }
+    const reviewRows = rows.map((row) => {
+      const userId = Number(row.user_id);
+      const referralEarnings = immutableByUser.get(userId) || "0.00000000";
+      const channel = channelByUser.get(userId);
+      const miniApp = miniAppByUser.get(userId);
+      const miniAppEarnings = miniAppEarningsByUser.get(userId);
+      const withdrawal = withdrawalByUser.get(userId);
+      const nonReferralEarnings = earningsByUser.get(userId)?.non_referral_earnings || 0;
       return {
         ...row,
-        referral_earnings: referral.value,
-        total_earnings: addReferralDecimals(row.non_referral_earnings, referral.value),
-        earnings_review_complete: referral.complete,
-        preclearance,
+        channel_count: channel?.channel_count || 0,
+        total_audience: channel?.total_audience || 0,
+        miniapp_count: miniApp?.miniapp_count || 0,
+        miniapp_impressions: miniAppEarnings?.miniapp_impressions || 0,
+        miniapp_earnings: miniAppEarnings?.miniapp_earnings || 0,
+        total_withdrawal_amount: withdrawal?.total_withdrawal_amount || 0,
+        withdrawal_count: withdrawal?.withdrawal_count || 0,
+        non_referral_earnings: nonReferralEarnings,
+        referral_earnings: referralEarnings,
+        total_earnings: addReferralDecimals(nonReferralEarnings, referralEarnings),
+        earnings_review_complete: true,
+        preclearance: null,
       };
-    }));
-    const [countRows] = await pool.query<CountRow[]>(countQuery, queryParams);
+    });
     const countRow = countRows[0] || { total: 0 };
 
     return NextResponse.json({
@@ -259,12 +248,6 @@ export async function PATCH(request: Request) {
   const conn = await pool.getConnection();
 
   try {
-    await ensureWithdrawalActionColumns(conn);
-    await ensureWithdrawalSubmissionColumns(conn);
-    if (action === "ban_user") {
-      await ensureUserBanColumns(conn);
-    }
-
     await conn.beginTransaction();
 
     const [wRows] = await conn.query<WithdrawalRow[]>(`
@@ -287,11 +270,15 @@ export async function PATCH(request: Request) {
     const wasPaidOut = Boolean(withdrawal.paid_out) || currentStatus === "success";
 
     if (action === "approve") {
+      let preclearanceOverride: Awaited<ReturnType<typeof assessWithdrawalPreclearance>> | null = null;
       if (!wasPaidOut) {
         const preclearance = await assessWithdrawalPreclearance(Number(id), conn);
         if (preclearance.state !== "cleared") {
-          await conn.rollback();
-          return NextResponse.json({ error: "Withdrawal requires manual review before approval", preclearance }, { status: 409 });
+          if (String(reason || "").trim().length < 8) {
+            await conn.rollback();
+            return NextResponse.json({ error: "Enter an admin review note of at least 8 characters to override the safety hold", preclearance }, { status: 409 });
+          }
+          preclearanceOverride = preclearance;
         }
         if (wasRefunded) {
           const available = toNumber(withdrawal.balance_available);
@@ -343,6 +330,12 @@ export async function PATCH(request: Request) {
           previous_status: currentStatus,
           previous_refunded: wasRefunded,
           previous_paid_out: wasPaidOut,
+          preclearance_override: preclearanceOverride ? {
+            state: preclearanceOverride.state,
+            reasons: preclearanceOverride.reasons,
+            risk_score: preclearanceOverride.risk.score,
+            risk_state: preclearanceOverride.risk.state,
+          } : null,
         },
       });
       return successResponse();
@@ -363,7 +356,7 @@ export async function PATCH(request: Request) {
       }
 
       await conn.query(
-        "UPDATE withdrawals SET status = 'rejected', reject_reason = ?, refunded = ? WHERE id = ?",
+        "UPDATE withdrawals SET status = 'rejected', reject_reason = ?, refunded = ?, updated_at = NOW() WHERE id = ?",
         [reason || null, wasRefunded || shouldRefund ? 1 : 0, id]
       );
 

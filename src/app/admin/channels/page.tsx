@@ -4,6 +4,7 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
+import { useAdminRequestGuard } from "@/hooks/useAdminRequestGuard";
 import { ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Trash2, ExternalLink, BadgeCheck, Tv, Loader2, CheckCheck } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
@@ -11,6 +12,9 @@ import EmptyState from "@/components/ui/EmptyState";
 import { SkeletonCard, SkeletonTableRows } from "@/components/ui/Skeleton";
 import ChannelControlCenter from "@/components/admin/ChannelControlCenter";
 import { publicChannelUrl } from "@/lib/telegramChannelInput";
+import ModerationRejectFields from "@/components/admin/ModerationRejectFields";
+import ModerationHistory from "@/components/admin/ModerationHistory";
+import { getApiErrorMessage } from "@/lib/apiErrorMessage";
 
 type ChannelAction = "activate" | "reject" | "pause" | "delete";
 type PendingAction = {
@@ -218,6 +222,7 @@ function ActionButtons({ channel, actionLoading, onView, onAction }: ActionButto
 }
 
 export default function AdminChannelsPage() {
+  const beginListRequest = useAdminRequestGuard();
   const [channels, setChannels] = useState([]);
   const [summary, setSummary] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -234,20 +239,24 @@ export default function AdminChannelsPage() {
   const [viewModalOpen, setViewModalOpen] = useState(false);
   const [selectedChannel, setSelectedChannel] = useState<any>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
+  const [policyRuleKey, setPolicyRuleKey] = useState("");
+  const [internalNote, setInternalNote] = useState("");
 
   const fetchChannels = async (p: number, s: string, q: string) => {
+    const controller = beginListRequest();
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/channels?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`);
+      const res = await fetch(`/api/admin/channels?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`, { signal: controller.signal });
       const data = await res.json();
       setChannels(data.channels);
       setSummary(data.summary || null);
       setTotalPages(data.totalPages);
       setSelectedPendingIds([]);
     } catch (err) {
+      if (controller.signal.aborted) return;
       console.error(err);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 
@@ -256,19 +265,19 @@ export default function AdminChannelsPage() {
       fetchChannels(page, statusFilter, search);
     }, 500);
     return () => clearTimeout(timer);
-  }, [page, statusFilter, search]);
+  }, [page, statusFilter, search, beginListRequest]);
 
-  const handleAction = async (id: number, action: string) => {
+  const handleAction = async (id: number, action: string, ruleKey = "", note = "") => {
     setActionLoading(id);
     try {
       const normalizedAction = action === "approve" ? "activate" : action;
-      const res = await fetch(`/api/admin/channels/${id}/actions`, {
+      const res = await fetch(action === "reject" ? "/api/admin/moderation-rejections" : `/api/admin/channels/${id}/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: normalizedAction })
+        body: JSON.stringify(action === "reject" ? { entity_type: "channel", entity_id: id, policy_rule_key: ruleKey, internal_note: note } : { action: normalizedAction })
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Action failed");
+      if (!res.ok) throw new Error(getApiErrorMessage(data, "Channel action failed"));
       if (selectedChannel?.id === id) setViewModalOpen(false);
       await fetchChannels(page, statusFilter, search);
     } catch (err: any) {
@@ -284,14 +293,16 @@ export default function AdminChannelsPage() {
   };
 
   const openActionConfirm = (channel: any, action: ChannelAction, title: string, message: string, danger = false) => {
+    setPolicyRuleKey(""); setInternalNote("");
     setPendingAction({ channel, action, title, message, danger });
   };
 
   const confirmPendingAction = async () => {
     if (!pendingAction) return;
     const { channel, action } = pendingAction;
+    if (action === "reject" && !policyRuleKey) { setError("MODERATION_REASON_REQUIRED"); return; }
     setPendingAction(null);
-    await handleAction(channel.id, action);
+    await handleAction(channel.id, action, policyRuleKey, internalNote);
   };
 
   const visiblePendingIds = channels
@@ -387,7 +398,7 @@ export default function AdminChannelsPage() {
         confirmBtnText="Confirm"
         confirmBtnVariant={pendingAction?.danger ? "danger" : "primary"}
         isLoading={actionLoading !== null}
-      />
+      >{pendingAction?.action === "reject" && <ModerationRejectFields scopes={["publisher.general", "publisher.channel"]} ruleKey={policyRuleKey} internalNote={internalNote} onRuleKey={setPolicyRuleKey} onInternalNote={setInternalNote} />}</ConfirmationModal>
       <ConfirmationModal
         isOpen={bulkApprovalConfirmOpen}
         onClose={() => setBulkApprovalConfirmOpen(false)}
@@ -607,6 +618,7 @@ export default function AdminChannelsPage() {
               </div>
             </div>
 
+            <div className="px-6 pb-4"><ModerationHistory entityType="channel" entityId={selectedChannel.id} /></div>
             {/* Review actions */}
             <div className="border-t border-slate-200 bg-slate-50 px-6 py-4">
               {selectedChannel.status === "pending" ? (

@@ -1,45 +1,15 @@
 import { NextResponse } from "next/server";
-import type { PoolConnection, RowDataPacket } from "mysql2/promise";
+import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { ADVERTISER_TRUST_LEVELS, normalizeAdvertiserTrustLevel } from "@/lib/advertiserTrust";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { setUserEnforcementExemption } from "@/lib/userEnforcementExemptions";
+import { parseAdminPagination } from "@/lib/adminPagination";
 
 type ColumnRow = RowDataPacket & {
   COLUMN_NAME: string;
 };
-
-async function columnExists(conn: PoolConnection, table: string, column: string) {
-  const [rows] = await conn.query<RowDataPacket[]>(`
-    SELECT 1
-    FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_SCHEMA = DATABASE()
-      AND TABLE_NAME = ?
-      AND COLUMN_NAME = ?
-    LIMIT 1
-  `, [table, column]);
-
-  return rows.length > 0;
-}
-
-async function ensureUserBanColumns(conn: PoolConnection) {
-  if (!(await columnExists(conn, "users", "status"))) {
-    await conn.query("ALTER TABLE users ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'active'");
-  }
-
-  if (!(await columnExists(conn, "users", "is_banned"))) {
-    await conn.query("ALTER TABLE users ADD COLUMN is_banned TINYINT(1) NOT NULL DEFAULT 0");
-  }
-
-  if (!(await columnExists(conn, "users", "banned_at"))) {
-    await conn.query("ALTER TABLE users ADD COLUMN banned_at DATETIME NULL");
-  }
-
-  if (!(await columnExists(conn, "users", "ban_reason"))) {
-    await conn.query("ALTER TABLE users ADD COLUMN ban_reason VARCHAR(255) NULL");
-  }
-}
 
 async function getUserColumns() {
   const [rows] = await pool.query<ColumnRow[]>(`
@@ -58,12 +28,10 @@ export async function GET(request: Request) {
   }
 
   const { searchParams } = new URL(request.url);
-  const page = parseInt(searchParams.get("page") || "1");
-  const limit = parseInt(searchParams.get("limit") || "10");
+  const { page, limit, offset } = parseAdminPagination(searchParams, { defaultLimit: 10 });
   const search = searchParams.get("search") || "";
   const trustFilter = normalizeAdvertiserTrustLevel(searchParams.get("trust") || "all");
   const rawTrustFilter = searchParams.get("trust") || "all";
-  const offset = (page - 1) * limit;
 
   try {
     const columns = await getUserColumns();
@@ -90,25 +58,7 @@ export async function GET(request: Request) {
         ${publisherTrustExpr} as publisher_trust_score,
         ${publisherRiskExpr} as publisher_risk_score,
         ${trustUpdatedExpr} as advertiser_trust_updated_at,
-        ${trustNoteExpr} as advertiser_trust_note,
-        (
-          SELECT COUNT(*) FROM campaigns c WHERE c.user_id = users.id
-        ) + (
-          SELECT COUNT(*) FROM miniapp_rewarded_campaigns mrc WHERE mrc.advertiser_id = users.id
-        ) as advertiser_total_campaigns,
-        (
-          SELECT COUNT(*) FROM campaigns c WHERE c.user_id = users.id AND c.status IN ('active', 'completed', 'budget_exhausted')
-        ) + (
-          SELECT COUNT(*) FROM miniapp_rewarded_campaigns mrc WHERE mrc.advertiser_id = users.id AND mrc.status IN ('approved', 'completed')
-        ) as advertiser_approved_campaigns,
-        (
-          SELECT COUNT(*) FROM campaigns c WHERE c.user_id = users.id AND c.status = 'rejected'
-        ) + (
-          SELECT COUNT(*) FROM miniapp_rewarded_campaigns mrc WHERE mrc.advertiser_id = users.id AND mrc.status = 'rejected'
-        ) as advertiser_rejected_campaigns,
-        (
-          SELECT COALESCE(SUM(amount), 0) FROM advertiser_transactions atx WHERE atx.user_id = users.id AND atx.type = 'debit'
-        ) as advertiser_total_spend
+        ${trustNoteExpr} as advertiser_trust_note
       FROM users
     `;
     let countQuery = "SELECT COUNT(*) as total FROM users";
@@ -137,10 +87,67 @@ export async function GET(request: Request) {
 
     query += " ORDER BY id DESC LIMIT ? OFFSET ?";
 
-    const [rows] = await pool.query(query, [...queryParams, limit, offset]);
-    const [[countRow]] = await pool.query<Array<RowDataPacket & { total: number }>>(countQuery, countParams);
+    const [[rows], [countRows]] = await Promise.all([
+      pool.query<RowDataPacket[]>(query, [...queryParams, limit, offset]),
+      pool.query<Array<RowDataPacket & { total: number }>>(countQuery, countParams),
+    ]);
+    const countRow = countRows[0] || { total: 0 };
+    const userIds = rows.map((row) => Number(row.id)).filter(Number.isSafeInteger);
+    let users = rows;
+
+    if (userIds.length > 0) {
+      const [[discountRows], [campaignRows], [miniAppRows], [spendRows]] = await Promise.all([
+        pool.query<RowDataPacket[]>(
+          `SELECT user_id, cpm_discount, cpc_discount, expires_at,
+             CASE WHEN expires_at > UTC_TIMESTAMP() THEN 1 ELSE 0 END AS is_active
+           FROM advertiser_rate_discounts WHERE user_id IN (?)`,
+          [userIds]
+        ),
+        pool.query<RowDataPacket[]>(
+          `SELECT user_id, COUNT(*) AS total,
+             SUM(status IN ('active','completed','budget_exhausted')) AS approved,
+             SUM(status = 'rejected') AS rejected
+           FROM campaigns WHERE user_id IN (?) GROUP BY user_id`,
+          [userIds]
+        ),
+        pool.query<RowDataPacket[]>(
+          `SELECT advertiser_id AS user_id, COUNT(*) AS total,
+             SUM(status IN ('approved','completed')) AS approved,
+             SUM(status = 'rejected') AS rejected
+           FROM miniapp_rewarded_campaigns WHERE advertiser_id IN (?) GROUP BY advertiser_id`,
+          [userIds]
+        ),
+        pool.query<RowDataPacket[]>(
+          `SELECT user_id, COALESCE(SUM(amount), 0) AS total_spend
+           FROM advertiser_transactions WHERE user_id IN (?) AND type='debit' GROUP BY user_id`,
+          [userIds]
+        ),
+      ]);
+      const byUser = <T extends RowDataPacket>(items: T[]) => new Map(items.map((item) => [Number(item.user_id), item]));
+      const discounts = byUser(discountRows);
+      const campaigns = byUser(campaignRows);
+      const miniApps = byUser(miniAppRows);
+      const spend = byUser(spendRows);
+      users = rows.map((row) => {
+        const userId = Number(row.id);
+        const discount = discounts.get(userId);
+        const standard = campaigns.get(userId);
+        const miniApp = miniApps.get(userId);
+        return {
+          ...row,
+          advertiser_cpm_discount: discount?.cpm_discount || 0,
+          advertiser_cpc_discount: discount?.cpc_discount || 0,
+          advertiser_discount_expires_at: discount?.expires_at || null,
+          advertiser_discount_active: Number(discount?.is_active || 0),
+          advertiser_total_campaigns: Number(standard?.total || 0) + Number(miniApp?.total || 0),
+          advertiser_approved_campaigns: Number(standard?.approved || 0) + Number(miniApp?.approved || 0),
+          advertiser_rejected_campaigns: Number(standard?.rejected || 0) + Number(miniApp?.rejected || 0),
+          advertiser_total_spend: spend.get(userId)?.total_spend || 0,
+        };
+      });
+    }
     return NextResponse.json({
-      users: rows,
+      users,
       total: countRow.total,
       page,
       totalPages: Math.ceil(countRow.total / limit),
@@ -159,7 +166,8 @@ export async function PATCH(request: Request) {
 
   try {
     const { id, balance_locked, balance_available, ad_balance, action, reason, trust_level,
-      unban_disposition, exemption_type, exemption_expires_at } = await request.json();
+      unban_disposition, exemption_type, exemption_expires_at, discount_cpm_enabled,
+      discount_cpc_enabled, cpm_discount, cpc_discount, discount_expires_at } = await request.json();
 
     if (!id) return NextResponse.json({ error: "User ID required" }, { status: 400 });
 
@@ -177,20 +185,6 @@ export async function PATCH(request: Request) {
       reason: reason || auditAction,
       metadata,
     });
-
-    await ensureUserBanColumns(conn);
-
-    if (!(await columnExists(conn, "users", "advertiser_trust_level"))) {
-      await conn.query("ALTER TABLE users ADD COLUMN advertiser_trust_level VARCHAR(20) NOT NULL DEFAULT 'new'");
-    }
-
-    if (!(await columnExists(conn, "users", "advertiser_trust_updated_at"))) {
-      await conn.query("ALTER TABLE users ADD COLUMN advertiser_trust_updated_at DATETIME NULL");
-    }
-
-    if (!(await columnExists(conn, "users", "advertiser_trust_note"))) {
-      await conn.query("ALTER TABLE users ADD COLUMN advertiser_trust_note VARCHAR(255) NULL");
-    }
 
     if (action === "ban") {
       await conn.query(
@@ -262,6 +256,45 @@ export async function PATCH(request: Request) {
         await conn.query("UPDATE miniapp_rewarded_campaigns SET status = 'paused' WHERE advertiser_id = ? AND status = 'approved'", [id]);
       }
       await audit("advertiser_trust_change", { previous_level: before.advertiser_trust_level, new_level: level });
+      return NextResponse.json({ success: true });
+    }
+
+    if (action === "set_advertiser_discount") {
+      const cpmEnabled = Boolean(discount_cpm_enabled);
+      const cpcEnabled = Boolean(discount_cpc_enabled);
+      const cpmAmount = cpmEnabled ? Number(cpm_discount) : 0;
+      const cpcAmount = cpcEnabled ? Number(cpc_discount) : 0;
+      if ((cpmEnabled && (!Number.isFinite(cpmAmount) || cpmAmount <= 0 || cpmAmount > 1000))
+        || (cpcEnabled && (!Number.isFinite(cpcAmount) || cpcAmount <= 0 || cpcAmount > 1000))) {
+        return NextResponse.json({ error: "Discounts must be greater than $0 and no more than $1,000 per 1,000 events" }, { status: 400 });
+      }
+
+      const [previousRows] = await conn.query<RowDataPacket[]>(
+        "SELECT cpm_discount,cpc_discount,expires_at FROM advertiser_rate_discounts WHERE user_id=? LIMIT 1",
+        [id],
+      );
+      if (!cpmEnabled && !cpcEnabled) {
+        await conn.query("DELETE FROM advertiser_rate_discounts WHERE user_id=?", [id]);
+        await audit("advertiser_discount_disabled", { previous: previousRows[0] || null });
+        return NextResponse.json({ success: true });
+      }
+
+      const expiresAt = new Date(String(discount_expires_at || ""));
+      if (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) {
+        return NextResponse.json({ error: "Select a future discount expiry" }, { status: 400 });
+      }
+      await conn.query(
+        `INSERT INTO advertiser_rate_discounts
+          (user_id,cpm_discount,cpc_discount,expires_at,updated_by_admin_id)
+         VALUES (?,?,?,?,?)
+         ON DUPLICATE KEY UPDATE cpm_discount=VALUES(cpm_discount),cpc_discount=VALUES(cpc_discount),
+           expires_at=VALUES(expires_at),updated_by_admin_id=VALUES(updated_by_admin_id)`,
+        [id, cpmAmount, cpcAmount, expiresAt.toISOString().slice(0, 19).replace("T", " "), admin?.id || null],
+      );
+      await audit("advertiser_discount_updated", {
+        previous: previousRows[0] || null,
+        next: { cpm_discount: cpmAmount, cpc_discount: cpcAmount, expires_at: expiresAt.toISOString() },
+      });
       return NextResponse.json({ success: true });
     }
 

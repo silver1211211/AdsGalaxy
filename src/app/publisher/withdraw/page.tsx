@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, react-hooks/set-state-in-effect -- legacy withdrawal flow retains loose API rows and mount fetching */
 
 import React, { useState, useEffect } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
@@ -22,17 +23,20 @@ import { AnimatePresence, motion } from "framer-motion";
 import WithdrawalForm from "@/components/publisher/WithdrawalForm";
 import WithdrawalDetailSheet from "@/components/publisher/WithdrawalDetailSheet";
 import { useHeader } from "@/context/HeaderContext";
+import { useTranslations } from "@/i18n/client";
 
 export default function WithdrawalPage() {
   const { setTitle } = useHeader();
+  const { t } = useTranslations();
   const [data, setData] = useState<any>({ balance: { balance_available: 0, balance_locked: 0 }, history: [] });
   const [isLoading, setIsLoading] = useState(true);
   const [isWithdrawing, setIsWithdrawing] = useState(false);
   const [selectedWithdrawal, setSelectedWithdrawal] = useState<any | null>(null);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   useEffect(() => {
-    setTitle("Withdrawals");
-  }, [setTitle]);
+    setTitle(t("common.withdrawals"));
+  }, [setTitle, t]);
 
   const fetchData = async () => {
     try {
@@ -44,6 +48,16 @@ export default function WithdrawalPage() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const loadMore = async () => {
+    if (!data.next_cursor || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try {
+      const res = await apiFetch(`/api/publisher/withdrawals?cursor=${encodeURIComponent(data.next_cursor)}`);
+      const json = await res.json();
+      if (res.ok) setData((current: any) => ({ ...current, history: [...current.history, ...json.history], has_more: json.has_more, next_cursor: json.next_cursor }));
+    } finally { setIsLoadingMore(false); }
   };
 
   useEffect(() => {
@@ -68,21 +82,21 @@ export default function WithdrawalPage() {
           <div className="relative space-y-5">
             <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-blue-100">
               <Sparkles size={12} />
-              Secure payout desk
+              {t("publisher.withdrawals.commandCenter")}
             </div>
             <div className="space-y-2">
-              <h1 className="text-3xl font-black tracking-tight">Withdraw with clarity.</h1>
+              <h1 className="text-3xl font-black tracking-tight">{t("publisher.withdrawals.hero")}</h1>
               <p className="max-w-md text-sm font-medium leading-relaxed text-blue-100/80">
-                Request funds, track locked earnings, and review every payout from one clean control room.
+                {t("publisher.withdrawals.heroDescription")}
               </p>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="rounded-2xl border border-white/10 bg-white/10 p-3">
-                <p className="text-[10px] font-black uppercase tracking-widest text-blue-100/70">Available</p>
+                <p className="text-[10px] font-black uppercase tracking-widest text-blue-100/70">{t("common.available")}</p>
                 <p className="mt-1 text-xl font-black">${parseFloat(data.balance.balance_available).toFixed(2)}</p>
               </div>
               <div className="rounded-2xl border border-white/10 bg-white/10 p-3">
-                <p className="text-[10px] font-black uppercase tracking-widest text-blue-100/70">Locked</p>
+                <p className="text-[10px] font-black uppercase tracking-widest text-blue-100/70">{t("publisher.withdrawals.locked")}</p>
                 <p className="mt-1 text-xl font-black">${parseFloat(data.balance.balance_locked).toFixed(2)}</p>
               </div>
             </div>
@@ -95,7 +109,7 @@ export default function WithdrawalPage() {
             <div className="space-y-1">
               <div className="flex items-center gap-2 text-slate-400">
                 <Wallet size={16} />
-                <span className="text-[10px] font-black uppercase tracking-widest">Available Balance</span>
+                <span className="text-[10px] font-black uppercase tracking-widest">{t("publisher.dashboard.availableBalance")}</span>
               </div>
               <h2 className="text-4xl font-black text-slate-900 tracking-tight">
                 ${parseFloat(data.balance.balance_available).toFixed(2)}
@@ -104,7 +118,7 @@ export default function WithdrawalPage() {
             <div className="text-right space-y-1">
               <div className="flex items-center justify-end gap-2 text-slate-400">
                 <Lock size={12} />
-                <span className="text-[10px] font-black uppercase tracking-widest">Locked</span>
+                <span className="text-[10px] font-black uppercase tracking-widest">{t("publisher.withdrawals.locked")}</span>
               </div>
               <p className="text-sm font-black text-amber-600 bg-amber-50 px-3 py-1 rounded-lg inline-block">
                 ${parseFloat(data.balance.balance_locked).toFixed(2)}
@@ -117,12 +131,12 @@ export default function WithdrawalPage() {
             className="w-full py-4 bg-[#0c9de8] text-white rounded-2xl text-sm font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#0c9de8]/25 hover:-translate-y-0.5 hover:shadow-xl hover:shadow-[#0c9de8]/30"
           >
             <ArrowUpRight size={20} />
-            Withdraw Funds
+            {t("publisher.withdrawals.withdrawFunds")}
           </button>
           <div className="flex items-start gap-3 rounded-2xl border border-blue-100 bg-blue-50/70 p-4 text-[#0c5f94]">
             <ShieldCheck size={18} className="mt-0.5 shrink-0" />
             <p className="text-[11px] font-bold leading-relaxed">
-              Payout requests keep their existing review flow. This panel only makes the status easier to read.
+              {t("publisher.withdrawals.reviewNotice")}
             </p>
           </div>
         </div>
@@ -133,7 +147,7 @@ export default function WithdrawalPage() {
             <div className="w-8 h-8 bg-slate-100 text-slate-400 rounded-lg flex items-center justify-center">
               <History size={18} />
             </div>
-            <h2 className="text-lg font-black text-slate-900 uppercase tracking-tight">Withdrawal History</h2>
+            <h2 className="text-lg font-black text-slate-900 uppercase tracking-tight">{t("publisher.withdrawals.history")}</h2>
           </div>
 
           {isLoading ? (
@@ -155,9 +169,9 @@ export default function WithdrawalPage() {
                 <ArrowRightLeft size={32} />
               </div>
               <div className="space-y-1">
-                <p className="text-slate-900 font-black text-sm uppercase tracking-tight">No Transactions</p>
+                <p className="text-slate-900 font-black text-sm uppercase tracking-tight">{t("publisher.withdrawals.noTransactions")}</p>
                 <p className="text-slate-400 text-[10px] font-bold uppercase max-w-[200px] mx-auto leading-relaxed">
-                  Your withdrawal history will appear here once you place a request.
+                  {t("publisher.withdrawals.noTransactionsDescription")}
                 </p>
               </div>
             </div>
@@ -195,6 +209,11 @@ export default function WithdrawalPage() {
                   </div>
                 </button>
               ))}
+              {data.has_more && (
+                <button type="button" disabled={isLoadingMore} onClick={loadMore} className="w-full rounded-2xl border border-slate-200 bg-white py-3 text-xs font-black text-[#0c9de8] disabled:opacity-50">
+                  {isLoadingMore ? "Loading…" : "See More"}
+                </button>
+              )}
             </div>
           )}
         </div>

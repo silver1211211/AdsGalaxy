@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- approval automation reads heterogeneous legacy campaign rows */
 import type { PoolConnection } from "mysql2/promise";
 import pool from "@/lib/db";
 import { getAdvertiserHistory, normalizeAdvertiserTrustLevel } from "@/lib/advertiserTrust";
@@ -116,18 +117,16 @@ async function duplicateSignals(input: AutomationInput, domain: string, settings
   const [[domainRow]]: any = await db.query(
     `SELECT
       (
-        SELECT COUNT(*) FROM campaigns WHERE user_id = ? AND id <> ? AND (link LIKE ? OR postback_url LIKE ?)
+        SELECT COUNT(*) FROM campaigns WHERE user_id = ? AND id <> ? AND link LIKE ?
       ) + (
-        SELECT COUNT(*) FROM miniapp_rewarded_campaigns WHERE advertiser_id = ? AND id <> ? AND (landing_url LIKE ? OR postback_url LIKE ?)
+        SELECT COUNT(*) FROM miniapp_rewarded_campaigns WHERE advertiser_id = ? AND id <> ? AND landing_url LIKE ?
       ) as duplicate_count`,
     [
       input.advertiserId,
       input.campaignType === "campaign" ? input.campaignId : 0,
       `%${domain}%`,
-      `%${domain}%`,
       input.advertiserId,
       input.campaignType === "miniapp_rewarded" ? input.campaignId : 0,
-      `%${domain}%`,
       `%${domain}%`,
     ]
   );
@@ -314,6 +313,7 @@ export async function applyAutomationBulkAction(input: {
   const db = conn || pool;
   const ids = input.ids.map(Number).filter((id) => Number.isInteger(id) && id > 0);
   if (ids.length === 0) return { affected: 0 };
+  if (input.action === "reject") throw new Error("MODERATION_REASON_REQUIRED");
   const placeholders = ids.map(() => "?").join(", ");
 
   if (["approve", "reject", "pause", "resume"].includes(input.action)) {

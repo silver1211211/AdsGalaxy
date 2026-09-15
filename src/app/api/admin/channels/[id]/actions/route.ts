@@ -74,6 +74,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const permission = DANGEROUS.has(action) ? "dangerous" : "operate";
   const { admin, response } = await requireAdminPermission(permission);
   if (response) return response;
+  if (action === "reject") return NextResponse.json({ error: "MODERATION_REASON_REQUIRED", code: "MODERATION_REASON_REQUIRED" }, { status: 400 });
   const channelId = Number((await params).id);
   const reason = String(body.reason || "").trim();
   if (!Number.isInteger(channelId) || channelId <= 0) return NextResponse.json({ error: "Invalid channel" }, { status: 400 });

@@ -1,5 +1,8 @@
 export type PublisherChannelErrorCode =
   | "INVALID_CHANNEL"
+  | "INVALID_CHANNEL_USERNAME"
+  | "INVALID_CHANNEL_TITLE"
+  | "CHANNEL_BELOW_MINIMUM_SUBSCRIBERS"
   | "CHANNEL_NOT_ACCESSIBLE"
   | "CHANNEL_ALREADY_EXISTS"
   | "PERMISSION_REQUIRED"
@@ -13,6 +16,9 @@ export type PublisherChannelErrorCode =
 
 const messages: Record<PublisherChannelErrorCode, string> = {
   INVALID_CHANNEL: "Please provide a valid Telegram channel.",
+  INVALID_CHANNEL_USERNAME: "Please provide a valid public Telegram channel username.",
+  INVALID_CHANNEL_TITLE: "The verified channel title must be between 3 and 128 characters.",
+  CHANNEL_BELOW_MINIMUM_SUBSCRIBERS: "This channel does not meet the minimum subscriber requirement.",
   CHANNEL_NOT_ACCESSIBLE: "We could not access this channel. Please verify the bot permissions and try again.",
   CHANNEL_ALREADY_EXISTS: "This channel is already registered.",
   PERMISSION_REQUIRED: "The required channel permission is missing.",

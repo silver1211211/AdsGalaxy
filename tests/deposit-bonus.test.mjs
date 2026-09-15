@@ -37,12 +37,15 @@ test("confirmation locks the deposit and ignores browser bonus values", () => {
   assert.doesNotMatch(listRoute, /ALTER TABLE|CREATE TABLE/);
   assert.match(route, /MAX_PROVIDER_RESPONSE_BYTES/);
   assert.match(listRoute, /MAX_PROVIDER_RESPONSE_BYTES/);
+  assert.doesNotMatch(service, /'deposit_bonus(?:_reversal)?'/);
+  assert.match(service, /Deposit bonus for deposit/);
+  assert.match(service, /Deposit bonus reversal for deposit/);
 });
 
 test("history, receipt, countdown and earned badge use server bonus data", () => {
   assert.match(page, /Deposit Bonus Live/);
   assert.match(page, /View bonus tiers/);
-  assert.match(page, /Total credited/);
+  assert.match(page, /Total credited|advertiser\.deposit\.totalCredited/);
   assert.match(page, /bonus_rate_basis_points/);
   assert.match(page, /promotion\.ends_at/);
 });

@@ -12,7 +12,6 @@ import {
   ArrowRight,
   TrendingUp,
   DollarSign,
-  Lock,
   Tv,
   Smartphone,
   Bot,
@@ -24,13 +23,11 @@ import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { useHeader } from "@/context/HeaderContext";
 import { apiFetch } from "@/lib/api";
-import AppBootState from "@/components/shared/AppBootState";
 import { AnimatePresence, motion } from "framer-motion";
 import { useRouter } from "next/navigation";
-import {
-  selectAdvertiserDashboardMetric,
-  type AdvertiserCampaignType,
-} from "@/lib/advertiserDashboardMetrics";
+import { useTranslations } from "@/i18n/client";
+import { readDashboardSnapshot, writeDashboardSnapshot } from "@/lib/dashboardSnapshot";
+import CampaignStatusBadge from "@/components/advertiser/CampaignStatusBadge";
 
 const CREATE_OPTIONS = [
   {
@@ -59,18 +56,11 @@ const CREATE_OPTIONS = [
 type AdvertiserCampaign = {
   id: number;
   name: string;
-  type?: AdvertiserCampaignType;
-  category?: string;
+  source?: "regular" | "miniapp";
+  type?: string;
+  campaign_kind?: string | null;
   status?: string;
-  budget?: string | number;
-  impressions?: string | number;
-  today_impressions?: string | number;
-  yesterday_impressions?: string | number;
   spend?: string | number;
-  today_spend?: string | number;
-  clicks?: string | number;
-  conversions?: string | number;
-  conversion_value?: string | number;
 };
 
 type AdvertiserStats = {
@@ -86,27 +76,22 @@ type AdvertiserStats = {
   conversion_value?: number;
   miniapp_impressions?: number;
   ad_balance: number;
-  ad_balance_locked: number;
   advertiser_trust_level?: string;
   advertiser_trust_label?: string;
   recent_campaigns: AdvertiserCampaign[];
 };
 
-const CAMPAIGN_TYPE_META: Record<string, { label: string; icon: typeof Tv }> = {
-  views: { label: "Channel Campaign - Views", icon: Tv },
-  clicks: { label: "Channel Campaign - Clicks", icon: Tv },
-  broadcast: { label: "Bot Campaign", icon: Bot },
-  miniapp: { label: "Mini App Campaign", icon: Smartphone },
+const CAMPAIGN_TYPE_ICONS: Record<string, typeof Tv> = {
+  views: Tv,
+  clicks: Tv,
+  broadcast: Bot,
+  miniapp: Smartphone,
 };
 
 const LIVE_STATUSES = new Set(["active", "approved", "monetized"]);
 
-function getCampaignTypeMeta(type?: string) {
-  return CAMPAIGN_TYPE_META[type || ""] || { label: type || "Campaign", icon: BarChart3 };
-}
-
-function numberValue(value: unknown) {
-  return Number(value || 0).toLocaleString();
+function getCampaignTypeIcon(type?: string) {
+  return CAMPAIGN_TYPE_ICONS[type || ""] || BarChart3;
 }
 
 function money(value: unknown) {
@@ -127,7 +112,6 @@ const defaultStats: AdvertiserStats = {
   conversion_value: 0,
   miniapp_impressions: 0,
   ad_balance: 0,
-  ad_balance_locked: 0,
   advertiser_trust_level: "new",
   advertiser_trust_label: "New Advertiser",
   recent_campaigns: [],
@@ -135,87 +119,96 @@ const defaultStats: AdvertiserStats = {
 
 export default function AdvertiserDashboard() {
   const { setTitle } = useHeader();
+  const { t } = useTranslations();
   const router = useRouter();
-  const [isLoading, setIsLoading] = useState(true);
+  const initialSnapshot = React.useMemo(() => readDashboardSnapshot<AdvertiserStats>("advertiser"), []);
+  const [isLoading, setIsLoading] = useState(!initialSnapshot);
   const [loadError, setLoadError] = useState(false);
-  const [stats, setStats] = useState<AdvertiserStats>(defaultStats);
+  const [balance, setBalance] = useState<{ available: number } | null>(null);
+  const [lowBalanceDismissed, setLowBalanceDismissed] = useState(false);
+  const [balanceError, setBalanceError] = useState(false);
+  const [stats, setStats] = useState<AdvertiserStats>(initialSnapshot || defaultStats);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showTypeModal, setShowTypeModal] = useState(false);
 
   const fetchStats = useCallback(async () => {
     try {
-      setIsLoading(true);
+      if (!initialSnapshot) setIsLoading(true);
       setLoadError(false);
-      let res: Response | null = null;
-      let data: Record<string, unknown> = {};
-      let lastError: unknown = null;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          res = await apiFetch("/api/advertiser/stats", { timeoutMs: 20000 });
-          data = await res.json().catch(() => ({}));
-          if (res.ok || res.status === 401 || res.status === 403) break;
-        } catch (error) {
-          lastError = error;
-        }
-        if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 750 * (2 ** attempt)));
-      }
-      if (!res) throw lastError || new Error("Failed to load advertiser stats");
+      const res = await apiFetch("/api/advertiser/stats", { timeoutMs: 12000 });
+      const data: Record<string, unknown> = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(String(data.error || "Failed to load advertiser stats"));
       setStats(data as unknown as AdvertiserStats);
+      writeDashboardSnapshot("advertiser", data);
     } catch (err) {
       console.error("Failed to fetch stats:", err);
       setLoadError(true);
     } finally {
       setIsLoading(false);
     }
+  }, [initialSnapshot]);
+
+  const fetchBalance = useCallback(async () => {
+    setBalanceError(false);
+    try {
+      const res = await apiFetch("/api/me/status", { timeoutMs: 5000 });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(String(data.error || "Failed to load balance"));
+      setBalance({
+        available: Number(data.ad_balance || 0),
+      });
+    } catch {
+      setBalanceError(true);
+    }
   }, []);
 
   useEffect(() => {
-    setTitle("Dashboard");
+    setTitle(t("common.dashboard"));
     const timer = window.setTimeout(() => {
-      fetchStats();
+      void fetchBalance();
+      void fetchStats();
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [fetchStats, setTitle]);
+  }, [fetchBalance, fetchStats, setTitle, t]);
 
   const statCards = [
     { 
-      label: "Total Campaigns", 
+      label: t("advertiser.dashboard.totalCampaigns"),
       value: stats.total_campaigns, 
       icon: Zap, 
       color: "text-blue-600", 
       bg: "bg-blue-50" 
     },
     { 
-      label: "Total Views", 
+      label: t("advertiser.dashboard.totalViews"),
       value: stats.total_views.toLocaleString(), 
       icon: Eye, 
       color: "text-emerald-600", 
       bg: "bg-emerald-50" 
     },
     { 
-      label: "Total Spent", 
+      label: t("advertiser.dashboard.totalSpent"),
       value: `$${stats.total_spent.toLocaleString()}`, 
       icon: TrendingUp, 
       color: "text-amber-600", 
       bg: "bg-amber-50" 
     },
     { 
-      label: "Total Clicks", 
+      label: t("advertiser.dashboard.totalClicks"),
       value: stats.total_clicks.toLocaleString(), 
       icon: MousePointer2, 
       color: "text-indigo-600", 
       bg: "bg-indigo-50" 
     },
     {
-      label: "Impressions",
+      label: t("common.impressions"),
       value: Number(stats.miniapp_impressions || 0).toLocaleString(),
       icon: Smartphone,
       color: "text-emerald-600",
       bg: "bg-emerald-50"
     },
     {
-      label: "Conversions",
+      label: t("common.conversions"),
       value: Number(stats.conversions || 0).toLocaleString(),
       icon: Zap,
       color: "text-purple-600",
@@ -229,7 +222,7 @@ export default function AdvertiserDashboard() {
       bg: "bg-rose-50"
     },
     {
-      label: "Conversion Rate",
+      label: t("advertiser.dashboard.conversionRate"),
       value: `${(Number(stats.conversion_rate || 0) * 100).toFixed(2)}%`,
       icon: TrendingUp,
       color: "text-cyan-600",
@@ -247,13 +240,13 @@ export default function AdvertiserDashboard() {
           <div className="relative">
             <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.22em] text-blue-100">
               <Sparkles size={12} />
-              Advertiser Command Center
+              {t("advertiser.dashboard.commandCenter")}
             </div>
             <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
               <div>
-                <h1 className="text-3xl font-black tracking-tight">Launch campaigns with confidence.</h1>
+                <h1 className="text-3xl font-black tracking-tight">{t("advertiser.dashboard.hero")}</h1>
                 <p className="mt-2 max-w-xl text-sm font-medium leading-6 text-white/65">
-                  Track budget, reach, trust level, and campaign performance across Telegram inventory.
+                  {t("advertiser.dashboard.heroDescription")}
                 </p>
               </div>
               <button
@@ -261,34 +254,42 @@ export default function AdvertiserDashboard() {
                 className="inline-flex items-center justify-center gap-2 rounded-2xl bg-white px-5 py-3 text-xs font-black uppercase tracking-wide text-[#0c9de8] shadow-lg shadow-white/10"
               >
                 <Megaphone size={15} />
-                Create Campaign
+                {t("advertiser.campaigns.create")}
               </button>
             </div>
           </div>
         </div>
 
         {loadError && (
-          <div className="-mx-4 sm:mx-0">
-            <AppBootState
-              mode="error"
-              title="Unable to load AdsGalaxy"
-              message="We couldn't start the Mini App. Please reload and try again."
-              detail="If this continues, contact support."
-              actionLabel="Retry"
-              onAction={fetchStats}
-            />
+          <div className="flex items-center justify-between rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+            <span>Analytics are temporarily unavailable. Your account remains usable.</span>
+            <button className="font-black text-blue-600" onClick={fetchStats}>{t("common.retry")}</button>
+          </div>
+        )}
+
+        {balance && balance.available < 2 && !lowBalanceDismissed && (
+          <div role="status" className="flex flex-col gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-950 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <p className="text-sm font-bold">{t("advertiser.dashboard.lowBalanceTitle")}</p>
+              <p className="text-xs text-amber-800">{t("advertiser.dashboard.lowBalanceDescription")}</p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <Link href="/advertiser/deposit" className="rounded-lg bg-amber-900 px-3 py-2 text-xs font-bold text-white">{t("advertiser.dashboard.deposit")}</Link>
+              <button type="button" aria-label={t("common.close")} onClick={() => setLowBalanceDismissed(true)} className="rounded-lg p-2 text-amber-800 hover:bg-amber-100"><X size={16} /></button>
+            </div>
           </div>
         )}
 
         {/* Balance Section */}
-        {!loadError && <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {!loadError && <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="flex items-center justify-between rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
             <div className="space-y-1">
-              <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Ad Balance</p>
-              <p className="text-3xl font-black text-slate-900">${stats.ad_balance.toFixed(2)}</p>
+              <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{t("advertiser.dashboard.adBalance")}</p>
+              {balance ? <p className="text-3xl font-black text-slate-900">${balance.available.toFixed(2)}</p> : <div className="h-9 w-32 animate-pulse rounded-lg bg-slate-100" />}
+              {balanceError && <button onClick={fetchBalance} className="text-xs font-bold text-blue-600">{t("common.retry")}</button>}
               <div className="flex items-center gap-1.5 pt-1">
                 <div className="w-2 h-2 bg-emerald-500 rounded-full" />
-                <span className="text-xs font-medium text-slate-400">Available for ads</span>
+                <span className="text-xs font-medium text-slate-400">{t("advertiser.dashboard.availableForSpend")}</span>
               </div>
             </div>
             <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-600">
@@ -296,19 +297,6 @@ export default function AdvertiserDashboard() {
             </div>
           </div>
 
-          <div className="flex items-center justify-between rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
-            <div className="space-y-1">
-              <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Locked Balance</p>
-              <p className="text-3xl font-black text-slate-900">${stats.ad_balance_locked.toFixed(2)}</p>
-              <div className="flex items-center gap-1.5 pt-1">
-                <div className="w-2 h-2 bg-amber-500 rounded-full" />
-                <span className="text-xs font-medium text-slate-400">In active campaigns</span>
-              </div>
-            </div>
-            <div className="w-16 h-16 bg-amber-50 rounded-2xl flex items-center justify-center text-amber-600">
-              <Lock size={32} />
-            </div>
-          </div>
           <div className="flex items-center justify-between rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
             <div className="space-y-1">
               <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Trust Level</p>
@@ -343,71 +331,60 @@ export default function AdvertiserDashboard() {
           ))}
         </div>}
 
-        {/* Recent Campaigns Placeholder */}
+        {/* Recent Campaign */}
         {!loadError && <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
           <div className="flex items-center justify-between mb-6">
-            <h3 className="text-lg font-bold text-slate-900">Recent Campaigns</h3>
+            <h3 className="text-lg font-bold text-slate-900">{t("advertiser.dashboard.recentCampaigns")}</h3>
             <Link href="/advertiser/campaigns" className="text-sm text-blue-600 font-semibold hover:underline flex items-center gap-1">
-              View all <ArrowRight size={14} />
+              {t("common.campaigns")} <ArrowRight size={14} />
             </Link>
           </div>
           <div className="space-y-4">
             {isLoading ? (
-              [1, 2, 3].map((item) => (
+              [1].map((item) => (
                 <div key={item} className="h-16 rounded-xl bg-slate-50 animate-pulse" />
               ))
             ) : stats.recent_campaigns.length === 0 ? (
-              <p className="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs">No recent campaigns</p>
+              <p className="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs">{t("advertiser.campaigns.empty")}</p>
             ) : (
-              stats.recent_campaigns.map((campaign) => {
-                const typeMeta = getCampaignTypeMeta(campaign.type);
+              stats.recent_campaigns.slice(0, 1).map((campaign) => {
+                const TypeIcon = getCampaignTypeIcon(campaign.type);
                 const isLive = LIVE_STATUSES.has(campaign.status || "");
-                const engagementMetric = selectAdvertiserDashboardMetric(campaign);
+                const campaignDescription = campaign.campaign_kind === "channel_growth"
+                  ? `${t("growth.title")} · ${t("common.subscribers")}`
+                  : campaign.type === "broadcast"
+                    ? t("advertiser.campaigns.botCampaign")
+                    : campaign.type === "miniapp"
+                      ? `${t("advertiser.dashboard.miniAppCampaign")} · ${t("advertiser.dashboard.rewardedViews")}`
+                      : `${t("advertiser.campaigns.channelCampaign")} · ${campaign.type === "clicks" ? t("advertiser.statistics.clicks") : t("advertiser.statistics.views")}`;
+                const statisticsSource = campaign.source || (campaign.type === "miniapp" ? "miniapp" : "regular");
                 return (
-                  <div key={`${campaign.type}-${campaign.id}`} className="flex flex-col gap-4 rounded-xl border border-slate-50 bg-slate-50/50 p-4 md:flex-row md:items-center md:justify-between">
-                    <div className="flex items-center gap-4">
+                  <div key={`${statisticsSource}-${campaign.id}`} className="rounded-xl border border-slate-100 bg-slate-50/50 p-4">
+                    <div className="flex items-start gap-3">
                       <div className={cn(
                         "w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-white",
                         isLive ? "bg-emerald-500" : "bg-slate-400"
                       )}>
-                        <typeMeta.icon size={20} />
+                        <TypeIcon size={20} />
                       </div>
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <p className="text-sm font-bold text-slate-900 truncate uppercase">{campaign.name}</p>
-                        <p className="text-xs text-slate-500">{typeMeta.label}{campaign.category ? ` - ${campaign.category}` : ""}</p>
+                        <p className="text-xs text-slate-500">{campaignDescription}</p>
                       </div>
+                      <CampaignStatusBadge status={campaign.status} />
                     </div>
-                    <div className="grid grid-cols-2 gap-3 text-left sm:grid-cols-3 lg:grid-cols-7 md:text-right">
-                      <div className={cn(
-                        "inline-flex h-7 items-center justify-center rounded-full px-3 text-[10px] font-black uppercase",
-                        isLive ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"
-                      )}>
-                        {campaign.status}
-                      </div>
+                    <div className="mt-4 flex items-end justify-between border-t border-slate-100 pt-3">
                       <div>
-                        <p className="text-sm font-bold text-slate-900">{numberValue(campaign.impressions)}</p>
-                        <p className="text-[10px] text-slate-400 uppercase font-black">Impressions</p>
+                        <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">{t("advertiser.dashboard.spent")}</p>
+                        <p className="text-base font-black text-slate-900">{money(campaign.spend)}</p>
                       </div>
-                      <div>
-                        <p className="text-sm font-bold text-slate-900">{numberValue(campaign.today_impressions)}</p>
-                        <p className="text-[10px] text-slate-400 uppercase font-black">Today</p>
-                      </div>
-                      <div>
-                        <p className="text-sm font-bold text-slate-900">{numberValue(campaign.yesterday_impressions)}</p>
-                        <p className="text-[10px] text-slate-400 uppercase font-black">Yesterday</p>
-                      </div>
-                      <div>
-                        <p className="text-sm font-bold text-slate-900">{money(campaign.spend)}</p>
-                        <p className="text-[10px] text-slate-400 uppercase font-black">Spend</p>
-                      </div>
-                      <div>
-                        <p className="text-sm font-bold text-slate-900">{money(campaign.today_spend)}</p>
-                        <p className="text-[10px] text-slate-400 uppercase font-black">Today Spend</p>
-                      </div>
-                      <div>
-                        <p className="text-sm font-bold text-slate-900">{numberValue(engagementMetric.value)}</p>
-                        <p className="text-[10px] text-slate-400 uppercase font-black">{engagementMetric.label}</p>
-                      </div>
+                      <Link
+                        href={`/advertiser/campaigns?statistics=${encodeURIComponent(`${statisticsSource}:${campaign.id}`)}`}
+                        onClick={() => window.sessionStorage.setItem("adsgalaxy:campaign-statistics-target", `${statisticsSource}:${campaign.id}`)}
+                        className="inline-flex items-center gap-1 text-sm font-bold text-blue-600 hover:underline"
+                      >
+                        {t("common.statistics")} <ArrowRight size={14} />
+                      </Link>
                     </div>
                   </div>
                 );
@@ -423,7 +400,7 @@ export default function AdvertiserDashboard() {
             className="group p-6 bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl text-white shadow-lg shadow-blue-200 flex items-center justify-between transition-transform active:scale-[0.98] text-left"
           >
             <div className="space-y-1">
-              <h3 className="text-lg font-bold">Create Campaign</h3>
+              <h3 className="text-lg font-bold">{t("advertiser.campaigns.create")}</h3>
               <p className="text-blue-100 text-sm">Launch a new ad in minutes</p>
             </div>
             <PlusCircle size={32} className="text-white/40 group-hover:text-white transition-colors" />
@@ -434,7 +411,7 @@ export default function AdvertiserDashboard() {
             className="group p-6 bg-white border-2 border-slate-100 rounded-2xl text-slate-900 flex items-center justify-between transition-all hover:border-blue-200 active:scale-[0.98]"
           >
             <div className="space-y-1">
-              <h3 className="text-lg font-bold">Deposit Funds</h3>
+              <h3 className="text-lg font-bold">{t("advertiser.dashboard.depositFunds")}</h3>
               <p className="text-slate-500 text-sm">Add balance to run ads</p>
             </div>
             <Wallet size={32} className="text-slate-200 group-hover:text-blue-600 transition-colors" />
@@ -459,8 +436,8 @@ export default function AdvertiserDashboard() {
               <div className="absolute top-3 left-1/2 -translate-x-1/2 w-10 h-1 bg-slate-200 rounded-full sm:hidden" />
               <div className="flex items-center justify-between px-6 pt-7 pb-4 border-b border-slate-100">
                 <div>
-                  <h2 className="text-base font-black uppercase tracking-tight text-slate-900">Create Campaign</h2>
-                  <p className="text-xs text-slate-400 font-medium mt-0.5">Choose how you want to advertise</p>
+                  <h2 className="text-base font-black uppercase tracking-tight text-slate-900">{t("advertiser.campaigns.create")}</h2>
+                  <p className="text-xs text-slate-400 font-medium mt-0.5">{t("advertiser.dashboard.chooseFormat")}</p>
                 </div>
                 <button
                   onClick={() => setShowCreateModal(false)}
@@ -469,7 +446,7 @@ export default function AdvertiserDashboard() {
                   <X size={16} />
                 </button>
               </div>
-              <div className="p-4 space-y-2">
+              <div className="max-h-[70vh] space-y-2 overflow-y-auto p-4">
                 {CREATE_OPTIONS.map((opt) => {
                   const isChannel = opt.key === "channel";
                   return (
@@ -538,8 +515,8 @@ export default function AdvertiserDashboard() {
                     <Eye size={22} />
                   </div>
                   <div className="flex-1">
-                    <p className="text-sm font-black text-slate-900 uppercase tracking-tight">Views Campaign</p>
-                    <p className="text-xs text-slate-400 font-medium mt-0.5">Pay per 1,000 channel post views</p>
+                    <p className="text-sm font-black text-slate-900 uppercase tracking-tight">{t("advertiser.dashboard.viewsCampaign")}</p>
+                    <p className="text-xs text-slate-400 font-medium mt-0.5 truncate">{t("advertiser.chooser.views.description")}</p>
                   </div>
                   <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
                 </button>
@@ -551,9 +528,25 @@ export default function AdvertiserDashboard() {
                     <MousePointer2 size={22} />
                   </div>
                   <div className="flex-1">
-                    <p className="text-sm font-black text-slate-900 uppercase tracking-tight">Click Campaign</p>
-                    <p className="text-xs text-slate-400 font-medium mt-0.5">Pay per button or link click</p>
+                    <p className="text-sm font-black text-slate-900 uppercase tracking-tight">{t("advertiser.dashboard.clickCampaign")}</p>
+                    <p className="text-xs text-slate-400 font-medium mt-0.5 truncate">{t("advertiser.chooser.clicks.description")}</p>
                   </div>
+                  <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
+                </button>
+                <button
+                  onClick={() => { setShowTypeModal(false); router.push("/advertiser/campaigns/new/growth"); }}
+                  className="w-full flex items-center gap-4 px-4 py-4 rounded-2xl border border-slate-100 bg-white hover:border-[#0c9de8] hover:bg-blue-50/50 transition-all group text-left"
+                >
+                  <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center shrink-0 text-[#0c9de8] group-hover:bg-[#0c9de8] group-hover:text-white transition-colors"><PlusCircle size={22} /></div>
+                  <div className="flex-1"><p className="text-sm font-black text-slate-900 uppercase tracking-tight">{t("advertiser.chooser.growth.title")}</p><p className="text-xs text-slate-400 font-medium mt-0.5 truncate">{t("advertiser.chooser.growth.description")}</p></div>
+                  <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
+                </button>
+                <button
+                  onClick={() => { setShowTypeModal(false); router.push("/advertiser/campaigns/new/channel?type=teaser"); }}
+                  className="w-full flex items-center gap-4 px-4 py-4 rounded-2xl border border-slate-100 bg-white hover:border-[#0c9de8] hover:bg-blue-50/50 transition-all group text-left"
+                >
+                  <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center shrink-0 text-[#0c9de8] group-hover:bg-[#0c9de8] group-hover:text-white transition-colors"><Sparkles size={22} /></div>
+                  <div className="flex-1"><p className="text-sm font-black text-slate-900 uppercase tracking-tight">{t("advertiser.chooser.teaser.title")}</p><p className="text-xs text-slate-400 font-medium mt-0.5 truncate">{t("advertiser.chooser.teaser.description")}</p></div>
                   <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
                 </button>
               </div>

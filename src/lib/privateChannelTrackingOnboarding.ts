@@ -1,7 +1,9 @@
+import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import type { ChannelPrivacySchema } from "@/lib/channelPrivacy";
 import {
   getConfiguredMtprotoAccountNumbers,
+  getMtprotoAccountAvailability,
   getTrackingAccountUsernames,
   joinPrivateInviteWithAccount,
   type MtprotoAccountNumber,
@@ -22,10 +24,35 @@ type InviteLink = {
   invite_link?: string;
 };
 
+type NamedLockRow = RowDataPacket & {
+  acquired: number | string | null;
+};
+
+type TrackingAccountLoadRow = RowDataPacket & {
+  tracking_account: number | string | null;
+  active_count: number | string | null;
+  assigned_count: number | string | null;
+};
+
+type ExistingTrackingRow = RowDataPacket & {
+  tracking_account: number | string | null;
+  tracking_account_status: string | null;
+  tracking_account_member_status: string | null;
+};
+
+type ExistingTrackingAssignment = {
+  account: MtprotoAccountNumber | null;
+  status: string;
+  memberStatus: string;
+};
+
 export type TrackingOnboardingResult =
   | { status: "not_required"; manual_usernames: ReturnType<typeof getTrackingAccountUsernames> }
   | { status: "active"; tracking_account: MtprotoAccountNumber; member_status: string; manual_usernames: ReturnType<typeof getTrackingAccountUsernames> }
   | { status: "pending_manual"; reason: string; manual_usernames: ReturnType<typeof getTrackingAccountUsernames> };
+
+const TRACKING_ASSIGNMENT_LOCK = "adsgalaxy_private_tracking_assignment_v1";
+const TRACKING_ASSIGNMENT_LOCK_TIMEOUT_SECONDS = 20;
 
 function safeReason(value: unknown) {
   return String(value || "unknown")
@@ -129,10 +156,107 @@ export async function clearPrivateTrackingAssignment(channelId: number | string,
   );
 }
 
-function chooseAccountOrder(configuredAccounts: MtprotoAccountNumber[]) {
-  // Account 1 is intentionally excluded until its Telegram session is
-  // reauthorized. New private channels must be joined by account 2 only.
-  return ([2] as MtprotoAccountNumber[]).filter((account) => configuredAccounts.includes(account));
+async function withTrackingAssignmentLock<T>(run: () => Promise<T>): Promise<T> {
+  const connection = await pool.getConnection();
+  let acquired = false;
+
+  try {
+    const [rows] = await connection.query<NamedLockRow[]>(
+      "SELECT GET_LOCK(?, ?) AS acquired",
+      [TRACKING_ASSIGNMENT_LOCK, TRACKING_ASSIGNMENT_LOCK_TIMEOUT_SECONDS]
+    );
+    acquired = Number(rows[0]?.acquired) === 1;
+    if (!acquired) throw new Error("tracking_assignment_busy");
+    return await run();
+  } finally {
+    if (acquired) {
+      await connection.query("SELECT RELEASE_LOCK(?)", [TRACKING_ASSIGNMENT_LOCK]).catch(() => undefined);
+    }
+    connection.release();
+  }
+}
+
+async function getExistingTrackingAssignment(channelId: number | string): Promise<ExistingTrackingAssignment> {
+  const [rows] = await pool.query<ExistingTrackingRow[]>(
+    `SELECT tracking_account, tracking_account_status, tracking_account_member_status
+     FROM channels
+     WHERE id = ?
+     LIMIT 1`,
+    [channelId]
+  );
+
+  const row = rows[0];
+  const account = Number(row?.tracking_account);
+  return {
+    account: account === 1 || account === 2 ? account as MtprotoAccountNumber : null,
+    status: String(row?.tracking_account_status || ""),
+    memberStatus: String(row?.tracking_account_member_status || ""),
+  };
+}
+
+async function reserveTrackingAccount(channelId: number | string, account: MtprotoAccountNumber) {
+  await pool.query(
+    `UPDATE channels
+     SET tracking_account = ?,
+         tracking_account_assigned_at = COALESCE(tracking_account_assigned_at, NOW())
+     WHERE id = ?
+       AND COALESCE(tracking_account_status, '') <> 'active'`,
+    [account, channelId]
+  );
+}
+
+async function clearTrackingReservation(channelId: number | string, account: MtprotoAccountNumber) {
+  await pool.query(
+    `UPDATE channels
+     SET tracking_account = NULL
+     WHERE id = ?
+       AND tracking_account = ?
+       AND COALESCE(tracking_account_status, '') <> 'active'`,
+    [channelId, account]
+  );
+}
+
+export async function chooseTrackingAccountOrder(
+  configuredAccounts: MtprotoAccountNumber[]
+): Promise<MtprotoAccountNumber[]> {
+  if (configuredAccounts.length <= 1) return [...configuredAccounts];
+
+  const placeholders = configuredAccounts.map(() => "?").join(",");
+  const [rows] = await pool.query<TrackingAccountLoadRow[]>(
+    `SELECT
+       tracking_account,
+       SUM(CASE
+         WHEN tracking_account_status = 'active'
+          AND tracking_account_member_status IN ('member', 'already_member')
+         THEN 1 ELSE 0
+       END) AS active_count,
+       COUNT(*) AS assigned_count
+     FROM channels
+     WHERE tracking_account IN (${placeholders})
+     GROUP BY tracking_account`,
+    configuredAccounts
+  );
+
+  const load = new Map<MtprotoAccountNumber, { active: number; assigned: number }>(
+    configuredAccounts.map((account) => [account, { active: 0, assigned: 0 }])
+  );
+
+  for (const row of rows) {
+    const account = Number(row.tracking_account);
+    if (account !== 1 && account !== 2) continue;
+    load.set(account, {
+      active: Math.max(0, Number(row.active_count || 0)),
+      assigned: Math.max(0, Number(row.assigned_count || 0)),
+    });
+  }
+
+  return [...configuredAccounts].sort((left, right) => {
+    const leftLoad = load.get(left) || { active: 0, assigned: 0 };
+    const rightLoad = load.get(right) || { active: 0, assigned: 0 };
+    return leftLoad.active - rightLoad.active
+      || leftLoad.assigned - rightLoad.assigned
+      || left - right;
+  });
 }
 
 export async function onboardPrivateChannelTracking(input: {
@@ -175,44 +299,93 @@ export async function onboardPrivateChannelTracking(input: {
     return { status: "pending_manual", reason: "missing_account_sessions", manual_usernames };
   }
 
-  const accountOrder = await chooseAccountOrder(configuredAccounts);
-  const errors: string[] = [];
+  try {
+    return await withTrackingAssignmentLock(async () => {
+      const existing = await getExistingTrackingAssignment(input.channelId);
+      const existingIsActive = existing.status === "active"
+        && (existing.memberStatus === "member" || existing.memberStatus === "already_member");
 
-  for (const account of accountOrder) {
-    let createdInvite: string | null = null;
-
-    try {
-      const invite = await telegram<InviteLink>("createChatInviteLink", {
-        chat_id: input.chatId,
-        name: `AdsGalaxy Tracking ${account}`,
-        expire_date: Math.floor(Date.now() / 1000) + 600,
-        member_limit: 1,
-        creates_join_request: false,
-      });
-
-      if (!invite.ok || !invite.result?.invite_link) {
-        errors.push(`account_${account}:${safeReason(invite.description || "invite_create_failed")}`);
-        continue;
+      if (existing.account && existingIsActive && configuredAccounts.includes(existing.account)) {
+        return {
+          status: "active" as const,
+          tracking_account: existing.account,
+          member_status: "member",
+          manual_usernames,
+        };
       }
 
-      createdInvite = invite.result.invite_link;
-      const joined = await joinPrivateInviteWithAccount(account, createdInvite);
-      if (joined.ok) {
-        await markActive(input.channelId, account, "member", input.schema);
-        return { status: "active", tracking_account: account, member_status: "member", manual_usernames };
+      if (existing.account && existingIsActive) {
+        return {
+          status: "pending_manual" as const,
+          reason: `account_${existing.account}:missing_account_session`,
+          manual_usernames,
+        };
       }
 
-      errors.push(`account_${account}:${safeReason(joined.code)}`);
-    } finally {
-      if (createdInvite) {
-        await telegram("revokeChatInviteLink", { chat_id: input.chatId, invite_link: createdInvite }).catch(() => null);
+      const balancedOrder = await chooseTrackingAccountOrder(configuredAccounts);
+      const accountOrder = existing.account && configuredAccounts.includes(existing.account)
+        ? [existing.account, ...balancedOrder.filter((account) => account !== existing.account)]
+        : balancedOrder;
+      const errors: string[] = [];
+
+      for (const account of accountOrder) {
+        const availability = getMtprotoAccountAvailability(account);
+        if (!availability.available) {
+          errors.push(`account_${account}:${safeReason(availability.code)}`);
+          continue;
+        }
+
+        let createdInvite: string | null = null;
+
+        try {
+          await reserveTrackingAccount(input.channelId, account);
+          const invite = await telegram<InviteLink>("createChatInviteLink", {
+            chat_id: input.chatId,
+            name: `AdsGalaxy Tracking ${account}`,
+            expire_date: Math.floor(Date.now() / 1000) + 600,
+            member_limit: 1,
+            creates_join_request: false,
+          });
+
+          if (!invite.ok || !invite.result?.invite_link) {
+            errors.push(`account_${account}:${safeReason(invite.description || "invite_create_failed")}`);
+            await clearTrackingReservation(input.channelId, account);
+            continue;
+          }
+
+          createdInvite = invite.result.invite_link;
+          const joined = await joinPrivateInviteWithAccount(account, createdInvite);
+          if (joined.ok) {
+            await markActive(input.channelId, account, joined.memberStatus, input.schema);
+            return {
+              status: "active" as const,
+              tracking_account: account,
+              member_status: joined.memberStatus,
+              manual_usernames,
+            };
+          }
+
+          errors.push(`account_${account}:${safeReason(joined.code)}`);
+          await clearTrackingReservation(input.channelId, account);
+        } finally {
+          if (createdInvite) {
+            await telegram("revokeChatInviteLink", { chat_id: input.chatId, invite_link: createdInvite }).catch(() => null);
+          }
+        }
       }
+
+      const reason = safeReason(errors.join(";") || "tracking_join_failed");
+      await markPendingManual(input.channelId, reason, input.schema);
+      return { status: "pending_manual" as const, reason, manual_usernames };
+    });
+  } catch (error) {
+    const reason = safeReason(error instanceof Error ? error.message : error);
+    if (reason === "tracking_assignment_busy") {
+      return { status: "pending_manual", reason, manual_usernames };
     }
+    await markPendingManual(input.channelId, reason, input.schema);
+    return { status: "pending_manual", reason, manual_usernames };
   }
-
-  const reason = safeReason(errors.join(";") || "tracking_join_failed");
-  await markPendingManual(input.channelId, reason, input.schema);
-  return { status: "pending_manual", reason, manual_usernames };
 }
 
 export { getTrackingAccountUsernames };

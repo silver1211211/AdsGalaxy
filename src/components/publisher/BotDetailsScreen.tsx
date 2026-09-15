@@ -7,6 +7,7 @@ import {
   ChevronLeft, ChevronDown, ChevronUp, Code2, Copy, ExternalLink, Plug, Edit3, Play, Pause, UserPlus, Eye, EyeOff, Info,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import OwnerModerationRejection from "@/components/shared/OwnerModerationRejection";
 import { apiFetch } from "@/lib/api";
 import Modal from "@/components/ui/Modal";
 import ManualAddUsersPopup from "@/components/publisher/ManualAddUsersPopup";
@@ -370,6 +371,7 @@ export default function BotDetailsScreen({
 
       <div className="flex-1 overflow-y-auto">
         <div className="space-y-3 p-4 pb-8">
+          <OwnerModerationRejection entityType="bot" entityId={bot.id} status={bot.status} />
 
           {/* ── Asset Overview ── */}
           <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">

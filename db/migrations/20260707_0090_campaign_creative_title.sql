@@ -18,6 +18,19 @@ PREPARE campaign_title_stmt FROM @campaign_title_sql;
 EXECUTE campaign_title_stmt;
 DEALLOCATE PREPARE campaign_title_stmt;
 
-UPDATE campaigns
-SET campaign_title = 'Ads'
-WHERE campaign_title IS NULL OR TRIM(campaign_title) = '';
+-- Avoid acquiring UPDATE locks when the historical backfill is already fully
+-- satisfied. The migration ledger prevents normal replays; this guard also
+-- keeps manual or partial-deploy reruns safe.
+SET @campaign_title_backfill_sql = IF(
+  EXISTS (
+    SELECT 1
+    FROM campaigns
+    WHERE campaign_title IS NULL OR TRIM(campaign_title) = ''
+    LIMIT 1
+  ),
+  'UPDATE campaigns SET campaign_title = ''Ads'' WHERE campaign_title IS NULL OR TRIM(campaign_title) = ''''',
+  'SELECT 1'
+);
+PREPARE campaign_title_backfill_stmt FROM @campaign_title_backfill_sql;
+EXECUTE campaign_title_backfill_stmt;
+DEALLOCATE PREPARE campaign_title_backfill_stmt;

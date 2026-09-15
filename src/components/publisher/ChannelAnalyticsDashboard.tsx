@@ -1,11 +1,11 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { ChartColumn } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { CalendarDays, ChartColumn, SlidersHorizontal } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { SkeletonChart, SkeletonStatGrid } from "@/components/ui/Skeleton";
 import { hasMinimumCpcSample, hasMinimumCpmSample } from "@/lib/statFormulas";
+import DateRangeCalendarPopup from "@/components/publisher/DateRangeCalendarPopup";
 
 type AnalyticsSummary = {
   earnings: number;
@@ -43,30 +43,30 @@ type ChannelAnalytics = {
   data_available: boolean;
 };
 
-type DateMode = "today" | "yesterday" | "7d" | "30d";
-
-const DATE_MODE_OPTIONS: Array<{ mode: DateMode; label: string }> = [
-  { mode: "today", label: "Today" },
-  { mode: "yesterday", label: "Yesterday" },
-  { mode: "7d", label: "Last 7 Days" },
-  { mode: "30d", label: "Last 30 Days" },
-];
+type PerformanceSource = "all" | "channel" | "teaser";
 
 function todayKey() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function yesterdayKey() {
-  const date = new Date();
-  date.setDate(date.getDate() - 1);
+function shiftDate(dateKey: string, days: number) {
+  const date = new Date(`${dateKey}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
 }
 
-function resolveModeQuery(mode: DateMode) {
-  if (mode === "today") { const key = todayKey(); return `from=${key}&to=${key}`; }
-  if (mode === "yesterday") { const key = yesterdayKey(); return `from=${key}&to=${key}`; }
-  if (mode === "30d") return `range=30`;
-  return `range=7`;
+function initialSevenDayRange() {
+  const end = todayKey();
+  return { start: shiftDate(end, -6), end };
+}
+
+function dateRangeLabel(start: string, end: string) {
+  const defaultRange = initialSevenDayRange();
+  if (start === defaultRange.start && end === defaultRange.end) return "Last 7 Days";
+  const format = (key: string) => new Date(`${key}T00:00:00Z`).toLocaleDateString(undefined, {
+    month: "short", day: "numeric", year: start.slice(0, 4) === end.slice(0, 4) ? undefined : "numeric", timeZone: "UTC",
+  });
+  return start === end ? format(start) : `${format(start)} – ${format(end)}`;
 }
 
 function formatMoney(value: number) {
@@ -120,15 +120,15 @@ interface ChannelAnalyticsDashboardProps {
 }
 
 export default function ChannelAnalyticsDashboard({ channelId, onSubscriberCount }: ChannelAnalyticsDashboardProps) {
-  const [dateMode, setDateMode] = useState<DateMode>("7d");
+  const [source, setSource] = useState<PerformanceSource>("all");
+  const [range, setRange] = useState(initialSevenDayRange);
+  const [calendarOpen, setCalendarOpen] = useState(false);
   const [data, setData] = useState<ChannelAnalytics | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    const query = resolveModeQuery(dateMode);
-    apiFetch(`/api/publisher/channels/${channelId}/analytics?${query}`, { cache: "no-store" })
+    apiFetch(`/api/publisher/channels/${channelId}/analytics?from=${range.start}&to=${range.end}&source=${source}`, { cache: "no-store" })
       .then(async (response) => {
         const json = await response.json().catch(() => null);
         if (!response.ok) throw new Error(json?.error || "Failed to load analytics");
@@ -140,7 +140,7 @@ export default function ChannelAnalyticsDashboard({ channelId, onSubscriberCount
       .catch(() => { if (!cancelled) setData(null); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [channelId, dateMode, onSubscriberCount]);
+  }, [channelId, source, range.start, range.end, onSubscriberCount]);
 
   const summary = data?.summary;
   const trend = data?.trend;
@@ -162,32 +162,36 @@ export default function ChannelAnalyticsDashboard({ channelId, onSubscriberCount
 
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm transition-shadow duration-200 hover:shadow-md">
-      <div className="flex items-center gap-3 border-b border-slate-100 px-4 py-3.5">
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 px-4 py-3.5">
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-500 ring-1 ring-inset ring-emerald-100">
           <ChartColumn size={16} />
         </span>
-        <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Daily Performance</p>
+        <p className="mr-auto text-[10px] font-black uppercase tracking-widest text-slate-500">Daily Performance</p>
+        <label className="relative inline-flex items-center">
+          <SlidersHorizontal size={12} className="pointer-events-none absolute left-2 text-slate-400" />
+          <select
+            value={source}
+            onChange={(event) => { setLoading(true); setSource(event.target.value as PerformanceSource); }}
+            aria-label="Filter performance source"
+            className="h-8 appearance-none rounded-lg border border-slate-200 bg-white pl-7 pr-3 text-[10px] font-black text-slate-600 outline-none focus:border-emerald-300"
+          >
+            <option value="all">All</option>
+            <option value="channel">Channel</option>
+            <option value="teaser">Teaser</option>
+          </select>
+        </label>
       </div>
 
       <div className="space-y-4 p-4">
-        {/* ── Date selector ── */}
-        <div className="overflow-x-auto">
-          <div className="flex w-max items-center gap-1 rounded-lg border border-slate-200/70 bg-slate-100 p-0.5">
-            {DATE_MODE_OPTIONS.map((option) => (
-              <button
-                key={option.mode}
-                type="button"
-                onClick={() => setDateMode(option.mode)}
-                className={cn(
-                  "whitespace-nowrap rounded px-2.5 py-1.5 text-[10px] font-black transition-all duration-200",
-                  dateMode === option.mode ? "bg-white text-emerald-600 shadow-sm" : "text-slate-500 hover:text-slate-700",
-                )}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        <button
+          type="button"
+          onClick={() => setCalendarOpen(true)}
+          aria-expanded={calendarOpen}
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-[10px] font-black text-emerald-600 shadow-sm transition-colors hover:bg-emerald-50"
+        >
+          <CalendarDays size={13} />
+          {dateRangeLabel(range.start, range.end)}
+        </button>
 
         {loading ? (
           <div className="space-y-4">
@@ -260,6 +264,17 @@ export default function ChannelAnalyticsDashboard({ channelId, onSubscriberCount
           </>
         )}
       </div>
+      <DateRangeCalendarPopup
+        isOpen={calendarOpen}
+        onClose={() => setCalendarOpen(false)}
+        initialStart={range.start}
+        initialEnd={range.end}
+        onApply={(start, end) => {
+          setLoading(true);
+          setRange({ start, end });
+          setCalendarOpen(false);
+        }}
+      />
     </div>
   );
 }

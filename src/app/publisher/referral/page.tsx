@@ -14,6 +14,7 @@ import { apiFetch } from "@/lib/api";
 import { useHeader } from "@/context/HeaderContext";
 import { cn } from "@/lib/utils";
 import { usePopupQueue } from "@/context/PopupQueueContext";
+import { StatusText } from "@/components/i18n/LocalizedEnum";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -281,7 +282,7 @@ export default function ReferralPage() {
   const [showRewards, setShowRewards] = useState(false);
   const [showAllLeaders, setShowAllLeaders] = useState(false);
   const [showAllTeams, setShowAllTeams]     = useState(false);
-  const [showAllHistory, setShowAllHistory] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [successPopup, setSuccessPopup] = useState<{ amount: string; settlementDate: string } | null>(null);
   const [fraudPopup, setFraudPopup]   = useState<{ reward: string; reason: string; reviewDate: string } | null>(null);
 
@@ -357,6 +358,23 @@ export default function ReferralPage() {
     else window.open(shareUrl, "_blank", "noopener,noreferrer");
   };
 
+  const loadMoreReferrals = async () => {
+    if (!data?.referrals_next_cursor || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try {
+      const response = await apiFetch(`/api/publisher/referrals?cursor=${encodeURIComponent(data.referrals_next_cursor)}`);
+      const next = await response.json();
+      setData((current: any) => ({
+        ...current,
+        referrals: [...(current?.referrals || []), ...(next?.referrals || [])],
+        referrals_has_more: Boolean(next?.referrals_has_more),
+        referrals_next_cursor: next?.referrals_next_cursor || null,
+      }));
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <DashboardLayout type="publisher">
@@ -382,7 +400,7 @@ export default function ReferralPage() {
   const leaderboard       = (data?.leaderboard || []) as any[];
   const visibleLeaders    = showAllLeaders ? leaderboard : leaderboard.slice(0, 5);
   const referrals         = (data?.referrals || []) as any[];
-  const visibleRefs       = showAllHistory ? referrals : referrals.slice(0, 5);
+  const visibleRefs       = referrals;
   const pendingTotal      = Number(data?.pending_rewards_total || 0);
   const nextSettlement    = data?.next_settlement_date
     ? new Date(data.next_settlement_date).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })
@@ -641,7 +659,7 @@ export default function ReferralPage() {
               <div className="flex items-start gap-2 rounded-2xl bg-blue-50 px-3 py-2.5">
                 <Bell size={14} className="mt-0.5 shrink-0 text-[#0c9de8]" />
                 <p className="text-xs font-semibold leading-5 text-slate-600">
-                  Last settlement: <span className="font-black">{lastSettlement.status}</span> · {money(lastSettlement.amount)}.
+                  Last settlement: <span className="font-black"><StatusText value={lastSettlement.status} /></span> · {money(lastSettlement.amount)}.
                 </p>
               </div>
             )}
@@ -1099,14 +1117,13 @@ export default function ReferralPage() {
                   </div>
                 );
               })}
-              {referrals.length > 5 && (
+              {data?.referrals_has_more && (
                 <button
-                  onClick={() => setShowAllHistory(v => !v)}
+                  onClick={loadMoreReferrals}
+                  disabled={isLoadingMore}
                   className="flex w-full items-center justify-center gap-1 rounded-2xl border border-slate-100 bg-white py-3 text-[11px] font-black text-[#0c9de8] shadow-sm"
                 >
-                  {showAllHistory
-                    ? <><ChevronUp size={13} /> Show less</>
-                    : <><ChevronDown size={13} /> Show all {referrals.length} referrals</>}
+                  <ChevronDown size={13} /> {isLoadingMore ? "Loading…" : "See More"}
                 </button>
               )}
             </div>

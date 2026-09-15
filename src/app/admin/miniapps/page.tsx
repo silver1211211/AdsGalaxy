@@ -4,9 +4,13 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
+import { useAdminRequestGuard } from "@/hooks/useAdminRequestGuard";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Modal from "@/components/ui/Modal";
 import { BarChart3, Check, ChevronLeft, ChevronRight, Copy, ExternalLink, Info, Link2, Loader2, Pause, Play, Search, Settings2, Smartphone, Trash2, X } from "lucide-react";
+import ModerationRejectFields from "@/components/admin/ModerationRejectFields";
+import ModerationHistory from "@/components/admin/ModerationHistory";
+import { getApiErrorMessage } from "@/lib/apiErrorMessage";
 
 type MiniApp = {
   id: number;
@@ -269,6 +273,7 @@ function formatNetworkTestStatus(data: any, result: { success: boolean; error_co
 }
 
 export default function AdminMiniAppsPage() {
+  const beginListRequest = useAdminRequestGuard();
   const [miniapps, setMiniapps] = useState<MiniApp[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
@@ -279,6 +284,8 @@ export default function AdminMiniAppsPage() {
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
+  const [policyRuleKey, setPolicyRuleKey] = useState("");
+  const [internalNote, setInternalNote] = useState("");
   const [networkMiniApp, setNetworkMiniApp] = useState<MiniApp | null>(null);
   const [approvalEnabled, setApprovalEnabled] = useState(false);
   const [detailsMiniApp, setDetailsMiniApp] = useState<MiniApp | null>(null);
@@ -299,9 +306,10 @@ export default function AdminMiniAppsPage() {
   const [optimizerReport, setOptimizerReport] = useState<OptimizerReport | null>(null);
 
   const fetchMiniApps = async (p: number, s: string, q: string, n: string) => {
+    const controller = beginListRequest();
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/miniapps?page=${p}&limit=10&status=${s}&network_count=${n}&search=${encodeURIComponent(q)}`);
+      const res = await fetch(`/api/admin/miniapps?page=${p}&limit=10&status=${s}&network_count=${n}&search=${encodeURIComponent(q)}`, { signal: controller.signal });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to fetch Mini Apps");
       setMiniapps(data.miniapps || []);
@@ -309,9 +317,10 @@ export default function AdminMiniAppsPage() {
       setOptimizerReport(data.optimizer_report || null);
       setTotalPages(data.totalPages || 1);
     } catch (err: any) {
+      if (controller.signal.aborted) return;
       setError(err.message || "Failed to fetch Mini Apps");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 
@@ -320,20 +329,21 @@ export default function AdminMiniAppsPage() {
       fetchMiniApps(page, statusFilter, search, networkCountFilter);
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [page, statusFilter, networkCountFilter, search]);
+  }, [page, statusFilter, networkCountFilter, search, beginListRequest]);
 
   const runAction = async () => {
     if (!pendingAction) return;
     const { miniapp, action } = pendingAction;
+    if (action === "reject" && !policyRuleKey) { setError("MODERATION_REASON_REQUIRED"); return; }
     setActionLoading(miniapp.id);
     try {
-      const res = await fetch(`/api/admin/miniapps/${miniapp.id}/actions`, {
+      const res = await fetch(action === "reject" ? "/api/admin/moderation-rejections" : `/api/admin/miniapps/${miniapp.id}/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify(action === "reject" ? { entity_type: "miniapp", entity_id: miniapp.id, policy_rule_key: policyRuleKey, internal_note: internalNote } : { action }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Action failed");
+      if (!res.ok) throw new Error(getApiErrorMessage(data, "Mini App action failed"));
       setPendingAction(null);
       await fetchMiniApps(page, statusFilter, search, networkCountFilter);
     } catch (err: any) {
@@ -509,7 +519,7 @@ export default function AdminMiniAppsPage() {
       )}
       {miniapp.status !== "rejected" && (
         <button
-          onClick={() => setPendingAction({ miniapp, action: "reject", title: "Reject Mini App", message: `Reject ${miniapp.miniapp_name}?`, danger: true })}
+          onClick={() => { setPolicyRuleKey(""); setInternalNote(""); setPendingAction({ miniapp, action: "reject", title: "Reject Mini App", message: `Reject ${miniapp.miniapp_name}?`, danger: true }); }}
           disabled={actionLoading === miniapp.id}
           className="rounded-lg border border-red-100 bg-red-50 p-2 text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
           title="Reject"
@@ -567,7 +577,7 @@ export default function AdminMiniAppsPage() {
         confirmBtnText="Confirm"
         confirmBtnVariant={pendingAction?.danger ? "danger" : "primary"}
         isLoading={actionLoading !== null}
-      />
+      >{pendingAction?.action === "reject" && <ModerationRejectFields scopes={["publisher.general", "publisher.mini-app"]} ruleKey={policyRuleKey} internalNote={internalNote} onRuleKey={setPolicyRuleKey} onInternalNote={setInternalNote} />}</ConfirmationModal>
 
       {/* Mini App IDs and URLs */}
       {detailsMiniApp && (
@@ -583,6 +593,7 @@ export default function AdminMiniAppsPage() {
               </button>
             </div>
             <div className="space-y-3 p-6">
+              <ModerationHistory entityType="miniapp" entityId={detailsMiniApp.id} />
               {[
                 { label: "Bot ID", value: String(detailsMiniApp.bot_id || ""), url: false, help: "" },
                 { label: "Bot URL", value: miniAppBotUrl(detailsMiniApp), url: true, help: "The Telegram bot users interact with." },

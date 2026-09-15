@@ -16,6 +16,7 @@ import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Toast from "@/components/ui/Toast";
 import { getDefaultPostingTimes, normalizePostingTimes, POSTING_TIME_OPTIONS } from "@/lib/postingTimes";
 import { classifyChannelAudience } from "@/lib/channelAudience";
+import { normalizePublicChannelUsername, TELEGRAM_CHANNEL_TITLE_MAX_LENGTH } from "@/lib/telegramChannelInput";
 
 const CATEGORIES = ["Crypto", "Finance", "NSFW +18", "Tech", "Gambling", "Entertainment", "Education", "Shopping", "Other"];
 const CONTINENTS = [
@@ -56,6 +57,8 @@ type ChannelDetails = {
   posting_times?: unknown;
   audience_continents?: unknown;
   categories?: string | string[];
+  teaser_enabled?: boolean | number;
+  teaser_daily_limit?: number;
 };
 
 type TelegramWebAppWindow = Window & {
@@ -89,6 +92,8 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
   const [selectedCategories, setSelectedCategories] = useState<string[]>(
     channel?.categories ? (typeof channel.categories === 'string' ? JSON.parse(channel.categories) : channel.categories) : []
   );
+  const [teaserEnabled, setTeaserEnabled] = useState(channel?.teaser_enabled !== 0);
+  const [teaserDailyLimit, setTeaserDailyLimit] = useState(Number(channel?.teaser_daily_limit || 2));
 
   // Telegram Back Button Logic
   useEffect(() => {
@@ -117,7 +122,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
     setIsLoading(true);
     setNotification(null);
     try {
-      const res = await apiFetch(`/api/telegram/chat-info?username=${username}`);
+      const res = await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(username)}`);
       const data: unknown = await res.json();
       
       if (!res.ok) {
@@ -133,7 +138,10 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
       }
 
       const details = data as ChannelDetails;
-      setChannelInfo(details);
+      const canonicalUsername = normalizePublicChannelUsername(details.username);
+      if (!canonicalUsername) throw new Error("Telegram did not return a valid public channel username.");
+      setChannelInfo({ ...details, username: canonicalUsername });
+      setUsername(canonicalUsername);
       setEditedTitle(details.title || "");
       setStep(2);
     } catch (err: unknown) {
@@ -222,11 +230,11 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
       });
       return;
     }
-    if (trimmedTitle.length > 50) {
+    if (trimmedTitle.length > TELEGRAM_CHANNEL_TITLE_MAX_LENGTH) {
       setNotification({
         type: "error",
         title: isEdit ? "Update Failed" : "Registration Failed",
-        message: "Channel name must be at most 50 characters."
+        message: `Channel name must be at most ${TELEGRAM_CHANNEL_TITLE_MAX_LENGTH} characters.`
       });
       return;
     }
@@ -245,6 +253,8 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
           posting_times: postingTimes,
           audience_continents: selectedContinents,
           categories: selectedCategories,
+          teaser_enabled: teaserEnabled,
+          teaser_daily_limit: teaserDailyLimit,
         }),
       });
 
@@ -371,6 +381,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                           type="text"
                           value={editedTitle}
                           onChange={(e) => setEditedTitle(e.target.value)}
+                          maxLength={TELEGRAM_CHANNEL_TITLE_MAX_LENGTH}
                           className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl focus:bg-white focus:ring-2 focus:ring-blue-500/20 outline-none transition-all font-bold text-slate-900"
                         />
                       </div>
@@ -439,6 +450,37 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                       )}>
                         {postingTimesError || `Select ${postsPerDay === 1 ? "1 time" : `up to ${postsPerDay} times`} in 30-minute intervals.`}
                       </p>
+                    </div>
+
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-black text-slate-900">Teaser Ads</p>
+                          <p className="mt-1 text-xs leading-relaxed text-slate-500">Allow short sponsored messages on eligible channel posts.</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setTeaserEnabled((enabled) => !enabled)}
+                          className={cn("rounded-full px-3 py-1.5 text-xs font-black", teaserEnabled ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600")}
+                        >
+                          {teaserEnabled ? "ON" : "OFF"}
+                        </button>
+                      </div>
+                      <div className="mt-4 flex items-center justify-between gap-3">
+                        <span className="text-xs font-bold text-slate-600">Daily Limit</span>
+                        <div className="flex gap-1.5">
+                          {[2, 3, 4, 5].map((limit) => (
+                            <button
+                              type="button"
+                              key={limit}
+                              onClick={() => setTeaserDailyLimit(limit)}
+                              className={cn("h-8 w-8 rounded-lg text-xs font-black", teaserDailyLimit === limit ? "bg-blue-600 text-white" : "bg-white text-slate-600")}
+                            >
+                              {limit}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     </div>
 
                     <div className="space-y-3">

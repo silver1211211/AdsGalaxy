@@ -1,14 +1,15 @@
 import { NextResponse } from "next/server";
 /* eslint-disable @typescript-eslint/no-explicit-any -- authenticated referral summary is dynamically shaped */
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 import { getReferralGrowthSummary } from "@/lib/referralSprint";
 import pool from "@/lib/db";
 
 export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
-    return NextResponse.json(await getReferralGrowthSummary(Number(user.id)));
+    const user = await getAuthenticatedUserStatus(initData, { request });
+    const cursor = new URL(request.url).searchParams.get("cursor");
+    return NextResponse.json(await getReferralGrowthSummary(Number(user.id), cursor));
   } catch (error: any) {
     console.error("Referrals Fetch Error:", error);
     return NextResponse.json({ error: error.message || "Failed to fetch referral data" }, { status: getAuthErrorStatus(error) });

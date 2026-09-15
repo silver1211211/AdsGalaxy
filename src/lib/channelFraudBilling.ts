@@ -13,7 +13,7 @@ export function fraudBillingStateForSeverity(severity: unknown): ChannelFraudBil
 type FraudPost = RowDataPacket & {
   fraud_event_id: number; billing_state: "confirmed_fraud" | "critical_fraud"; reason: string;
   post_id: number; campaign_id: number; channel_id: number; publisher_id: number; advertiser_id: number;
-  campaign_type: string; views: number; clicks: number; settled_views: number; settled_clicks: number;
+  campaign_type: string; funding_model: "legacy_reserved" | "direct_debit"; views: number; clicks: number; settled_views: number; settled_clicks: number;
   fraud_excluded_views: number; fraud_excluded_clicks: number;
 };
 
@@ -56,11 +56,12 @@ async function reverseSettlement(connection: PoolConnection, post: FraudPost, le
     [lockedRecovery, availableRecovery, post.publisher_id]
   );
   await connection.query(
-    `UPDATE campaigns SET channel_spend=GREATEST(0,channel_spend-?),
+    `UPDATE campaigns SET budget=IF(funding_model='direct_debit',LEAST(total_budget,budget+?),budget),
+       channel_spend=GREATEST(0,channel_spend-?),
        channel_publisher_earnings=GREATEST(0,channel_publisher_earnings-?),
        channel_platform_revenue=GREATEST(0,channel_platform_revenue-?),
        channel_reserve_amount=GREATEST(0,channel_reserve_amount-?) WHERE id=?`,
-    [advertiserCredit, publisherCredit, money(ledger.platform_revenue), money(ledger.reserve_amount), post.campaign_id]
+    [advertiserCredit, advertiserCredit, publisherCredit, money(ledger.platform_revenue), money(ledger.reserve_amount), post.campaign_id]
   );
   await connection.query(
     `UPDATE campaign_posts SET spend=GREATEST(0,spend-?), publisher_earnings=GREATEST(0,publisher_earnings-?),
@@ -84,7 +85,7 @@ export async function applyChannelFraudBillingPolicy() {
     `SELECT MAX(fe.id) fraud_event_id,
        CASE WHEN MAX(fe.billing_state='critical_fraud')=1 THEN 'critical_fraud' ELSE 'confirmed_fraud' END billing_state,
        MAX(fe.reason) reason, cp.id post_id, cp.campaign_id, cp.channel_id, ch.user_id publisher_id,
-       c.user_id advertiser_id, c.type campaign_type, COALESCE(cp.views,0) views,
+       c.user_id advertiser_id, c.type campaign_type, c.funding_model, COALESCE(cp.views,0) views,
        (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id=cp.id) clicks,
        COALESCE(cp.settled_views,0) settled_views, COALESCE(cp.settled_clicks,0) settled_clicks,
        COALESCE(cp.fraud_excluded_views,0) fraud_excluded_views,
@@ -94,7 +95,7 @@ export async function applyChannelFraudBillingPolicy() {
      JOIN campaigns c ON c.id=cp.campaign_id
      JOIN channels ch ON ch.id=cp.channel_id
      WHERE fe.billing_state IN ('confirmed_fraud','critical_fraud') AND fe.false_positive_at IS NULL
-     GROUP BY cp.id,cp.campaign_id,cp.channel_id,ch.user_id,c.user_id,c.type,cp.views,cp.settled_views,cp.settled_clicks,
+     GROUP BY cp.id,cp.campaign_id,cp.channel_id,ch.user_id,c.user_id,c.type,c.funding_model,cp.views,cp.settled_views,cp.settled_clicks,
        cp.fraud_excluded_views,cp.fraud_excluded_clicks`
   );
   let adjustedSettlements = 0;

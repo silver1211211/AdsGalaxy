@@ -78,18 +78,16 @@ test("production text and destination validation is safe and actionable", () => 
   }
 });
 
-test("views, clicks, and broadcast use one atomic guarded-debit creation pipeline", () => {
+test("views, clicks, and broadcast use one atomic creation pipeline without a historical pre-debit", () => {
   assert.match(route, /type === "clicks" \? submittedCpc/);
   assert.match(route, /inventoryType: type === "broadcast" \? "bot" : "channel"/);
-  assert.match(transaction, /SET ad_balance = ad_balance - \?[\s\S]*ad_balance >= \?/);
   const begin = transaction.indexOf("beginTransaction()");
-  const debit = transaction.indexOf("SET ad_balance = ad_balance - ?");
   const campaign = route.indexOf("INSERT INTO campaigns");
   const targeting = route.indexOf("campaign_direct_inventory_targets");
-  const ledger = transaction.indexOf("INSERT INTO advertiser_transactions");
   const commit = transaction.indexOf("commit()");
-  assert.ok(begin < debit && debit < ledger && ledger < commit);
+  assert.ok(begin >= 0 && begin < commit);
   assert.ok(campaign < targeting);
+  assert.doesNotMatch(transaction, /(?:ad_balance|advertiser_transactions|locked_balance)/);
   assert.match(transaction, /catch \(error\)[\s\S]*rollback\(\)[\s\S]*throw error/);
   assert.match(transaction, /success: true as const, id: campaignId/);
 });

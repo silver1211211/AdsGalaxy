@@ -5,6 +5,7 @@ import { combineMiniAppCampaignMetricSources } from "../src/lib/miniappCampaignM
 import { calculateCumulativeExternalDue } from "../src/lib/miniappExternalDeliveryMath.ts";
 
 const worker = readFileSync("src/lib/miniappExternalDeliverySync.ts", "utf8");
+const directDebit = readFileSync("src/lib/advertiserDirectDebit.ts", "utf8");
 const billing = readFileSync("src/lib/miniappInternalAds.ts", "utf8");
 const notifications = readFileSync("src/lib/miniappCampaignNotifications.ts", "utf8");
 const migration = readFileSync("db/migrations/20260831_0122_miniapp_external_delivery_sync.sql", "utf8");
@@ -82,15 +83,19 @@ test("all advertiser and admin campaign reporting reuses combined authoritative 
   assert.match(campaignMetrics, /miniapp_external_delivery_batches/);
   assert.match(campaignMetrics, /combineMiniAppCampaignMetricSources/);
   for (const route of reportingRoutes) {
-    assert.match(route, /getMiniAppCampaignMetrics/);
-    assert.match(route, /applyMiniAppCampaignMetrics|miniAppMetrics\.values/);
+    const usesSharedMetrics = /getMiniAppCampaignMetrics/.test(route)
+      && /applyMiniAppCampaignMetrics|miniAppMetrics\.values/.test(route);
+    const directlyCombinesBothSources = /miniapp_internal_ad_impressions/.test(route)
+      && /miniapp_external_delivery_batches/.test(route);
+    assert.ok(usesSharedMetrics || directlyCombinesBothSources);
   }
 });
 
 test("worker uses transactions, row locks, guarded debits, and combined source totals", () => {
   assert.match(worker, /beginTransaction\(\)/);
   assert.match(worker, /FOR UPDATE/);
-  assert.match(worker, /ad_balance >= \?/);
+  assert.match(worker, /claimAdvertiserDirectDebit/);
+  assert.match(directDebit, /UPDATE users SET ad_balance=ad_balance-\? WHERE id=\? AND ad_balance>=\?/);
   assert.match(worker, /remaining_budget >= \?/);
   assert.match(worker, /platformDeliveredDuring/);
   assert.match(worker, /external_impressions_added/);

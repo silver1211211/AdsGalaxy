@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 import { normalizePostingTimes, normalizePostsPerDay } from "@/lib/postingTimes";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import {
@@ -11,6 +11,7 @@ import {
   normalizePrivateInviteLink,
   normalizePublicChannelUsername,
 } from "@/lib/channelPrivacy";
+import { normalizeTelegramChannelTitle } from "@/lib/telegramChannelInput";
 import { resolvePrivateInviteLink } from "@/lib/telegramMtproto";
 import { encryptPrivateInviteLink } from "@/lib/privateInviteLinkVault";
 import {
@@ -22,11 +23,12 @@ import { notifyChannelSubmitted } from "@/lib/publisherNotifications";
 import { normalizeChannelAudience } from "@/lib/channelAudience";
 import { sendChannelWelcomePostIfNeeded } from "@/lib/channelWelcomePost";
 import { safeQueuePublisherWelcome } from "@/lib/supportMessages";
+import { MINIMUM_PUBLISHER_CHANNEL_SUBSCRIBERS } from "@/lib/policyRegistry";
 import { sanitizePublisherChannel } from "@/lib/channelRefreshPolicy";
 import { logPublisherChannelError, publisherChannelError } from "@/lib/publisherChannelErrors";
 import { isTransientDatabaseError, queryWithRetry } from "@/lib/dbResilience";
+import { validateTeaserDailyLimit } from "@/lib/teaser";
 
-type SettingRow = RowDataPacket & { value?: string | number | null };
 type ExistingChannelRow = RowDataPacket & { id: number; user_id: number; is_deleted: boolean | number };
 
 async function hasPostingTimesColumn() {
@@ -123,7 +125,7 @@ function addTrackingInsertColumns(
 export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await getAuthenticatedUserStatus(initData, { request });
     const [hasCampaignClicks, hasAdSettlements, hasAdSettlementsViews, hasCampaignPosts, hasCampaignPostViews,
       hasClickReward, hasClickChannelId, hasViewReward, hasViewChannelId, hasUpdatedAt] = await Promise.all([
       tableExists("campaign_clicks"),
@@ -187,6 +189,9 @@ export async function GET(request: Request) {
         c.suggested_fix,
         c.failure_reason,
         c.marketplace_visible,
+        c.teaser_enabled,
+        c.teaser_daily_limit,
+        c.teaser_status,
         c.created_at,
         ${hasUpdatedAt ? "c.updated_at" : "c.created_at"} as updated_at,
         ${totalImpressionsExpr} as total_impressions,
@@ -225,6 +230,8 @@ export async function POST(request: Request) {
       invite_link,
       verification_token,
       subscriber_count,
+      teaser_enabled,
+      teaser_daily_limit,
     } = body;
     let normalizedAudience: string;
     try {
@@ -234,7 +241,7 @@ export async function POST(request: Request) {
         error: error instanceof Error ? error.message : "Channel audience is invalid",
       }, { status: 400 });
     }
-    const normalizedTitle = String(title ?? "").trim();
+    const submittedTitle = String(title ?? "").trim();
     const normalizedChannelType = inferChannelType({ channelType: channel_type, inviteLink: invite_link, username });
     if (!normalizedChannelType) {
       return publisherChannelError("INVALID_CHANNEL", 400);
@@ -262,15 +269,7 @@ export async function POST(request: Request) {
     }
 
     if (normalizedChannelType === "public" && !normalizedUsername) {
-      return publisherChannelError("INVALID_CHANNEL", 400);
-    }
-
-    if (normalizedTitle.length < 3) {
-      return publisherChannelError("INVALID_CHANNEL", 400);
-    }
-
-    if (normalizedTitle.length > 50) {
-      return publisherChannelError("INVALID_CHANNEL", 400);
+      return publisherChannelError("INVALID_CHANNEL_USERNAME", 400);
     }
 
     const botToken = process.env.BOT_TOKEN;
@@ -320,6 +319,15 @@ export async function POST(request: Request) {
 
     const normalizedPostsPerDay = normalizePostsPerDay(posts_per_day);
     const normalizedPostingTimes = normalizePostingTimes(posting_times, normalizedPostsPerDay);
+    const normalizedTeaserEnabled = teaser_enabled === undefined
+      ? true
+      : teaser_enabled !== false && teaser_enabled !== 0 && teaser_enabled !== "0";
+    let normalizedTeaserDailyLimit: number;
+    try {
+      normalizedTeaserDailyLimit = validateTeaserDailyLimit(teaser_daily_limit ?? 2);
+    } catch {
+      return NextResponse.json({ error: "TEASER_INVALID_DAILY_LIMIT" }, { status: 400 });
+    }
     const canStorePostingTimes = await hasPostingTimesColumn();
     const privacySchema = await getChannelPrivacySchema();
     const encryptedPrivateInviteLink = normalizedChannelType === "private"
@@ -344,9 +352,8 @@ export async function POST(request: Request) {
       console.warn("channels.posting_times column is missing; channel posting times will use runtime defaults");
     }
 
-    // 1. Get minimum subscribers requirement from settings
-    const [settings] = await queryWithRetry<SettingRow[]>("SELECT value FROM settings WHERE `key` = 'min_subscribers'", [], { operation: "publisher_channel_min_subscribers" });
-    const minSubscribers = parseInt(String(settings[0]?.value || "0"));
+    // Locked policy authority shared with the public Publisher Channel Policy.
+    const minSubscribers = MINIMUM_PUBLISHER_CHANNEL_SUBSCRIBERS;
 
     // 2. Verify Telegram access and fetch current member count.
     const chatData = await telegram(botToken, "getChat", { chat_id: resolvedChatId });
@@ -358,17 +365,47 @@ export async function POST(request: Request) {
       return publisherChannelError("INVALID_CHANNEL", 400);
     }
 
-    const telegramUsername = String(chatData.result?.username || "").replace(/^@/, "").trim() || null;
+    const telegramUsername = normalizePublicChannelUsername(chatData.result?.username);
     if (normalizedChannelType === "public") {
-      normalizedUsername = telegramUsername || normalizedUsername;
+      // Telegram's response is authoritative after verification. The submitted
+      // value is used only to locate the chat and must not replace its identity.
+      normalizedUsername = telegramUsername;
       if (!normalizedUsername) {
-        return publisherChannelError("INVALID_CHANNEL", 400);
+        return publisherChannelError("INVALID_CHANNEL_USERNAME", 400);
       }
       resolvedChatId = String(chatData.result.id);
     } else {
       normalizedUsername = telegramUsername;
       resolvedChatId = String(chatData.result.id || resolvedChatId);
     }
+
+    // Telegram titles are human-readable and may contain spaces. Retain the
+    // authoritative verified title instead of applying username validation to
+    // it; the submitted display title is only a compatibility fallback.
+    const normalizedTitle = normalizeTelegramChannelTitle(chatData.result?.title)
+      || normalizeTelegramChannelTitle(submittedTitle);
+    if (!normalizedTitle) {
+      return publisherChannelError("INVALID_CHANNEL_TITLE", 400);
+    }
+
+    // Re-check the required bot permissions at the write boundary. Successful
+    // chat lookup alone is not proof that the bot is still an administrator.
+    const meData = await telegram(botToken, "getMe", {});
+    if (!meData.ok) return publisherChannelError("TELEGRAM_TEMPORARILY_UNAVAILABLE", 503);
+    const memberData = await telegram(botToken, "getChatMember", { chat_id: resolvedChatId, user_id: meData.result?.id });
+    const member = memberData.result;
+    const isCreator = member?.status === "creator";
+    const hasRequiredAdminAccess = memberData.ok
+      && (member?.status === "administrator" || isCreator)
+      && (isCreator || member?.can_post_messages === true)
+      && (isCreator || member?.can_delete_messages === true)
+      && (normalizedChannelType !== "private" || isCreator || member?.can_invite_users === true);
+    if (!hasRequiredAdminAccess) {
+      return publisherChannelError("PERMISSION_REQUIRED", 400);
+    }
+    const teaserStatus = !normalizedTeaserEnabled
+      ? "disabled"
+      : (isCreator || member?.can_edit_messages === true) ? "active" : "needs_permission";
 
     const tgData = await telegram(botToken, "getChatMemberCount", { chat_id: resolvedChatId });
 
@@ -379,7 +416,12 @@ export async function POST(request: Request) {
     const subscriberCount = tgData.ok ? Number(tgData.result || 0) : Number(privateSubscriberCount || 0);
 
     if (subscriberCount < minSubscribers) {
-      return publisherChannelError("INVALID_CHANNEL", 400);
+      return Response.json({
+        error: {
+          code: "CHANNEL_BELOW_MINIMUM_SUBSCRIBERS",
+          message: `Channel must have at least ${minSubscribers} subscribers. Current: ${subscriberCount}.`,
+        },
+      }, { status: 400 });
     }
 
     // 3. Check if channel already exists
@@ -409,6 +451,10 @@ export async function POST(request: Request) {
         "posts_per_day = ?",
         "audience_continents = ?",
         "categories = ?",
+        "teaser_enabled = ?",
+        "teaser_daily_limit = ?",
+        "teaser_status = ?",
+        "teaser_permission_checked_at = NOW()",
         "is_deleted = FALSE",
         "status = 'pending'",
         "paused_reason = NULL",
@@ -423,11 +469,14 @@ export async function POST(request: Request) {
         subscriberCount,
         normalizedPostsPerDay,
         JSON.stringify([normalizedAudience]),
-        JSON.stringify(categories || [])
+        JSON.stringify(categories || []),
+        normalizedTeaserEnabled ? 1 : 0,
+        normalizedTeaserDailyLimit,
+        teaserStatus
       ];
 
       if (canStorePostingTimes) {
-        updateColumns.splice(6, 0, "posting_times = ?");
+        updateColumns.push("posting_times = ?");
         updateParams.push(JSON.stringify(normalizedPostingTimes));
       }
 
@@ -494,6 +543,10 @@ export async function POST(request: Request) {
       "posts_per_day",
       "audience_continents",
       "categories",
+      "teaser_enabled",
+      "teaser_daily_limit",
+      "teaser_status",
+      "teaser_permission_checked_at",
       "status"
     ];
     const insertParams = [
@@ -505,6 +558,10 @@ export async function POST(request: Request) {
       normalizedPostsPerDay,
       JSON.stringify([normalizedAudience]),
       JSON.stringify(categories || []),
+      normalizedTeaserEnabled ? 1 : 0,
+      normalizedTeaserDailyLimit,
+      teaserStatus,
+      new Date(),
       "pending"
     ];
 

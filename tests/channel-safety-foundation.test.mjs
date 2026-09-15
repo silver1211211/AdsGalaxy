@@ -41,7 +41,8 @@ test("withdrawal pre-clearance reviews incomplete coverage without rejecting", (
   const route = read("src/app/api/admin/withdrawals/route.ts");
   assert.match(source, /incomplete_fraud_coverage/);
   assert.match(source, /manual_review_required/);
-  assert.match(route, /requires manual review before approval/);
+  assert.match(route, /override the safety hold/);
+  assert.match(route, /preclearance\.state !== "cleared"/);
   assert.doesNotMatch(route, /UPDATE withdrawals SET status = 'rejected'.*preclearance/s);
 });
 

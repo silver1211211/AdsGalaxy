@@ -23,9 +23,12 @@ import {
   BookOpen,
   Smartphone,
   Target,
+  Languages,
 } from "lucide-react";
 import Image from "next/image";
 import { useEffect, useState } from "react";
+import { useTranslations } from "@/i18n/client";
+import type { Locale } from "@/i18n";
 
 const BOT_LINK = `https://t.me/${process.env.NEXT_PUBLIC_BOT_USERNAME || "Ads_Galaxy_bot"}`;
 const CHANNEL_NAME = process.env.NEXT_PUBLIC_CHANNEL || "AdsGalaxy_News";
@@ -146,8 +149,37 @@ function PrimaryButton({
 }
 
 export default function PublicHomepage() {
+  const { locale, setLocale, t } = useTranslations();
   const [menuOpen, setMenuOpen] = useState(false);
   const [footer, setFooter] = useState<FooterSettings>(FOOTER_DEFAULTS);
+  const [languagePromptOpen, setLanguagePromptOpen] = useState(false);
+
+  const chooseLanguage = (language: Locale) => {
+    setLocale(language);
+    window.localStorage.setItem("adsgalaxy_public_language_selected", "1");
+    setLanguagePromptOpen(false);
+  };
+
+  const languageSelect = (compact = false) => (
+    <label className={`relative flex items-center ${compact ? "w-[6.5rem]" : "w-[8.25rem]"}`}>
+      <Languages size={14} className="pointer-events-none absolute left-2.5 text-[#0c9de8]" />
+      <span className="sr-only">{t("public.language.switchLabel")}</span>
+      <select
+        value={locale}
+        onChange={(event) => chooseLanguage(event.target.value as Locale)}
+        aria-label={t("public.language.switchLabel")}
+        className="h-10 w-full cursor-pointer appearance-none rounded-xl border border-slate-200 bg-white py-2 pl-8 pr-2 text-xs font-black text-slate-700 shadow-sm outline-none transition focus:border-[#0c9de8] focus:ring-2 focus:ring-blue-100"
+      >
+        <option value="ru">{t("bot.language.russian")}</option>
+        <option value="en">{t("bot.language.english")}</option>
+      </select>
+    </label>
+  );
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- browser storage is only available after hydration
+    setLanguagePromptOpen(window.localStorage.getItem("adsgalaxy_public_language_selected") !== "1");
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -176,6 +208,19 @@ export default function PublicHomepage() {
 
   return (
     <div className="min-h-screen bg-white text-slate-900 antialiased selection:bg-blue-100 selection:text-slate-950">
+      {languagePromptOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="public-language-title">
+          <div className="w-full max-w-sm rounded-3xl border border-white/70 bg-white p-6 text-center shadow-2xl shadow-slate-950/25">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-50 text-[#0c9de8]"><Languages size={23} /></div>
+            <h2 id="public-language-title" className="mt-4 text-xl font-black text-slate-950">{t("public.language.promptTitle")}</h2>
+            <p className="mt-2 text-sm leading-6 text-slate-500">{t("public.language.promptDescription")}</p>
+            <div className="mt-5 grid gap-2">
+              <button type="button" onClick={() => chooseLanguage("ru")} className="min-h-12 rounded-xl bg-[#0c9de8] px-4 text-sm font-black text-white shadow-md shadow-blue-200 transition active:scale-[0.98]">Русский</button>
+              <button type="button" onClick={() => chooseLanguage("en")} className="min-h-12 rounded-xl border border-slate-200 bg-white px-4 text-sm font-black text-slate-700 transition hover:bg-slate-50 active:scale-[0.98]">English</button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* ─── HEADER ─── */}
       <header className="sticky top-0 z-50 border-b border-slate-200/70 bg-white/85 shadow-sm shadow-slate-200/40 backdrop-blur-xl">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:h-[72px] sm:px-6 xl:max-w-7xl xl:px-8">
@@ -206,6 +251,7 @@ export default function PublicHomepage() {
           </nav>
 
           <div className="hidden md:flex items-center gap-3">
+            {languageSelect()}
             <a
               href={BOT_LINK}
               target="_blank"
@@ -218,15 +264,7 @@ export default function PublicHomepage() {
           </div>
 
           <div className="flex items-center gap-2 md:hidden">
-            <a
-              href={BOT_LINK}
-              target="_blank"
-              rel="noopener noreferrer"
-              className={`min-h-10 items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-[#13aef5] to-[#0b86d6] px-3.5 text-xs font-black text-white shadow-md shadow-[#0c9de8]/25 transition-all active:scale-[0.97] ${menuOpen ? "hidden" : "inline-flex"}`}
-            >
-              Open App
-              <ArrowRight size={13} />
-            </a>
+            {!menuOpen && languageSelect(true)}
             <button
               onClick={() => setMenuOpen((v) => !v)}
               className="-mr-1 rounded-xl p-2 text-slate-700 transition-colors hover:bg-slate-100"
@@ -238,7 +276,14 @@ export default function PublicHomepage() {
         </div>
 
         {menuOpen && (
-          <div className="space-y-1 border-t border-slate-100 bg-white/95 px-4 py-4 shadow-xl shadow-slate-200/50 backdrop-blur-xl md:hidden">
+          <>
+            <button
+              type="button"
+              aria-label="Close menu"
+              onClick={() => setMenuOpen(false)}
+              className="fixed inset-x-0 bottom-0 top-16 z-0 cursor-default bg-slate-950/25 backdrop-blur-[1px] sm:top-[72px] md:hidden"
+            />
+            <div className="absolute inset-x-0 top-full z-10 space-y-1 border-t border-slate-100 bg-white/95 px-4 py-4 shadow-xl shadow-slate-950/15 backdrop-blur-xl md:hidden">
             {navLinks.map((link) => (
               <a
                 key={link.href}
@@ -261,7 +306,8 @@ export default function PublicHomepage() {
                 <ArrowRight size={14} />
               </a>
             </div>
-          </div>
+            </div>
+          </>
         )}
       </header>
 
@@ -1230,7 +1276,7 @@ export default function PublicHomepage() {
           {/* Bottom bar */}
           <div className="mt-10 flex flex-col items-center justify-between gap-3 border-t border-slate-800 pt-6 sm:flex-row">
             <p className="text-center text-xs text-slate-500 sm:text-left">
-              © {footer.year} {footer.brand} — {footer.rights}
+              © {footer.year} {footer.brand} — {footer.rights === FOOTER_DEFAULTS.rights ? t("public.footer.rights") : footer.rights}
             </p>
             <a
               href={BOT_LINK}

@@ -11,6 +11,7 @@ import {
 } from "@/lib/privateChannelTrackingOnboarding";
 import { decryptPrivateInviteLink } from "@/lib/privateInviteLinkVault";
 import { classifyChannelGeoConfidence } from "@/lib/channelGeoQuality";
+import { parseAdminPagination } from "@/lib/adminPagination";
 
 async function tableExists(table: string) {
   const [rows]: any = await pool.query("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? LIMIT 1", [table]);
@@ -36,13 +37,11 @@ export async function GET(request: Request) {
   }
 
   const { searchParams } = new URL(request.url);
-  const page = parseInt(searchParams.get("page") || "1");
-  const limit = parseInt(searchParams.get("limit") || "10");
+  const { page, limit, offset } = parseAdminPagination(searchParams, { defaultLimit: 10 });
   const statusFilter = searchParams.get("status") || "all";
   const qualityFilter = searchParams.get("quality") || "all";
   const riskFilter = searchParams.get("risk") || "all";
   const search = searchParams.get("search") || "";
-  const offset = (page - 1) * limit;
 
   try {
     const hasGeoClassifications = await tableExists("channel_geo_classifications");
@@ -149,6 +148,7 @@ export async function PATCH(request: Request) {
   try {
     const { id, action } = await request.json();
     const normalizedAction = action === "deny" ? "reject" : action === "approve" ? "activate" : action;
+    if (normalizedAction === "reject") return NextResponse.json({ error: "MODERATION_REASON_REQUIRED", code: "MODERATION_REASON_REQUIRED" }, { status: 400 });
 
     // Fetch channel and owner details
     const [rows]: any = await pool.query(

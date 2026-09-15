@@ -117,11 +117,11 @@ test("lookup and pending behavior require publisher-scoped Mini App ownership", 
 });
 
 test("locked SDK runtime and mediation sources retain canonical Git blob identity across checkout line endings", () => {
-  const protectedPaths = [
-    "src/lib/miniappSdkRuntime.ts",
-    "src/lib/miniappMediationEngine.ts",
-  ];
-  for (const path of protectedPaths) {
-    assert.equal(git("hash-object", path), git("rev-parse", `HEAD:${path}`), path);
+  const protectedBlobs = new Map([
+    ["src/lib/miniappSdkRuntime.ts", "cdb13cf756299f3c5cab796ccccb58b087da5bd6"],
+    ["src/lib/miniappMediationEngine.ts", "a4950d9fc996e0040586ae8a8fe9e18fccb0c521"],
+  ]);
+  for (const [path, expectedHash] of protectedBlobs) {
+    assert.equal(git("hash-object", path), expectedHash, path);
   }
 });

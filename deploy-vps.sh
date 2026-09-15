@@ -8,8 +8,17 @@ APP_DIR="/www/wwwroot/bots/AdsFusion"
 PM2_APP="AdsFusionApp"
 PM2_CRON="AdsFusionCron"
 ENV_FILE="$APP_DIR/.env"
+MIGRATION_LEDGER="adsfusion_schema_migrations"
+LEGACY_BASELINE="20260908_0130_broadcast_delivery_reliability.sql"
 
 cd "$APP_DIR"
+
+# Never build/promote when this shell cannot control the root-owned PM2 daemon.
+# Failing here keeps the currently running build and processes untouched.
+if ! PM2_HOME="${PM2_HOME:-/root/.pm2}" pm2 ping >/dev/null 2>&1; then
+  echo "ERROR: PM2 control is unavailable for this account; deployment was not started."
+  exit 1
+fi
 
 # ── Load DB credentials from .env ─────────────────────────────────────────────
 DB_HOST=$(grep '^DB_HOST=' "$ENV_FILE" | cut -d'=' -f2-)
@@ -69,9 +78,68 @@ run_migration() {
   local file="$1"
   local name
   name=$(basename "$file")
-  echo "  --> $name"
   [ -f "$file" ] || { echo "  ERROR: Required migration is missing: $name"; return 1; }
+  local checksum applied_checksum
+  checksum=$(sha256sum "$file" | awk '{print $1}')
+
+  # This production deployment predates the ledger. Once its verified 0130
+  # schema baseline is recorded, historical migrations must never replay.
+  if [[ "$name" == "$LEGACY_BASELINE" || "$name" < "$LEGACY_BASELINE" ]]; then
+    if mysql -N -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" \
+      -e "SELECT 1 FROM $MIGRATION_LEDGER WHERE migration_name='$LEGACY_BASELINE' LIMIT 1" 2>/dev/null | grep -qx 1; then
+      echo "  --> $name (already covered by verified production baseline)"
+      return 0
+    fi
+  fi
+
+  applied_checksum=$(mysql -N -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" \
+    -e "SELECT checksum_sha256 FROM $MIGRATION_LEDGER WHERE migration_name='$name' LIMIT 1" 2>/dev/null || true)
+  if [ -n "$applied_checksum" ]; then
+    [ "$applied_checksum" = "$checksum" ] || {
+      echo "  ERROR: Applied migration checksum changed: $name"
+      return 1
+    }
+    echo "  --> $name (already applied)"
+    return 0
+  fi
+
+  echo "  --> $name"
   mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$file"
+  mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" \
+    -e "INSERT INTO $MIGRATION_LEDGER (migration_name, checksum_sha256) VALUES ('$name', '$checksum')"
+}
+
+initialize_migration_ledger() {
+  mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "
+    CREATE TABLE IF NOT EXISTS $MIGRATION_LEDGER (
+      migration_name VARCHAR(255) NOT NULL,
+      checksum_sha256 VARCHAR(64) NOT NULL,
+      applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (migration_name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"
+
+  local ledger_count baseline_markers
+  ledger_count=$(mysql -N -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" \
+    -e "SELECT COUNT(*) FROM $MIGRATION_LEDGER")
+  if [ "$ledger_count" -ne 0 ]; then return 0; fi
+
+  baseline_markers=$(mysql -N -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "
+    SELECT
+      (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='broadcast_deliveries'
+          AND COLUMN_NAME IN ('telegram_message_id','next_retry_at','failure_category','sending_at','lease_expires_at'))
+      +
+      (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='platform_broadcast_recipients'
+          AND COLUMN_NAME IN ('deletion_status','deletion_attempts','deletion_next_retry_at','deleted_at','deletion_error'));"
+  )
+  if [ "$baseline_markers" -eq 10 ]; then
+    mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" \
+      -e "INSERT INTO $MIGRATION_LEDGER (migration_name, checksum_sha256) VALUES ('$LEGACY_BASELINE', 'verified-production-baseline')"
+    echo "    Recorded verified legacy production baseline through $LEGACY_BASELINE."
+  else
+    echo "    No legacy baseline recorded; migrations will run and be tracked individually."
+  fi
 }
 
 echo "==> [1/5] Validating production environment..."
@@ -79,6 +147,7 @@ validate_required_env \
   DB_HOST DB_PORT DB_USER DB_PASS DB_NAME \
   ADMIN_SESSION_SECRET CRON_SECRET BOT_TOKEN TELEGRAM_WEBHOOK_SECRET_TOKEN \
   BOT_ADD_USER_SECRET BOT_INTEGRATION_ENCRYPTION_KEY PRIVATE_INVITE_LINK_ENCRYPTION_KEY MINIAPP_STATS_SECRET \
+  GROUPPILOT_KEY GROUPPILOT_API_URL GROUPPILOT_SITE \
   NEXT_PUBLIC_APP_URL NEXT_PUBLIC_SDK_URL NEXT_PUBLIC_API_BASE_URL
 echo "    Provider reporting verification:"
 echo "      AdsGram: SDK/blockId verified; no public reporting API wired."
@@ -90,6 +159,7 @@ warn_env_any "Monetag browser SDK URL" "MONETAG_SDK_URL" "NEXT_PUBLIC_MONETAG_SD
 echo "    Required environment variables are present."
 
 echo "==> [2/5] Applying database migrations..."
+initialize_migration_ledger
 
 # Step 1A: Run the comprehensive catch-up migration first.
 # This adds all columns/tables from migrations 0006-0040 that lack IF NOT EXISTS guards,
@@ -219,7 +289,23 @@ for MIG in \
   "20260822_0119_broadcast_recipient_windows.sql" \
   "20260831_0122_miniapp_external_delivery_sync.sql" \
   "20260902_0123_channel_safety_foundation.sql" \
-  "20260902_0124_miniapp_dynamic_cpm_v2.sql"
+  "20260902_0124_miniapp_dynamic_cpm_v2.sql" \
+  "20260903_0125_miniapp_request_id_collation.sql" \
+  "20260904_0126_user_language_preference.sql" \
+  "20260905_0127_advertiser_rate_discounts.sql" \
+  "20260905_0128_platform_broadcast_recipient_discovery.sql" \
+  "20260908_0130_broadcast_delivery_reliability.sql" \
+  "20260908_0131_ai_support_sessions.sql" \
+  "20260908_0132_channel_growth.sql" \
+  "20260909_0133_advertiser_direct_debit.sql" \
+  "20260909_0134_teaser_ads.sql" \
+  "20260909_0135_teaser_organic_snapshots.sql" \
+  "20260910_0136_channel_targeting_authority.sql" \
+  "20260910_0137_teaser_emergency_targeting_override.sql" \
+  "20260910_0138_teaser_orphan_recovery.sql" \
+  "20260910_0139_teaser_worker_retry_durability.sql" \
+  "20260911_0140_admin_fast_v2_indexes.sql" \
+  "20260911_0141_policy_moderation_rejections.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"
@@ -264,7 +350,9 @@ CRON_SECRET=$(grep '^CRON_SECRET=' "$ENV_FILE" | cut -d'=' -f2-)
 if [ -z "$CRON_SECRET" ]; then
   echo "    WARNING: CRON_SECRET is missing; production crons were not installed."
 else
-  CRON_BASE='curl -fsS --max-time 240 -H "x-cron-secret: '"$CRON_SECRET"'" https://app.adsgalaxy.online/api/cron'
+  # Keep background work off the public app/Nginx path. The five delivery
+  # workers are staggered across the minute to protect the shared 1-CPU DB.
+  CRON_BASE='curl -fsS --max-time 240 -H "x-cron-secret: '"$CRON_SECRET"'" http://127.0.0.1:3007/api/cron'
   CRON_BEGIN="# BEGIN ADSGALAXY MANAGED CRONS"
   CRON_END="# END ADSGALAXY MANAGED CRONS"
   EXISTING_CRONTAB=$(crontab -l 2>/dev/null || true)
@@ -272,7 +360,7 @@ else
     $0 == begin { managed=1; next }
     $0 == end { managed=0; next }
     !managed
-  ' | grep -Ev '/api/cron/(process-ads|process-broadcast|platform-broadcasts|process-miniapp-internal-ads|miniapp-external-delivery-sync|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|process-support-messages|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|retry-telegram-cleanup|verify-bot-users|referral-sprint|promote-ads-galaxy)([[:space:]?]|$)' | grep -v 'scripts/sync-channel-identities\.sh' || true)
+  ' | grep -Ev '/api/cron/(process-ads|channel-growth|channel-targeting-classification|teaser|process-broadcast|platform-broadcasts|process-miniapp-internal-ads|miniapp-external-delivery-sync|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|process-support-messages|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|retry-telegram-cleanup|verify-bot-users|referral-sprint|promote-ads-galaxy)([[:space:]?]|$)' | grep -v 'scripts/sync-channel-identities\.sh' || true)
 
   {
     printf '%s\n' "$CLEAN_CRONTAB"
@@ -280,10 +368,13 @@ else
     # Phase 6C timing: delivery workers stay real-time; publisher settlement and
     # provider synchronization run only at their explicitly scheduled cadence.
     echo "* * * * * $CRON_BASE/process-ads >/dev/null 2>&1"
-    echo "* * * * * $CRON_BASE/process-broadcast >/dev/null 2>&1"
-    echo "* * * * * $CRON_BASE/platform-broadcasts >/dev/null 2>&1"
-    echo "* * * * * $CRON_BASE/process-miniapp-internal-ads >/dev/null 2>&1"
-    echo "* * * * * $CRON_BASE/miniapp-external-delivery-sync >/dev/null 2>&1"
+    echo "* * * * * sleep 6; $CRON_BASE/channel-growth >/dev/null 2>&1"
+    echo "9-59/15 * * * * $CRON_BASE/channel-targeting-classification >/dev/null 2>&1"
+    echo "* * * * * sleep 18; $CRON_BASE/teaser >/dev/null 2>&1"
+    echo "* * * * * sleep 12; $CRON_BASE/process-broadcast >/dev/null 2>&1"
+    echo "* * * * * sleep 24; $CRON_BASE/platform-broadcasts >/dev/null 2>&1"
+    echo "* * * * * sleep 36; $CRON_BASE/process-miniapp-internal-ads >/dev/null 2>&1"
+    echo "* * * * * sleep 48; $CRON_BASE/miniapp-external-delivery-sync >/dev/null 2>&1"
     echo "*/15 * * * * $CRON_BASE/update-views >/dev/null 2>&1"
     echo "3 * * * * $CRON_BASE/channel-settlement >/dev/null 2>&1"
     echo "8-59/15 * * * * $CRON_BASE/settle-broadcast-publishers >/dev/null 2>&1"

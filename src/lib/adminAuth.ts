@@ -1,15 +1,16 @@
 import pool from "@/lib/db";
 import crypto from "crypto";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import type { RowDataPacket } from "mysql2/promise";
 
-type AdminRow = RowDataPacket & {
+type AdminRow = {
   id: number;
   username: string;
   role?: string;
+  telegram_id?: string | number | null;
 };
 
-type SessionRow = AdminRow & {
+type SessionRow = RowDataPacket & AdminRow & {
   session_id: number;
 };
 
@@ -62,6 +63,35 @@ function signSession(sessionId: number, token: string) {
   return crypto.createHmac("sha256", getSessionSecret()).update(`${sessionId}.${token}`).digest("hex");
 }
 
+function isPreviewAdminHost(host: string) {
+  const hostname = String(host || "").split(",")[0].trim().toLowerCase().replace(/:\d+$/, "");
+  return process.env.NODE_ENV !== "production"
+    && process.env.ENABLE_LOCAL_MINIAPP_DEV === "true"
+    && (hostname === "preview.adsgalaxy.online" || hostname === "localhost" || hostname === "127.0.0.1");
+}
+
+function signPreviewAdmin(payload: string) {
+  return crypto.createHmac("sha256", getSessionSecret()).update(`preview.${payload}`).digest("hex");
+}
+
+export function createAdminPreviewCookieValue(id: number, username: string, expiresAt: number) {
+  const payload = Buffer.from(JSON.stringify({ id, username, expiresAt }), "utf8").toString("base64url");
+  return `preview.${payload}.${signPreviewAdmin(payload)}`;
+}
+
+function parseAdminPreviewCookie(value: string) {
+  const [prefix, payload, signature] = String(value || "").split(".");
+  if (prefix !== "preview" || !payload || !signature) return null;
+  const expected = Buffer.from(signPreviewAdmin(payload), "hex");
+  const supplied = Buffer.from(signature, "hex");
+  if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) return null;
+  const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { id?: unknown; username?: unknown; expiresAt?: unknown };
+  const id = Number(parsed.id);
+  const expiresAt = Number(parsed.expiresAt);
+  if (!Number.isInteger(id) || id <= 0 || !String(parsed.username || "") || expiresAt <= Date.now()) return null;
+  return { id, username: String(parsed.username), role: "read_only_admin" as const };
+}
+
 export function createAdminSessionCookieValue(sessionId: number, token: string) {
   return `${sessionId}.${token}.${signSession(sessionId, token)}`;
 }
@@ -85,7 +115,7 @@ export async function checkAdminAuth() {
   return Boolean(await getAuthenticatedAdmin());
 }
 
-export async function getAuthenticatedAdmin() {
+export async function getAuthenticatedAdmin(): Promise<AdminRow | null> {
   const cookieStore = await cookies();
   const adminCookie = await cookieStore.get("admin_auth");
   if (!adminCookie) {
@@ -93,6 +123,11 @@ export async function getAuthenticatedAdmin() {
   }
 
   try {
+    const headerStore = await headers();
+    const host = headerStore.get("x-forwarded-host") || headerStore.get("host") || "";
+    if (isPreviewAdminHost(host) && adminCookie.value.startsWith("preview.")) {
+      return parseAdminPreviewCookie(adminCookie.value);
+    }
     const session = parseAdminSessionCookie(adminCookie.value);
     if (!session) return null;
 

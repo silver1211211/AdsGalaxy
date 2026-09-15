@@ -7,6 +7,7 @@ const settlement = readFileSync("src/lib/channelSettlement.ts", "utf8");
 const deletion = readFileSync("src/lib/campaignPostDeletion.ts", "utf8");
 const processAds = readFileSync("src/app/api/cron/process-ads/route.ts", "utf8");
 const advertiserRoute = readFileSync("src/app/api/advertiser/campaigns/[id]/route.ts", "utf8");
+const pauseCleanupWorker = readFileSync("src/app/api/cron/retry-telegram-cleanup/route.ts", "utf8");
 const broadcastWorker = readFileSync("src/app/api/cron/process-broadcast/route.ts", "utf8");
 const lifecycle = readFileSync("src/lib/campaignLifecycle.ts", "utf8");
 
@@ -63,14 +64,15 @@ test("multiple cleanup failures remain independent and retryable", () => {
 });
 
 test("stale process-ads placement rechecks active status under lock before insertion", () => {
-  const lock = processAds.indexOf("SELECT status, budget, cpm, cpc, type, daily_budget_limit FROM campaigns WHERE id = ? FOR UPDATE");
+  const lock = processAds.indexOf("const [[lockedCampaign]]");
   const statusCheck = processAds.indexOf('lockedCampaign?.status !== "active"', lock);
   const insert = processAds.indexOf("INSERT INTO campaign_posts", statusCheck);
   assert.ok(lock >= 0 && statusCheck > lock && insert > statusCheck);
 });
 
 test("pause cleanup remains distinct from exhaustion cleanup", () => {
-  assert.match(advertiserRoute, /settleCampaignEngagementBeforeDeletion\(Number\(id\), "advertiser_pause"\)/);
-  assert.match(advertiserRoute, /deleteActiveCampaignPosts\(id\)/);
+  assert.match(advertiserRoute, /cleanup_queued: true/);
+  assert.match(pauseCleanupWorker, /settleCampaignEngagementBeforeDeletion\(\s*Number\(campaign\.id\),\s*"advertiser_pause"/);
+  assert.match(pauseCleanupWorker, /deleteActiveCampaignPosts\(campaign\.id\)/);
   assert.doesNotMatch(deletion, /resume_locked_until|paused_at/);
 });

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy broadcast delivery rows are dynamically shaped */
 import pool from "@/lib/db";
 import { SAFE_TELEGRAM_PARSE_MODE, sendTelegramMessage } from "@/lib/telegram";
 import { getAdvertiserTrustMultipliers, normalizeAdvertiserTrustLevel, qualityMultiplier } from "@/lib/advertiserTrust";
@@ -11,12 +12,13 @@ import {
 import {
   autoPauseBot,
   checkBotHealth,
+  classifyBotUserSendFailure,
   classifyBotTokenFailure,
   markBotUserDeliverySuccess,
   markBotUserInactive,
   recordBotBroadcastSuccess,
-  sendWithRetries,
 } from "@/lib/botLifecycle";
+import { classifyTelegramFailure } from "@/lib/platformBroadcast";
 import { createSystemLog, upsertBroadcastHourlyLog } from "@/lib/systemLogs";
 import { requireAdServingAllowed, upsertAdminAlert } from "@/lib/productionSafety";
 import { processBoundedQueue } from "@/lib/concurrency";
@@ -33,6 +35,7 @@ import {
   evaluateBroadcastAffordability,
   refundedBroadcastStatus,
 } from "@/lib/broadcastBudgetLifecycle";
+import { claimAdvertiserDirectDebit } from "@/lib/advertiserDirectDebit";
 
 export const dynamic = 'force-dynamic';
 
@@ -159,12 +162,15 @@ async function finalizeBroadcastDelivery(input: {
   user: any;
   payout: BroadcastPayout;
   attempts: number;
+  telegramMessageId?: number | null;
 }, db = pool) {
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
     const [[delivery]]: any = await conn.query(
-      "SELECT status FROM broadcast_deliveries WHERE id = ? FOR UPDATE",
+      `SELECT bd.status,bd.cost,c.user_id advertiser_id,c.funding_model
+       FROM broadcast_deliveries bd JOIN campaigns c ON c.id=bd.campaign_id
+       WHERE bd.id=? FOR UPDATE`,
       [input.deliveryId]
     );
     if (!delivery) throw new Error("broadcast_reservation_missing");
@@ -172,14 +178,37 @@ async function finalizeBroadcastDelivery(input: {
       await conn.commit();
       return { idempotent: true };
     }
-    if (delivery.status !== "pending") throw new Error("broadcast_reservation_not_pending");
+    if (!["pending", "sending", "retry_wait"].includes(delivery.status)) throw new Error("broadcast_reservation_not_pending");
+
+    if (delivery.funding_model === "direct_debit") {
+      const walletDebit = await claimAdvertiserDirectDebit(conn, {
+        sourceKey: `bot:delivery:${input.deliveryId}`,
+        advertiserId: Number(delivery.advertiser_id),
+        campaignId: Number(input.campaign.id),
+        campaignTable: "campaigns",
+        billingType: "bot_delivery",
+        amount: input.payout.advertiserDebit,
+        description: `Bot delivery charge #${input.deliveryId}`,
+      });
+      if (!walletDebit.ok) {
+        if (walletDebit.duplicate) {
+          await conn.rollback();
+          return { idempotent: true };
+        }
+        await conn.query("UPDATE campaigns SET budget=budget+?,status='paused',pause_reason='insufficient_balance' WHERE id=?", [delivery.cost, input.campaign.id]);
+        await conn.query("UPDATE broadcast_deliveries SET cost=0,publisher_reward=0,reserve_amount=0,platform_revenue=0,status='failed_final',failure_reason='insufficient_balance',failure_category='funding',last_failure_at=NOW() WHERE id=?", [input.deliveryId]);
+        await conn.commit();
+        return { idempotent: false, insufficientBalance: true };
+      }
+    }
 
     const [deliveryUpdate]: any = await conn.query(
       `UPDATE broadcast_deliveries
        SET publisher_reward = ?, reserve_amount = ?, platform_revenue = ?, status = 'sent', retry_count = ?, last_success_at = NOW(),
-           failure_reason = NULL, telegram_error = NULL
-       WHERE id = ? AND status = 'pending'`,
-      [input.payout.publisherReward, input.payout.reserveAmount, input.payout.platformRevenue, input.attempts, input.deliveryId]
+           failure_reason = NULL, failure_category = NULL, telegram_error = NULL, telegram_message_id = ?, next_retry_at = NULL,
+           sending_at = NULL, lease_expires_at = NULL
+       WHERE id = ? AND status IN ('pending','sending','retry_wait')`,
+      [input.payout.publisherReward, input.payout.reserveAmount, input.payout.platformRevenue, input.attempts, input.telegramMessageId || null, input.deliveryId]
     );
     if (deliveryUpdate.affectedRows !== 1) throw new Error("broadcast_finalize_race");
     await conn.query("UPDATE bot_users SET last_broadcast_at = NOW() WHERE id = ?", [input.user.id]);
@@ -209,7 +238,7 @@ async function refundBroadcastReservation(input: {
       "SELECT status, cost FROM broadcast_deliveries WHERE id = ?",
       [input.deliveryId]
     );
-    if (!candidateDelivery || candidateDelivery.status !== "pending") {
+    if (!candidateDelivery || !["pending", "sending", "retry_wait"].includes(candidateDelivery.status)) {
       await conn.commit();
       return { refunded: false, idempotent: true };
     }
@@ -222,7 +251,7 @@ async function refundBroadcastReservation(input: {
       "SELECT status, cost FROM broadcast_deliveries WHERE id = ? FOR UPDATE",
       [input.deliveryId]
     );
-    if (!delivery || delivery.status !== "pending") {
+    if (!delivery || !["pending", "sending", "retry_wait"].includes(delivery.status)) {
       await conn.commit();
       return { refunded: false, idempotent: true };
     }
@@ -231,9 +260,10 @@ async function refundBroadcastReservation(input: {
     if (refundResult.affectedRows !== 1) throw new Error("broadcast_refund_campaign_missing");
     const [deliveryUpdate]: any = await conn.query(
       `UPDATE broadcast_deliveries
-       SET cost = 0, publisher_reward = 0, reserve_amount = 0, platform_revenue = 0, status = 'failed', failure_reason = ?, telegram_error = ?,
-           retry_count = ?, last_failure_at = NOW()
-       WHERE id = ? AND status = 'pending'`,
+       SET cost = 0, publisher_reward = 0, reserve_amount = 0, platform_revenue = 0, status = 'failed_final', failure_reason = ?,
+           failure_category = 'permanent', telegram_error = ?, retry_count = ?, last_failure_at = NOW(), next_retry_at = NULL,
+           sending_at = NULL, lease_expires_at = NULL
+       WHERE id = ? AND status IN ('pending','sending','retry_wait')`,
       [input.failureReason, input.telegramError.slice(0, 500), input.attempts, input.deliveryId]
     );
     if (deliveryUpdate.affectedRows !== 1) throw new Error("broadcast_refund_race");
@@ -259,6 +289,19 @@ async function refundBroadcastReservation(input: {
   } finally {
     conn.release();
   }
+}
+
+async function scheduleBroadcastRetry(deliveryId: number, result: any, attempt: number) {
+  const failure = classifyTelegramFailure(result);
+  if (!failure.retry || attempt >= 3) return false;
+  const jitter = Math.floor(Math.random() * 6);
+  await pool.query(
+    `UPDATE broadcast_deliveries SET status='retry_wait',retry_count=?,failure_reason=?,failure_category=?,telegram_error=?,
+       next_retry_at=DATE_ADD(NOW(),INTERVAL ? SECOND),last_failure_at=NOW(),sending_at=NULL,lease_expires_at=NULL
+     WHERE id=? AND status IN ('pending','sending','retry_wait')`,
+    [attempt, normalizeFailureReason(result?.description), failure.category, String(result?.description || "Telegram network failure").slice(0, 500), failure.delay + jitter, deliveryId],
+  );
+  return true;
 }
 
 export async function GET(req: NextRequest) {
@@ -293,18 +336,79 @@ export async function GET(req: NextRequest) {
 
     const payoutSettings = await getBroadcastPayoutSettings();
 
-    await pool.query(`
-      UPDATE campaigns
-      SET status = 'budget_exhausted',
-        budget_exhausted_at = NOW(),
-        pause_reason = 'budget_exhausted'
-      WHERE type = 'broadcast'
-        AND status = 'active'
-        AND (
-          ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8) <= 0
-          OR budget < ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8)
-        )
+    // Recover abandoned leases, then process durable retries before claiming
+    // new recipients. Reservations remain debited until success or final fail.
+    await pool.query(`UPDATE broadcast_deliveries SET status='retry_wait',sending_at=NULL,lease_expires_at=NULL,
+      next_retry_at=LEAST(COALESCE(next_retry_at,NOW()),NOW())
+      WHERE status='sending' AND lease_expires_at<NOW()`);
+    const retryLimit = Math.min(50, Math.max(1, Number(process.env.CRON_BROADCAST_RETRY_BATCH_SIZE || 20)));
+    const [retryRows]: any = await pool.query(
+      `SELECT bd.id delivery_id,bd.retry_count,bd.chat_id,bd.user_id,bd.bot_id,bd.campaign_id,
+         c.campaign_title,c.message_text,c.image_url,c.button_text,c.link,c.cpm,
+         GREATEST(COALESCE(c.cpm,0)-CASE WHEN ard.expires_at>UTC_TIMESTAMP() THEN ard.cpm_discount ELSE 0 END,0.01) effective_cpm
+       FROM broadcast_deliveries bd
+       JOIN campaigns c ON c.id=bd.campaign_id
+       JOIN bots b ON b.id=bd.bot_id AND b.status='active' AND b.is_deleted=FALSE
+       LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
+       WHERE bd.status='retry_wait' AND bd.next_retry_at<=NOW()
+       ORDER BY bd.next_retry_at,bd.id LIMIT ?`, [retryLimit]);
+    if (retryRows.length) {
+      await processBoundedQueue(retryRows, Math.min(2, retryRows.length), async (retry: any) => {
+        const [claim]: any = await pool.query(
+          `UPDATE broadcast_deliveries SET status='sending',sending_at=NOW(),lease_expires_at=DATE_ADD(NOW(),INTERVAL 90 SECOND)
+           WHERE id=? AND status='retry_wait' AND next_retry_at<=NOW()`, [retry.delivery_id]);
+        if (claim.affectedRows !== 1) return;
+        const attempt = Number(retry.retry_count || 0) + 1;
+        try {
+          const [[bot]]: any = await pool.query("SELECT * FROM bots WHERE id=? LIMIT 1", [retry.bot_id]);
+          if (!bot) throw new Error("broadcast_retry_bot_missing");
+          const token = await loadBotToken(pool, bot);
+          const response = await sendTelegramMessage(retry.chat_id, composeCampaignCreativeTelegramHtml(retry.campaign_title, retry.message_text), {
+            photo: retry.image_url || undefined, parse_mode: "HTML", token,
+            reply_markup: { inline_keyboard: [[{ text: retry.button_text, url: retry.link }]] },
+          });
+          if (response?.ok) {
+            const finalized = await finalizeBroadcastDelivery({
+              deliveryId: retry.delivery_id, campaign: { id: retry.campaign_id }, bot: { id: retry.bot_id },
+              user: { id: retry.user_id }, payout: calculateBroadcastPayout(retry.effective_cpm, payoutSettings), attempts: attempt,
+              telegramMessageId: Number(response.result?.message_id || 0) || null,
+            });
+            if (finalized.insufficientBalance) return { status: "failed", failure_reason: "insufficient_balance" };
+          } else if (!(await scheduleBroadcastRetry(retry.delivery_id, response, attempt))) {
+            await refundBroadcastReservation({ deliveryId: retry.delivery_id, campaignId: retry.campaign_id,
+              failureReason: normalizeFailureReason(response?.description), telegramError: String(response?.description || "Telegram failure"), attempts: attempt });
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Telegram retry failure";
+          const synthetic = { error_code: 0, description: message };
+          if (!(await scheduleBroadcastRetry(retry.delivery_id, synthetic, attempt))) {
+            await refundBroadcastReservation({ deliveryId: retry.delivery_id, campaignId: retry.campaign_id,
+              failureReason: normalizeFailureReason(message), telegramError: message, attempts: attempt });
+          }
+        }
+      });
+    }
+
+    // Discover a small candidate set without opening a transaction, then update
+    // only those primary keys. This prevents every tick from locking a broad
+    // range of active campaigns while billing traffic is using them.
+    const [exhaustedCandidates]: any = await pool.query(`
+      SELECT c.id
+      FROM campaigns c
+      LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
+      WHERE c.type='broadcast' AND c.status='active'
+        AND (COALESCE(c.cpm,0)<=0 OR c.budget < ROUND(GREATEST(COALESCE(c.cpm,0)-CASE WHEN ard.expires_at>UTC_TIMESTAMP() THEN ard.cpm_discount ELSE 0 END,0.01)/1000,8))
+      ORDER BY c.id
+      LIMIT 50
     `);
+    if (exhaustedCandidates.length) {
+      const ids = exhaustedCandidates.map((row: any) => Number(row.id));
+      await pool.query(
+        `UPDATE campaigns SET status='budget_exhausted',budget_exhausted_at=NOW(),pause_reason='budget_exhausted'
+         WHERE status='active' AND id IN (${ids.map(() => "?").join(",")})`,
+        ids,
+      );
+    }
 
     // 1. Find active broadcast campaigns with budget
     const trustMultipliers = await getAdvertiserTrustMultipliers();
@@ -319,12 +423,15 @@ export async function GET(req: NextRequest) {
     };
 
     const [campaignRows]: any = await pool.query(`
-      SELECT c.*, COALESCE(u.advertiser_trust_level, 'new') as advertiser_trust_level
+      SELECT c.*, COALESCE(u.advertiser_trust_level, 'new') as advertiser_trust_level,
+        GREATEST(COALESCE(c.cpm,0) - CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN ard.cpm_discount ELSE 0 END,0.01) effective_cpm
       FROM campaigns c
       JOIN users u ON c.user_id = u.id
+      LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
       WHERE c.type = 'broadcast' AND c.status = 'active'
-        AND ROUND(GREATEST(COALESCE(c.cpm, 0), 0) / 1000, 8) > 0
-        AND c.budget >= ROUND(GREATEST(COALESCE(c.cpm, 0), 0) / 1000, 8)
+        AND COALESCE(c.cpm,0) > 0
+        AND c.budget >= ROUND(GREATEST(COALESCE(c.cpm,0) - CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN ard.cpm_discount ELSE 0 END,0.01) / 1000,8)
+        AND (c.funding_model <> 'direct_debit' OR u.ad_balance >= ROUND(GREATEST(COALESCE(c.cpm,0) - CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN ard.cpm_discount ELSE 0 END,0.01) / 1000,8))
         AND COALESCE(u.advertiser_trust_level, 'new') != 'restricted'
         AND (c.start_at IS NULL OR c.start_at <= NOW())
         AND (c.end_at IS NULL OR c.end_at >= NOW())
@@ -459,16 +566,21 @@ export async function GET(req: NextRequest) {
           AND (bu.last_broadcast_at IS NULL OR bu.last_broadcast_at < NOW() - INTERVAL ? HOUR)
           AND (
             SELECT COUNT(*) FROM broadcast_deliveries bd 
-            WHERE bd.user_id = bu.id AND bd.created_at > NOW() - INTERVAL 1 DAY
+            WHERE bd.user_id = bu.id AND bd.status = 'sent' AND bd.created_at > NOW() - INTERVAL 1 DAY
           ) < ?
           AND (
             ? IS NULL
             OR (
               SELECT COUNT(*) FROM broadcast_deliveries bd
-              WHERE bd.campaign_id = ?
+              WHERE bd.campaign_id = ? AND bd.status = 'sent'
                 AND bd.user_id = bu.id
                 AND bd.created_at >= CURDATE()
             ) < ?
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM broadcast_deliveries in_flight
+            WHERE in_flight.campaign_id=? AND in_flight.user_id=bu.id
+              AND in_flight.status IN ('pending','sending','retry_wait')
           )
           ORDER BY CASE WHEN bu.status='active' THEN 0 ELSE 1 END, bu.id
           LIMIT ?
@@ -479,6 +591,7 @@ export async function GET(req: NextRequest) {
           campaign.frequency_cap_per_user || null,
           campaign.id,
           campaign.frequency_cap_per_user || null,
+          campaign.id,
           limit - totalDispatched
         ]);
 
@@ -510,8 +623,8 @@ export async function GET(req: NextRequest) {
     }
 
     // Execute dispatches "together"
-    const requestedWorkerCount = Math.max(1, parseInt(process.env.CRON_BROADCAST_WORKERS || "3", 10) || 3);
-    const maxWorkerCount = Math.max(1, parseInt(process.env.CRON_BROADCAST_WORKER_MAX || "5", 10) || 5);
+    const requestedWorkerCount = Math.max(1, parseInt(process.env.CRON_BROADCAST_WORKERS || "2", 10) || 2);
+    const maxWorkerCount = Math.min(5, Math.max(1, parseInt(process.env.CRON_BROADCAST_WORKER_MAX || "5", 10) || 5));
     const workerCount = Math.min(requestedWorkerCount, maxWorkerCount);
     const results = await processBoundedQueue(dispatches, workerCount, async ({ campaign, bot, user }) => {
       try {
@@ -521,7 +634,7 @@ export async function GET(req: NextRequest) {
           ]]
         };
 
-        const payout = calculateBroadcastPayout(campaign.cpm, payoutSettings);
+        const payout = calculateBroadcastPayout(campaign.effective_cpm, payoutSettings);
         const cost = payout.advertiserDebit;
         const reservation = await reserveBroadcastDelivery({ campaign, bot, user, cost });
         if (!reservation.ok) {
@@ -532,28 +645,32 @@ export async function GET(req: NextRequest) {
           };
         }
 
-        let sendResult;
+        let res;
         try {
-          sendResult = await sendWithRetries(() => sendTelegramMessage(user.chat_id, composeCampaignCreativeTelegramHtml(campaign.campaign_title, campaign.message_text), {
+          res = await sendTelegramMessage(user.chat_id, composeCampaignCreativeTelegramHtml(campaign.campaign_title, campaign.message_text), {
             photo: campaign.image_url,
             parse_mode: "HTML",
             reply_markup: replyMarkup,
             token: bot.bot_token
-          }));
+          });
         } catch (sendError) {
           const message = sendError instanceof Error ? sendError.message : "Telegram send failed";
-          await refundBroadcastReservation({
-            deliveryId: reservation.deliveryId, campaignId: campaign.id,
-            failureReason: normalizeFailureReason(message), telegramError: message, attempts: 1,
-          });
+          const synthetic = { error_code: 0, description: message };
+          if (await scheduleBroadcastRetry(reservation.deliveryId, synthetic, 1)) {
+            return { status: 'retry_wait', user: user.id, campaign_id: campaign.id, campaign_name: campaign.name, failure_reason: normalizeFailureReason(message) };
+          }
+          await refundBroadcastReservation({ deliveryId: reservation.deliveryId, campaignId: campaign.id, failureReason: normalizeFailureReason(message), telegramError: message, attempts: 1 });
           throw sendError;
         }
-        const res = sendResult.result;
 
-        if (sendResult.ok && res && res.ok) {
-          await finalizeBroadcastDelivery({
-            deliveryId: reservation.deliveryId, campaign, bot, user, payout, attempts: sendResult.attempts || 1,
+        if (res?.ok) {
+          const finalized = await finalizeBroadcastDelivery({
+            deliveryId: reservation.deliveryId, campaign, bot, user, payout, attempts: 1,
+            telegramMessageId: Number(res.result?.message_id || 0) || null,
           });
+          if (finalized.insufficientBalance) {
+            return { status: "failed", user: user.id, campaign_id: campaign.id, campaign_name: campaign.name, failure_reason: "insufficient_balance" };
+          }
           const remainingBudget = reservation.remainingBudget;
           const budgetExhausted = evaluateBroadcastAffordability(remainingBudget, cost).exhausted;
 
@@ -576,20 +693,24 @@ export async function GET(req: NextRequest) {
           };
         }
 
-        const failureMessage = String(res?.description || sendResult.failure?.reason || "Unknown error");
+        const failureMessage = String(res?.description || "Unknown error");
+        if (await scheduleBroadcastRetry(reservation.deliveryId, res, 1)) {
+          return { status: 'retry_wait', user: user.id, campaign_id: campaign.id, campaign_name: campaign.name, error: failureMessage, failure_reason: normalizeFailureReason(failureMessage) };
+        }
         await refundBroadcastReservation({
           deliveryId: reservation.deliveryId, campaignId: campaign.id,
           failureReason: normalizeFailureReason(failureMessage), telegramError: failureMessage,
-          attempts: sendResult.attempts || 1,
+          attempts: 1,
         });
         if (!res?.ok) {
           let botFailure = null;
-          if (sendResult.failure) {
+          if (!res?.ok) {
             botFailure = classifyBotTokenFailure(res?.description);
             if (botFailure) {
               await autoPauseBot(bot.id, botFailure);
             } else {
-              await markBotUserInactive(user.id, sendResult.failure);
+              const userFailure = classifyBotUserSendFailure(res?.description, Number(res?.error_code || 0));
+              if (userFailure) await markBotUserInactive(user.id, userFailure);
             }
           }
           return { 
@@ -600,7 +721,7 @@ export async function GET(req: NextRequest) {
             error: res?.description || 'Unknown error',
             inactive_detected: !botFailure,
             bot_failed: Boolean(botFailure),
-            failure_reason: normalizeFailureReason(res?.description || sendResult.failure?.reason)
+            failure_reason: normalizeFailureReason(res?.description)
           };
         }
         return { status: 'failed', user: user.id, campaign_id: campaign.id, campaign_name: campaign.name, error: 'Unknown error', failure_reason: "unknown_error" };

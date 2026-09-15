@@ -28,6 +28,10 @@ export async function POST(request: Request) {
     const result = await attributeReferral({
       userId: Number(user.id),
       token: body.referral_token,
+      // Persist first-touch attribution in the bounded internal request. Device
+      // fraud signals and reward finalization run through normal Mini App auth,
+      // which is idempotent and has the actual request/device context.
+      deferFinalization: true,
     });
     return NextResponse.json(result);
   } catch (error) {

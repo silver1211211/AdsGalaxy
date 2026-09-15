@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import { claimAdvertiserDirectDebit } from "@/lib/advertiserDirectDebit";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { campaignCategoryMatches } from "@/lib/campaignCategories";
@@ -25,6 +26,7 @@ import { composeCampaignCreativeTelegramHtml } from "@/lib/campaignCreative";
 import { campaignExcludesChannel, campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { calculateBroadcastPayout, getBroadcastPayoutSettings, type BroadcastPayout, type BroadcastPayoutSettings } from "@/lib/broadcastPublisherCpmEngine";
 import { processBoundedQueue } from "@/lib/concurrency";
+import { effectiveBidPerThousand, getAdvertiserDiscount } from "@/lib/advertiserDiscount";
 
 export const dynamic = "force-dynamic";
 
@@ -58,6 +60,8 @@ type CampaignRow = RowDataPacket & {
   campaign_title?: string | null;
   message_text: string;
   image_url: string | null;
+  cpm: string | number;
+  effective_cpm?: number;
 };
 
 type ChannelRow = RowDataPacket & {
@@ -644,9 +648,34 @@ async function reserveEmergencyBroadcastDelivery(input: {
 async function finalizeEmergencyBroadcastDelivery(input: {
   schema: BroadcastSchema;
   deliveryId: number;
+  campaignId: number;
   payout: BroadcastPayout;
   attempts: number;
 }) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [deliveryRows] = await conn.query<Array<RowDataPacket & { advertiser_id: number; funding_model: string; cost: string | number }>>(
+      "SELECT c.user_id advertiser_id,c.funding_model,bd.cost FROM broadcast_deliveries bd JOIN campaigns c ON c.id=bd.campaign_id WHERE bd.id=? FOR UPDATE",
+      [input.deliveryId],
+    );
+    const delivery = deliveryRows[0];
+    if (!delivery) throw new Error("broadcast_reservation_missing");
+    if (delivery.funding_model === "direct_debit") {
+      const walletDebit = await claimAdvertiserDirectDebit(conn, {
+        sourceKey: `bot:delivery:${input.deliveryId}`,
+        advertiserId: Number(delivery.advertiser_id), campaignId: input.campaignId,
+        campaignTable: "campaigns", billingType: "bot_delivery", amount: input.payout.advertiserDebit,
+        description: `Bot delivery charge #${input.deliveryId}`,
+      });
+      if (!walletDebit.ok) {
+        if (walletDebit.duplicate) { await conn.rollback(); return { ok: true, idempotent: true }; }
+        await conn.query("UPDATE campaigns SET budget=budget+?,status='paused',pause_reason='insufficient_balance' WHERE id=?", [delivery.cost,input.campaignId]);
+        await conn.query("UPDATE broadcast_deliveries SET cost=0,publisher_reward=0,reserve_amount=0,platform_revenue=0,status='failed' WHERE id=?", [input.deliveryId]);
+        await conn.commit();
+        return { ok: false, reason: "insufficient_balance" };
+      }
+    }
   const assignments = ["publisher_reward=?", "reserve_amount=?", "platform_revenue=?", "status='sent'"];
   const params: Array<number | string> = [input.payout.publisherReward, input.payout.reserveAmount, input.payout.platformRevenue];
   if (input.schema.hasDeliveryRetryCount) {
@@ -658,11 +687,17 @@ async function finalizeEmergencyBroadcastDelivery(input: {
   if (input.schema.hasDeliveryTelegramError) assignments.push("telegram_error=NULL");
   params.push(input.deliveryId);
 
-  const [updated] = await pool.query<ResultSetHeader>(
+  const [updated] = await conn.query<ResultSetHeader>(
     `UPDATE broadcast_deliveries SET ${assignments.join(",")} WHERE id=? AND status='pending'`,
     params
   );
   if (updated.affectedRows !== 1) throw new Error("broadcast_finalize_race");
+  await conn.commit();
+  return { ok: true, idempotent: false };
+  } catch (error) {
+    await conn.rollback().catch(() => undefined);
+    throw error;
+  } finally { conn.release(); }
 }
 
 async function refundEmergencyBroadcastDelivery(input: {
@@ -730,7 +765,7 @@ async function postBroadcastToBotUser(options: {
       { text: campaign.button_text, url: campaign.link },
     ]],
   };
-  const payout = calculateBroadcastPayout(campaign.cpm, options.payoutSettings);
+  const payout = calculateBroadcastPayout(campaign.effective_cpm ?? campaign.cpm, options.payoutSettings);
   const cost = payout.advertiserDebit;
   const reservation = await reserveEmergencyBroadcastDelivery({ schema, campaign, bot, user, cost });
   if (!reservation.ok) return { ok: false, reason: reservation.reason };
@@ -758,12 +793,14 @@ async function postBroadcastToBotUser(options: {
   const result = sendResult.result;
 
   if (result?.ok) {
-    await finalizeEmergencyBroadcastDelivery({
+    const finalized = await finalizeEmergencyBroadcastDelivery({
       schema,
       deliveryId: reservation.deliveryId,
+      campaignId: campaign.id,
       payout,
       attempts: sendResult.attempts || 1,
     });
+    if (!finalized.ok) return { ok: false, reason: finalized.reason };
     await pool.query("UPDATE bot_users SET last_broadcast_at = NOW() WHERE id = ?", [user.id]);
     await markBotUserDeliverySuccess(user.id);
     await recordBotBroadcastSuccess(bot.id);
@@ -916,6 +953,8 @@ export async function POST(
     }
 
     const campaign = campaignRows[0] as CampaignRow;
+    const advertiserDiscount = await getAdvertiserDiscount(pool, campaign.user_id);
+    campaign.effective_cpm = effectiveBidPerThousand(campaign.cpm, advertiserDiscount.cpm_discount);
 
     if (campaign.status !== "active") {
       return NextResponse.json({ error: "Only active campaigns can be emergency pushed" }, { status: 400 });

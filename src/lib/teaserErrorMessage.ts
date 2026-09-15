@@ -1,0 +1,41 @@
+/** Safe presentation keys for stable Teaser error codes. Never return upstream text. */
+const KEYS: Record<string, string> = {
+  PREVIEW_READ_ONLY: "teaser.error.previewReadOnly",
+  "Preview account is read-only": "teaser.error.previewReadOnly",
+  TEASER_EDIT_PERMISSION_REQUIRED: "teaser.error.permissionRequired",
+  TEASER_PERMISSION_CHECK_FAILED: "teaser.error.permissionCheckFailed",
+  TEASER_SETTINGS_SAVE_FAILED: "teaser.error.settingsSaveFailed",
+  TEASER_INVALID_DAILY_LIMIT: "teaser.error.invalidDailyLimit",
+  TEASER_TEMPORARILY_UNAVAILABLE: "teaser.error.temporarilyUnavailable",
+  INVALID_TEASER_CPM: "teaser.error.invalidCpm",
+  INVALID_TEASER_COPY_COUNT: "teaser.error.invalidCopyCount",
+  TEASER_COPY_TOO_SHORT: "teaser.error.copyTooShort",
+  TEASER_COPY_TOO_LONG: "teaser.error.copyTooLong",
+  DUPLICATE_TEASER_COPY: "teaser.error.duplicateCopy",
+  TEASER_COPY_CONTAINS_URL: "teaser.error.copyContainsUrl",
+  INVALID_TEASER_CTA: "teaser.error.invalidCta",
+  TEASER_NOT_AVAILABLE_FOR_CLICK: "teaser.error.viewsOnly",
+  CAMPAIGN_INACTIVE: "teaser.error.campaignInactive",
+  BUDGET_EXHAUSTED: "teaser.error.budgetExhausted",
+  INSUFFICIENT_BALANCE: "teaser.error.insufficientBalance",
+  TEASER_RESUME_COOLDOWN: "teaser.error.cooldown",
+  TEASER_RESUME_NOT_ELIGIBLE: "teaser.error.campaignNotEligible",
+  TEASER_NOT_AVAILABLE: "teaser.error.viewsOnly",
+  TEASER_DISABLE_NOT_AVAILABLE: "teaser.error.viewsOnly",
+  USE_DISABLE_TEASER_ACTION: "teaser.error.generic",
+  TEASER_ALREADY_ENABLED: "teaser.error.alreadyEnabled",
+  TEASER_ALREADY_DISABLED: "teaser.error.alreadyDisabled",
+  TEASER_ENABLE_FAILED: "teaser.error.enableFailed",
+  TEASER_DISABLE_FAILED: "teaser.error.disableFailed",
+  TEASER_CAMPAIGN_NOT_ELIGIBLE: "teaser.error.campaignNotEligible",
+  TEASER_EMERGENCY_ALREADY_EXISTS: "teaser.error.emergencyAlreadyExists",
+  TEASER_NO_ELIGIBLE_INVENTORY: "teaser.error.noEligibleInventory",
+  TEASER_EMERGENCY_CREATE_FAILED: "teaser.error.emergencyCreateFailed",
+  TEASER_OVERRIDE_CONFIRMATION_REQUIRED: "teaser.error.overrideConfirmationRequired",
+  TEASER_JOB_LOAD_FAILED: "teaser.error.jobLoadFailed",
+  TEASER_SPLIT_INVALID: "teaser.error.splitInvalid",
+};
+export function teaserErrorMessageKey(code: unknown): string {
+  return KEYS[String(code || "").trim()] || "teaser.error.generic";
+}
+export const teaserErrorCodes = Object.freeze(Object.keys(KEYS));

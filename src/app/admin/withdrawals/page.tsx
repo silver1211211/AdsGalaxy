@@ -5,6 +5,7 @@ import AdminLayout from "@/components/layout/AdminLayout";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Modal from "@/components/ui/Modal";
 import { Ban, Check, ChevronLeft, ChevronRight, Copy, Eye, Loader2, Search, X } from "lucide-react";
+import { useAdminRequestGuard } from "@/hooks/useAdminRequestGuard";
 
 type ActionType = "approve" | "reject" | "ban_user";
 type WithdrawalRow = {
@@ -40,7 +41,7 @@ type WithdrawalRow = {
     reason_details?: Array<{ code: string; detail: string }>;
     risk?: { score: number; state: string };
     ledger?: { classification: string; coverage_gap_records: number };
-  };
+  } | null;
 };
 type ActionModal = { type: ActionType; withdrawal: WithdrawalRow } | null;
 
@@ -98,7 +99,7 @@ function FraudMetrics({ withdrawal, dense = false }: { withdrawal: WithdrawalRow
   return (
     <div className="space-y-2">
       <div className={`rounded-md border px-2 py-1.5 ${withdrawal.preclearance?.state === "cleared" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
-        <div className="text-[10px] font-bold uppercase tracking-wide">Pre-clearance: {withdrawal.preclearance?.state === "cleared" ? "Cleared" : "Manual review required"}</div>
+        <div className="text-[10px] font-bold uppercase tracking-wide">Pre-clearance: {withdrawal.preclearance ? (withdrawal.preclearance.state === "cleared" ? "Cleared" : "Manual review required") : "Review on open"}</div>
         {withdrawal.preclearance?.reasons?.length ? <div className="mt-0.5 text-[10px]">{withdrawal.preclearance.reasons.join(", ").replaceAll("_", " ")}</div> : null}
       </div>
       <div className={`grid ${dense ? "grid-cols-2" : "grid-cols-2 xl:grid-cols-4"} gap-2`}>
@@ -114,6 +115,7 @@ function FraudMetrics({ withdrawal, dense = false }: { withdrawal: WithdrawalRow
 }
 
 export default function AdminWithdrawalsPage() {
+  const beginListRequest = useAdminRequestGuard();
   const [withdrawals, setWithdrawals] = useState<WithdrawalRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
@@ -128,19 +130,22 @@ export default function AdminWithdrawalsPage() {
   const [refund, setRefund] = useState(true);
   const [viewModalOpen, setViewModalOpen] = useState(false);
   const [selectedWithdrawal, setSelectedWithdrawal] = useState<WithdrawalRow | null>(null);
+  const [preclearanceLoading, setPreclearanceLoading] = useState<number | null>(null);
 
   const fetchWithdrawals = async (p: number, s: string, q: string) => {
+    const controller = beginListRequest();
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/withdrawals?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`);
+      const res = await fetch(`/api/admin/withdrawals?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`, { signal: controller.signal });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to fetch withdrawals");
       setWithdrawals(data.withdrawals || []);
       setTotalPages(data.totalPages || 1);
     } catch (err: unknown) {
+      if (controller.signal.aborted) return;
       setError(errorMessage(err, "Failed to fetch withdrawals"));
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 
@@ -149,10 +154,31 @@ export default function AdminWithdrawalsPage() {
       fetchWithdrawals(page, statusFilter, search);
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [page, statusFilter, search]);
+  }, [page, statusFilter, search, beginListRequest]);
 
-  const openAction = (type: ActionType, withdrawal: WithdrawalRow) => {
-    setActionModal({ type, withdrawal });
+  const loadPreclearance = async (withdrawal: WithdrawalRow) => {
+    if (withdrawal.preclearance) return withdrawal;
+    setPreclearanceLoading(withdrawal.id);
+    try {
+      const res = await fetch(`/api/admin/withdrawals?preclearance_id=${withdrawal.id}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to load the safety assessment");
+      const updated = { ...withdrawal, preclearance: data.preclearance };
+      setWithdrawals((items) => items.map((item) => item.id === withdrawal.id ? updated : item));
+      setSelectedWithdrawal((current) => current?.id === withdrawal.id ? updated : current);
+      return updated;
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to load the safety assessment"));
+      return null;
+    } finally {
+      setPreclearanceLoading(null);
+    }
+  };
+
+  const openAction = async (type: ActionType, withdrawal: WithdrawalRow) => {
+    const reviewed = type === "approve" ? await loadPreclearance(withdrawal) : withdrawal;
+    if (!reviewed) return;
+    setActionModal({ type, withdrawal: reviewed });
     setReason("");
     setRefund(type === "reject" && withdrawal.status !== "success" && !withdrawal.refunded);
   };
@@ -166,6 +192,10 @@ export default function AdminWithdrawalsPage() {
   const runAction = async () => {
     if (!actionModal) return;
     const { type, withdrawal } = actionModal;
+    if (type === "approve" && withdrawal.preclearance?.state === "manual_review_required" && reason.trim().length < 8) {
+      setError("Enter an admin review note of at least 8 characters to override the safety hold.");
+      return;
+    }
     setActionLoading(withdrawal.id);
     try {
       const res = await fetch("/api/admin/withdrawals", {
@@ -222,16 +252,16 @@ export default function AdminWithdrawalsPage() {
 
   const ActionButtons = ({ withdrawal }: { withdrawal: WithdrawalRow }) => (
     <div className="flex flex-wrap items-center justify-end gap-2">
-      <button onClick={() => { setSelectedWithdrawal(withdrawal); setViewModalOpen(true); }} className="rounded-md p-1.5 text-slate-400 hover:bg-blue-50 hover:text-blue-600" title="View details">
-        <Eye size={16} />
+      <button onClick={() => { setSelectedWithdrawal(withdrawal); setViewModalOpen(true); void loadPreclearance(withdrawal); }} className="rounded-md p-1.5 text-slate-400 hover:bg-blue-50 hover:text-blue-600" title="View details">
+        {preclearanceLoading === withdrawal.id ? <Loader2 size={16} className="animate-spin" /> : <Eye size={16} />}
       </button>
-      <button onClick={() => openAction("approve", withdrawal)} disabled={actionLoading === withdrawal.id || withdrawal.preclearance?.state === "manual_review_required"} title={withdrawal.preclearance?.state === "manual_review_required" ? `Blocked: ${withdrawal.preclearance.reasons.join(", ")}` : "Approve withdrawal"} className="inline-flex items-center gap-1 rounded-md border border-emerald-100 bg-emerald-50 px-2 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50">
-        {actionLoading === withdrawal.id ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} Approve
+      <button onClick={() => void openAction("approve", withdrawal)} disabled={actionLoading === withdrawal.id || preclearanceLoading === withdrawal.id} title={withdrawal.preclearance?.state === "manual_review_required" ? "Review safety findings and approve with an admin note" : "Review and approve withdrawal"} className="inline-flex items-center gap-1 rounded-md border border-emerald-100 bg-emerald-50 px-2 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50">
+        {actionLoading === withdrawal.id || preclearanceLoading === withdrawal.id ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} Approve
       </button>
-      <button onClick={() => openAction("reject", withdrawal)} disabled={actionLoading === withdrawal.id} className="inline-flex items-center gap-1 rounded-md border border-red-100 bg-red-50 px-2 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50">
+      <button onClick={() => void openAction("reject", withdrawal)} disabled={actionLoading === withdrawal.id} className="inline-flex items-center gap-1 rounded-md border border-red-100 bg-red-50 px-2 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50">
         {actionLoading === withdrawal.id ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />} Reject
       </button>
-      <button onClick={() => openAction("ban_user", withdrawal)} disabled={actionLoading === withdrawal.id || Boolean(withdrawal.is_banned)} className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-900 px-2 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50">
+      <button onClick={() => void openAction("ban_user", withdrawal)} disabled={actionLoading === withdrawal.id || Boolean(withdrawal.is_banned)} className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-900 px-2 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50">
         <Ban size={14} /> {withdrawal.is_banned ? "Banned" : "Ban User"}
       </button>
     </div>
@@ -260,6 +290,21 @@ export default function AdminWithdrawalsPage() {
               {actionModal?.type === "ban_user" ? "Ban reason" : "Reject reason"}
             </label>
             <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm outline-none focus:border-blue-500" placeholder="Write a short admin note..." />
+          </div>
+        )}
+
+        {actionModal?.type === "approve" && actionModal.withdrawal.preclearance?.state === "manual_review_required" && (
+          <div className="space-y-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-wide text-amber-800">Manual safety review override</p>
+              <p className="mt-1 text-xs text-amber-700">This withdrawal has active safety findings. Approval is allowed only after an authorized administrator records why the payout is safe.</p>
+              {actionModal.withdrawal.preclearance.reason_details?.length ? (
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-amber-800">
+                  {actionModal.withdrawal.preclearance.reason_details.map((item) => <li key={item.code}>{item.detail}</li>)}
+                </ul>
+              ) : null}
+            </div>
+            <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} className="w-full rounded-xl border border-amber-300 bg-white p-3 text-sm outline-none focus:border-blue-500" placeholder="Required: explain why this safety hold can be overridden..." />
           </div>
         )}
 

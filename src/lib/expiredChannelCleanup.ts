@@ -28,7 +28,9 @@ export async function cleanupExpiredChannelPosts() {
       },
     };
   }
-  const fastDebitPublisherSettlement = await settlePendingChannelPublisherCredits();
+  // Cleanup must yield to user-facing traffic. Each debit is settled in its own
+  // transaction and busy rows are skipped by the settlement worker.
+  const fastDebitPublisherSettlement = await settlePendingChannelPublisherCredits({ limit: 25 });
   console.info("Expired channel post cleanup settlement-before-delete complete", {
     classic_candidates: settlement.candidates,
     classic_settled_posts: settlement.settledPosts,

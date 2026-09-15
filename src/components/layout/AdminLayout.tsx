@@ -73,6 +73,7 @@ const menuSections = [
     items: [
       { href: "/admin/referrals", icon: Gift, label: "Referrals" },
       { href: "/admin/audience-analytics", icon: BarChart3, label: "Audience Analytics" },
+      { href: "/admin/teaser-analytics", icon: BarChart3, label: "Teaser Analytics" },
       { href: "/admin/enterprise", icon: BriefcaseBusiness, label: "Enterprise" },
     ],
   },

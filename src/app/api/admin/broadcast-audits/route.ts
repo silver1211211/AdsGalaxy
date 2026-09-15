@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
 import type { RowDataPacket } from "mysql2/promise";
+import { parseAdminPagination } from "@/lib/adminPagination";
 
 type DeliveryRow = RowDataPacket & Record<string, unknown>;
 type CountRow = RowDataPacket & { total: number };
@@ -12,9 +13,7 @@ export async function GET(request: Request) {
   }
 
   const { searchParams } = new URL(request.url);
-  const page = parseInt(searchParams.get("page") || "1");
-  const limit = parseInt(searchParams.get("limit") || "10");
-  const offset = (page - 1) * limit;
+  const { page, limit, offset } = parseAdminPagination(searchParams, { defaultLimit: 10 });
   const search = searchParams.get("search") || "";
 
   try {

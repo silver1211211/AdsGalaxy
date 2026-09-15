@@ -4,12 +4,16 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
+import { useAdminRequestGuard } from "@/hooks/useAdminRequestGuard";
 import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Bot, Search, Users, ShieldOff, Pause, Play, Trash2, ExternalLink } from "lucide-react";
 import EmptyState from "@/components/ui/EmptyState";
 import { SkeletonCard, SkeletonTableRows } from "@/components/ui/Skeleton";
 import Modal from "@/components/ui/Modal";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import ManualBotUserImport from "@/components/admin/ManualBotUserImport";
+import ModerationRejectFields from "@/components/admin/ModerationRejectFields";
+import ModerationHistory from "@/components/admin/ModerationHistory";
+import { getApiErrorMessage } from "@/lib/apiErrorMessage";
 
 type BotAction = "activate" | "reject" | "pause" | "delete";
 type PendingAction = {
@@ -21,6 +25,7 @@ type PendingAction = {
 } | null;
 
 export default function AdminBotsPage() {
+  const beginListRequest = useAdminRequestGuard();
   const [bots, setBots] = useState([]);
   const [summary, setSummary] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -34,20 +39,24 @@ export default function AdminBotsPage() {
   const [viewModalOpen, setViewModalOpen] = useState(false);
   const [selectedBot, setSelectedBot] = useState<any>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
+  const [policyRuleKey, setPolicyRuleKey] = useState("");
+  const [internalNote, setInternalNote] = useState("");
 
   const fetchBots = async (p: number, s: string, q: string) => {
+    const controller = beginListRequest();
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/bots?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`);
+      const res = await fetch(`/api/admin/bots?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`, { signal: controller.signal });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to load bots");
       setBots(Array.isArray(data.bots) ? data.bots : []);
       setTotalPages(data.totalPages || 1);
       setSummary(data.summary || null);
     } catch (err: any) {
+      if (controller.signal.aborted) return;
       setError(err.message || "Failed to load bots");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 
@@ -56,19 +65,19 @@ export default function AdminBotsPage() {
       fetchBots(page, statusFilter, search);
     }, 500);
     return () => clearTimeout(timer);
-  }, [page, statusFilter, search]);
+  }, [page, statusFilter, search, beginListRequest]);
 
-  const handleAction = async (id: number, action: string) => {
+  const handleAction = async (id: number, action: string, ruleKey = "", note = "") => {
     setActionLoading(id);
     try {
       const normalizedAction = action === "approve" ? "activate" : action;
-      const res = await fetch(`/api/admin/bots/${id}/actions`, {
+      const res = await fetch(action === "reject" ? "/api/admin/moderation-rejections" : `/api/admin/bots/${id}/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: normalizedAction })
+        body: JSON.stringify(action === "reject" ? { entity_type: "bot", entity_id: id, policy_rule_key: ruleKey, internal_note: note } : { action: normalizedAction })
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Action failed");
+      if (!res.ok) throw new Error(getApiErrorMessage(data, "Bot action failed"));
       await fetchBots(page, statusFilter, search);
     } catch (err: any) {
       setError(err.message);
@@ -83,14 +92,16 @@ export default function AdminBotsPage() {
   };
 
   const openActionConfirm = (bot: any, action: BotAction, title: string, message: string, danger = false) => {
+    setPolicyRuleKey(""); setInternalNote("");
     setPendingAction({ bot, action, title, message, danger });
   };
 
   const confirmPendingAction = async () => {
     if (!pendingAction) return;
     const { bot, action } = pendingAction;
+    if (action === "reject" && !policyRuleKey) { setError("MODERATION_REASON_REQUIRED"); return; }
     setPendingAction(null);
-    await handleAction(bot.id, action);
+    await handleAction(bot.id, action, policyRuleKey, internalNote);
   };
 
   const StatusBadge = ({ status }: { status: string }) => (
@@ -241,7 +252,7 @@ export default function AdminBotsPage() {
         confirmBtnText="Confirm"
         confirmBtnVariant={pendingAction?.danger ? "danger" : "primary"}
         isLoading={actionLoading !== null}
-      />
+      >{pendingAction?.action === "reject" && <ModerationRejectFields scopes={["publisher.general", "publisher.bot"]} ruleKey={policyRuleKey} internalNote={internalNote} onRuleKey={setPolicyRuleKey} onInternalNote={setInternalNote} />}</ConfirmationModal>
 
       {/* Bot Details Modal */}
       {viewModalOpen && selectedBot && (
@@ -376,6 +387,7 @@ export default function AdminBotsPage() {
                 </div>
               </div>
 
+              <ModerationHistory entityType="bot" entityId={selectedBot.id} />
               <ManualBotUserImport botId={Number(selectedBot.id)} onImported={() => void fetchBots(page, statusFilter, search)} />
             </div>
           </div>

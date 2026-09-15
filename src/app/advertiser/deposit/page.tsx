@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable react-hooks/set-state-in-effect -- legacy payment countdown resets state from promotion lifecycle effects */
 
 import React, { useCallback, useState, useEffect } from "react";
 import Image from "next/image";
@@ -26,6 +27,8 @@ import { AnimatePresence, motion } from "framer-motion";
 import Modal from "@/components/ui/Modal";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import { OXAPAY_DEPOSIT_NETWORKS } from "@/lib/oxapayNetworks";
+import { useTranslations } from "@/i18n/client";
+import { StatusText } from "@/components/i18n/LocalizedEnum";
 
 interface Deposit {
   id: number;
@@ -85,6 +88,7 @@ const DEFAULT_NETWORKS: DepositNetwork[] = OXAPAY_DEPOSIT_NETWORKS;
 
 export default function DepositPage() {
   const { setTitle } = useHeader();
+  const { t } = useTranslations();
   const [deposits, setDeposits] = useState<Deposit[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
@@ -101,7 +105,9 @@ export default function DepositPage() {
   const [timeLeft, setTimeLeft] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
   const [activeFilter, setActiveFilter] = useState("all");
-  const [limit, setLimit] = useState(10);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [depositNetworks, setDepositNetworks] = useState<DepositNetwork[]>(DEFAULT_NETWORKS);
   const [promotion, setPromotion] = useState<DepositPromotion | null>(null);
   const [promotionTimeLeft, setPromotionTimeLeft] = useState("");
@@ -124,8 +130,7 @@ export default function DepositPage() {
   };
 
   const allVisibleDeposits = getFilteredDeposits();
-  const paginatedDeposits = allVisibleDeposits.slice(0, limit);
-  const hasMore = allVisibleDeposits.length > limit;
+  const paginatedDeposits = allVisibleDeposits;
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -146,13 +151,15 @@ export default function DepositPage() {
     return () => clearInterval(interval);
   }, [viewingDeposit]);
 
-  const fetchDeposits = useCallback(async (silent = false) => {
+  const fetchDeposits = useCallback(async (silent = false, cursor: string | null = null) => {
     if (!silent) setIsLoading(true);
     try {
-      const res = await apiFetch("/api/advertiser/deposits");
+      const res = await apiFetch(cursor ? `/api/advertiser/deposits?cursor=${encodeURIComponent(cursor)}` : "/api/advertiser/deposits");
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to fetch deposits");
-      setDeposits(data.deposits);
+      setDeposits((current) => cursor ? [...current, ...data.deposits] : data.deposits);
+      setNextCursor(data.next_cursor || null);
+      setHasMore(Boolean(data.has_more));
       setMinDeposit(data.minDeposit);
       setPromotion(data.promotion || null);
       if (Array.isArray(data.networks) && data.networks.length > 0) {
@@ -168,6 +175,12 @@ export default function DepositPage() {
       setIsLoading(false);
     }
   }, [network]);
+
+  const loadMoreDeposits = async () => {
+    if (!nextCursor || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try { await fetchDeposits(true, nextCursor); } finally { setIsLoadingMore(false); }
+  };
 
   useEffect(() => {
     if (!promotion?.is_live) {
@@ -191,9 +204,9 @@ export default function DepositPage() {
   }, [promotion]);
 
   useEffect(() => {
-    setTitle("Deposit");
+    setTitle(t("common.deposit"));
     void Promise.resolve().then(() => fetchDeposits());
-  }, [fetchDeposits, setTitle]);
+  }, [fetchDeposits, setTitle, t]);
 
   useEffect(() => {
     const webapp = getTelegramWebApp();
@@ -283,7 +296,7 @@ export default function DepositPage() {
       if (viewingDeposit?.track_id === track_id) {
         setViewingDeposit(data);
         if (data.status === "paid") {
-          setStatusMessage("Payment received! Your balance has been updated.");
+          setStatusMessage(t("advertiser.deposit.paymentReceived"));
           if (webapp) webapp.HapticFeedback?.notificationOccurred('success');
           setTimeout(() => {
             setIsPaying(false);
@@ -291,7 +304,7 @@ export default function DepositPage() {
             setStatusMessage("");
           }, 2000);
         } else {
-          setStatusMessage("Payment not received yet. Please wait a moment.");
+          setStatusMessage(t("advertiser.deposit.paymentPending"));
           setTimeout(() => setStatusMessage(""), 3000);
         }
       }
@@ -327,7 +340,7 @@ export default function DepositPage() {
   return (
     <DashboardLayout type="advertiser">
       <div className="mx-auto max-w-xl space-y-6">
-        <Modal isOpen={!!error} onClose={() => setError("")} type="error" title="Deposit Error">
+        <Modal isOpen={!!error} onClose={() => setError("")} type="error" title={t("advertiser.deposit.error")}>
           {error}
         </Modal>
 
@@ -336,12 +349,12 @@ export default function DepositPage() {
           <div className="relative space-y-4">
             <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-blue-100">
               <Sparkles size={12} />
-              Balance launchpad
+              {t("advertiser.deposit.commandCenter")}
             </div>
             <div>
-              <h1 className="text-3xl font-black tracking-tight">Fund campaigns faster.</h1>
+              <h1 className="text-3xl font-black tracking-tight">{t("advertiser.deposit.hero")}</h1>
               <p className="mt-2 max-w-sm text-sm font-medium leading-relaxed text-blue-100/75">
-                Create a crypto invoice, monitor payment status, and keep your campaign balance ready.
+                {t("advertiser.deposit.heroDescription")}
               </p>
             </div>
             <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/10 p-3 text-blue-100">
@@ -358,8 +371,8 @@ export default function DepositPage() {
               <Wallet size={20} />
             </div>
             <div className="min-w-0">
-              <h2 className="text-lg font-black uppercase tracking-tight text-slate-900">Add Balance</h2>
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Fund your advertiser account</p>
+              <h2 className="text-lg font-black uppercase tracking-tight text-slate-900">{t("advertiser.deposit.addBalance")}</h2>
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{t("advertiser.deposit.fundAccount")}</p>
             </div>
           </div>
 
@@ -391,7 +404,7 @@ export default function DepositPage() {
             </div>
             <div className="space-y-2">
               <div className="flex justify-between items-center px-1">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Amount to deposit ($)</label>
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">{t("advertiser.deposit.amount")} ($)</label>
                 <span className="text-[9px] font-black uppercase tracking-widest text-[#0c9de8]">Min: ${minDeposit.toFixed(2)}</span>
               </div>
               <div className="relative">
@@ -408,7 +421,7 @@ export default function DepositPage() {
             </div>
 
             <div className="space-y-2">
-              <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 px-1">Select Network</label>
+              <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 px-1">{t("advertiser.deposit.selectNetwork")}</label>
               <div className="max-h-[248px] overflow-y-auto pr-1">
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                 {depositNetworks.map((net) => (
@@ -463,7 +476,7 @@ export default function DepositPage() {
               <div className="p-5 bg-amber-50 border border-amber-200 rounded-2xl flex gap-3 shadow-sm shadow-amber-100/50">
                 <AlertCircle className="text-amber-500 shrink-0" size={20} />
                 <div className="space-y-1.5">
-                  <p className="text-xs font-black text-amber-900 uppercase">Pending Invoice Found</p>
+                  <p className="text-xs font-black text-amber-900 uppercase">{t("advertiser.deposit.pendingFound")}</p>
                   <p className="text-[10px] font-bold text-amber-700 leading-relaxed opacity-90">
                     You already have a pending deposit of ${pendingDeposit.amount}. Please complete or wait for it to expire.
                   </p>
@@ -476,7 +489,7 @@ export default function DepositPage() {
                     }}
                     className="text-[10px] font-black text-amber-900 uppercase underline pt-1 hover:text-amber-800 transition-colors"
                   >
-                    View Pending Invoice
+                    {t("advertiser.deposit.viewPending")}
                   </button>
                 </div>
               </div>
@@ -487,7 +500,7 @@ export default function DepositPage() {
                 className="w-full py-4 mt-2 bg-[#0c9de8] text-white rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:opacity-50 transition-all shadow-lg shadow-[#0c9de8]/30 hover:shadow-[#0c9de8]/40 active:scale-[0.98]"
               >
                 {isCreating ? <Loader2 className="animate-spin" size={18} /> : <Plus size={18} />}
-                {isCreating ? "Creating..." : "Create Deposit"}
+                {isCreating ? t("advertiser.deposit.creating") : t("advertiser.deposit.create")}
               </button>
             )}
           </div>
@@ -496,7 +509,7 @@ export default function DepositPage() {
         {/* History Section */}
         <div className="space-y-4 pt-2">
           <div className="flex items-center justify-between px-2">
-            <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest">Deposits</h3>
+            <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest">{t("common.deposits")}</h3>
             <div className="flex items-center gap-2">
               <div className="flex bg-slate-100/80 p-1 rounded-xl border border-slate-200/50">
                 {["all", "paid", "canceled"].map((f) => (
@@ -529,7 +542,7 @@ export default function DepositPage() {
               <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center mx-auto text-slate-300 shadow-sm border border-slate-100">
                 <Wallet size={32} />
               </div>
-              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest">No deposits found</p>
+              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest">{t("advertiser.deposit.empty")}</p>
             </div>
           ) : (
             <div className="space-y-3">
@@ -578,14 +591,15 @@ export default function DepositPage() {
 
               {hasMore && (
                 <button
+                  disabled={isLoadingMore}
                   onClick={() => {
                     const webapp = getTelegramWebApp();
                     if (webapp) webapp.HapticFeedback?.impactOccurred('light');
-                    setLimit(prev => prev + 10);
+                    void loadMoreDeposits();
                   }}
                   className="w-full py-4 bg-slate-50 text-slate-400 rounded-2xl font-black uppercase tracking-widest text-[10px] active:scale-95 transition-all"
                 >
-                  Load More Deposits
+                  {isLoadingMore ? "Loading…" : t("advertiser.deposit.loadMore")}
                 </button>
               )}
             </div>
@@ -615,27 +629,27 @@ export default function DepositPage() {
 
               <div className="space-y-6 mt-4">
                 <div className="text-center space-y-1">
-                  <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Deposit Receipt</h3>
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Track ID: {viewingDeposit.track_id}</p>
+                  <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">{t("advertiser.deposit.receipt")}</h3>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{t("advertiser.deposit.trackId", { id: viewingDeposit.track_id })}</p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Amount</p>
+                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">{t("common.amount")}</p>
                     <p className="text-sm font-black text-slate-900">${viewingDeposit.amount}</p>
                   </div>
                   <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Status</p>
+                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">{t("common.status")}</p>
                     <p className={cn("text-sm font-black uppercase", getStatusInfo(viewingDeposit.status).color)}>
-                      {viewingDeposit.status}
+                      <StatusText value={viewingDeposit.status} />
                     </p>
                   </div>
                   <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Network</p>
+                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">{t("advertiser.deposit.selectNetwork")}</p>
                     <p className="text-sm font-black text-slate-900 uppercase">{viewingDeposit.network}</p>
                   </div>
                   <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Date</p>
+                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">{t("common.date")}</p>
                     <p className="text-sm font-black text-slate-900">
                       {new Date(viewingDeposit.created_at).toLocaleDateString()}
                     </p>
@@ -643,10 +657,10 @@ export default function DepositPage() {
                 </div>
                 {viewingDeposit.status === "paid" && (
                   <div className="rounded-2xl border border-emerald-100 bg-emerald-50/60 p-4 text-sm">
-                    <div className="flex justify-between"><span>Deposit amount</span><strong>${Number(viewingDeposit.amount).toFixed(2)}</strong></div>
-                    <div className="mt-1 flex justify-between"><span>Deposit bonus</span><strong>${Number(viewingDeposit.bonus_amount || 0).toFixed(2)}</strong></div>
-                    <div className="mt-1 flex justify-between"><span>Total credited</span><strong>${(Number(viewingDeposit.amount) + Number(viewingDeposit.bonus_amount || 0)).toFixed(2)}</strong></div>
-                    <div className="mt-1 flex justify-between"><span>Bonus rate</span><strong>{Number(viewingDeposit.bonus_rate_basis_points || 0) / 100}%</strong></div>
+                    <div className="flex justify-between"><span>{t("advertiser.deposit.amount")}</span><strong>${Number(viewingDeposit.amount).toFixed(2)}</strong></div>
+                    <div className="mt-1 flex justify-between"><span>{t("advertiser.deposit.depositBonus")}</span><strong>${Number(viewingDeposit.bonus_amount || 0).toFixed(2)}</strong></div>
+                    <div className="mt-1 flex justify-between"><span>{t("advertiser.deposit.totalCredited")}</span><strong>${(Number(viewingDeposit.amount) + Number(viewingDeposit.bonus_amount || 0)).toFixed(2)}</strong></div>
+                    <div className="mt-1 flex justify-between"><span>{t("advertiser.deposit.bonusRate")}</span><strong>{Number(viewingDeposit.bonus_rate_basis_points || 0) / 100}%</strong></div>
                   </div>
                 )}
 
@@ -657,7 +671,7 @@ export default function DepositPage() {
                         onClick={() => setIsPaying(true)}
                         className="flex-1 py-4 bg-[#0c9de8] text-white rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-2 transition-all"
                       >
-                        <DollarSign size={20} /> Pay
+                        <DollarSign size={20} /> {t("advertiser.deposit.pay")}
                       </button>
                       
                       {viewingDeposit.status !== "paying" && (
@@ -667,7 +681,7 @@ export default function DepositPage() {
                           className="flex-1 py-4 bg-red-50 text-red-500 rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-2 transition-all"
                         >
                           {isCanceling ? <Loader2 className="animate-spin" size={20} /> : <XCircle size={20} />}
-                          Cancel
+                          {t("common.cancel")}
                         </button>
                       )}
                     </div>
@@ -680,7 +694,7 @@ export default function DepositPage() {
                     }}
                     className="w-full py-4 bg-slate-50 text-slate-900 rounded-2xl font-black uppercase tracking-widest transition-all"
                   >
-                    Close Receipt
+                    {t("advertiser.deposit.closeReceipt")}
                   </button>
                 </div>
               </div>
@@ -696,9 +710,9 @@ export default function DepositPage() {
           if (viewingDeposit) handleCancel(viewingDeposit.track_id);
           setShowCancelConfirm(false);
         }}
-        title="Cancel Deposit?"
-        message="Are you sure you want to cancel this deposit? This action cannot be undone."
-        confirmBtnText="Yes, Cancel"
+        title={t("advertiser.deposit.cancelTitle")}
+        message={t("advertiser.deposit.cancelDescription")}
+        confirmBtnText={t("advertiser.deposit.yesCancel")}
         confirmBtnVariant="danger"
         isLoading={isCanceling}
       />      {/* Full Screen Payment View */}
@@ -715,30 +729,30 @@ export default function DepositPage() {
               <div className="text-center space-y-2 pb-2">
                 <div className="inline-flex items-center gap-2 px-3 py-1 bg-amber-50 text-amber-600 rounded-full border border-amber-100">
                   <Clock size={12} />
-                  <span className="text-[10px] font-black uppercase tracking-widest">{timeLeft || "Checking..."}</span>
+                  <span className="text-[10px] font-black uppercase tracking-widest">{timeLeft || t("advertiser.deposit.checking")}</span>
                 </div>
-                <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tight">Complete Payment</h2>
+                <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tight">{t("advertiser.deposit.completePayment")}</h2>
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                  Order ID: {viewingDeposit.order_id}
+                  {t("advertiser.deposit.orderId", { id: viewingDeposit.order_id })}
                 </p>
               </div>
 
               <div className="bg-slate-50 rounded-3xl p-6 space-y-6 border border-slate-100">
                 <div className="text-center space-y-1">
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Send Exactly</p>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{t("advertiser.deposit.sendExactly")}</p>
                   <p className="text-3xl font-black text-slate-900">{viewingDeposit.pay_amount} {viewingDeposit.pay_currency}</p>
                 </div>
 
                 <div className="space-y-4">
                   <div className="space-y-2 text-center">
-                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Network</label>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">{t("advertiser.deposit.selectNetwork")}</label>
                     <div className="p-3 bg-white rounded-2xl border border-slate-100 font-black text-[#0c9de8] text-lg">
                       {viewingDeposit.network}
                     </div >
                   </div>
 
                   <div className="space-y-2">
-                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 px-1">Deposit Address</label>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 px-1">{t("advertiser.deposit.address")}</label>
                     <div className="relative">
                       <div className="p-4 bg-white rounded-2xl border border-slate-100 font-bold text-slate-900 text-xs break-all pr-14 leading-relaxed">
                         {viewingDeposit.address}
@@ -756,7 +770,7 @@ export default function DepositPage() {
                 <div className="flex items-center gap-4 p-4 bg-blue-50/50 rounded-2xl text-blue-600 border border-blue-100/50">
                   <Info size={20} className="shrink-0" />
                   <p className="text-[9px] font-bold leading-relaxed">
-                    Transfer the exact amount above to the address. Your balance will update automatically after confirmation.
+                    {t("advertiser.deposit.transferNotice")}
                   </p>
                 </div>
 
@@ -767,7 +781,7 @@ export default function DepositPage() {
                     className="w-full py-3.5 bg-[#0c9de8] text-white rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-3 disabled:opacity-50 transition-all"
                   >
                     {isChecking ? <Loader2 className="animate-spin" size={20} /> : <CheckCircle2 size={20} />}
-                    {isChecking ? "Checking..." : "I Have Paid"}
+                    {isChecking ? t("advertiser.deposit.checking") : t("advertiser.deposit.paidAction")}
                   </button>
 
                   {statusMessage && (
@@ -791,7 +805,7 @@ export default function DepositPage() {
                   }}
                   className="text-[10px] font-black text-slate-400 uppercase tracking-widest transition-colors"
                 >
-                  Go Back to Receipt
+                  {t("advertiser.deposit.backToReceipt")}
                 </button>
               </div>
             </div>

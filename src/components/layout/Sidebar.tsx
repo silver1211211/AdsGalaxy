@@ -14,8 +14,11 @@ import {
   BriefcaseBusiness,
   DollarSign,
   Sparkles,
+  MessageCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useTranslations } from "@/i18n/client";
+import type { TranslationKey } from "@/i18n";
 
 interface SidebarProps {
   type: "publisher" | "advertiser";
@@ -26,21 +29,24 @@ interface SidebarProps {
 export default function Sidebar({ type, isOpen, onClose }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
+  const { t } = useTranslations();
 
-  const publisherLinks = [
-    { name: "Dashboard", href: "/publisher", icon: LayoutDashboard },
-    { name: "Monetize", href: "/publisher/monetize", icon: DollarSign },
-    { name: "Withdraw", href: "/publisher/withdraw", icon: ArrowUpRight },
-    { name: "Referral", href: "/publisher/referral", icon: Users },
-    { name: "FAQs", href: "/publisher/faqs", icon: HelpCircle },
+  const publisherLinks: Array<{ name: TranslationKey; href: string; icon: React.ElementType }> = [
+    { name: "common.dashboard", href: "/publisher", icon: LayoutDashboard },
+    { name: "navigation.monetize", href: "/publisher/monetize", icon: DollarSign },
+    { name: "common.withdraw", href: "/publisher/withdraw", icon: ArrowUpRight },
+    { name: "navigation.referrals", href: "/publisher/referral", icon: Users },
+    { name: "navigation.faq", href: "/publisher/faqs", icon: HelpCircle },
+    { name: "navigation.aiSupport", href: "/publisher/ai-support", icon: MessageCircle },
   ];
 
-  const advertiserLinks = [
-    { name: "Dashboard", href: "/advertiser", icon: LayoutDashboard },
-    { name: "Campaigns", href: "/advertiser/campaigns", icon: Tv },
-    { name: "Enterprise", href: "/advertiser/enterprise", icon: BriefcaseBusiness },
-    { name: "Deposit Fund", href: "/advertiser/deposit", icon: Wallet },
-    { name: "FAQs", href: "/advertiser/faqs", icon: HelpCircle },
+  const advertiserLinks: Array<{ name: TranslationKey; href: string; icon: React.ElementType }> = [
+    { name: "common.dashboard", href: "/advertiser", icon: LayoutDashboard },
+    { name: "navigation.campaigns", href: "/advertiser/campaigns", icon: Tv },
+    { name: "navigation.enterprise", href: "/advertiser/enterprise", icon: BriefcaseBusiness },
+    { name: "navigation.deposit", href: "/advertiser/deposit", icon: Wallet },
+    { name: "navigation.faq", href: "/advertiser/faqs", icon: HelpCircle },
+    { name: "navigation.aiSupport", href: "/advertiser/ai-support", icon: MessageCircle },
   ];
 
   const links = type === "publisher" ? publisherLinks : advertiserLinks;
@@ -77,10 +83,10 @@ export default function Sidebar({ type, isOpen, onClose }: SidebarProps) {
               </div>
               <div>
                 <p className="text-lg font-black tracking-tight text-white">
-                  {type.charAt(0).toUpperCase() + type.slice(1)}
+                  {t(type === "publisher" ? "common.publisher" : "common.advertiser")}
                 </p>
                 <p className="text-[10px] font-bold uppercase tracking-widest text-blue-100/80">
-                  Command Center
+                  {t("common.dashboard")}
                 </p>
               </div>
             </div>
@@ -92,7 +98,7 @@ export default function Sidebar({ type, isOpen, onClose }: SidebarProps) {
             const isActive = pathname === link.href;
             return (
               <Link
-                key={link.name}
+                key={link.href}
                 href={link.href}
                 onClick={handleNavigation}
                 className={cn(
@@ -108,7 +114,7 @@ export default function Sidebar({ type, isOpen, onClose }: SidebarProps) {
                 )}>
                   <link.icon size={16} />
                 </span>
-                {link.name}
+                {t(link.name)}
               </Link>
             );
           })}
@@ -122,9 +128,9 @@ export default function Sidebar({ type, isOpen, onClose }: SidebarProps) {
             className="group flex w-full items-center justify-between rounded-2xl border border-white/15 bg-white/10 px-4 py-3 shadow-inner shadow-white/5 transition-colors hover:bg-white/20"
           >
             <div className="flex flex-col items-start">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-blue-100">Switch to</span>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-blue-100">{t("common.switchTo")}</span>
               <span className="text-sm font-semibold text-white capitalize">
-                {type === "publisher" ? "Advertiser" : "Publisher"}
+                {t(type === "publisher" ? "common.advertiser" : "common.publisher")}
               </span>
             </div>
             <ArrowLeftRight size={18} className="text-blue-100 group-hover:text-white transition-colors" />

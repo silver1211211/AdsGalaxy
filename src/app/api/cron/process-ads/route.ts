@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- scheduler queries combine legacy campaign schemas */
 import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
@@ -27,6 +28,7 @@ import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronS
 import { campaignExcludesChannel, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { composeCampaignCreativeTelegramHtml } from "@/lib/campaignCreative";
 import { getChannelUnitPrice } from "@/lib/channelBilling";
+import { createGrowthDeliveryInvite } from "@/lib/channelGrowthInvite";
 import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
 
 export const dynamic = 'force-dynamic';
@@ -38,11 +40,18 @@ interface CampaignRow {
   budget: string | number;
   cpm?: string | number;
   cpc?: string | number;
+  advertiser_discount?: string | number;
+  advertiser_ad_balance?: string | number;
+  funding_model?: "legacy_reserved" | "direct_debit";
   daily_budget_limit?: string | number | null;
   category: string;
   continents: string;
   parse_mode: string;
   type: string;
+  campaign_kind?: string;
+  cost_per_subscriber?: string | number | null;
+  destination_chat_id?: string | number | null;
+  destination_channel_id?: string | number | null;
   link: string;
   button_text: string;
   campaign_title?: string | null;
@@ -68,6 +77,8 @@ interface ChannelRow {
   title?: string;
   categories: string | string[] | null;
   audience_continents: string | string[] | null;
+  authoritative_country_code?: string | null;
+  authoritative_language_code?: string | null;
   inventory_score?: number;
   inventory_rank?: string;
   inventory_override?: string;
@@ -246,9 +257,11 @@ export async function GET(req: NextRequest) {
     const trustMultipliers = await getAdvertiserTrustMultipliers();
     const deliverySettings = await getDeliveryOptimizationSettings();
     const [campaignRows]: any = await pool.query(`
-      SELECT c.*, COALESCE(u.advertiser_trust_level, 'new') as advertiser_trust_level
+      SELECT c.*, u.ad_balance advertiser_ad_balance, COALESCE(u.advertiser_trust_level, 'new') as advertiser_trust_level,
+        CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END advertiser_discount
       FROM campaigns c
       JOIN users u ON c.user_id = u.id
+      LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
       WHERE c.status = 'active' AND c.budget > 0 AND c.type != 'broadcast'
         AND (c.start_at IS NULL OR c.start_at <= NOW())
         AND (c.end_at IS NULL OR c.end_at >= NOW())
@@ -277,14 +290,22 @@ export async function GET(req: NextRequest) {
               WHEN c.type = 'views' THEN GREATEST(COALESCE(cp.views, 0) - COALESCE(cp.settled_views, 0), 0)
               WHEN c.type = 'clicks' THEN GREATEST((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) - COALESCE(cp.settled_clicks, 0), 0)
               ELSE 0
-            END * (CASE WHEN c.type = 'clicks' THEN COALESCE(c.cpc, 0) ELSE COALESCE(c.cpm, 0) END / 1000)
+            END * (GREATEST(
+              CASE WHEN c.type = 'clicks' THEN COALESCE(c.cpc, 0) ELSE COALESCE(c.cpm, 0) END
+              - CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END,
+              0.01
+            ) / 1000)
           ), 0) AS unsettled_liability,
           COALESCE(SUM(
             CASE
               WHEN cp.status IN ('active','posted','sent','pending_delivery')
                 AND cp.delivery_failed_at IS NULL
                 ${activePostDeleteFilter}
-              THEN CASE WHEN c.type = 'clicks' THEN COALESCE(c.cpc, 0) ELSE COALESCE(c.cpm, 0) END / 1000
+              THEN GREATEST(
+                CASE WHEN c.type = 'clicks' THEN COALESCE(c.cpc, 0) ELSE COALESCE(c.cpm, 0) END
+                - CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END,
+                0.01
+              ) / 1000
               ELSE 0
             END
           ), 0) AS active_post_buffer,
@@ -294,6 +315,7 @@ export async function GET(req: NextRequest) {
             WHERE d.campaign_id = c.id AND d.created_at >= CURDATE()), 0)) AS today_spend
         FROM campaigns c
         LEFT JOIN campaign_posts cp ON cp.campaign_id = c.id
+        LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
         WHERE c.id IN (?)
         GROUP BY c.id
       `, [campaigns.map((campaign) => campaign.id)]);
@@ -313,7 +335,11 @@ export async function GET(req: NextRequest) {
         .map((campaign) => {
           const liability = liabilityByCampaign.get(Number(campaign.id)) || { unsettled: 0, buffer: 0, todaySpend: 0 };
           const originalBudget = Number(campaign.budget || 0);
-          const pendingLiability = Number((liability.unsettled + liability.buffer).toFixed(8));
+          // Growth posts do not spend on impressions; only a verified subscriber
+          // conversion reserves/debits one CPS unit inside channelGrowth.ts.
+          const pendingLiability = campaign.campaign_kind === "channel_growth"
+            ? 0
+            : Number((liability.unsettled + liability.buffer).toFixed(8));
           const dailyBudget = Number(campaign.daily_budget_limit || 0);
           const dailyAvailable = dailyBudget > 0 ? dailyBudget - liability.todaySpend - pendingLiability : Number.POSITIVE_INFINITY;
           const availableBudget = Number((Math.min(originalBudget - pendingLiability, dailyAvailable)).toFixed(8));
@@ -326,8 +352,11 @@ export async function GET(req: NextRequest) {
           };
         })
         .filter((campaign) => {
-          const unitPrice = getChannelUnitPrice({ type: campaign.type, cpm: campaign.cpm, cpc: campaign.cpc });
-          return Number.isFinite(unitPrice) && unitPrice > 0 && Number(campaign.available_budget_for_placement || 0) >= unitPrice;
+          const unitPrice = campaign.campaign_kind === "channel_growth" ? Number(campaign.cost_per_subscriber || 0) : getChannelUnitPrice({ type: campaign.type, cpm: campaign.cpm, cpc: campaign.cpc, discount: campaign.advertiser_discount });
+          const walletCanPay = campaign.funding_model !== "direct_debit"
+            || Number(campaign.advertiser_ad_balance || 0) + 1e-10 >= unitPrice;
+          return Number.isFinite(unitPrice) && unitPrice > 0 && walletCanPay
+            && Number(campaign.available_budget_for_placement || 0) >= unitPrice;
         });
     }
 
@@ -410,8 +439,8 @@ export async function GET(req: NextRequest) {
       : [];
 
     const [channelRows]: any = await pool.query(`
-      SELECT c.*
-      FROM channels c
+      SELECT c.*,g.authoritative_country_code,g.authoritative_language_code
+      FROM channels c LEFT JOIN channel_geo_classifications g ON g.channel_id=c.id
       WHERE c.status = 'active' AND c.is_deleted = FALSE
       AND (
         SELECT COUNT(*) FROM campaign_posts cp
@@ -555,6 +584,10 @@ export async function GET(req: NextRequest) {
           campaignAudience: campaign.continents,
           channelCategories: channel.categories,
           channelAudience: channel.audience_continents,
+          campaignCountries: (campaign as any).countries,
+          campaignLanguages: (campaign as any).languages,
+          channelCountry: channel.authoritative_country_code,
+          channelLanguage: channel.authoritative_language_code,
         })) {
           incrementSkip("targeting_mismatch");
           return false;
@@ -640,10 +673,13 @@ export async function GET(req: NextRequest) {
       try {
         await conn.beginTransaction();
         const [[lockedCampaign]]: any = await conn.query(
-          "SELECT status, budget, cpm, cpc, type, daily_budget_limit FROM campaigns WHERE id = ? FOR UPDATE",
+          `SELECT c.status,c.budget,c.cpm,c.cpc,c.type,c.daily_budget_limit,
+             CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END advertiser_discount
+           FROM campaigns c LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
+           WHERE c.id = ? FOR UPDATE`,
           [campaign.id]
         );
-        const unitLiability = getChannelUnitPrice({ type: lockedCampaign?.type || campaign.type, cpm: lockedCampaign?.cpm, cpc: lockedCampaign?.cpc });
+        const unitLiability = campaign.campaign_kind === "channel_growth" ? Number(campaign.cost_per_subscriber || 0) : getChannelUnitPrice({ type: lockedCampaign?.type || campaign.type, cpm: lockedCampaign?.cpm, cpc: lockedCampaign?.cpc, discount: lockedCampaign?.advertiser_discount });
         const [[lockedLiability]]: any = await conn.query(`
           SELECT
             COALESCE(SUM(CASE
@@ -660,7 +696,9 @@ export async function GET(req: NextRequest) {
           FROM campaign_posts cp WHERE cp.campaign_id = ?`,
           [campaign.type, unitLiability, unitLiability, campaign.id, campaign.id, campaign.id]
         );
-        const pendingLiability = Number(lockedLiability?.pending_liability || 0);
+        const pendingLiability = campaign.campaign_kind === "channel_growth"
+          ? 0
+          : Number(lockedLiability?.pending_liability || 0);
         const remaining = Number(lockedCampaign?.budget || 0) - pendingLiability;
         const dailyCap = Number(lockedCampaign?.daily_budget_limit || 0);
         const dailyRemaining = dailyCap > 0
@@ -690,9 +728,16 @@ export async function GET(req: NextRequest) {
 
       const domain = process.env.DOMAIN;
       const host = domain ? `https://${domain}` : (process.env.NEXT_PUBLIC_APP_URL || req.nextUrl.origin);
-      const buttonUrl = campaign.type === "clicks"
-        ? `${host}/api/clicks/${campaign.id}/${postId}`
-        : campaign.link;
+      let buttonUrl = campaign.type === "clicks" ? `${host}/api/clicks/${campaign.id}/${postId}` : campaign.link;
+      if (campaign.campaign_kind === "channel_growth") {
+        try {
+          const trackedInvite = await createGrowthDeliveryInvite({ campaignId: Number(campaign.id), postId, sourceChannelId: Number(channel.id), sourcePublisherId: Number(channel.user_id), destinationChatId: Number(campaign.destination_chat_id), destinationChannelId: campaign.destination_channel_id ? Number(campaign.destination_channel_id) : null });
+          buttonUrl = trackedInvite.url;
+        } catch {
+          await pool.query("UPDATE campaign_posts SET status='delivery_failed',delivery_failed_at=NOW(),delivery_failure_reason='growth_invite_unavailable' WHERE id=?",[postId]);
+          failedPosts++; incrementSkip("growth_invite_unavailable"); continue;
+        }
+      }
       const botUsername = process.env.TELEGRAM_BOT_USERNAME || process.env.NEXT_PUBLIC_BOT_USERNAME || "Ads_Galaxy_bot";
 
       const replyMarkup = {

@@ -27,6 +27,7 @@ type PermissionSnapshot = {
   can_post_messages?: boolean;
   can_delete_messages?: boolean;
   can_invite_users?: boolean;
+  can_edit_messages?: boolean;
   can_access?: boolean;
 };
 
@@ -164,6 +165,7 @@ async function verifyChatInfo(request: Request, input: ChatInfoInput) {
       can_post_messages: isCreator || member.can_post_messages === true,
       can_delete_messages: isCreator || member.can_delete_messages === true,
       can_invite_users: isCreator || member.can_invite_users === true,
+      can_edit_messages: isCreator || member.can_edit_messages === true,
       can_access: true,
     };
     

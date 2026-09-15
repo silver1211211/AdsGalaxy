@@ -1,0 +1,11 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+const read=(path)=>fs.readFileSync(new URL(`../${path}`,import.meta.url),"utf8");
+const authority=read("src/lib/channelTargetingClassification.ts"),matcher=read("src/lib/channelAudience.ts"),normal=read("src/app/api/cron/process-ads/route.ts"),teaser=read("src/lib/teaserPlacement.ts"),migration=read("db/migrations/20260910_0136_channel_targeting_authority.sql"),route=read("src/app/api/advertiser/campaigns/[id]/route.ts"),details=read("src/components/advertiser/CampaignDetailsScreen.tsx");
+test("country authority is conservative and fraud-filtered",()=>{for(const token of ["countryMinEvents: 20","countryDominance: 0.6","duplicate_event=0","rapid_burst=0","concentration_alert=0","authoritative_country_code"])assert.match(authority,new RegExp(token));});
+test("language authority uses bounded Teaser-free organic snapshots",()=>{for(const token of ["languageMinSamples: 3","languageDominance: 0.6","maxLanguagePosts: 20","channel_organic_posts","teaser_eligible=1","organic_content"])assert.match(authority,new RegExp(token));});
+test("authority schema is additive and auditable",()=>{for(const token of ["authoritative_country_code","authoritative_language_code","country_source","language_source","targeting_override_by"])assert.match(migration,new RegExp(token));});
+test("shared matcher fails closed for explicit unknown country or language",()=>{assert.match(matcher,/countries\.length===0\|\|\(channelCountry!==null&&countries\.includes\(channelCountry\)\)/);assert.match(matcher,/languages\.length===0\|\|\(channelLanguage!==null&&languages\.includes\(channelLanguage\)\)/);});
+test("normal and Teaser delivery use persisted shared authority without N+1",()=>{for(const source of [normal,teaser]){assert.match(source,/authoritative_country_code/);assert.match(source,/authoritative_language_code/);assert.match(source,/campaignCountries/);assert.match(source,/campaignLanguages/);}});
+test("explicit enable action remains server-enforced and UI-visible",()=>{assert.match(route,/action==="toggle_teaser"\|\|action==="enable_teaser"/);assert.match(route,/const enable=action==="enable_teaser"\|\|body\.enabled===true/);assert.match(route,/TEASER_RESUME_COOLDOWN/);assert.match(details,/action: "enable_teaser"/);assert.match(details,/teaser\.enable/);});

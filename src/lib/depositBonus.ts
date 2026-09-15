@@ -120,7 +120,7 @@ export async function awardDepositBonus(
   );
   await conn.query(
     `INSERT INTO advertiser_transactions (user_id, amount, type, description)
-     VALUES (?, ?, 'deposit_bonus', ?)`,
+     VALUES (?, ?, 'credit', ?)`,
     [
       input.userId,
       calculation.bonusAmount,
@@ -255,7 +255,7 @@ export async function reverseDepositBonus(conn: PoolConnection, depositId: numbe
     await conn.query("UPDATE users SET ad_balance = ad_balance - ? WHERE id = ?", [reversedAmount, bonus.user_id]);
     await conn.query(
       `INSERT INTO advertiser_transactions (user_id, amount, type, description)
-       VALUES (?, ?, 'deposit_bonus_reversal', ?)`,
+       VALUES (?, ?, 'debit', ?)`,
       [bonus.user_id, `-${reversedAmount}`, `Deposit bonus reversal for deposit #${depositId}`],
     );
   }

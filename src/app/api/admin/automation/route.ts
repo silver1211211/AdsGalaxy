@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy automation payloads are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedAdmin, requireAdminPermission } from "@/lib/adminAuth";
@@ -110,6 +111,7 @@ export async function PATCH(request: Request) {
     }
 
     if (action === "bulk_action") {
+      if (clean(body.bulk_action) === "reject") return NextResponse.json({ error: "MODERATION_REASON_REQUIRED", code: "MODERATION_REASON_REQUIRED" }, { status: 400 });
       const result = await applyAutomationBulkAction({
         action: clean(body.bulk_action),
         campaignType: clean(body.campaign_type),

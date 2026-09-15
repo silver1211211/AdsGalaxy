@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
-import { audit, composeHtml, countEligibleRecipients, discoverRecipients, getBroadcastDashboard, parseBroadcastTarget, validateButtonUrl } from "@/lib/platformBroadcast";
+import { audit, composeHtml, countEligibleRecipients, getBroadcastDashboard, parseBroadcastTarget, validateButtonUrl } from "@/lib/platformBroadcast";
+import type { ResultSetHeader } from "mysql2/promise";
 
 export async function GET(request: Request) {
   const { response } = await requireAdminPermission("read"); if (response) return response;
@@ -18,7 +19,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const { admin, response } = await requireAdminPermission("dangerous"); if (response) return response;
-  const body = await request.json();
+  const body: Record<string, unknown> = await request.json();
   let target;
   try { target = parseBroadcastTarget(body); }
   catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid recipient filter." }, { status: 400 }); }
@@ -30,14 +31,24 @@ export async function POST(request: Request) {
   const html = composeHtml(title, Boolean(body.title_bold), message);
   if (html.length > 4096) return NextResponse.json({ error: "Formatted message is too long." }, { status: 400 });
   const connection = await pool.getConnection();
+  let broadcastId = 0;
   try {
     await connection.beginTransaction();
-    const [result]: any = await connection.query(`INSERT INTO platform_broadcasts
+    const [result] = await connection.query<ResultSetHeader>(`INSERT INTO platform_broadcasts
       (title,title_bold,message_text,message_html,image_path,button_text,button_url,target_type,target_value,target_unit,target_since,status,created_by_admin_id,queued_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,'queued',?,NOW())`, [title || null, body.title_bold ? 1 : 0, message, html, body.image_path || null, buttonText || null, buttonUrl, target.targetType, target.targetValue, target.targetUnit, target.targetSince, admin!.id]);
-    await discoverRecipients(result.insertId, connection); await connection.commit();
-    await audit(result.insertId, "send_requested", admin!.id, { target: target.targetType, value: target.targetValue, unit: target.targetUnit, since: target.targetSince });
-    return NextResponse.json({ id: result.insertId, status: "queued" }, { status: 202 });
+    broadcastId = Number(result.insertId);
+    await connection.commit();
   } catch (error) { await connection.rollback(); console.error(error); return NextResponse.json({ error: "Could not queue broadcast." }, { status: 500 }); }
   finally { connection.release(); }
+
+  // Recipient discovery and all Telegram work belong to the resumable worker.
+  // The durable queued row is committed before this request acknowledges it.
+  void audit(broadcastId, "send_requested", admin!.id, {
+    target: target.targetType,
+    value: target.targetValue,
+    unit: target.targetUnit,
+    since: target.targetSince,
+  }).catch((error) => console.error("Platform broadcast queue audit failed", { broadcast_id: broadcastId, error }));
+  return NextResponse.json({ id: broadcastId, status: "queued" }, { status: 202 });
 }

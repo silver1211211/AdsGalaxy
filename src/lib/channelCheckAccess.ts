@@ -3,6 +3,12 @@ import "server-only";
 import bcrypt from "bcryptjs";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { redisKeys } from "@/lib/redisCache";
+import {
+  clearDistributedRateLimit,
+  getDistributedRateLimitState,
+  recordDistributedRateLimitFailure,
+} from "@/lib/redisRateLimit";
 
 const SETTING_KEYS = {
   unlockedUntil: "channel_check_unlocked_until",
@@ -142,7 +148,16 @@ function getAttempt(key: string) {
   return existing;
 }
 
-function recordFailedAttempt(key: string) {
+async function recordFailedAttempt(key: string, distributedKey: string, redisAvailable: boolean) {
+  if (redisAvailable) {
+    const recorded = await recordDistributedRateLimitFailure(
+      distributedKey,
+      RATE_LIMIT_MAX_ATTEMPTS,
+      RATE_LIMIT_WINDOW_MS,
+      RATE_LIMIT_LOCK_MS,
+    );
+    if (recorded.available) return;
+  }
   const entry = getAttempt(key);
   entry.count += 1;
   if (entry.count >= RATE_LIMIT_MAX_ATTEMPTS) {
@@ -150,8 +165,9 @@ function recordFailedAttempt(key: string) {
   }
 }
 
-function clearAttempts(key: string) {
+async function clearAttempts(key: string, distributedKey: string) {
   attempts.delete(key);
+  await clearDistributedRateLimit(distributedKey);
 }
 
 async function getAdminPasswordRows() {
@@ -186,19 +202,22 @@ async function getAdminPasswordRows() {
 export async function verifyTemporaryChannelCheckPassword(password: string, rateLimitKey: string) {
   const cleanPassword = String(password || "");
   const key = rateLimitKey || "unknown";
-  const entry = getAttempt(key);
+  const distributedKey = redisKeys.rateLimit("channel-check", key);
+  const distributed = await getDistributedRateLimitState(distributedKey, RATE_LIMIT_MAX_ATTEMPTS);
+  const entry = distributed.available ? null : getAttempt(key);
   const current = nowMs();
 
-  if (entry.lockedUntil > current) {
+  if (distributed.limited || (entry && entry.lockedUntil > current)) {
+    const retryAfterMs = distributed.limited ? distributed.retryAfterMs : Math.max(0, (entry?.lockedUntil || 0) - current);
     return {
       ok: false as const,
       rateLimited: true,
-      retryAfterSeconds: Math.ceil((entry.lockedUntil - current) / 1000),
+      retryAfterSeconds: Math.ceil(retryAfterMs / 1000),
     };
   }
 
   if (!cleanPassword) {
-    recordFailedAttempt(key);
+    await recordFailedAttempt(key, distributedKey, distributed.available);
     return { ok: false as const, rateLimited: false };
   }
 
@@ -207,12 +226,12 @@ export async function verifyTemporaryChannelCheckPassword(password: string, rate
     if (!admin.password_hash) continue;
     const matches = await bcrypt.compare(cleanPassword, admin.password_hash);
     if (matches) {
-      clearAttempts(key);
+      await clearAttempts(key, distributedKey);
       return { ok: true as const, adminId: Number(admin.id) };
     }
   }
 
-  recordFailedAttempt(key);
+  await recordFailedAttempt(key, distributedKey, distributed.available);
   return { ok: false as const, rateLimited: false };
 }
 

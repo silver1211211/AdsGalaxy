@@ -7,8 +7,11 @@ import { motion, AnimatePresence } from "framer-motion";
 import { apiFetch } from "@/lib/api";
 import EmptyState from "@/components/ui/EmptyState";
 import { SkeletonBlock } from "@/components/ui/Skeleton";
+import { StatusText } from "@/components/i18n/LocalizedEnum";
+import { useTranslations } from "@/i18n/client";
 
 export default function PublisherEarningsPage() {
+  const { tp } = useTranslations();
   const [earnings, setEarnings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -133,7 +136,7 @@ export default function PublisherEarningsPage() {
                     <div className="flex items-center gap-3">
                       <div className="text-right">
                         <p className="font-black text-slate-900">+${parseFloat(earning.amount).toFixed(4)}</p>
-                        <p className="text-xs font-semibold text-slate-500">{earning.count} {earning.type}s</p>
+                          <p className="text-xs font-semibold text-slate-500">{tp(earning.type === "click" ? "clicks" : "impressions", Number(earning.count || 0))}</p>
                       </div>
                       <ChevronRight size={18} className="text-slate-400" />
                     </div>
@@ -183,8 +186,8 @@ export default function PublisherEarningsPage() {
                     <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Total Reward</p>
                     <p className="text-3xl font-black text-slate-900">${parseFloat(selectedEarning.amount).toFixed(4)}</p>
                   </div>
-                  <div className={`px-3 py-1 rounded-full text-xs font-bold border ${selectedEarning.status === 'unlocked' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
-                    {selectedEarning.status.toUpperCase()}
+                  <div className={`px-3 py-1 rounded-full text-xs font-bold uppercase border ${selectedEarning.status === 'unlocked' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                    <StatusText value={selectedEarning.status} />
                   </div>
                 </div>
 
@@ -210,7 +213,7 @@ export default function PublisherEarningsPage() {
                       {selectedEarning.type === 'click' ? <MousePointerClick size={18} /> : <Eye size={18} />}
                     </div>
                     <div>
-                      <p className="text-xs font-bold text-slate-500 uppercase">Valid {selectedEarning.type}s</p>
+                      <p className="text-xs font-bold text-slate-500 uppercase">{tp(selectedEarning.type === "click" ? "clicks" : "impressions", Number(selectedEarning.count || 0))}</p>
                       <p className="text-sm font-semibold text-slate-900">{selectedEarning.count}</p>
                     </div>
                   </div>

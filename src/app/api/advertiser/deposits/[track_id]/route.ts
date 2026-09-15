@@ -3,6 +3,7 @@ import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import type { RowDataPacket } from "mysql2/promise";
 import { confirmDepositCredit } from "@/lib/depositBonus";
+import { reactivateInsufficientBalanceCampaigns } from "@/lib/directDebitLifecycle";
 
 const OXAPAY_STATUS_URL = "https://api.oxapay.com/v1/payment/";
 const OXAPAY_KEY = process.env.OXAPAY_MERCHANT_API_KEY;
@@ -153,6 +154,12 @@ export async function GET(
         confirmed_at: confirmedAt,
         bonus_amount: confirmation.bonusAmount,
         bonus_rate_basis_points: confirmation.rateBasisPoints,
+      });
+      await reactivateInsufficientBalanceCampaigns(user.id).catch((error) => {
+        console.error("Direct-debit campaign reactivation after deposit failed", {
+          user_id: user.id,
+          error: error instanceof Error ? error.message : "unknown_error",
+        });
       });
     } else if (newStatus !== deposit.status) {
       await pool.query("UPDATE deposits SET status = ? WHERE id = ?", [newStatus, deposit.id]);

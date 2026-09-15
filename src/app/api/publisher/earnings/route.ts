@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 
 export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await getAuthenticatedUserStatus(initData, { request });
     if (!user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }

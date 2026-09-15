@@ -1,39 +1,33 @@
 import { NextResponse } from "next/server";
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy publisher stats payloads are not schema-generated */
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 import {
-  ensureReferralGrowthSettingDefaults,
   getReferralJoinRewardAmount,
   getReferralTotalRewardAmount,
   getReferralVerificationRewardAmount,
 } from "@/lib/referralSprint";
 import { cpc, cpm, ctr, fixedMetric, metricNumber } from "@/lib/statFormulas";
 import { botUserCountExpressions } from "@/lib/botAudience";
+import { logSlowRequest } from "@/lib/performanceTiming";
+import { CACHE_TTL_SECONDS, cacheGetOrSet, redisKeys } from "@/lib/redisCache";
 
 export async function GET(request: Request) {
+  const startedAt = Date.now();
   try {
     const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await getAuthenticatedUserStatus(initData, { request });
+    const payload = await cacheGetOrSet(
+      redisKeys.publisherStats(Number(user.id)),
+      CACHE_TTL_SECONDS.PUBLISHER_ANALYTICS,
+      async () => {
 
-    // Fetch total channels count
-    const [channelCountRows]: any = await pool.query(
-      "SELECT COUNT(*) as total FROM channels WHERE user_id = ? AND is_deleted = FALSE AND status = 'active'",
-      [user.id]
-    );
-    const [deliveryEligibleChannelRows]: any = await pool.query(
-      "SELECT COUNT(*) as total FROM channels WHERE user_id = ? AND is_deleted = FALSE AND status = 'active'",
-      [user.id]
-    );
-
-    // Fetch monetized bots and mini apps counts
-    const [botCountRows]: any = await pool.query(
-      "SELECT COUNT(*) as total FROM bots WHERE user_id = ? AND is_deleted = FALSE AND status IN ('active', 'approved')",
-      [user.id]
-    );
-    const [miniappCountRows]: any = await pool.query(
-      "SELECT COUNT(*) as total FROM miniapps WHERE user_id = ? AND is_deleted = FALSE AND status IN ('active', 'approved', 'monetized')",
-      [user.id]
+    const [[assetCounts]]: any = await pool.query(
+      `SELECT
+        (SELECT COUNT(*) FROM channels WHERE user_id=? AND is_deleted=FALSE AND status='active') total_channels,
+        (SELECT COUNT(*) FROM bots WHERE user_id=? AND is_deleted=FALSE AND status IN ('active','approved')) total_bots,
+        (SELECT COUNT(*) FROM miniapps WHERE user_id=? AND is_deleted=FALSE AND status IN ('active','approved','monetized')) total_miniapps`,
+      [user.id, user.id, user.id]
     );
 
     // Fetch 3 most recent channels
@@ -83,7 +77,6 @@ export async function GET(request: Request) {
       "SELECT value FROM settings WHERE `key` = 'referral_reward_percentage'"
     );
     const referralPercent = settingRows[0]?.value || "5";
-    await ensureReferralGrowthSettingDefaults(pool, false);
     const [[referralSprintSetting]]: any = await pool.query(
       "SELECT value FROM referral_growth_settings WHERE `key` = 'referral_sprint_enabled' LIMIT 1"
     );
@@ -164,7 +157,7 @@ export async function GET(request: Request) {
         FLOOR(COALESCE(SUM(CASE WHEN bd.status = 'sent' THEN 1 ELSE 0 END), 0) / 5) as impressions,
         COALESCE(SUM(CASE WHEN bd.status = 'sent' THEN bd.publisher_reward ELSE 0 END), 0) as earnings,
         COALESCE(SUM(CASE WHEN bd.status = 'sent' THEN bd.cost ELSE 0 END), 0) as gross_revenue,
-        COALESCE(SUM(CASE WHEN bd.status = 'failed' THEN 1 ELSE 0 END), 0) as failed_sends
+        COALESCE(SUM(CASE WHEN bd.status IN ('failed','failed_final') THEN 1 ELSE 0 END), 0) as failed_sends
        FROM (${rangeSql}) ranges
        LEFT JOIN bots b ON b.user_id = ? AND b.is_deleted = FALSE
        LEFT JOIN broadcast_deliveries bd ON bd.bot_id = b.id AND DATE(bd.created_at) BETWEEN ranges.start_date AND ranges.end_date
@@ -225,10 +218,7 @@ export async function GET(request: Request) {
     );
 
     // Stats from user profile
-    return NextResponse.json({
-      balance_locked: user.balance_locked,
-      balance_available: user.balance_available,
-      balance_pending: user.balance_locked,
+    return {
       total_withdrawn: totalWithdrawn,
       earnings_summary: publisherSummary,
       today_earnings: publisherSummary.today?.earnings || 0,
@@ -239,9 +229,11 @@ export async function GET(request: Request) {
       bot_active_users: metricNumber(botAudienceRow?.active_users),
       bot_blocked_users: metricNumber(botAudienceRow?.blocked_users),
       bot_delivery_eligible_users: metricNumber(botAudienceRow?.delivery_eligible_users),
-      total_channels: channelCountRows[0].total,
-      delivery_eligible_channels: deliveryEligibleChannelRows[0].total,
-      total_monetized: (channelCountRows[0].total || 0) + (botCountRows[0].total || 0) + (miniappCountRows[0].total || 0),
+      total_channels: assetCounts.total_channels,
+      total_bots: assetCounts.total_bots,
+      total_miniapps: assetCounts.total_miniapps,
+      delivery_eligible_channels: assetCounts.total_channels,
+      total_monetized: Number(assetCounts.total_channels || 0) + Number(assetCounts.total_bots || 0) + Number(assetCounts.total_miniapps || 0),
       recent_channels: recentChannels,
       recent_monetized: recentMonetized,
       referral_percent: referralPercent,
@@ -253,10 +245,25 @@ export async function GET(request: Request) {
       referral_sprint_enabled: referralSprintSetting?.value === "1",
       referral_dashboard_promotion_enabled: referralPromotionSetting?.value !== "0",
       promote_ads_galaxy_status: promoteCampaign?.status || null,
-      join_rewarded: user.join_rewarded
+    };
+      },
+    );
+    return NextResponse.json({
+      ...payload,
+      // These values come from the authenticated MariaDB lookup on every request.
+      balance_locked: user.balance_locked,
+      balance_available: user.balance_available,
+      balance_pending: user.balance_locked,
+      join_rewarded: user.join_rewarded,
     }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
   } catch (error: any) {
     console.error("Stats API Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to fetch stats" }, { status: getAuthErrorStatus(error) === 403 ? 403 : 401 });
+    const authStatus = getAuthErrorStatus(error);
+    return NextResponse.json(
+      { error: authStatus === 401 || authStatus === 403 ? "Authentication required" : "Failed to fetch publisher stats" },
+      { status: authStatus === 403 ? 403 : authStatus === 401 ? 401 : 500 },
+    );
+  } finally {
+    logSlowRequest("/api/publisher/stats", startedAt);
   }
 }

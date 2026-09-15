@@ -1,5 +1,7 @@
 import crypto from "crypto";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy authentication rows are dynamically shaped */
 import pool from "./db";
+import { getMiniappSession, setMiniappSession } from "./miniappSession";
 import { getLocalMiniappDevAuthenticatedUser, parseLocalMiniappDevInitData } from "./localMiniappDev";
 import { attributeReferral, finalizeStoredReferralForUser } from "./referralAttribution";
 import {
@@ -33,7 +35,18 @@ export function isBannedUserError(error: unknown) {
 }
 
 export function getAuthErrorStatus(error: unknown) {
-  return isBannedUserError(error) ? 403 : 500;
+  if (isBannedUserError(error)) return 403;
+
+  const message = error instanceof Error ? error.message : "";
+
+  if (
+    message.startsWith("Unauthorized:") ||
+    message.startsWith("Invalid initData:")
+  ) {
+    return 401;
+  }
+
+  return 500;
 }
 
 export function validateInitData(initData: string, botToken: string) {
@@ -195,53 +208,127 @@ export async function getAuthenticatedUser(initData: string | null, options: { a
  * refreshes profile/referral metadata and can wait on write locks held by the
  * ad-processing workload. App bootstrap only needs the current account state.
  */
+// MINIAPP_SESSION_STATUS_HELPERS
+async function loadAuthenticatedStatusRow(
+  field: "id" | "telegram_id",
+  value: number | string,
+) {
+  const predicate = field === "id" ? "u.id = ?" : "u.telegram_id = ?";
+
+  const [rows]: any = await pool.query({
+    sql: `SELECT u.id, u.status, u.banned_at, u.ban_reason, u.language,
+                 u.ad_balance, u.balance_available, u.balance_locked, u.join_rewarded,
+                 (SELECT COALESCE(SUM(c.budget), 0)
+                    FROM campaigns c
+                   WHERE c.user_id = u.id
+                     AND c.status IN ('pending', 'active', 'paused')) AS advertiser_balance_locked
+          FROM users u
+          WHERE ${predicate}
+          LIMIT 1`,
+    timeout: 5000,
+    values: [value],
+  });
+
+  return rows[0] || null;
+}
+
+/**
+ * Fast account/bootstrap authentication.
+ *
+ * Priority:
+ * 1. Fresh Telegram initData when supplied.
+ * 2. A signed 48-hour Ads Galaxy session when initData is absent or merely old.
+ *
+ * Invalid signatures never fall back to the session cookie.
+ */
 export async function getAuthenticatedUserStatus(
   initData: string | null,
   options: { request?: Request } = {},
 ) {
-  if (!initData || initData === "undefined" || initData === "null") {
-    throw new Error("Unauthorized: No initData provided");
-  }
+  const suppliedInitData =
+    Boolean(initData) &&
+    initData !== "undefined" &&
+    initData !== "null";
 
-  if (parseLocalMiniappDevInitData(initData)) {
-    if (process.env.NODE_ENV === "production" || process.env.ENABLE_LOCAL_MINIAPP_DEV !== "true") {
+  if (suppliedInitData && parseLocalMiniappDevInitData(initData)) {
+    if (
+      process.env.NODE_ENV === "production" ||
+      process.env.ENABLE_LOCAL_MINIAPP_DEV !== "true"
+    ) {
       throw new Error("Unauthorized: Local Mini App dev auth is disabled");
     }
-    return getLocalMiniappDevAuthenticatedUser(initData, { allowBanned: true });
-  }
 
-  const botToken = process.env.BOT_TOKEN;
-  if (!botToken) {
-    throw new Error("Server configuration error: BOT_TOKEN not set");
-  }
-
-  const telegramUser = validateInitData(initData, botToken) as TelegramUser & { start_param?: string };
-  const [rows]: any = await pool.query({
-    sql: `SELECT id, status, banned_at, ban_reason
-          FROM users
-          WHERE telegram_id = ?
-          LIMIT 1`,
-    timeout: 5000,
-    values: [String(telegramUser.id)],
-  });
-
-  if (!rows[0]) {
-    // A genuinely new user still needs the full creation/referral workflow.
-    return getAuthenticatedUser(initData, { allowBanned: true });
-  }
-
-  await pool.query("UPDATE users SET last_active_at = NOW() WHERE id = ?", [rows[0].id]);
-
-  const securitySignals = getReferralSecuritySignals(options.request);
-  await updateUserReferralSecuritySignals(Number(rows[0].id), securitySignals);
-  if (telegramUser.start_param) {
-    await attributeReferral({
-      userId: Number(rows[0].id),
-      token: telegramUser.start_param,
-      signals: securitySignals,
+    return getLocalMiniappDevAuthenticatedUser(initData!, {
+      allowBanned: true,
+      request: options.request,
     });
   }
-  await finalizeStoredReferralForUser(Number(rows[0].id), securitySignals);
 
-  return rows[0];
+  if (suppliedInitData) {
+    const botToken = process.env.BOT_TOKEN;
+
+    if (!botToken) {
+      throw new Error("Server configuration error: BOT_TOKEN not set");
+    }
+
+    try {
+      const telegramUser = validateInitData(
+        initData!,
+        botToken,
+      ) as TelegramUser & { start_param?: string };
+
+      const user = await loadAuthenticatedStatusRow(
+        "telegram_id",
+        String(telegramUser.id),
+      );
+
+      if (!user) {
+        // A genuinely new user still needs creation/referral processing.
+        const createdUser = await getAuthenticatedUser(initData, {
+          allowBanned: true,
+          request: options.request,
+        });
+
+        if (createdUser?.id) {
+          await setMiniappSession(Number(createdUser.id));
+        }
+
+        return createdUser;
+      }
+
+      // A valid Telegram launch silently renews the 48-hour session.
+      await setMiniappSession(Number(user.id));
+
+      return user;
+    } catch (error) {
+      const isExpiredInitData =
+        error instanceof Error &&
+        error.message === "Invalid initData: Data is too old";
+
+      // Never hide a bad Telegram signature/hash behind an existing cookie.
+      if (!isExpiredInitData) {
+        throw error;
+      }
+    }
+  }
+
+  const session = await getMiniappSession();
+
+  if (!session) {
+    if (suppliedInitData) {
+      throw new Error("Invalid initData: Data is too old");
+    }
+
+    throw new Error("Unauthorized: No initData or valid session provided");
+  }
+
+  const user = await loadAuthenticatedStatusRow("id", session.uid);
+
+  if (!user) {
+    throw new Error("Unauthorized: Session user not found");
+  }
+
+  // Account status and balances are deliberately re-read from MariaDB.
+  // The cookie contains identity only and is never financial authority.
+  return user;
 }

@@ -7,6 +7,7 @@ import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { normalizeMiniAppCampaignCategories, validateMiniAppCampaignText } from "@/lib/miniappCampaignValidation";
 import { validateOptionalDailyBudget } from "@/lib/campaignBudget";
 import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByIds } from "@/lib/miniappCampaignMetrics";
+import type { ResultSetHeader } from "mysql2/promise";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,7 +19,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const id = parseInt(rawId);
     const [rows]: any = await pool.query(
       `SELECT id, campaign_name, title, description, cta_text, title_color, body_color,
-         categories, image_url, logo_url, landing_url, budget, remaining_budget,
+         categories, image_url, logo_url, landing_url, budget, remaining_budget, funding_model,
          advertiser_cpm_bid, campaign_budget_mode, daily_budget_mode, target_countries,
          countries, languages, vpn_policy, device_policy, os_policy, start_at, end_at,
          daily_budget_limit, frequency_cap_per_user, direct_placement_mode,
@@ -52,7 +53,13 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       rows[0].excluded_inventory = [];
     }
     const metrics = await getMiniAppCampaignMetricsByIds([id]);
-    return NextResponse.json({ ...applyMiniAppCampaignMetrics(rows[0], metrics), chart_data: chartData });
+    return NextResponse.json({
+      ...applyMiniAppCampaignMetrics(rows[0], metrics),
+      budget_cap: Number(rows[0].budget || 0),
+      remaining_allowance: Number(rows[0].remaining_budget || 0),
+      actual_spend: Number(rows[0].budget || 0) - Number(rows[0].remaining_budget || 0),
+      chart_data: chartData,
+    });
   } catch (error: any) {
     console.error("Miniapp campaign GET error:", error);
     const status = getAuthErrorStatus(error);
@@ -109,6 +116,43 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
         return NextResponse.json({ error: "Top up the ad balance before resuming this campaign" }, { status: 400 });
       }
       return NextResponse.json({ success: true, status: "approved" });
+    }
+
+    if (body.action === "add_fund") {
+      const amount = String(body.amount ?? "").trim();
+      if (!/^\d+(?:\.\d{1,8})?$/.test(amount) || !/[1-9]/.test(amount)) {
+        return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
+      }
+      await pool.query(
+        `UPDATE miniapp_rewarded_campaigns
+         SET budget=budget+CAST(? AS DECIMAL(20,8)),
+             remaining_budget=remaining_budget+CAST(? AS DECIMAL(20,8)),updated_at=NOW()
+         WHERE id=? AND advertiser_id=?`,
+        [amount, amount, id, user.id],
+      );
+      return NextResponse.json({ success: true });
+    }
+
+    if (body.action === "set_budget_cap") {
+      const requestedCap = String(body.amount ?? body.budget ?? "").trim();
+      if (!/^\d+(?:\.\d{1,8})?$/.test(requestedCap) || !/[1-9]/.test(requestedCap)) {
+        return NextResponse.json({ error: "Invalid campaign budget cap" }, { status: 400 });
+      }
+      const [updated] = await pool.query<ResultSetHeader>(
+        `UPDATE miniapp_rewarded_campaigns
+         SET remaining_budget=remaining_budget-(budget-CAST(? AS DECIMAL(20,8))),
+             budget=CAST(? AS DECIMAL(20,8)),updated_at=NOW()
+         WHERE id=? AND advertiser_id=?
+           AND CAST(? AS DECIMAL(20,8))>=budget-remaining_budget
+           AND remaining_budget>=(budget-CAST(? AS DECIMAL(20,8)))`,
+        [requestedCap, requestedCap, id, user.id, requestedCap, requestedCap],
+      );
+      if (updated.affectedRows !== 1) {
+        return NextResponse.json({
+          error: "Budget cap cannot be lower than actual spend or committed allowance.",
+        }, { status: 409 });
+      }
+      return NextResponse.json({ success: true });
     }
 
     const str = (v: unknown, fallback = "") => String(v ?? fallback).trim();

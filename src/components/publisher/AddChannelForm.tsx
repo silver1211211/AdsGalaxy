@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
 import { getApiErrorMessage } from "@/lib/apiErrorMessage";
 import { PUBLISHER_CHANNEL_AUDIENCE_OPTIONS } from "@/lib/channelAudience";
+import { normalizePublicChannelUsername, TELEGRAM_CHANNEL_TITLE_MAX_LENGTH } from "@/lib/telegramChannelInput";
 
 interface AddChannelFormProps {
   onClose: () => void;
@@ -43,11 +44,14 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
     setIsLoading(true);
     setError("");
     try {
-      const res = await apiFetch(`/api/telegram/chat-info?username=${username}`);
+      const res = await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(username)}`);
       const data: unknown = await res.json();
       if (!res.ok) throw new Error(getApiErrorMessage(data, "Failed to fetch channel info"));
       const details = data as TelegramChannelInfo;
-      setChannelInfo(details);
+      const canonicalUsername = normalizePublicChannelUsername(details.username);
+      if (!canonicalUsername) throw new Error("Telegram did not return a valid public channel username.");
+      setChannelInfo({ ...details, username: canonicalUsername });
+      setUsername(canonicalUsername);
       setEditedTitle(details.title);
       setStep(2);
     } catch (err: unknown) {
@@ -71,8 +75,8 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
       setError("Channel name must be at least 3 characters.");
       return;
     }
-    if (trimmedTitle.length > 50) {
-      setError("Channel name must be at most 50 characters.");
+    if (trimmedTitle.length > TELEGRAM_CHANNEL_TITLE_MAX_LENGTH) {
+      setError(`Channel name must be at most ${TELEGRAM_CHANNEL_TITLE_MAX_LENGTH} characters.`);
       return;
     }
 
@@ -174,7 +178,7 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
                     type="text"
                     value={editedTitle}
                     onChange={(e) => setEditedTitle(e.target.value)}
-                    maxLength={50}
+                    maxLength={TELEGRAM_CHANNEL_TITLE_MAX_LENGTH}
                     className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                   />
                 </div>

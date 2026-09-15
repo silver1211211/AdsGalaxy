@@ -1,4 +1,5 @@
 import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import { claimAdvertiserDirectDebit } from "@/lib/advertiserDirectDebit";
 import { getMiniAppOptimizationSettings } from "@/lib/miniappOptimization";
 import { parseTargetingList } from "@/lib/advertiserTargeting";
 import { calculateMiniAppPublisherPayout } from "@/lib/miniappPublisherCpmEngine";
@@ -541,11 +542,17 @@ export async function recordInternalAdImpression(input: {
     completion_quality_score: completionQualityScore,
   };
 
-  const [balanceResult] = await input.conn.query<ResultSetHeader>(
-    "UPDATE users SET ad_balance = ad_balance - ? WHERE id = ? AND ad_balance >= ?",
-    [cost, campaign.advertiser_id, cost]
-  );
-  if (balanceResult.affectedRows !== 1) {
+  const walletDebit = await claimAdvertiserDirectDebit(input.conn, {
+    sourceKey: `miniapp:internal:${input.requestId}`,
+    advertiserId: Number(campaign.advertiser_id),
+    campaignId: input.campaignId,
+    campaignTable: "miniapp_rewarded_campaigns",
+    billingType: "miniapp_impression",
+    amount: cost,
+    description: `Mini App impression ${input.requestId}`,
+  });
+  if (!walletDebit.ok) {
+    if (walletDebit.duplicate) return { duplicate: true, insufficient_balance: false, cpm, cost };
     await input.conn.query(
       "UPDATE miniapp_rewarded_campaigns SET status = 'paused', pause_reason = 'insufficient_balance' WHERE id = ?",
       [input.campaignId]
@@ -619,11 +626,6 @@ export async function recordInternalAdImpression(input: {
   if (campaignUpdate.affectedRows !== 1) throw new Error("campaign_budget_exhausted");
   const budgetExhausted = toNumber(campaign.remaining_budget) - cost + 1e-10 < cost;
   if (budgetExhausted) await enqueueMiniAppBudgetExhaustedNotification(input.conn, input.campaignId);
-  await input.conn.query(
-    "INSERT INTO advertiser_transactions (user_id, amount, type, description) VALUES (?, ?, 'debit', ?)",
-    [campaign.advertiser_id, cost, `Mini App impression ${input.requestId}`]
-  );
-
   const adsGalaxyFee = payout.ads_galaxy_revenue;
   const publisherRevenue = payout.publisher_revenue;
   const [dateRows] = await input.conn.query<Array<RowDataPacket & { stat_date: string }>>(

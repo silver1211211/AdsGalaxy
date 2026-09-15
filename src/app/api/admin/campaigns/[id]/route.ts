@@ -99,6 +99,18 @@ export async function GET(
     }
 
     const isBroadcast = campaignRows[0].type === "broadcast";
+    const isTeaserCampaign =
+      String(campaignRows[0].teaser_mode || "none") !== "none";
+
+    const [teaserCreativeRows] = isTeaserCampaign
+      ? await pool.query<GenericRow[]>(`
+          SELECT id, campaign_id, copy_text, position, active
+          FROM teaser_creatives
+          WHERE campaign_id = ?
+            AND active = 1
+          ORDER BY position ASC, id ASC
+        `, [id])
+      : [[] as GenericRow[]];
 
     const [metricsRows] = isBroadcast
       ? await pool.query<GenericRow[]>(`
@@ -181,7 +193,11 @@ export async function GET(
     const totalClicks = Number(clickRows[0]?.total_clicks || 0);
 
     return NextResponse.json({
-      campaign: { ...campaignRows[0], ...financialRows[0] },
+      campaign: {
+        ...campaignRows[0],
+        ...financialRows[0],
+        teaser_creatives: teaserCreativeRows,
+      },
       metrics: {
         ...metrics,
         total_clicks: totalClicks,
@@ -206,13 +222,14 @@ export async function PATCH(
     await ensureClassicSettlementColumns();
     const { id } = await params;
     const body = await request.json() as Record<string, unknown>;
-    const fields = Object.keys(body);
+    const teaserCreativesInput = body.teaser_creatives;
+    const fields = Object.keys(body).filter((field) => field !== "teaser_creatives");
     const unknownFields = fields.filter((field) => !(field in EDITABLE_CAMPAIGN_FIELDS));
     if (unknownFields.length > 0) {
       return NextResponse.json({ error: `Unknown or read-only field: ${unknownFields[0]}` }, { status: 400 });
     }
 
-    if (fields.length === 0) {
+    if (fields.length === 0 && teaserCreativesInput === undefined) {
       return NextResponse.json({ error: "No fields to update" }, { status: 400 });
     }
 
@@ -227,6 +244,87 @@ export async function PATCH(
     const values: unknown[] = [];
     const oldValues: Record<string, unknown> = {};
     const newValues: Record<string, unknown> = {};
+
+    let teaserCopies: string[] | null = null;
+    let teaserCopiesChanged = false;
+
+    if (teaserCreativesInput !== undefined) {
+      if (String(campaign.teaser_mode || "none") !== "teaser_only") {
+        return NextResponse.json(
+          { error: "Teaser messages can only be edited for a Teaser campaign" },
+          { status: 400 }
+        );
+      }
+
+      if (!Array.isArray(teaserCreativesInput)) {
+        return NextResponse.json(
+          { error: "teaser_creatives must be an array" },
+          { status: 400 }
+        );
+      }
+
+      teaserCopies = teaserCreativesInput.map((value) =>
+        typeof value === "string" ? value.trim() : ""
+      );
+
+      if (teaserCopies.length < 2 || teaserCopies.length > 5) {
+        return NextResponse.json(
+          { error: "Teaser campaigns require between 2 and 5 messages" },
+          { status: 400 }
+        );
+      }
+
+      if (teaserCopies.some((copy) => Array.from(copy).length < 20)) {
+        return NextResponse.json(
+          { error: "Each Teaser message must contain at least 20 characters" },
+          { status: 400 }
+        );
+      }
+
+      if (teaserCopies.some((copy) => Array.from(copy).length > 80)) {
+        return NextResponse.json(
+          { error: "Each Teaser message must contain at most 80 characters" },
+          { status: 400 }
+        );
+      }
+
+      if (teaserCopies.some((copy) => /(?:https?:\/\/|t\.me\/)/iu.test(copy))) {
+        return NextResponse.json(
+          { error: "Teaser messages cannot contain URLs" },
+          { status: 400 }
+        );
+      }
+
+      if (
+        new Set(teaserCopies.map((copy) => copy.toLocaleLowerCase())).size
+        !== teaserCopies.length
+      ) {
+        return NextResponse.json(
+          { error: "Teaser messages must be unique" },
+          { status: 400 }
+        );
+      }
+
+      const [existingCreativeRows] = await pool.query<GenericRow[]>(`
+        SELECT copy_text
+        FROM teaser_creatives
+        WHERE campaign_id = ?
+          AND active = 1
+        ORDER BY position ASC, id ASC
+      `, [id]);
+
+      const existingCopies = existingCreativeRows.map((row) =>
+        String(row.copy_text || "")
+      );
+
+      teaserCopiesChanged =
+        JSON.stringify(existingCopies) !== JSON.stringify(teaserCopies);
+
+      if (teaserCopiesChanged) {
+        oldValues.teaser_creatives = existingCopies;
+        newValues.teaser_creatives = teaserCopies;
+      }
+    }
 
     for (const field of fields as EditableCampaignField[]) {
       if (!campaignColumns.has(field)) {
@@ -267,12 +365,71 @@ export async function PATCH(
       values.push(value);
     }
 
-    if (updates.length === 0) {
+    if (updates.length === 0 && !teaserCopiesChanged) {
       return NextResponse.json({ error: "No changes to save" }, { status: 400 });
     }
 
-    values.push(id);
-    await pool.query(`UPDATE campaigns SET ${updates.join(", ")}, updated_at = NOW() WHERE id = ?`, values);
+    const conn = await pool.getConnection();
+
+    try {
+      await conn.beginTransaction();
+
+      if (updates.length > 0) {
+        values.push(id);
+        await conn.query(
+          `UPDATE campaigns
+           SET ${updates.join(", ")}, updated_at = NOW()
+           WHERE id = ?`,
+          values
+        );
+      }
+
+      if (teaserCopiesChanged && teaserCopies) {
+        // Preserve each existing creative ID for its position.
+        // This avoids breaking existing teaser_placement references.
+        for (const [index, copy] of teaserCopies.entries()) {
+          await conn.query(
+            `INSERT INTO teaser_creatives
+              (campaign_id, copy_text, position, active)
+             VALUES (?, ?, ?, 1)
+             ON DUPLICATE KEY UPDATE
+               copy_text = VALUES(copy_text),
+               active = 1`,
+            [id, copy, index + 1]
+          );
+        }
+
+        // Only positions removed by the admin are deactivated.
+        await conn.query(
+          `UPDATE teaser_creatives
+           SET active = 0
+           WHERE campaign_id = ?
+             AND position > ?`,
+          [id, teaserCopies.length]
+        );
+
+        // Keep legacy compatibility message synchronized to Message 1.
+        await conn.query(
+          `UPDATE campaigns
+           SET message_text = ?, updated_at = NOW()
+           WHERE id = ?`,
+          [teaserCopies[0], id]
+        );
+
+        if (!("message_text" in oldValues)) {
+          oldValues.message_text = campaign.message_text ?? null;
+        }
+
+        newValues.message_text = teaserCopies[0];
+      }
+
+      await conn.commit();
+    } catch (error) {
+      await conn.rollback();
+      throw error;
+    } finally {
+      conn.release();
+    }
 
     await recordAdminActionAudit({
       adminId: admin?.id,

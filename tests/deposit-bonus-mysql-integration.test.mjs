@@ -144,7 +144,10 @@ test("duplicate and simultaneous confirmations credit principal and bonus once",
   const [[user]] = await pool.query("SELECT ad_balance FROM users WHERE id=?", [fixture.userId]);
   assert.equal(Number(user.ad_balance), 322.5);
   const [[ledger]] = await pool.query(
-    "SELECT SUM(type='credit') principal,SUM(type='deposit_bonus') bonus FROM advertiser_transactions WHERE user_id=?",
+    `SELECT
+       SUM(type='credit' AND description LIKE 'Deposit via OxaPay%') principal,
+       SUM(type='credit' AND description LIKE 'Deposit bonus%') bonus
+     FROM advertiser_transactions WHERE user_id=?`,
     [fixture.userId],
   );
   assert.equal(Number(ledger.principal), 1);

@@ -9,6 +9,7 @@ import { sendTelegramMessage } from "@/lib/telegram";
 import { getMiniAppPublisherCpmSettings, maxPublisherCpm, normalizeMiniAppCpmMode, validateAdvertiserCpmBid } from "@/lib/miniappPublisherCpmEngine";
 import { validateOptionalDailyBudget } from "@/lib/campaignBudget";
 import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByIds } from "@/lib/miniappCampaignMetrics";
+import { parseAdminPagination } from "@/lib/adminPagination";
 
 function cleanText(value: unknown) {
   return String(value || "").trim();
@@ -53,6 +54,7 @@ export async function GET(request: Request) {
   if (response) return response;
 
   const { searchParams } = new URL(request.url);
+  const { page, limit, offset } = parseAdminPagination(searchParams, { defaultLimit: 20 });
   const status = searchParams.get("status") || "all";
   const params: string[] = [];
   let where = "WHERE 1=1";
@@ -61,7 +63,8 @@ export async function GET(request: Request) {
     params.push(status);
   }
 
-  const [rows] = await pool.query(
+  const [[rows], [countRows]] = await Promise.all([
+    pool.query(
     `SELECT
       c.*,
       u.username,
@@ -80,13 +83,21 @@ export async function GET(request: Request) {
      LEFT JOIN users u ON c.advertiser_id = u.id
      ${where}
      ORDER BY c.created_at DESC
-     LIMIT 200`,
-    params
-  );
+     LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    ),
+    pool.query<Array<RowDataPacket & { total: number }>>(
+      `SELECT COUNT(*) total FROM miniapp_rewarded_campaigns c ${where}`,
+      params
+    ),
+  ]);
 
   const metrics = await getMiniAppCampaignMetricsByIds((rows as Array<{ id: number }>).map((row) => row.id));
   return NextResponse.json({
     campaigns: (rows as Array<Record<string, unknown>>).map((row) => applyMiniAppCampaignMetrics(row, metrics)),
+    page,
+    total: Number(countRows[0]?.total || 0),
+    totalPages: Math.max(1, Math.ceil(Number(countRows[0]?.total || 0) / limit)),
     cpm_configuration: "global",
   });
 }
@@ -99,6 +110,7 @@ export async function PATCH(request: Request) {
     const body = await request.json();
     const id = Number(body.id);
     const action = cleanText(body.action);
+    if (action === "reject") return NextResponse.json({ error: "MODERATION_REASON_REQUIRED", code: "MODERATION_REASON_REQUIRED" }, { status: 400 });
     const moderationNotes = cleanText(body.moderation_notes);
     const adminCpm = body.admin_cpm === undefined ? null : Number(body.admin_cpm);
     const cpmMode = normalizeMiniAppCpmMode(body.cpm_mode);

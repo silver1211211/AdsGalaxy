@@ -5,6 +5,7 @@ import Link from "next/link";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { apiFetch } from "@/lib/api";
 import { BarChart3, Bot, Code2, Copy, ExternalLink, Loader2, Plus, ShieldCheck, TestTube2, Webhook } from "lucide-react";
+import { StatusText } from "@/components/i18n/LocalizedEnum";
 
 const eventOptions = ["*", "reward.eligible", "reward.claimed", "campaign.approved", "campaign.rejected", "conversion.recorded", "referral.verified", "postback.conversion", "ad.click", "ad.completed"];
 
@@ -226,7 +227,7 @@ export default function DeveloperCenterPage() {
                 <div className="mt-4 grid gap-2">
                   {data.bindings.map((binding: any) => (
                     <div key={binding.id} className="rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700">
-                      #{binding.miniapp_id} {binding.miniapp_name} · {binding.environment} · {binding.status}
+                      #{binding.miniapp_id} {binding.miniapp_name} · {binding.environment} · <StatusText value={binding.status} />
                     </div>
                   ))}
                 </div>
@@ -260,7 +261,7 @@ export default function DeveloperCenterPage() {
                     <div className="flex items-center justify-between gap-3">
                       <div>
                         <h3 className="font-black text-slate-900">{app.name}</h3>
-                        <p className="text-xs font-bold text-slate-400">{app.platform} / {app.mode} / {app.status}</p>
+                        <p className="text-xs font-bold text-slate-400">{app.platform} / {app.mode} / <StatusText value={app.status} /></p>
                       </div>
                       <span className="rounded-lg bg-white px-2 py-1 text-xs font-black uppercase text-slate-500">{app.mode}</span>
                     </div>
@@ -282,7 +283,7 @@ export default function DeveloperCenterPage() {
                       </button>
                     </div>
                     <dl className="mt-4 grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
-                      <div><dt className="font-black uppercase tracking-widest text-slate-400">Status</dt><dd className="font-bold text-slate-700">{app.status}</dd></div>
+                      <div><dt className="font-black uppercase tracking-widest text-slate-400">Status</dt><dd className="font-bold text-slate-700"><StatusText value={app.status} /></dd></div>
                       <div><dt className="font-black uppercase tracking-widest text-slate-400">Created</dt><dd className="font-bold text-slate-700">{formatDate(app.created_at)}</dd></div>
                       <div><dt className="font-black uppercase tracking-widest text-slate-400">Last Activity</dt><dd className="font-bold text-slate-700">{formatDate(app.last_activity_at || app.updated_at)}</dd></div>
                       <div><dt className="font-black uppercase tracking-widest text-slate-400">Environment</dt><dd className="font-bold text-slate-700">{app.mode}</dd></div>

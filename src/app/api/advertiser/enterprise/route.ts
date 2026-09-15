@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 import { listEnterpriseInventory, listPackages } from "@/lib/enterpriseDeals";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   try {
-    await getAuthenticatedUser(request.headers.get("x-telegram-init-data"));
+    await getAuthenticatedUserStatus(request.headers.get("x-telegram-init-data"), { request });
     const { searchParams } = new URL(request.url);
     const [packages, inventory] = await Promise.all([
       listPackages(undefined, true),

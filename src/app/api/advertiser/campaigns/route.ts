@@ -1,11 +1,11 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy campaign payloads are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
-import { normalizeCampaignCategory } from "@/lib/campaignCategories";
+import { getAuthenticatedUser, getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
+import { serializeCampaignCategories } from "@/lib/campaignCategories";
 import { serializeExplicitCampaignAudience } from "@/lib/channelAudience";
 import { normalizeAdvertiserTargeting, targetingDbParams } from "@/lib/advertiserTargeting";
 import { calculateCampaignQualityScore } from "@/lib/advertiserTrust";
-import { validatePostbackUrl } from "@/lib/conversionTracking";
 import { normalizeMarketplaceType, publicSelectionMetadata, recordMarketplaceEvent, validateDirectPlacementTargets } from "@/lib/publisherMarketplace";
 import { evaluateCampaignAutomation } from "@/lib/approvalAutomation";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
@@ -25,6 +25,11 @@ import {
   validateCampaignText,
 } from "@/lib/campaignCreationValidation";
 import { executeCampaignCreationTransaction } from "@/lib/campaignCreationTransaction";
+import { CACHE_TTL_SECONDS, cacheGetOrSet, invalidateAdvertiserCaches, redisKeys } from "@/lib/redisCache";
+import { getGrowthSettings, validateGrowthBudgets, validateGrowthMessageText, verifyGrowthDestination } from "@/lib/channelGrowth";
+import { getAdvertiserDiscount } from "@/lib/advertiserDiscount";
+import { getChannelUnitPrice } from "@/lib/channelBilling";
+import { normalizeTeaserVariants,validateTeaserCpm,validateTeaserCta } from "@/lib/teaser";
 
 function campaignCreateErrorResponse(error: any) {
   const authStatus = getAuthErrorStatus(error);
@@ -33,6 +38,11 @@ function campaignCreateErrorResponse(error: any) {
   }
   const failure = classifyCampaignCreateFailure(error);
   return NextResponse.json(failure.body, { status: failure.status });
+}
+
+function safeCampaignCreateDiagnosticCode(error: any) {
+  const code = String(error?.code || "").toUpperCase();
+  return /^[A-Z0-9_]{1,64}$/.test(code) ? code : "UNCLASSIFIED";
 }
 
 export async function POST(request: Request) {
@@ -50,15 +60,27 @@ export async function POST(request: Request) {
     const parse_mode = "html";
     const message_text = String(formData.get("message_text") || "");
     const link = formData.get("link") as string;
-    const postbackUrl = validatePostbackUrl(formData.get("postback_url"));
     const button_text = formData.get("button_text") as string;
+    const campaignKind = formData.get("campaign_kind") === "channel_growth" ? "channel_growth" : "channel";
     const type = validateCampaignObjective(formData.get("type"));
+    const requestedTeaserMode=String(formData.get("teaser_mode")||"none");
+    if(requestedTeaserMode==="standard_plus_teaser")throw new CampaignCreatePublicError("TEASER_STANDALONE_ONLY","Teaser Ads must be created as a separate campaign.");
+    const teaserMode=requestedTeaserMode==="teaser_only"?"teaser_only":"none";
+    if(type==="clicks"&&teaserMode!=="none")throw new CampaignCreatePublicError("TEASER_VIEWS_ONLY","Teaser is available for Views campaigns only.");
+    const teaserEnabled=teaserMode!=="none";
+    let teaserVariants:string[]=[];let teaserCta:string|null=null;let teaserCpm:number|null=null;
+    if(teaserEnabled){
+      teaserVariants=normalizeTeaserVariants(JSON.parse(String(formData.get("teaser_variants")||"[]")));
+      teaserCta=validateTeaserCta(formData.get("teaser_cta"));
+      const [teaserSettings]=await pool.query<Array<RowDataPacket&{key:string;value:string}>>("SELECT `key`,value FROM settings WHERE `key` IN ('teaser_min_cpm','teaser_max_cpm')");const settings=new Map(teaserSettings.map(row=>[row.key,Number(row.value)]));
+      teaserCpm=validateTeaserCpm(formData.get("teaser_cpm"),{min:settings.get("teaser_min_cpm")??0.5,max:settings.get("teaser_max_cpm")??6.5});
+    }
     const budget = validateTotalBudget(formData.get("budget"));
     const submittedCpm = parseFloat(String(formData.get("cpm") || "0"));
     const submittedCpc = parseFloat(String(formData.get("cpc") || formData.get("cpm") || "0"));
     const cpc = type === "clicks" ? submittedCpc : 0;
     const cpm = type === "clicks" ? cpc : submittedCpm;
-    const category = normalizeCampaignCategory(formData.get("category"));
+    const category = serializeCampaignCategories(formData.get("category"), 3);
     let continents = String(formData.get("continents") || "");
     if (type !== "broadcast") {
       try {
@@ -70,7 +92,7 @@ export async function POST(request: Request) {
         );
       }
     }
-    const imageFile = formData.get("image") as File | null;
+    const imageFile = teaserMode==="teaser_only"?null:formData.get("image") as File | null;
     const directPlacementMode = String(formData.get("direct_placement_mode") || "network") === "direct" ? "direct" : "network";
     const directInventoryScope = String(formData.get("direct_inventory_scope") || "network");
     const directInventoryType = normalizeMarketplaceType(formData.get("direct_inventory_type") || (type === "broadcast" ? "bot" : "channel"));
@@ -98,11 +120,51 @@ export async function POST(request: Request) {
       daily_budget_limit: formData.get("daily_budget_limit"),
       frequency_cap_per_user: formData.get("frequency_cap_per_user"),
     }, budget);
+    if (campaignKind === "channel_growth") {
+      try {
+        validateGrowthBudgets(budget, targeting.daily_budget_limit);
+      } catch (error) {
+        throw new CampaignCreatePublicError("INVALID_GROWTH_BUDGET", error instanceof Error ? error.message : "Channel Growth budget is invalid.");
+      }
+      try {
+        validateGrowthMessageText(message_text);
+      } catch (error) {
+        throw new CampaignCreatePublicError("INVALID_GROWTH_MESSAGE", error instanceof Error ? error.message : "Channel Growth message is invalid.");
+      }
+    }
 
     // 1. Complete request validation (before upload or database mutation)
     validateCampaignText({ name, campaignTitle, messageText: message_text, link, buttonText: button_text });
 
-    await validateCampaignCpmBid(type, type === "clicks" ? cpc : cpm);
+    let growthDestination: Awaited<ReturnType<typeof verifyGrowthDestination>> | null = null;
+    let costPerSubscriber: number | null = null;
+    if (campaignKind === "channel_growth") {
+      const settings = await getGrowthSettings();
+      costPerSubscriber = Number(formData.get("cost_per_subscriber"));
+      if (!Number.isFinite(costPerSubscriber) || costPerSubscriber < settings.min || costPerSubscriber > settings.max) throw new CampaignCreatePublicError("INVALID_CPS", `Cost per Subscriber must be between $${settings.min.toFixed(2)} and $${settings.max.toFixed(2)}.`);
+      growthDestination = await verifyGrowthDestination(String(formData.get("destination_channel") || link));
+    } else if (teaserMode !== "teaser_only") {
+      await validateCampaignCpmBid(type, type === "clicks" ? cpc : cpm);
+    }
+
+    const discount = await getAdvertiserDiscount(pool, user.id);
+    const nextBillableUnit = campaignKind === "channel_growth"
+      ? Number(costPerSubscriber || 0)
+      : teaserMode === "teaser_only"
+        ? Number(teaserCpm || 0) / 1000
+        : getChannelUnitPrice({
+            type,
+            cpm,
+            cpc,
+            discount: type === "clicks" ? discount.cpc_discount : discount.cpm_discount,
+          });
+    const [walletRows] = await pool.query<Array<RowDataPacket & { ad_balance: string | number }>>(
+      "SELECT ad_balance FROM users WHERE id=? LIMIT 1",
+      [user.id],
+    );
+    if (!(nextBillableUnit > 0) || Number(walletRows[0]?.ad_balance || 0) + 1e-10 < nextBillableUnit) {
+      throw new CampaignCreatePublicError("INSUFFICIENT_AD_BALANCE", "Ad Balance cannot cover the next billable event.");
+    }
 
     // Click-type restriction: No usernames or links in text
     if (type === "clicks") {
@@ -122,7 +184,8 @@ export async function POST(request: Request) {
     }
     conn.release();
 
-    // 2. Optional image upload. Established behavior permits text-only campaigns.
+    // 2. Optional image upload. If selected, the image is part of the creative:
+    // never silently create a text-only campaign when storage fails.
     let imageUrl = null;
     if (imageFile) {
       if (imageFile.size > 1024 * 1024) {
@@ -139,13 +202,15 @@ export async function POST(request: Request) {
           body: imgApiFormData,
         });
         const imgData = await imgRes.json();
-        if (imgData.success) {
+        if (imgRes.ok && imgData.success && imgData.data?.url) {
           imageUrl = imgData.data.url;
         } else {
           console.error("Campaign image upload was rejected by the provider");
+          return NextResponse.json({ error: "Image upload failed. No campaign was created." }, { status: 502 });
         }
-      } catch (err) {
+      } catch {
         console.error("Campaign image upload provider was unavailable");
+        return NextResponse.json({ error: "Image upload is temporarily unavailable. No campaign was created." }, { status: 503 });
       }
     }
 
@@ -188,14 +253,14 @@ export async function POST(request: Request) {
           // Insert campaign
           const [result]: any = await conn.query(
         `INSERT INTO campaigns (
-          user_id, name, campaign_title, parse_mode, message_text, image_url, link, postback_url, button_text, type,
-          budget, total_budget, cpm, cpc, category, quality_score, quality_tier, quality_metadata,
+          user_id, name, campaign_title, parse_mode, message_text, image_url, link, button_text, type, campaign_kind, billing_model, funding_model, cost_per_subscriber, destination_chat_id, growth_tracking_status,
+          budget, total_budget, cpm, cpc, teaser_mode, teaser_enabled, teaser_cta_key, teaser_cpm, category, quality_score, quality_tier, quality_metadata,
           continents, countries, languages, vpn_policy,
           device_policy, os_policy, start_at, end_at, daily_budget_limit,
           frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
           direct_inventory_metadata, status
         )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'direct_debit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
         [
           user.id,
           name,
@@ -204,13 +269,21 @@ export async function POST(request: Request) {
           message_text,
           imageUrl,
           link,
-          postbackUrl,
           button_text,
           type,
+          campaignKind,
+          campaignKind === "channel_growth" ? "cps" : (type === "clicks" ? "cpc" : "cpm"),
+          costPerSubscriber,
+          growthDestination?.chatId ?? null,
+          campaignKind === "channel_growth" ? "ready" : null,
           budget,
           budget,
           cpm,
           cpc,
+          teaserMode,
+          teaserEnabled?1:0,
+          teaserCta,
+          teaserCpm,
           category,
           quality.score,
           quality.tier,
@@ -241,6 +314,8 @@ export async function POST(request: Request) {
             }, conn);
           }
 
+          for(const [position,copy] of teaserVariants.entries())await conn.query("INSERT INTO teaser_creatives(campaign_id,copy_text,position) VALUES(?,?,?)",[result.insertId,copy,position+1]);
+
           await replaceCampaignExclusions(conn, {
         campaignType: "campaign",
         campaignId: result.insertId,
@@ -266,6 +341,7 @@ export async function POST(request: Request) {
         },
       });
 
+      await invalidateAdvertiserCaches(Number(user.id));
       return NextResponse.json(creation);
     } finally {
       transactionConnection.release();
@@ -275,7 +351,10 @@ export async function POST(request: Request) {
     if (error instanceof CampaignSchemaNotReadyError) {
       console.error("Campaign schema readiness check failed", { missingCount: error.missing.length });
     } else if (!(error instanceof CampaignCreatePublicError) && !publicCampaignValidationError(error)) {
-      console.error("Campaign creation failed", { errorType: error?.constructor?.name || "UnknownError" });
+      console.error("Campaign creation failed", {
+        errorType: error?.constructor?.name || "UnknownError",
+        errorCode: safeCampaignCreateDiagnosticCode(error),
+      });
     }
     return campaignCreateErrorResponse(error);
   }
@@ -284,7 +363,14 @@ export async function POST(request: Request) {
 export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await getAuthenticatedUserStatus(initData, { request });
+    const url = new URL(request.url);
+    const requestedLimit = Number(url.searchParams.get("limit") || 50);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.trunc(requestedLimit))) : 50;
+    const rows = await cacheGetOrSet(
+      redisKeys.campaignList(Number(user.id), limit),
+      CACHE_TTL_SECONDS.CAMPAIGN_LIST,
+      async () => {
     const hasCampaignUpdatedAt = await columnExists(pool, "campaigns", "updated_at");
     const hasCampaignPostViews = await columnExists(pool, "campaign_posts", "views");
     const hasBroadcastDeliveryCost = await columnExists(pool, "broadcast_deliveries", "cost");
@@ -306,9 +392,13 @@ export async function GET(request: Request) {
     const channelTodaySpendExpr = `(COALESCE((SELECT SUM(l.advertiser_debit) FROM channel_settlement_ledger l WHERE l.campaign_id=c.id AND l.created_at>=CURDATE()),0)
       + COALESCE((SELECT SUM(d.advertiser_debit) FROM channel_advertiser_debits d WHERE d.campaign_id=c.id AND d.created_at>=CURDATE()),0))`;
     const campaignUpdatedAtExpr = hasCampaignUpdatedAt ? "c.updated_at" : "c.created_at";
+    const broadcastEffectiveCpmExpr = `GREATEST(COALESCE(c.cpm, 0) - COALESCE((
+      SELECT CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN ard.cpm_discount ELSE 0 END
+      FROM advertiser_rate_discounts ard WHERE ard.user_id = c.user_id LIMIT 1
+    ), 0), 0.01)`;
 
-    const [rows]: any = await pool.query(
-      `SELECT id, name, campaign_title, parse_mode, message_text, image_url, link, postback_url, button_text, rejection_reason,
+    const [campaignRows]: any = await pool.query(
+          `SELECT id, name, campaign_title, parse_mode, message_text, image_url, link, button_text, rejection_reason,
          type,
          CASE WHEN type = 'broadcast' THEN GREATEST(COALESCE(budget, 0), 0) ELSE budget END AS budget,
          total_budget, cpm, cpc, category, continents, countries, languages, vpn_policy,
@@ -317,8 +407,8 @@ export async function GET(request: Request) {
          direct_inventory_metadata,
          CASE
            WHEN type = 'broadcast' AND status = 'active' AND (
-             ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8) <= 0
-             OR budget < ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8)
+             COALESCE(c.cpm, 0) <= 0
+             OR budget < ROUND(${broadcastEffectiveCpmExpr} / 1000, 8)
            ) THEN 'budget_exhausted'
            ELSE status
          END AS status,
@@ -352,8 +442,8 @@ export async function GET(request: Request) {
          END as today_spend,
          CASE
            WHEN type = 'broadcast' THEN (
-             ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8) <= 0
-             OR budget < ROUND(GREATEST(COALESCE(cpm, 0), 0) / 1000, 8)
+             COALESCE(c.cpm, 0) <= 0
+             OR budget < ROUND(${broadcastEffectiveCpmExpr} / 1000, 8)
            )
            ELSE COALESCE(c.budget, 0) <= 0
          END AS budget_exhausted,
@@ -422,8 +512,11 @@ export async function GET(request: Request) {
            ) * 100
            ELSE 0
          END as completion_percent
-       FROM campaigns c WHERE c.user_id = ? ORDER BY c.created_at DESC`,
-      [user.id]
+       FROM campaigns c WHERE c.user_id = ? ORDER BY c.created_at DESC LIMIT ?`,
+      [user.id, limit]
+    );
+    return campaignRows;
+      },
     );
 
     return NextResponse.json(rows, { headers: { "Cache-Control": "private, no-store, max-age=0" } });

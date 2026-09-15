@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy Mini App campaign payloads are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 import { normalizeAdvertiserTargeting, targetingDbParams } from "@/lib/advertiserTargeting";
 import { getMiniAppPublisherCpmSettings, validateAdvertiserCpmBid } from "@/lib/miniappPublisherCpmEngine";
 import { calculateCampaignQualityScore } from "@/lib/advertiserTrust";
@@ -163,7 +163,9 @@ async function validateCreativeImageUrl(imageUrl: string, maxSize = 1 * 1024 * 1
 
 export async function GET(request: Request) {
   try {
-    const user = await getAuthenticatedUser(request.headers.get("x-telegram-init-data"));
+    const user = await getAuthenticatedUserStatus(request.headers.get("x-telegram-init-data"), { request });
+    const requestedLimit = Number(new URL(request.url).searchParams.get("limit") || 20);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(50, Math.max(1, Math.trunc(requestedLimit))) : 20;
     const [rows] = await pool.query(
       `SELECT
         c.id,
@@ -204,8 +206,8 @@ export async function GET(request: Request) {
         0 AS delivery_metrics_loaded_separately
        FROM miniapp_rewarded_campaigns c
        WHERE c.advertiser_id = ?
-       ORDER BY c.created_at DESC`,
-      [user.id]
+       ORDER BY c.created_at DESC, c.id DESC LIMIT ?`,
+      [user.id, limit]
     );
     const metrics = await getMiniAppCampaignMetricsByIds((rows as any[]).map((row) => row.id));
     return NextResponse.json((rows as any[]).map((row) => applyMiniAppCampaignMetrics(row, metrics)));

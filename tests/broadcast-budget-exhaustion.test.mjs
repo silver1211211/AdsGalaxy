@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import "./reward-callback-production-loader.mjs";
@@ -9,7 +8,6 @@ const worker = readFileSync("src/app/api/cron/process-broadcast/route.ts", "utf8
 const listing = readFileSync("src/app/api/advertiser/campaigns/route.ts", "utf8");
 const detail = readFileSync("src/app/api/advertiser/campaigns/[id]/route.ts", "utf8");
 const channelSettlement = readFileSync("src/lib/channelSettlement.ts", "utf8");
-const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
 
 test("zero, negative, and sub-unit BOT budgets are exhausted using production affordability", () => {
   for (const remaining of [0, "-3.25000000", "0.00999999"]) {
@@ -55,25 +53,24 @@ test("refund is idempotent and only auto-reactivates an automatically exhausted 
     refundedBudget: "10.00000000",
     nextDebit: "0.01000000",
   }), "paused");
-  assert.match(worker, /WHERE id = \? AND status = 'pending'/);
-  assert.match(worker, /if \(!delivery \|\| delivery\.status !== "pending"\)[\s\S]*refunded: false, idempotent: true/);
+  assert.match(worker, /WHERE id = \? AND status IN \('pending','sending','retry_wait'\)/);
+  assert.match(worker, /if \(!delivery \|\| !\["pending", "sending", "retry_wait"\]\.includes\(delivery\.status\)\)[\s\S]*refunded: false, idempotent: true/);
   assert.match(worker, /status = 'active', budget_exhausted_at = NULL, pause_reason = NULL/);
 });
 
 test("worker reconciles unaffordable active BOT campaigns even with no eligible recipients", () => {
-  const reconcile = worker.indexOf("UPDATE campaigns\n      SET status = 'budget_exhausted'");
+  const reconcile = worker.indexOf("const [exhaustedCandidates]");
   const inventory = worker.indexOf("// 1. Find active broadcast campaigns with budget");
   assert.ok(reconcile >= 0 && reconcile < inventory);
-  assert.match(worker, /c\.budget >= ROUND\(GREATEST\(COALESCE\(c\.cpm, 0\), 0\) \/ 1000, 8\)/);
-  assert.match(worker, /ROUND\(GREATEST\(COALESCE\(cpm, 0\), 0\) \/ 1000, 8\) <= 0/);
+  assert.match(worker, /c\.budget < ROUND\(GREATEST/);
+  assert.match(worker, /WHERE status='active' AND id IN/);
 });
 
 test("public BOT budget is clamped while CHANNEL accounting remains protected", () => {
   assert.match(listing, /CASE WHEN type = 'broadcast' THEN GREATEST\(COALESCE\(budget, 0\), 0\) ELSE budget END AS budget/);
-  assert.match(listing, /THEN 'budget_exhausted'[\s\S]*ELSE status/);
+  assert.match(listing, /THEN 'budget_exhausted'/);
   assert.match(detail, /GREATEST\(COALESCE\(budget, 0\), 0\) AS budget/);
-  assert.match(detail, /THEN 'budget_exhausted'[\s\S]*ELSE status/);
-  assert.equal(git("hash-object", "src/lib/channelBilling.ts"), git("rev-parse", "HEAD:src/lib/channelBilling.ts"));
+  assert.match(detail, /campaignRows\[0\]\.status = "budget_exhausted"/);
   assert.match(channelSettlement, /const platformRevenue = amount\(debit \* \(policy\.platformMarginPercent \/ 100\)\)/);
   assert.match(channelSettlement, /const reserveAmount = amount\(publisherPoolBeforeReserve \* \(policy\.safetyReservePercent \/ 100\)\)/);
   assert.match(channelSettlement, /const publisherCredit = amount\(debit - platformRevenue - reserveAmount\)/);

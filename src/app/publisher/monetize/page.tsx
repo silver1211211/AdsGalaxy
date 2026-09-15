@@ -17,9 +17,11 @@ import MiniAppDetailsScreen from "@/components/publisher/MiniAppDetailsScreen";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/api";
+import { getApiErrorMessage } from "@/lib/apiErrorMessage";
 import { useHeader } from "@/context/HeaderContext";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Toast from "@/components/ui/Toast";
+import { StatusText } from "@/components/i18n/LocalizedEnum";
 import {
   getDefaultPostingTimes,
   normalizePostingTimes,
@@ -36,6 +38,8 @@ import {
 } from "@/lib/telegramChannelInput";
 import { logPrivateChannelDiagnostic } from "@/lib/privateChannelDiagnostics";
 import { subscriberFreshness, telegramAudienceLabel } from "@/lib/channelRefreshPolicy";
+import { useTranslations } from "@/i18n/client";
+import type { TranslationKey } from "@/i18n";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -52,6 +56,16 @@ const CONTINENTS = [
   { name: "South America", countries: "Brazil, Argentina, Colombia" },
   { name: "Oceania",       countries: "Australia, New Zealand" },
 ];
+const CHANNEL_CONTINENTS = CONTINENTS.filter(continent => continent.name !== "Global");
+const AUDIENCE_LABEL_KEYS: Record<string, TranslationKey> = {
+  Global: "audience.global", Africa: "audience.africa", Asia: "audience.asia", Europe: "audience.europe",
+  "North America": "audience.northAmerica", "South America": "audience.southAmerica", Oceania: "audience.oceania",
+};
+const CATEGORY_LABEL_KEYS: Record<string, TranslationKey> = {
+  Crypto: "category.crypto", Finance: "category.finance", "NSFW +18": "category.adult", Tech: "category.tech",
+  Gambling: "category.gambling", Entertainment: "category.entertainment", Education: "category.education",
+  Shopping: "category.shopping", Other: "category.other",
+};
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -104,7 +118,7 @@ function StatusBadge({ status }: { status: Status }) {
       c.cls,
     )}>
       <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", c.dot)} />
-      {c.label}
+      <StatusText value={status === "approved" ? "active" : status} />
     </span>
   );
 }
@@ -562,6 +576,7 @@ function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBo
 // ── FlowModal ─────────────────────────────────────────────────────────────────
 
 function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
+  const { t } = useTranslations();
   // navigation
   const [step, setStep]         = useState<FlowStep>("select");
   const [slideDir, setSlideDir] = useState<1 | -1>(1);
@@ -575,6 +590,8 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
   const [chVerifyError, setChVerifyError] = useState("");
   const [chTitle,     setChTitle]     = useState("");
   const [chPPD,       setChPPD]       = useState(1);
+  const [chTeaserEnabled, setChTeaserEnabled] = useState(true);
+  const [chTeaserDailyLimit, setChTeaserDailyLimit] = useState(2);
   const [chTimes,     setChTimes]     = useState<string[]>(() => getDefaultPostingTimes(1));
   const [chTimesOrd,  setChTimesOrd]  = useState<string[]>(() => getDefaultPostingTimes(1));
   const [chTimesErr,  setChTimesErr]  = useState("");
@@ -622,6 +639,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
     can_post_messages?: boolean;
     can_delete_messages?: boolean;
     can_invite_users?: boolean;
+    can_edit_messages?: boolean;
     can_access?: boolean;
   } | null>(null);
   const [privateVerificationToken, setPrivateVerificationToken] = useState<string | null>(null);
@@ -789,6 +807,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
         throw new Error(data.error || "Failed to fetch channel info");
       }
       setChInfo(data);
+      setBotPermissions(data.permissions || null);
       if (chIsPrivate && data.verification_token) {
         setPrivateVerificationToken(data.verification_token);
       }
@@ -826,14 +845,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
   }
 
   function toggleChCont(name: string) {
-    setChConts(prev => {
-      if (name === "Global") return prev.includes("Global") ? [] : CONTINENTS.map(c => c.name);
-      let next = prev.includes(name)
-        ? prev.filter(c => c !== name && c !== "Global")
-        : [...prev, name];
-      if (next.length === CONTINENTS.length - 1) next = CONTINENTS.map(c => c.name);
-      return next;
-    });
+    setChConts(prev => prev.includes(name) ? [] : [name]);
   }
 
   function handleChPPDChange(val: number) {
@@ -873,8 +885,8 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
 
   async function handleChSubmit() {
     const title = chTitle.trim();
-    if (title.length < 3)  { setToast({ type: "error", title: "Registration Failed", message: "Channel name must be at least 3 characters." }); return; }
-    if (title.length > 50) { setToast({ type: "error", title: "Registration Failed", message: "Channel name must be at most 50 characters." }); return; }
+    if (title.length < 3)  { setToast({ type: "error", title: t("publisher.channels.registrationFailed"), message: t("publisher.channels.nameMin") }); return; }
+    if (title.length > 50) { setToast({ type: "error", title: t("publisher.channels.registrationFailed"), message: t("publisher.channels.nameMax") }); return; }
     const verifiedChannelType = chInfo?.channel_type === "private" ? "private" : chIsPrivate ? "private" : "public";
     setIsLoading(true);
     setToast(null);
@@ -908,12 +920,17 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
           posting_times: chTimes,
           audience_continents: chConts,
           categories: chCats,
+          teaser_enabled: chTeaserEnabled,
+          teaser_daily_limit: chTeaserDailyLimit,
         }),
       });
-      if (!res.ok) { const d = await res.json(); throw new Error(d.error || "Failed to add channel"); }
+      if (!res.ok) {
+        const data: unknown = await res.json();
+        throw new Error(getApiErrorMessage(data, "Failed to add channel"));
+      }
       onSuccess();
     } catch (err: any) {
-      setToast({ type: "error", title: "Registration Failed", message: err.message });
+      setToast({ type: "error", title: t("publisher.channels.registrationFailed"), message: err.message });
     } finally {
       setIsLoading(false);
     }
@@ -1474,7 +1491,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
 
                         <div className="grid grid-cols-2 gap-4">
                           <div className="space-y-1">
-                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Display Name</label>
+                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{t("publisher.channels.displayName")}</label>
                             <input
                               type="text"
                               value={chTitle}
@@ -1523,9 +1540,87 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                           </p>
                         </div>
 
+                        {/* Teaser Ads are independent from scheduled channel posting. */}
+                        <div className={cn(
+                          "overflow-hidden rounded-2xl border-2 transition-all",
+                          chTeaserEnabled
+                            ? "border-emerald-200 bg-gradient-to-br from-emerald-50 to-sky-50"
+                            : "border-slate-200 bg-slate-50",
+                        )}>
+                          <div className="flex items-start gap-3 p-4">
+                            <div className={cn(
+                              "flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl",
+                              chTeaserEnabled ? "bg-emerald-500 text-white shadow-lg shadow-emerald-200" : "bg-slate-700 text-slate-100 shadow-sm",
+                            )}>
+                              <Sparkles size={20} />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <h3 className="text-sm font-black text-slate-900">{t("teaser.onboardingTitle")}</h3>
+                                  <p className="mt-0.5 text-[11px] font-semibold leading-relaxed text-slate-500">{t("teaser.onboardingDescription")}</p>
+                                </div>
+                                <button
+                                  type="button"
+                                  role="switch"
+                                  aria-checked={chTeaserEnabled}
+                                  onClick={() => setChTeaserEnabled(enabled => !enabled)}
+                                  className={cn(
+                                    "relative h-7 w-12 shrink-0 rounded-full transition-colors",
+                                    chTeaserEnabled ? "bg-emerald-500" : "bg-slate-700",
+                                  )}
+                                >
+                                  <span className={cn(
+                                    "absolute left-0 top-1 h-5 w-5 rounded-full bg-white shadow-sm transition-transform",
+                                    chTeaserEnabled ? "translate-x-6" : "translate-x-1",
+                                  )} />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+
+                          {chTeaserEnabled && (
+                            <div className="border-t border-emerald-200/70 bg-white/70 px-4 py-4">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">{t("teaser.editsPerDay")}</p>
+                                  <p className="mt-1 text-[10px] font-semibold text-slate-400">{t("teaser.independentPosting")}</p>
+                                </div>
+                                <div className="flex rounded-xl bg-slate-100 p-1">
+                                  {[2, 3, 4, 5].map(limit => (
+                                    <button
+                                      type="button"
+                                      key={limit}
+                                      onClick={() => setChTeaserDailyLimit(limit)}
+                                      className={cn(
+                                        "h-8 w-9 rounded-lg text-xs font-black transition-all",
+                                        chTeaserDailyLimit === limit
+                                          ? "bg-emerald-500 text-white shadow-sm"
+                                          : "text-slate-500 hover:bg-white",
+                                      )}
+                                    >
+                                      {limit}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                              <div className="mt-3 flex items-start gap-2 rounded-xl bg-sky-50 px-3 py-2.5 text-[10px] font-semibold leading-relaxed text-sky-700">
+                                <Info size={14} className="mt-0.5 shrink-0" />
+                                <span>{t("teaser.targetingHint")}</span>
+                              </div>
+                              {botPermissions?.can_edit_messages === false && (
+                                <div className="mt-2 flex items-start gap-2 rounded-xl bg-amber-50 px-3 py-2.5 text-[10px] font-semibold leading-relaxed text-amber-700">
+                                  <Info size={14} className="mt-0.5 shrink-0" />
+                                  <span>{t("teaser.permissionRequired")}</span>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
                         {/* Posting times */}
                         <div className="space-y-3">
-                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Posting Times</label>
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{t("publisher.channels.postingTime")}</label>
                           <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto pr-1">
                             {POSTING_TIME_OPTIONS.map(time => (
                               <button
@@ -1562,7 +1657,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                                     : "bg-white border-slate-200 text-slate-400 hover:border-blue-200",
                                 )}
                               >
-                                {cat}
+                                {t(CATEGORY_LABEL_KEYS[cat])}
                               </button>
                             ))}
                           </div>
@@ -1570,9 +1665,9 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
 
                         {/* Audience */}
                         <div className="space-y-3">
-                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Target Audience</label>
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{t("publisher.channels.targetAudience")}</label>
                           <div className="grid grid-cols-1 gap-2">
-                            {CONTINENTS.map(cont => (
+                            {CHANNEL_CONTINENTS.map(cont => (
                               <button
                                 key={cont.name}
                                 onClick={() => toggleChCont(cont.name)}
@@ -1584,7 +1679,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                                 )}
                               >
                                 <div className="flex items-center justify-between w-full">
-                                  <span className="font-black text-base">{cont.name}</span>
+                                  <span className="font-black text-base">{t(AUDIENCE_LABEL_KEYS[cont.name])}</span>
                                   {chConts.includes(cont.name) && <CheckCircle2 size={18} />}
                                 </div>
                                 <span className={cn(
@@ -1610,7 +1705,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                           className="w-full py-3.5 bg-[#0c9de8] hover:bg-blue-600 disabled:bg-slate-200 text-white font-black rounded-2xl transition-all flex items-center justify-center gap-2 text-sm"
                         >
                           {isLoading && <Loader2 className="animate-spin" size={20} />}
-                          Complete Registration
+                          {t("publisher.channels.registrationComplete")}
                         </button>
                       </div>
                     )}
@@ -1769,7 +1864,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                                     : "bg-white border-slate-200 text-slate-400 hover:border-blue-200",
                                 )}
                               >
-                                {cat}
+                                {t(CATEGORY_LABEL_KEYS[cat])}
                               </button>
                             ))}
                           </div>
@@ -1791,7 +1886,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                                 )}
                               >
                                 <div className="flex items-center justify-between w-full">
-                                  <span className="font-black text-base">{cont.name}</span>
+                                  <span className="font-black text-base">{t(AUDIENCE_LABEL_KEYS[cont.name])}</span>
                                   {botConts.includes(cont.name) && <CheckCircle2 size={18} />}
                                 </div>
                                 <span className={cn(
@@ -1873,6 +1968,7 @@ async function loadInventoryResource(path: string): Promise<any[] | null> {
 
 export default function MonetizePage() {
   const { setTitle } = useHeader();
+  const { t } = useTranslations();
   const [channels,  setChannels]  = useState<any[]>(() => lastSuccessfulInventory?.channels || []);
   const [miniapps,  setMiniapps]  = useState<any[]>(() => lastSuccessfulInventory?.miniapps || []);
   const [bots,      setBots]      = useState<any[]>(() => lastSuccessfulInventory?.bots || []);
@@ -1895,6 +1991,8 @@ export default function MonetizePage() {
   const [maEditLoading, setMaEditLoading] = useState(false);
   const [processingId,   setProcessingId]   = useState<string | null>(null);
   const [toast, setToast] = useState<{ type: "success" | "error"; title: string; message: string } | null>(null);
+  const [assetQuery, setAssetQuery] = useState("");
+  const [assetType, setAssetType] = useState<"all" | "channel" | "bot" | "miniapp">("all");
 
   async function handleToggleChannelStatus(ch: any) {
     const key = `ch-${ch.id}`;
@@ -2004,7 +2102,7 @@ export default function MonetizePage() {
   }
 
   useEffect(() => {
-    setTitle("Monetize");
+    setTitle(t("navigation.monetize"));
     void refetch();
   }, []);
 
@@ -2020,6 +2118,12 @@ export default function MonetizePage() {
     + miniapps.filter(m => m.status === "pending").length
     + bots.filter(b => b.status === "pending").length
     : 0;
+  const normalizedAssetQuery = assetQuery.trim().toLowerCase();
+  const matchesAssetQuery = (...values: unknown[]) => !normalizedAssetQuery || values.some((value) => String(value || "").toLowerCase().includes(normalizedAssetQuery));
+  const filteredChannels = assetType !== "all" && assetType !== "channel" ? [] : channels.filter((channel) => matchesAssetQuery(channel.title, channel.username));
+  const filteredBots = assetType !== "all" && assetType !== "bot" ? [] : bots.filter((bot) => matchesAssetQuery(bot.bot_name, bot.bot_username));
+  const filteredMiniapps = assetType !== "all" && assetType !== "miniapp" ? [] : miniapps.filter((app) => matchesAssetQuery(app.miniapp_name, app.miniapp_username));
+  const hasFilteredAssets = filteredChannels.length + filteredBots.length + filteredMiniapps.length > 0;
 
   return (
     <DashboardLayout type="publisher">
@@ -2140,36 +2244,28 @@ export default function MonetizePage() {
       <div className="space-y-5">
 
         {/* ── Header ── */}
-        <div className="relative overflow-hidden rounded-[2rem] bg-white p-5 shadow-xl shadow-blue-100/50 border border-blue-100">
+        <div className="relative overflow-hidden rounded-2xl bg-white p-3 shadow-lg shadow-blue-100/40 border border-blue-100">
           <div className="absolute -right-10 -top-10 h-28 w-28 rounded-full bg-[#0c9de8]/15 blur-2xl" />
           <div className="relative flex items-center justify-between gap-4">
-            <div className="space-y-2">
-              <div className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-[#0c9de8]">
-                <Sparkles size={12} />
-                Publisher studio
-              </div>
-              <div>
-                <h1 className="text-2xl font-black uppercase tracking-tight text-slate-950">Monetize</h1>
-                <p className="mt-0.5 text-[11px] font-bold uppercase tracking-widest text-slate-400">Channels, bots, and mini apps in one earning stack</p>
-              </div>
+            <div>
+              <h1 className="text-lg font-black uppercase tracking-tight text-slate-950">{t("publisher.monetize.title")}</h1>
             </div>
             <button
               onClick={() => setShowFlow(true)}
-              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#0c9de8] text-white shadow-lg shadow-[#0c9de8]/25 transition-all hover:bg-blue-500 active:scale-95"
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-sky-300 bg-gradient-to-br from-[#0c9de8] to-blue-600 text-white shadow-md shadow-[#0c9de8]/20 transition-all hover:-translate-y-0.5 active:scale-95"
               aria-label="Add asset"
             >
               <Plus size={21} />
             </button>
           </div>
-          <div className="relative mt-4 grid grid-cols-3 gap-2">
+          <div className="relative mt-2 grid grid-cols-3 gap-2">
             {[
               { label: "Assets", value: total, icon: ShieldCheck },
               { label: "Active", value: totalActive, icon: CheckCircle2 },
               { label: "Review", value: totalPending, icon: Clock },
             ].map((item) => (
-              <div key={item.label} className="rounded-2xl border border-slate-100 bg-slate-50/80 p-3">
-                <item.icon size={14} className="text-[#0c9de8]" />
-                <p className="mt-2 text-lg font-black text-slate-950">{item.value}</p>
+              <div key={item.label} className="rounded-xl border border-slate-100 bg-slate-50/80 px-2.5 py-2">
+                <div className="flex items-center gap-1.5"><item.icon size={12} className="text-[#0c9de8]" /><p className="text-base font-black text-slate-950">{item.value}</p></div>
                 <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{item.label}</p>
               </div>
             ))}
@@ -2194,7 +2290,7 @@ export default function MonetizePage() {
             <div>
               <h3 className="text-base font-black text-slate-900">Start earning with AdsGalaxy</h3>
               <p className="mt-1.5 text-[13px] text-slate-400 max-w-xs mx-auto leading-relaxed">
-                Monetize your Telegram channels, mini apps, and bots by showing relevant ads to your audience.
+                {t("publisher.monetize.subtitle")}
               </p>
             </div>
             <div className="grid grid-cols-3 gap-3 text-left">
@@ -2225,24 +2321,19 @@ export default function MonetizePage() {
           </div>
         )}
 
-        {/* ── Summary strip ── */}
+        {/* ── Search and asset filter ── */}
         {!loading && !isEmpty && (
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded-full bg-slate-100 px-3 py-1.5 text-[11px] font-bold text-slate-500">
-              {total} asset{total !== 1 ? "s" : ""}
-            </span>
-            {totalActive > 0 && (
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-bold text-emerald-700">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                {totalActive} active
-              </span>
-            )}
-            {totalPending > 0 && (
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1.5 text-[11px] font-bold text-amber-700">
-                <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-                {totalPending} pending review
-              </span>
-            )}
+          <div className="flex h-9 w-full items-center gap-2">
+            <label className="relative min-w-0 flex-1">
+              <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input value={assetQuery} onChange={(event) => setAssetQuery(event.target.value)} placeholder="Search assets" className="h-9 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-xs font-semibold text-slate-700 outline-none focus:border-sky-400" />
+            </label>
+            <select value={assetType} onChange={(event) => setAssetType(event.target.value as typeof assetType)} aria-label="Filter asset type" className="h-9 shrink-0 rounded-lg border border-slate-200 bg-white px-2 text-[11px] font-black text-slate-600 outline-none focus:border-sky-400">
+              <option value="all">All</option>
+              <option value="channel">Channels</option>
+              <option value="bot">Bots</option>
+              <option value="miniapp">Mini Apps</option>
+            </select>
           </div>
         )}
 
@@ -2257,16 +2348,22 @@ export default function MonetizePage() {
           </div>
         )}
 
+        {!loading && !isEmpty && !hasFilteredAssets && (
+          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-8 text-center text-sm font-semibold text-slate-500">
+            No assets match this search.
+          </div>
+        )}
+
         {/* ── Channels ── */}
-        {!loading && channels.length > 0 && (
+        {!loading && filteredChannels.length > 0 && (
           <section className="space-y-3">
             <div className="flex items-center gap-2.5 border-b border-slate-100 pb-2.5">
               <Tv size={13} className="shrink-0 text-[#0c9de8]" />
               <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Channels</span>
-              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">{channels.length}</span>
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">{filteredChannels.length}</span>
             </div>
             <div className="space-y-2">
-              {channels.map(ch => {
+              {filteredChannels.map(ch => {
                 const cats = parseJSON<string[]>(ch.categories, []);
                 return (
                   <div key={ch.id} className={cn("relative rounded-3xl border border-slate-200/80 bg-white px-4 py-4 shadow-sm space-y-3 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50", openMenu === `ch-${ch.id}` && "z-20")}>
@@ -2298,7 +2395,7 @@ export default function MonetizePage() {
                               className="flex items-center gap-3 w-full px-4 py-3 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors"
                             >
                               <FileText size={15} className="text-slate-400 shrink-0" />
-                              View Details
+                              Statistics
                             </button>
                             <div className="border-t border-slate-100" />
                             <button
@@ -2337,8 +2434,12 @@ export default function MonetizePage() {
                         <Users size={11} />
                         {formatCount(ch.subscriber_count)} {telegramAudienceLabel(ch.channel_type)}
                       </span>
-                      <span className="text-slate-300">·</span>
-                      <span>{ch.subscribers_last_success_at ? `Refreshed ${new Date(ch.subscribers_last_success_at).toLocaleString()}` : "Refresh pending"}</span>
+                                  {ch.subscribers_last_success_at && (
+                                    <>
+                                      <span className="text-slate-300">·</span>
+                                      <span>Refreshed {new Date(ch.subscribers_last_success_at).toLocaleString()}</span>
+                                    </>
+                                  )}
                       {subscriberFreshness(ch.subscribers_last_success_at)==="delayed" && <span className="text-amber-600">Refresh delayed</span>}
                       {(ch.subscribers_fetch_status === "failed" || subscriberFreshness(ch.subscribers_last_success_at)==="stale") && <span className="text-amber-600">Count may be stale</span>}
                       <span className="text-slate-300">·</span>
@@ -2370,15 +2471,15 @@ export default function MonetizePage() {
         )}
 
         {/* ── Mini Apps ── */}
-        {!loading && miniapps.length > 0 && (
+        {!loading && filteredMiniapps.length > 0 && (
           <section className="space-y-3">
             <div className="flex items-center gap-2.5 border-b border-slate-100 pb-2.5">
               <Smartphone size={13} className="shrink-0 text-emerald-500" />
               <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Mini Apps</span>
-              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">{miniapps.length}</span>
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">{filteredMiniapps.length}</span>
             </div>
             <div className="space-y-2">
-              {miniapps.map(app => {
+              {filteredMiniapps.map(app => {
                 const hasActivity = Number(app.total_clicks) > 0 || Number(app.total_impressions) > 0;
                 return (
                   <div key={app.id} className={cn("relative rounded-3xl border border-slate-200/80 bg-white px-4 py-4 shadow-sm space-y-3 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50", openMenu === `ma-${app.id}` && "z-20")}>
@@ -2405,7 +2506,7 @@ export default function MonetizePage() {
                               className="flex items-center gap-3 w-full px-4 py-3 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors"
                             >
                               <FileText size={15} className="text-slate-400 shrink-0" />
-                              View Details
+                              Statistics
                             </button>
                             <div className="border-t border-slate-100" />
                             <button
@@ -2461,15 +2562,15 @@ export default function MonetizePage() {
         )}
 
         {/* ── Bots ── */}
-        {!loading && bots.length > 0 && (
+        {!loading && filteredBots.length > 0 && (
           <section className="space-y-3">
             <div className="flex items-center gap-2.5 border-b border-slate-100 pb-2.5">
               <Bot size={13} className="shrink-0 text-violet-500" />
               <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Bots</span>
-              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">{bots.length}</span>
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">{filteredBots.length}</span>
             </div>
             <div className="space-y-2">
-              {bots.map(bot => {
+              {filteredBots.map(bot => {
                 const cats = parseJSON<string[]>(bot.categories, []);
                 return (
                 <div key={bot.id} className={cn("relative rounded-3xl border border-slate-200/80 bg-white px-4 py-4 shadow-sm space-y-3 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50", openMenu === `bt-${bot.id}` && "z-20")}>
@@ -2496,7 +2597,7 @@ export default function MonetizePage() {
                             className="flex items-center gap-3 w-full px-4 py-3 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors"
                           >
                             <FileText size={15} className="text-slate-400 shrink-0" />
-                            View Details
+                            Statistics
                           </button>
                           <div className="border-t border-slate-100" />
                           <button

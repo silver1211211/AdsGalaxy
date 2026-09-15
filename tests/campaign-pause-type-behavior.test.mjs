@@ -7,6 +7,7 @@ const lifecycle = await import("../src/lib/campaignPauseLifecycle.ts");
 const route = readFileSync("src/app/api/advertiser/campaigns/[id]/route.ts", "utf8");
 const page = readFileSync("src/app/advertiser/campaigns/page.tsx", "utf8");
 const broadcastWorker = readFileSync("src/app/api/cron/process-broadcast/route.ts", "utf8");
+const cleanupWorker = readFileSync("src/app/api/cron/retry-telegram-cleanup/route.ts", "utf8");
 
 function blockBetween(source, start, end) {
   const from = source.indexOf(start);
@@ -17,7 +18,7 @@ function blockBetween(source, start, end) {
 
 test("BOT pause uses production classification without channel settlement, deletion, or lock", () => {
   assert.equal(lifecycle.pausableCampaignKind("broadcast"), "bot");
-  const botPause = blockBetween(route, 'if (campaignKind === "bot")', "const settlement =");
+  const botPause = blockBetween(route, 'if (campaignKind === "bot")', "const [pauseResult]");
   assert.match(botPause, /SET status = 'paused'/);
   assert.match(botPause, /paused_at = NOW\(\)/);
   assert.match(botPause, /resume_locked_until = NULL/);
@@ -33,12 +34,13 @@ test("BOT resume bypasses only the channel lock and performs no immediate delive
   assert.doesNotMatch(resume, /sendTelegramMessage|broadcast_deliveries|campaign_posts|process-broadcast|process-ads/);
 });
 
-test("CHANNEL pause preserves settlement, deletion, and the one-hour lock", () => {
+test("CHANNEL pause queues one-time settlement and deletion while preserving the one-hour lock", () => {
   assert.equal(lifecycle.pausableCampaignKind("views"), "channel");
   assert.equal(lifecycle.pausableCampaignKind("clicks"), "channel");
-  assert.match(route, /settleCampaignEngagementBeforeDeletion\(Number\(id\), "advertiser_pause"\)/);
   assert.match(route, /resume_locked_until = DATE_ADD\(NOW\(\), INTERVAL 1 HOUR\)/);
-  assert.match(route, /deleteActiveCampaignPosts\(id\)/);
+  assert.match(route, /cleanup_queued: true/);
+  assert.match(cleanupWorker, /settleCampaignEngagementBeforeDeletion\(\s*Number\(campaign\.id\),\s*"advertiser_pause"/);
+  assert.match(cleanupWorker, /deleteActiveCampaignPosts\(campaign\.id\)/);
 });
 
 test("CHANNEL resume enforces the lock with safe copy and does not post immediately", () => {
@@ -55,7 +57,7 @@ test("unsupported campaign types fail closed before destructive behavior", () =>
   assert.match(route, /if \(!campaignKind\)[\s\S]*This campaign type cannot be paused or resumed/);
   assert.ok(
     route.indexOf("if (!campaignKind)") <
-      route.indexOf('settleCampaignEngagementBeforeDeletion(Number(id), "advertiser_pause")')
+      route.indexOf('if (campaign.status === "active")')
   );
 });
 

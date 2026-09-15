@@ -11,6 +11,7 @@ test("health monitor rotates across eligible channels instead of repeating oldes
 });
 
 test("permanent Telegram access failures leave the active population", () => {
-  assert.match(monitor, /if \(telegramHealth\.permanent\) permanentAccessStatus = telegramHealth\.status/);
-  assert.match(monitor, /CASE WHEN \? IS NOT NULL THEN \? WHEN \? THEN 'paused' ELSE status END/);
+  assert.match(monitor, /const autoPaused = false/);
+  assert.match(monitor, /status_mutation_enabled: false/);
+  assert.doesNotMatch(monitor, /UPDATE channels SET status=/);
 });

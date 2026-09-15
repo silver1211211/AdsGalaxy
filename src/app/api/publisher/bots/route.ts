@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { botTokenHash, encryptBotToken, ensureBotIntegration, isBotEncryptionError, publisherBotEncryptionErrorMessage, resolveBotIntegrationStatus } from "@/lib/botIntegration";
@@ -44,7 +44,7 @@ async function columnExists(tableName: string, columnName: string) {
 export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await getAuthenticatedUserStatus(initData, { request });
     const [hasBroadcastDeliveries, hasWebhookTimestamp, hasBroadcastPublisherReward, hasBotUserSource, hasIntegrationFirstSeen] = await Promise.all([
       tableExists("broadcast_deliveries"),
       columnExists("bots", "webhook_last_update_at"),

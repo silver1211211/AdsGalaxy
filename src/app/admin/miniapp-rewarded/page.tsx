@@ -3,7 +3,11 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { AlertTriangle, Check, Edit3, Loader2, Pause, Play, RefreshCw, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronLeft, ChevronRight, Edit3, Loader2, Pause, Play, RefreshCw, X } from "lucide-react";
+import { useAdminRequestGuard } from "@/hooks/useAdminRequestGuard";
+import ConfirmationModal from "@/components/ui/ConfirmationModal";
+import ModerationRejectFields from "@/components/admin/ModerationRejectFields";
+import { getApiErrorMessage } from "@/lib/apiErrorMessage";
 
 const MINIAPP_CREATIVE_CATEGORIES = [
   "General",
@@ -139,14 +143,19 @@ function scheduleValue(start?: string | null, end?: string | null) {
 }
 
 export default function AdminMiniAppRewardedPage() {
+  const beginListRequest = useAdminRequestGuard();
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
   const [cpms, setCpms] = useState<Record<number, string>>({});
   const [cpmModes, setCpmModes] = useState<Record<number, string>>({});
   const [fixedCpms, setFixedCpms] = useState<Record<number, string>>({});
   const [fixedCpmReasons, setFixedCpmReasons] = useState<Record<number, string>>({});
   const [fixedCpmExpiries, setFixedCpmExpiries] = useState<Record<number, string>>({});
   const [moderationNotes, setModerationNotes] = useState<Record<number, string>>({});
+  const [policyRuleKeys, setPolicyRuleKeys] = useState<Record<number, string>>({});
+  const [pendingRejectionId, setPendingRejectionId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
   const [editForm, setEditForm] = useState<Record<string, string>>({});
@@ -158,31 +167,38 @@ export default function AdminMiniAppRewardedPage() {
   const [syncForm, setSyncForm] = useState({ target_impressions: "", target_clicks: "", duration_minutes: "60" });
 
   const fetchCampaigns = async () => {
+    const controller = beginListRequest();
     setLoading(true);
     try {
-      const res = await fetch("/api/admin/miniapp-rewarded-campaigns");
+      const res = await fetch(`/api/admin/miniapp-rewarded-campaigns?page=${page}&limit=20`, { signal: controller.signal });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to load campaigns");
       setCampaigns(data.campaigns || []);
+      setTotalPages(data.totalPages || 1);
     } catch (error: any) {
+      if (controller.signal.aborted) return;
       setMessage(error.message);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 
   useEffect(() => {
     fetchCampaigns();
-  }, []);
+  }, [page, beginListRequest]);
 
   const runAction = async (id: number, action: string) => {
     setMessage("");
     try {
       const campaign = campaigns.find((item) => item.id === id);
-      const res = await fetch("/api/admin/miniapp-rewarded-campaigns", {
-        method: "PATCH",
+      if (action === "reject" && !policyRuleKeys[id]) throw new Error("MODERATION_REASON_REQUIRED");
+      const res = await fetch(action === "reject" ? "/api/admin/moderation-rejections" : "/api/admin/miniapp-rewarded-campaigns", {
+        method: action === "reject" ? "POST" : "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: JSON.stringify(action === "reject" ? {
+          entity_type: "miniapp_rewarded_campaign", entity_id: id,
+          policy_rule_key: policyRuleKeys[id], internal_note: moderationNotes[id] || "",
+        } : {
           id,
           action,
           admin_cpm: cpms[id] ?? campaign?.admin_cpm ?? campaign?.advertiser_cpm_bid,
@@ -194,7 +210,7 @@ export default function AdminMiniAppRewardedPage() {
         }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Action failed");
+      if (!res.ok) throw new Error(getApiErrorMessage(data, "Campaign action failed"));
       setMessage("Campaign updated.");
       await fetchCampaigns();
     } catch (error: any) {
@@ -326,6 +342,9 @@ export default function AdminMiniAppRewardedPage() {
 
   return (
     <AdminLayout>
+      <ConfirmationModal isOpen={pendingRejectionId !== null} onClose={() => setPendingRejectionId(null)} onConfirm={() => { const id = pendingRejectionId; setPendingRejectionId(null); if (id !== null) void runAction(id, "reject"); }} title="Reject Mini App campaign" message="Select the policy reason for this rejection." confirmBtnText="Reject" confirmBtnVariant="danger">
+        {pendingRejectionId !== null && <ModerationRejectFields scopes={["advertiser.general", "advertiser.mini-app"]} ruleKey={policyRuleKeys[pendingRejectionId] || ""} internalNote={moderationNotes[pendingRejectionId] || ""} onRuleKey={(value) => setPolicyRuleKeys((prev) => ({ ...prev, [pendingRejectionId]: value }))} onInternalNote={(value) => setModerationNotes((prev) => ({ ...prev, [pendingRejectionId]: value }))} />}
+      </ConfirmationModal>
       {/* Page Header */}
       <div className="mb-6 flex items-center justify-between">
         <div>
@@ -514,16 +533,6 @@ export default function AdminMiniAppRewardedPage() {
                             className="w-40 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-blue-500"
                           />
                         </div>
-                        <div>
-                          <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Reason (optional)</label>
-                          <textarea
-                            value={moderationNotes[campaign.id] || ""}
-                            onChange={(e) => setModerationNotes((prev) => ({ ...prev, [campaign.id]: e.target.value }))}
-                            className="w-32 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-blue-500"
-                            placeholder="Reason (optional)"
-                            rows={2}
-                          />
-                        </div>
                       </div>
                     </td>
 
@@ -539,7 +548,7 @@ export default function AdminMiniAppRewardedPage() {
                             <Check size={14} />
                           </button>
                           <button
-                            onClick={() => runAction(campaign.id, "reject")}
+                            onClick={() => setPendingRejectionId(campaign.id)}
                             className="rounded-lg border border-red-200 bg-red-50 p-2 text-red-600 transition-colors hover:bg-red-100"
                             title="Reject"
                           >
@@ -580,6 +589,13 @@ export default function AdminMiniAppRewardedPage() {
             </table>
           </div>
         )}
+        <div className="flex items-center justify-between border-t border-slate-200 px-5 py-3 text-xs text-slate-500">
+          <span>Page {page} of {totalPages}</span>
+          <div className="flex gap-1">
+            <button type="button" disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))} className="rounded p-1 hover:bg-slate-100 disabled:opacity-40" aria-label="Previous page"><ChevronLeft size={16} /></button>
+            <button type="button" disabled={page >= totalPages || loading} onClick={() => setPage((value) => Math.min(totalPages, value + 1))} className="rounded p-1 hover:bg-slate-100 disabled:opacity-40" aria-label="Next page"><ChevronRight size={16} /></button>
+          </div>
+        </div>
       </div>
 
       {syncCampaign && (

@@ -1,6 +1,7 @@
 const TELEGRAM_LINK_HOSTS = new Set(["t.me", "telegram.me", "telegram.dog"]);
 const TELEGRAM_USERNAME_PATTERN = /^[A-Za-z0-9_]{3,32}$/;
 const TELEGRAM_INVITE_HASH_PATTERN = /^[A-Za-z0-9_-]+$/;
+export const TELEGRAM_CHANNEL_TITLE_MAX_LENGTH = 128;
 
 function telegramUrl(value: unknown) {
   const input = String(value || "").trim();
@@ -35,6 +36,13 @@ export function normalizePublicChannelUsername(value: unknown) {
   }
 
   return TELEGRAM_USERNAME_PATTERN.test(candidate) ? candidate : null;
+}
+
+export function normalizeTelegramChannelTitle(value: unknown) {
+  const title = String(value || "").trim().replace(/\s+/g, " ");
+  return title.length >= 3 && title.length <= TELEGRAM_CHANNEL_TITLE_MAX_LENGTH
+    ? title
+    : null;
 }
 
 export function normalizePrivateInviteLink(value: unknown) {

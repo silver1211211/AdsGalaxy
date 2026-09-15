@@ -145,7 +145,7 @@ export async function PATCH(request: Request) {
         reason: "manual_admin_start",
         metadata: body,
       });
-      await notifyReferralAudience(`Referral Sprint started\n\nInvite friends, earn verified referral rewards, and compete for bonus rewards. This sprint ends in ${duration} days.`, Number(result.insertId));
+      await notifyReferralAudience("bot.referral.sprintStarted.message", { days: duration }, Number(result.insertId));
       return NextResponse.json({ success: true });
     }
 

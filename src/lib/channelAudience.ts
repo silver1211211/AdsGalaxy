@@ -177,7 +177,18 @@ export function channelCampaignMatchesInventory(input: {
   campaignAudience: unknown;
   channelCategories: unknown;
   channelAudience: unknown;
+  campaignCountries?: unknown;
+  campaignLanguages?: unknown;
+  channelCountry?: unknown;
+  channelLanguage?: unknown;
 }) {
+  const list=(value:unknown,normalizer:(item:unknown)=>string|null)=>{try{const parsed=typeof value==="string"?JSON.parse(value):value;const values=Array.isArray(parsed)?parsed:[];return values.map(normalizer).filter(Boolean) as string[];}catch{return [] as string[];}};
+  const country=(value:unknown)=>{const code=String(value||"").trim().toUpperCase();return /^[A-Z]{2}$/.test(code)?code:null;};
+  const language=(value:unknown)=>{const code=String(value||"").trim().toLowerCase().split("-")[0];return /^[a-z]{2,3}$/.test(code)?code:null;};
+  const countries=list(input.campaignCountries,country), languages=list(input.campaignLanguages,language);
+  const channelCountry=country(input.channelCountry),channelLanguage=language(input.channelLanguage);
   return campaignCategoryMatches(input.campaignCategory, input.channelCategories)
-    && campaignAudienceMatchesChannel(input.campaignAudience, input.channelAudience);
+    && campaignAudienceMatchesChannel(input.campaignAudience, input.channelAudience)
+    && (countries.length===0||(channelCountry!==null&&countries.includes(channelCountry)))
+    && (languages.length===0||(channelLanguage!==null&&languages.includes(channelLanguage)));
 }

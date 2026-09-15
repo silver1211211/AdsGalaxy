@@ -1,6 +1,7 @@
-import type { PoolConnection } from "mysql2/promise";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy referral rows are dynamically shaped */
 import pool from "@/lib/db";
-import { escapeTelegramHtml, sendTelegramMessage } from "@/lib/telegram";
+import { escapeTelegramHtml } from "@/lib/telegram";
+import { sendLocalizedTelegramMessage } from "@/lib/userLocale";
 import { processReferralJoinReward } from "@/lib/referralSprint";
 import {
   blockReferralIfSelfDevice,
@@ -33,7 +34,7 @@ function validReferralToken(value: unknown) {
 async function finalizeReferral(
   referralId: number,
   signals: ReferralSecuritySignals,
-  notify: { telegramId: string | number; firstName: string } | null,
+  notify: { userId: number; firstName: string } | null,
 ) {
   await markReferralJoinSignals(referralId, signals);
   const selfDevice = await blockReferralIfSelfDevice(referralId);
@@ -41,9 +42,10 @@ async function finalizeReferral(
 
   await processReferralJoinReward(referralId);
   if (notify) {
-    await sendTelegramMessage(
-      notify.telegramId,
-      `<b>New Referral Joined!</b>\n\nHi ${escapeTelegramHtml(notify.firstName)}, someone joined with your referral code. You earned the instant join reward; the verification bonus unlocks after they join and verify the required channel.`,
+    await sendLocalizedTelegramMessage(
+      notify.userId,
+      "bot.referral.joined.message",
+      { name: escapeTelegramHtml(notify.firstName) },
       { parse_mode: "HTML" },
     );
   }
@@ -82,7 +84,7 @@ export async function attributeReferral(input: {
   const conn = await pool.getConnection();
   let created = false;
   let referralId = 0;
-  let referrerTelegramId: string | number = "";
+  let referrerUserId = 0;
   let referrerFirstName = "";
   try {
     await conn.beginTransaction();
@@ -152,7 +154,7 @@ export async function attributeReferral(input: {
 
     created = true;
     referralId = Number(inserted.insertId);
-    referrerTelegramId = referrer.telegram_id;
+    referrerUserId = Number(referrer.id);
     referrerFirstName = referrer.first_name || "User";
     if (promotionLinks.length) {
       await conn.query(
@@ -174,7 +176,7 @@ export async function attributeReferral(input: {
     await finalizeReferral(
       referralId,
       input.signals || EMPTY_SIGNALS,
-      { telegramId: referrerTelegramId, firstName: referrerFirstName },
+      { userId: referrerUserId, firstName: referrerFirstName },
     );
   }
   return { status: "attributed", referralId };

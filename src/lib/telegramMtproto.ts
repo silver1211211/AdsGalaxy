@@ -44,6 +44,8 @@ export const MTPROTO_ACCOUNT_KEYS: MtprotoAccountKey[] = ["account_1", "account_
 
 const clientPromises: Partial<Record<MtprotoAccountKey, Promise<TelegramClient>>> = {};
 const unhealthyAccounts=new Set<MtprotoAccountKey>();
+const unhealthyAccountCodes = new Map<MtprotoAccountKey, string>();
+const accountCooldownUntil = new Map<MtprotoAccountKey, number>();
 
 function getSharedMtprotoConfig() {
   const apiId = Number.parseInt(process.env.TELEGRAM_API_ID || "", 10);
@@ -105,8 +107,11 @@ function safeMtprotoErrorCode(error: unknown) {
   const upper = message.toUpperCase();
 
   if (message === "missing_api_id" || message === "missing_api_hash" || message === "missing_account_sessions") return message;
-  if (message === "session_unauthorized") return "session_auth_error";
+  if (message === "session_unauthorized") return "session_unauthorized";
   if (message === "verification_timeout") return message;
+  if (upper.includes("AUTH_KEY_DUPLICATED")) return "auth_key_duplicated";
+  if (upper.includes("SESSION_REVOKED")) return "session_revoked";
+  if (upper.includes("SESSION_PASSWORD_NEEDED")) return "session_password_needed";
   if (upper.includes("CHANNEL_PRIVATE")) return "channel_private";
   if (upper.includes("INVITE_HASH_EMPTY")) return "invite_hash_empty";
   if (upper.includes("INVITE_HASH_EXPIRED")) return "invite_hash_expired";
@@ -115,11 +120,44 @@ function safeMtprotoErrorCode(error: unknown) {
   if (upper.includes("CHAT_ADMIN_REQUIRED")) return "chat_admin_required";
   if (upper.includes("MESSAGE_ID_INVALID")) return "message_id_invalid";
   if (upper.includes("PEER_ID_INVALID")) return "peer_id_invalid";
-  if (upper.includes("AUTH_KEY") || upper.includes("SESSION_PASSWORD_NEEDED")) return "session_auth_error";
+  if (upper.includes("AUTH_KEY")) return "session_auth_error";
   if (upper.includes("FLOOD")) return "rate_limited";
   if (upper.includes("TIMEOUT") || upper.includes("ECONNRESET") || upper.includes("ETIMEDOUT")) return "network_error";
 
   return "mtproto_error";
+}
+
+function markMtprotoAccountFailure(account: MtprotoAccountKey, error: unknown, code = safeMtprotoErrorCode(error)) {
+  const floodWait = parseFloodWait(error);
+  if (floodWait && floodWait > 0) {
+    accountCooldownUntil.set(account, Date.now() + floodWait * 1000);
+  }
+  if (isMtprotoReauthenticationRequired(code)) {
+    unhealthyAccounts.add(account);
+    unhealthyAccountCodes.set(account, code);
+    delete clientPromises[account];
+  }
+}
+
+function mtprotoAccountAvailabilityCode(account: MtprotoAccountKey) {
+  if (unhealthyAccounts.has(account)) {
+    return unhealthyAccountCodes.get(account) || "account_unhealthy";
+  }
+
+  const cooldownUntil = accountCooldownUntil.get(account) || 0;
+  if (cooldownUntil > Date.now()) return "rate_limited";
+  if (cooldownUntil) accountCooldownUntil.delete(account);
+  return null;
+}
+
+export function isMtprotoReauthenticationRequired(code: string) {
+  return [
+    "auth_key_duplicated",
+    "session_revoked",
+    "session_password_needed",
+    "session_unauthorized",
+    "session_auth_error",
+  ].includes(code);
 }
 
 export function mtprotoAccountNumber(account: MtprotoAccountKey): MtprotoAccountNumber {
@@ -140,6 +178,15 @@ export function getConfiguredMtprotoAccountNumbers(): MtprotoAccountNumber[] {
   return MTPROTO_ACCOUNT_KEYS
     .filter((key) => Boolean(process.env[SESSION_ENV_BY_ACCOUNT[key]]))
     .map(mtprotoAccountNumber);
+}
+
+export function getMtprotoAccountAvailability(accountNumber: MtprotoAccountNumber) {
+  const accountKey = mtprotoAccountKey(accountNumber);
+  if (!accountKey) return { available: false as const, code: "invalid_account" };
+  const code = mtprotoAccountAvailabilityCode(accountKey);
+  return code
+    ? { available: false as const, code }
+    : { available: true as const };
 }
 
 export function getTrackingAccountUsernames() {
@@ -193,14 +240,14 @@ export async function getMtprotoChannelMemberCount(chatId: string | number, pref
   if (!pool.ok) return { ok: false, code: pool.code };
   const preferredKey = preferredAccount ? mtprotoAccountKey(preferredAccount) : null;
   const ordered = preferredKey ? [...pool.accounts.filter(a=>a.key===preferredKey),...pool.accounts.filter(a=>a.key!==preferredKey)] : pool.accounts;
-  const accounts=ordered.filter(a=>!unhealthyAccounts.has(a.key));
+  const accounts=ordered.filter(a=>!mtprotoAccountAvailabilityCode(a.key));
   return resolveMemberCountAcrossAccounts(accounts,unhealthyAccounts,async(account)=>Promise.race([
       (async()=>{ const client=await getMtprotoClient(account,pool.apiId,pool.apiHash); const full=await client.invoke(new Api.channels.GetFullChannel({channel:await client.getInputEntity(chatId)})); return (full.fullChat as unknown as {participantsCount?:unknown}).participantsCount; })(),
       new Promise<unknown>((_,reject)=>setTimeout(()=>reject(new Error("verification_timeout")),10_000)),
     ]),onHealth);
 }
 
-export async function resolveMemberCountAcrossAccounts<T extends {key:MtprotoAccountKey}>(accounts:T[],unhealthy:Set<MtprotoAccountKey>,attempt:(account:T)=>Promise<unknown>,onHealth?:(account:MtprotoAccountKey,status:"healthy"|"unhealthy",code?:string)=>Promise<void>):Promise<ChannelMemberCountResult>{let lastFailure="all_accounts_failed",lastAccount:MtprotoAccountKey|undefined,retryAfterSeconds:number|undefined;for(const account of accounts){if(unhealthy.has(account.key))continue;try{const validated=authoritativeMemberCount(await attempt(account));if(!validated.ok)throw new Error(validated.code);await onHealth?.(account.key,"healthy");return{ok:true,count:validated.count,account:account.key};}catch(error){lastFailure=error instanceof Error&&error.message==="member_count_unavailable"?"member_count_unavailable":safeMtprotoErrorCode(error);lastAccount=account.key;const flood=parseFloodWait(error);if(flood)retryAfterSeconds=flood;if(lastFailure==="session_auth_error"){unhealthy.add(account.key);delete clientPromises[account.key];await onHealth?.(account.key,"unhealthy","session_auth_error");}}}return{ok:false,code:lastFailure,account:lastAccount,retryAfterSeconds};}
+export async function resolveMemberCountAcrossAccounts<T extends {key:MtprotoAccountKey}>(accounts:T[],unhealthy:Set<MtprotoAccountKey>,attempt:(account:T)=>Promise<unknown>,onHealth?:(account:MtprotoAccountKey,status:"healthy"|"unhealthy",code?:string)=>Promise<void>):Promise<ChannelMemberCountResult>{let lastFailure="all_accounts_failed",lastAccount:MtprotoAccountKey|undefined,retryAfterSeconds:number|undefined;for(const account of accounts){if(unhealthy.has(account.key))continue;try{const validated=authoritativeMemberCount(await attempt(account));if(!validated.ok)throw new Error(validated.code);await onHealth?.(account.key,"healthy");return{ok:true,count:validated.count,account:account.key};}catch(error){lastFailure=error instanceof Error&&error.message==="member_count_unavailable"?"member_count_unavailable":safeMtprotoErrorCode(error);lastAccount=account.key;const flood=parseFloodWait(error);if(flood)retryAfterSeconds=flood;if(isMtprotoReauthenticationRequired(lastFailure)){unhealthy.add(account.key);delete clientPromises[account.key];await onHealth?.(account.key,"unhealthy",lastFailure);}}}return{ok:false,code:lastFailure,account:lastAccount,retryAfterSeconds};}
 
 async function resolveInviteWithAccount(
   account: MtprotoAccountConfig,
@@ -252,6 +299,7 @@ export async function resolvePrivateInviteLink(inviteLink: string): Promise<Priv
   if (!pool.ok) return { ok: false, code: pool.code };
 
   for (const account of pool.accounts) {
+    if (mtprotoAccountAvailabilityCode(account.key)) continue;
     try {
       return await Promise.race([
         resolveInviteWithAccount(account, pool.apiId, pool.apiHash, inviteLink),
@@ -279,6 +327,7 @@ export async function resolvePrivateInviteLink(inviteLink: string): Promise<Priv
           console.error(`Private invite MTProto ${account.key} retry failed: ${safeMtprotoErrorCode(retryError)}`);
         }
       }
+      markMtprotoAccountFailure(account.key, error, code);
       console.error(`Private invite MTProto ${account.key} failed: ${code}`);
     }
   }
@@ -293,6 +342,9 @@ export async function joinPrivateInviteWithAccount(
   const accountKey = mtprotoAccountKey(accountNumber);
   if (!accountKey) return { ok: false, code: "invalid_account" };
 
+  const unavailableCode = mtprotoAccountAvailabilityCode(accountKey);
+  if (unavailableCode) return { ok: false, code: unavailableCode };
+
   const pool = getMtprotoAccountPool();
   if (!pool.ok) return { ok: false, code: pool.code };
 
@@ -305,12 +357,15 @@ export async function joinPrivateInviteWithAccount(
   try {
     const client = await getMtprotoClient(account, pool.apiId, pool.apiHash);
     await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+    accountCooldownUntil.delete(account.key);
     return { ok: true, account: account.key, accountNumber, memberStatus: "member" };
   } catch (error) {
     const code = safeMtprotoErrorCode(error);
     if (code === "already_participant") {
+      accountCooldownUntil.delete(account.key);
       return { ok: true, account: account.key, accountNumber, memberStatus: "already_member" };
     }
+    markMtprotoAccountFailure(account.key, error, code);
     console.error(`Private tracking join MTProto ${account.key} failed: ${code}`);
     return { ok: false, code };
   }
@@ -337,7 +392,7 @@ export async function getPrivatePostViews(
     : preferredKey
     ? [...rotated.filter((account) => account.key === preferredKey), ...rotated.filter((account) => account.key !== preferredKey)]
     : rotated;
-  const healthyAccounts = accounts.filter((account) => !unhealthyAccounts.has(account.key));
+  const healthyAccounts = accounts.filter((account) => !mtprotoAccountAvailabilityCode(account.key));
 
   let lastFailure = "all_accounts_failed";
   for (const account of healthyAccounts) {
@@ -350,11 +405,9 @@ export async function getPrivatePostViews(
     } catch (error) {
       const code = safeMtprotoErrorCode(error);
       lastFailure = code;
-      if (code === "session_auth_error") {
-        unhealthyAccounts.add(account.key);
-        delete clientPromises[account.key];
-      }
+      markMtprotoAccountFailure(account.key, error, code);
       console.error(`Private views MTProto ${account.key} failed: ${code}`);
+      if (["channel_invalid", "peer_id_invalid", "channel_private", "chat_admin_required"].includes(code)) break;
     }
   }
 

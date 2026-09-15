@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import AdminLayout from "@/components/layout/AdminLayout";
 import Modal from "@/components/ui/Modal";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
+import AdminTeaserEmergencyPanel from "@/components/admin/AdminTeaserEmergencyPanel";
 import { ArrowLeft, CheckCircle2, CircleHelp, Loader2, Pause, Play, RotateCcw, Star, Trash2, Zap } from "lucide-react";
 
 function formatValue(value: unknown) {
@@ -54,7 +55,6 @@ type CampaignDetailsCampaign = {
   button_text?: string | null;
   parse_mode?: string | null;
   image_url?: string | null;
-  postback_url?: string | null;
   type: string;
   category: string;
   continents: string;
@@ -78,6 +78,14 @@ type CampaignDetailsCampaign = {
   spend?: string | number;
   approved_count?: string | number;
   rejected_count?: string | number;
+  teaser_mode?: "none" | "standard_plus_teaser" | "teaser_only";
+  teaser_enabled?: boolean | number;
+  teaser_creatives?: Array<{
+    id?: number;
+    copy_text: string;
+    position?: number;
+    active?: boolean | number;
+  }>;
 };
 
 type CampaignMetrics = Record<string, string | number | null | undefined>;
@@ -91,6 +99,7 @@ type EditCampaignData = {
   category?: string;
   cpm?: string | number;
   cpc?: string | number;
+  teaser_creatives?: string[];
 };
 
 type PlacementRow = {
@@ -375,6 +384,12 @@ export default function AdminCampaignDetailsPage() {
       name: campaign.name || "",
       campaign_title: campaign.campaign_title || "",
       message_text: campaign.message_text || "",
+      teaser_creatives:
+        campaign.teaser_mode === "teaser_only"
+          ? (campaign.teaser_creatives || [])
+              .filter((item) => item.active === undefined || Boolean(item.active))
+              .map((item) => String(item.copy_text || ""))
+          : undefined,
       link: campaign.link || "",
       button_text: campaign.button_text || "",
       category: campaign.category || "",
@@ -557,15 +572,59 @@ export default function AdminCampaignDetailsPage() {
               className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-md text-sm"
             />
           </div>
-          <div>
-            <label className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Message Text</label>
-            <textarea
-              maxLength={4096}
-              value={String(editData.message_text || "")}
-              onChange={(e) => setEditData({ ...editData, message_text: e.target.value })}
-              className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-md text-sm h-24"
-            />
-          </div>
+          {campaign?.teaser_mode === "teaser_only" ? (
+            <div>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-slate-700 uppercase tracking-wide">
+                  Teaser Messages
+                </label>
+                <span className="text-xs text-slate-400">
+                  {(editData.teaser_creatives || []).length}/5
+                </span>
+              </div>
+
+              <div className="mt-2 space-y-3">
+                {(editData.teaser_creatives || []).map((copy, index) => (
+                  <div key={index}>
+                    <label className="text-[11px] font-semibold text-slate-500">
+                      Message {index + 1}
+                    </label>
+                    <textarea
+                      maxLength={80}
+                      value={copy}
+                      onChange={(e) =>
+                        setEditData({
+                          ...editData,
+                          teaser_creatives: (editData.teaser_creatives || []).map(
+                            (item, itemIndex) =>
+                              itemIndex === index ? e.target.value : item
+                          ),
+                        })
+                      }
+                      className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-md text-sm h-20"
+                    />
+                    <div className="mt-1 text-right text-[10px] text-slate-400">
+                      {Array.from(copy).length}/80
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div>
+              <label className="text-xs font-semibold text-slate-700 uppercase tracking-wide">
+                Message Text
+              </label>
+              <textarea
+                maxLength={4096}
+                value={String(editData.message_text || "")}
+                onChange={(e) =>
+                  setEditData({ ...editData, message_text: e.target.value })
+                }
+                className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-md text-sm h-24"
+              />
+            </div>
+          )}
           <div>
             <label className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Link/URL</label>
             <input
@@ -661,7 +720,7 @@ export default function AdminCampaignDetailsPage() {
                 <button onClick={() => openEmergencyConfirm("fill_empty_slots")} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                   {actionLoading === "emergency-fill" ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />} Emergency Broadcast Push
                 </button>
-              ) : campaign.status === "active" && (
+              ) : campaign.status === "active" && campaign.teaser_mode !== "teaser_only" && (
                 <>
                   <button onClick={() => openEmergencyConfirm("fill_empty_slots")} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                     {actionLoading === "emergency-fill" ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />} Emergency Push: Fill Empty Slots
@@ -714,6 +773,8 @@ export default function AdminCampaignDetailsPage() {
             </div>
           )}
         </div>
+
+        {campaign?.teaser_mode === "teaser_only" && <AdminTeaserEmergencyPanel campaignId={campaign.id} />}
 
         {loading ? (
           <div className="p-8 text-center bg-white rounded-lg border border-slate-200">

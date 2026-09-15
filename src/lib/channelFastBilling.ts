@@ -8,21 +8,37 @@ import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
 import { deleteExhaustedChannelCampaignPosts, type CampaignPostDeletionSummary } from "@/lib/campaignPostDeletion";
 import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
 import { calculateCurrentCanonicalAllocation, shadowWriteChannelAllocation, unitsToDecimal } from "@/lib/channelAllocationLedger";
+import { claimAdvertiserDirectDebit } from "@/lib/advertiserDirectDebit";
 
 type LockedPost = RowDataPacket & {
-  campaign_id: number; channel_id: number; publisher_id: number; campaign_type: string;
+  campaign_id: number; channel_id: number; publisher_id: number; advertiser_id: number; campaign_type: string;
+  funding_model: "legacy_reserved" | "direct_debit";
   campaign_status: string; post_status: string; budget: string | number; cpm: string | number; cpc: string | number; daily_budget_limit: string | number | null;
+  advertiser_discount: string | number;
   views: string | number; settled_views: string | number; settled_clicks: string | number;
 };
 
 async function lockedPost(conn: PoolConnection, postId: number) {
+  // Lock campaign before post everywhere. Settlement writes campaigns before
+  // inserting its post-referencing ledger row, so the inverse post→campaign
+  // order here created a reproducible deadlock.
+  const [identity] = await conn.query<Array<RowDataPacket & { campaign_id: number }>>(
+    "SELECT campaign_id FROM campaign_posts WHERE id=? LIMIT 1",
+    [postId],
+  );
+  if (!identity[0]) return null;
+  await conn.query("SELECT id FROM campaigns WHERE id=? FOR UPDATE", [identity[0].campaign_id]);
   const [rows] = await conn.query<LockedPost[]>(`
     SELECT cp.campaign_id, cp.channel_id, cp.views, cp.settled_views, cp.settled_clicks,
       c.type campaign_type, c.status campaign_status, cp.status post_status,
+      c.user_id advertiser_id, c.funding_model,
       c.budget, c.cpm, c.cpc, c.daily_budget_limit,
+      CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END advertiser_discount,
       ch.user_id publisher_id
     FROM campaign_posts cp JOIN campaigns c ON c.id=cp.campaign_id
-    JOIN channels ch ON ch.id=cp.channel_id WHERE cp.id=? FOR UPDATE`, [postId]);
+    JOIN channels ch ON ch.id=cp.channel_id
+    LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
+    WHERE cp.id=? FOR UPDATE`, [postId]);
   return rows[0] || null;
 }
 
@@ -33,7 +49,7 @@ async function fastDebit(input: { conn: PoolConnection; postId: number; type: "c
   if (!post || post.campaign_status !== "active" || post.post_status !== "active" || post.campaign_type !== `${input.type}s`) {
     return { debited: false, duplicate: false, units: 0, becameExhausted: false, campaignId: null };
   }
-  const unitPrice = getChannelUnitPrice({ type: post.campaign_type, cpm: post.cpm, cpc: post.cpc });
+  const unitPrice = getChannelUnitPrice({ type: post.campaign_type, cpm: post.cpm, cpc: post.cpc, discount: post.advertiser_discount });
   if (!(unitPrice > 0)) return { debited: false, duplicate: false, units: 0, becameExhausted: false, campaignId: post.campaign_id };
   const [[today]] = await input.conn.query<Array<RowDataPacket & { spend: string | number }>>(
     `SELECT
@@ -59,6 +75,25 @@ async function fastDebit(input: { conn: PoolConnection; postId: number; type: "c
     return { debited: false, duplicate: false, units: 0, becameExhausted, campaignId: post.campaign_id };
   }
   const debit = money(units * unitPrice);
+  if (post.funding_model === "direct_debit") {
+    const walletDebit = await claimAdvertiserDirectDebit(input.conn, {
+      sourceKey: `channel:${input.sourceKey}`,
+      advertiserId: post.advertiser_id,
+      campaignId: post.campaign_id,
+      campaignTable: "campaigns",
+      billingType: input.type === "click" ? "channel_click" : "channel_view",
+      amount: debit,
+      description: `Channel ${input.type} charge ${input.sourceKey}`,
+    });
+    if (!walletDebit.ok) {
+      if (walletDebit.duplicate) return { debited: false, duplicate: true, units: 0, becameExhausted: false, campaignId: post.campaign_id };
+      await input.conn.query(
+        "UPDATE campaigns SET status='paused',pause_reason='insufficient_balance' WHERE id=? AND status='active'",
+        [post.campaign_id],
+      );
+      return { debited: false, duplicate: false, units: 0, becameExhausted: false, campaignId: post.campaign_id, insufficientBalance: true };
+    }
+  }
   const [campaignUpdate] = await input.conn.query<ResultSetHeader>(`
     UPDATE campaigns SET budget=GREATEST(budget-?,0), channel_spend=channel_spend+?
     WHERE id=? AND status='active' AND budget>=?`, [debit, debit, post.campaign_id, debit]);
@@ -121,8 +156,8 @@ export async function debitConfirmedChannelViews(postId: number, confirmedViews:
   return cleanupAfterFastDebit(result);
 }
 
-export async function settlePendingChannelPublisherCredits(options: number | { limit?: number; campaignId?: number } = 500) {
-  const limit = typeof options === "number" ? options : (options.limit ?? 500);
+export async function settlePendingChannelPublisherCredits(options: number | { limit?: number; campaignId?: number } = 50) {
+  const limit = Math.min(100, Math.max(1, typeof options === "number" ? options : (options.limit ?? 50)));
   const campaignId = typeof options === "number" ? undefined : options.campaignId;
   const filters = ["publisher_status='pending'"];
   const params: Array<number> = [];
@@ -143,7 +178,7 @@ export async function settlePendingChannelPublisherCredits(options: number | { l
       const [rows] = await conn.query<Array<RowDataPacket & Record<string, unknown>>>(
         `SELECT d.*,c.user_id advertiser_id FROM channel_advertiser_debits d
          JOIN campaigns c ON c.id=d.campaign_id
-         WHERE d.id=? AND d.publisher_status='pending' FOR UPDATE`, [candidate.id]);
+         WHERE d.id=? AND d.publisher_status='pending' FOR UPDATE SKIP LOCKED`, [candidate.id]);
       const row = rows[0]; if (!row) { await conn.rollback(); continue; }
       const [[settings]] = await conn.query<Array<RowDataPacket & { margin: string; reserve: string }>>(
         "SELECT MAX(CASE WHEN `key`='platform_margin_percent' THEN value END) margin, MAX(CASE WHEN `key`='safety_reserve_percent' THEN value END) reserve FROM settings WHERE `key` IN ('platform_margin_percent','safety_reserve_percent')");

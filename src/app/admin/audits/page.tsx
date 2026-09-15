@@ -1,10 +1,13 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any, react/no-unescaped-entities -- legacy audit rows are not schema-generated */
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
+import { useAdminRequestGuard } from "@/hooks/useAdminRequestGuard";
 import { Loader2, ChevronLeft, ChevronRight, Search, AlertTriangle, X, ShieldAlert } from "lucide-react";
 
 export default function AdminAuditsPage() {
+  const beginListRequest = useAdminRequestGuard();
   const [audits, setAudits] = useState([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
@@ -20,6 +23,7 @@ export default function AdminAuditsPage() {
   const [selectedPostId, setSelectedPostId] = useState<number | null>(null);
 
   const fetchAudits = async (p: number, search: string) => {
+    const controller = beginListRequest();
     setLoading(true);
     try {
       const url = new URL("/api/admin/audits", window.location.origin);
@@ -27,21 +31,23 @@ export default function AdminAuditsPage() {
       url.searchParams.set("limit", "10");
       if (search) url.searchParams.set("post_id", search);
 
-      const res = await fetch(url.toString());
+      const res = await fetch(url.toString(), { signal: controller.signal });
       const data = await res.json();
       setAudits(data.audits || []);
       setTotalPages(data.totalPages || 1);
     } catch (err) {
+      if (controller.signal.aborted) return;
       console.error(err);
       setError("Failed to fetch audits");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchAudits(page, postIdSearch);
-  }, [page, postIdSearch]);
+    const timer = window.setTimeout(() => void fetchAudits(page, postIdSearch), 0);
+    return () => window.clearTimeout(timer);
+  }, [page, postIdSearch, beginListRequest]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();

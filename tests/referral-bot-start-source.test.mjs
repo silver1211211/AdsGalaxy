@@ -8,7 +8,9 @@ const route = read("src/app/api/internal/bot/referral/route.ts");
 const auth = read("src/lib/auth.ts");
 const sprint = read("src/lib/referralSprint.ts");
 const promote = read("src/lib/promoteAdsGalaxy.ts");
-const bot = read("/www/wwwroot/bots/adsFusionBot/bot.js");
+const bot = read(process.env.ADSGALAXY_BOT_SOURCE || "/www/wwwroot/bots/adsFusionBot/bot.js");
+const languageRoute = read("src/app/api/internal/bot/language/route.ts");
+const botLocalization = read("src/lib/botLocalization.ts");
 
 test("new referral links use bot start deep links", () => {
   assert.doesNotMatch(sprint, /\?startapp=\$\{referralCode\}/);
@@ -17,13 +19,23 @@ test("new referral links use bot start deep links", () => {
   assert.match(promote, /\?start=\$\{link\.token\}/);
 });
 
-test("bot start uses the authenticated localhost attribution endpoint before welcome", () => {
+test("bot start records attribution independently without blocking welcome", () => {
   assert.match(bot, /http:\/\/127\.0\.0\.1:3006\/api\/internal\/bot\/referral/);
   assert.match(bot, /"Authorization": `Bearer \$\{BOT_TOKEN\}`/);
   assert.match(bot, /const referralToken = String\(ctx\.match \|\| ""\)\.trim\(\)/);
-  assert.ok(bot.indexOf("await attributeStartReferral") < bot.indexOf("await ctx.reply"));
-  assert.match(bot, /Launch Ads Galaxy/);
-  assert.match(bot, /webApp\(label, url\)/);
+  assert.match(bot, /void attributeStartReferralWithRetry/);
+  assert.ok(bot.indexOf("action: \"selector\"") < bot.indexOf("await ctx.reply(selector.text"));
+  assert.match(bot, /bot\.callbackQuery\(\/\^language:\(ru\|en\)\$\//);
+  assert.match(bot, /await ctx\.answerCallbackQuery/);
+  assert.match(botLocalization, /web_app_url/);
+  assert.match(botLocalization, /bot\.start\.openAdsGalaxy/);
+});
+
+test("language endpoint is bot-authenticated and never trusts a client user id", () => {
+  assert.match(languageRoute, /timingSafeEqual/);
+  assert.match(languageRoute, /ensureTelegramUserForReferral/);
+  assert.match(languageRoute, /setUserLocale\(Number\(user\.id\), body\.language\)/);
+  assert.doesNotMatch(languageRoute, /setUserLocale\(Number\(body\.(?:id|user_id)/);
 });
 
 test("internal route uses timing-safe bot authentication and server attribution", () => {
@@ -47,10 +59,9 @@ test("shared attribution preserves self, duplicate, overwrite and fraud protecti
 test("legacy Mini App attribution and bot attribution share one implementation", () => {
   assert.match(auth, /attributeReferral\(\{/);
   assert.match(auth, /token: tgUser\.start_param/);
-  assert.match(auth, /token: telegramUser\.start_param/);
   assert.match(auth, /finalizeStoredReferralForUser/);
   assert.doesNotMatch(auth, /result\.insertId && tgUser\.start_param/);
   assert.match(auth, /newUserId && tgUser\.start_param/);
-  assert.match(auth, /getAuthenticatedUserStatus\([\s\S]*?telegramUser\.start_param[\s\S]*?attributeReferral/);
+  assert.match(auth, /getAuthenticatedUserStatus\([\s\S]*?getAuthenticatedUser\(initData/);
   assert.doesNotMatch(auth, /INSERT IGNORE INTO referrals/);
 });

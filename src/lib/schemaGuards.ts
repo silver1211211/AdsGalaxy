@@ -2,8 +2,11 @@ import type { PoolConnection } from "mysql2/promise";
 import pool from "@/lib/db";
 
 type Db = typeof pool | PoolConnection;
+const columnCapabilityCache = new Map<string, boolean>();
 
 export async function columnExists(db: Db, table: string, column: string) {
+  const cacheKey = `${table}.${column}`;
+  if (db === pool && columnCapabilityCache.has(cacheKey)) return columnCapabilityCache.get(cacheKey)!;
   const [rows]: any = await db.query(
     `SELECT 1
      FROM INFORMATION_SCHEMA.COLUMNS
@@ -13,7 +16,9 @@ export async function columnExists(db: Db, table: string, column: string) {
      LIMIT 1`,
     [table, column]
   );
-  return rows.length > 0;
+  const exists = rows.length > 0;
+  if (db === pool) columnCapabilityCache.set(cacheKey, exists);
+  return exists;
 }
 
 async function addColumnIfMissing(db: Db, table: string, column: string, definition: string) {

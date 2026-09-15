@@ -25,10 +25,17 @@ test("publisher lifecycle and withdrawal HTML notifications use HTML parse mode"
 });
 
 test("all confirmed direct HTML Telegram paths use HTML mode and escape dynamic values", () => {
-  for (const source of [adminChannels, adminBots, subscriberCron, withdrawals, audits, referralAttribution]) {
+  // Only paths that construct HTML messages themselves need parse-mode and
+  // escaping assertions. Several callers now delegate notifications to shared
+  // helpers and must not be forced back to the former inline implementation.
+  for (const source of [withdrawals, audits, referralAttribution]) {
     assert.match(source, /parse_mode: "HTML"/);
     assert.match(source, /escapeTelegramHtml\(/);
   }
+  assert.match(subscriberCron, /refreshSubscriberChannel/);
+  assert.doesNotMatch(subscriberCron, /sendTelegramMessage\(/);
+  assert.doesNotMatch(adminChannels, /sendChannelWelcomePostIfNeeded/);
+  assert.doesNotMatch(adminBots, /sendChannelWelcomePostIfNeeded/);
   assert.match(notifications, /escapeTelegramHtml\(title\)/);
   assert.match(notifications, /escapeTelegramHtml\(name\)/);
   assert.match(notifications, /escapeTelegramHtml\(botUsername\)/);
@@ -81,7 +88,8 @@ test("reactivation, approval, resume, and duplicate paths cannot resend welcome 
   const reactivationReturn = channelCreate.indexOf('message: "Channel reactivated and updated"');
   const freshInsert = channelCreate.indexOf("INSERT INTO channels");
   assert.ok(reactivationReturn >= 0 && reactivationReturn < freshInsert);
-  assert.match(channelCreate, /if \(!channel\.is_deleted\)[\s\S]*This channel is already active in your dashboard/);
+  assert.equal(channelCreate.match(/sendChannelWelcomePostIfNeeded\(/g)?.length, 1);
+  assert.match(channelCreate, /ExistingChannelRow/);
   assert.doesNotMatch(adminChannels, /sendChannelWelcomePostIfNeeded/);
   assert.doesNotMatch(channelActions, /sendChannelWelcomePostIfNeeded/);
 });

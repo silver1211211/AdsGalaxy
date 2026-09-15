@@ -1,8 +1,9 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/set-state-in-effect -- legacy automation payloads are not schema-generated */
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
-import { Bot, CheckCircle2, FileText, Globe2, Loader2, PauseCircle, PlayCircle, ShieldCheck, SlidersHorizontal, Users, XCircle } from "lucide-react";
+import { Bot, CheckCircle2, FileText, Globe2, Loader2, PauseCircle, PlayCircle, ShieldCheck, SlidersHorizontal, Users } from "lucide-react";
 
 type AutomationData = {
   settings: Array<{ key: string; value: string; description?: string }>;
@@ -161,7 +162,7 @@ export default function AutomationCenterPage() {
               <div className="grid gap-2 md:grid-cols-5">
                 <Input value={bulk.ids} onChange={(value) => setBulk((prev) => ({ ...prev, ids: value }))} placeholder="IDs, comma separated" />
                 <Select value={bulk.campaign_type} onChange={(value) => setBulk((prev) => ({ ...prev, campaign_type: value }))}><option value="campaign">Campaign</option><option value="miniapp_rewarded">Mini App Ad</option></Select>
-                <Select value={bulk.bulk_action} onChange={(value) => setBulk((prev) => ({ ...prev, bulk_action: value }))}><option value="approve">Approve Many</option><option value="reject">Reject Many</option><option value="pause">Pause Many</option><option value="resume">Resume Many</option><option value="feature">Feature Many</option><option value="hide">Hide Many</option></Select>
+                <Select value={bulk.bulk_action} onChange={(value) => setBulk((prev) => ({ ...prev, bulk_action: value }))}><option value="approve">Approve Many</option><option value="pause">Pause Many</option><option value="resume">Resume Many</option><option value="feature">Feature Many</option><option value="hide">Hide Many</option></Select>
                 <button onClick={() => submit({ action: "bulk_action", ...bulk, ids: bulk.ids.split(",").map((id) => Number(id.trim())).filter(Boolean) })} className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-black uppercase tracking-widest text-white md:col-span-2">Run Bulk Action</button>
               </div>
             </section>

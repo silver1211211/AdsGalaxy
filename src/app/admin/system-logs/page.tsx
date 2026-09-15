@@ -1,7 +1,9 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy system-log metadata is intentionally dynamic */
 
 import React, { useEffect, useMemo, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
+import { useAdminRequestGuard } from "@/hooks/useAdminRequestGuard";
 import { AlertCircle, CheckCircle2, ChevronLeft, ChevronRight, Clock, Eye, FileText, Loader2, Search, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -50,6 +52,7 @@ function JsonBlock({ value }: { value: any }) {
 }
 
 export default function AdminSystemLogsPage() {
+  const beginListRequest = useAdminRequestGuard();
   const [logs, setLogs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
@@ -63,6 +66,7 @@ export default function AdminSystemLogsPage() {
   const [selectedLog, setSelectedLog] = useState<any>(null);
 
   const fetchLogs = async () => {
+    const controller = beginListRequest();
     setLoading(true);
     try {
       const url = new URL("/api/admin/system-logs", window.location.origin);
@@ -73,23 +77,25 @@ export default function AdminSystemLogsPage() {
       if (status !== "all") url.searchParams.set("status", status);
       if (date) url.searchParams.set("date", date);
 
-      const res = await fetch(url.toString());
+      const res = await fetch(url.toString(), { signal: controller.signal });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to fetch system logs");
       setLogs(data.logs || []);
       setTotalPages(data.totalPages || 1);
       setTotal(data.total || 0);
     } catch (error) {
+      if (controller.signal.aborted) return;
       console.error(error);
       setLogs([]);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchLogs();
-  }, [page, search, type, status, date]);
+    const timer = window.setTimeout(() => void fetchLogs(), 0);
+    return () => window.clearTimeout(timer);
+  }, [page, search, type, status, date, beginListRequest]);
 
   const totals = useMemo(() => {
     return logs.reduce((acc, log) => {

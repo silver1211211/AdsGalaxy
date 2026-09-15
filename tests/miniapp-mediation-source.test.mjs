@@ -56,11 +56,12 @@ test("internal cooldown skips only AdsGalaxy internal while external candidates 
 });
 
 test("impression-time cooldown serializes a Mini App/user pair before financial writes", () => {
+  const impressionWriter = internalAds.slice(internalAds.indexOf("export async function recordInternalAdImpression"));
   assert.match(internalAds, /SELECT GET_LOCK\(\?, 5\) AS acquired/);
   assert.match(internalAds, /SELECT id FROM miniapps WHERE id = \? FOR UPDATE/);
   assert.match(internalAds, /WHERE miniapp_id = \?\s*AND telegram_user_id = \?\s*AND created_at >= DATE_SUB\(NOW\(\), INTERVAL \? SECOND\)/);
   assert.match(internalAds, /return \{ duplicate: false, insufficient_balance: false, cooldown: true \}/);
-  assert.ok(internalAds.indexOf("SELECT GET_LOCK") < internalAds.indexOf("UPDATE users SET ad_balance"));
+  assert.ok(impressionWriter.indexOf("SELECT GET_LOCK") < impressionWriter.indexOf("claimAdvertiserDirectDebit"));
 });
 
 test("internal cooldown with no external candidate returns friendly message without exact seconds", () => {

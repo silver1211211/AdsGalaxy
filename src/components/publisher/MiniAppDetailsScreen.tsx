@@ -8,6 +8,7 @@ import {
   Edit3, Play, Pause, Info,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import OwnerModerationRejection from "@/components/shared/OwnerModerationRejection";
 import MiniAppAnalyticsDashboard from "@/components/publisher/MiniAppAnalyticsDashboard";
 import { buildMiniappSdkUrl } from "@/lib/miniappSdkUrl";
 import MiniAppRewardCallbackPanel from "@/components/publisher/MiniAppRewardCallbackPanel";
@@ -272,6 +273,7 @@ export default function MiniAppDetailsScreen({
 
       <div className="flex-1 overflow-y-auto">
         <div className="space-y-3 p-4 pb-8">
+          <OwnerModerationRejection entityType="miniapp" entityId={miniapp.id} status={miniapp.status} />
 
           {/* ── Daily Performance ── */}
           {isValidMiniappId && <MiniAppAnalyticsDashboard miniappId={miniappId} />}

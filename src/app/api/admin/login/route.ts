@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import type { RowDataPacket } from "mysql2/promise";
+import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import pool from "@/lib/db";
-import { createAdminSessionCookieValue } from "@/lib/adminAuth";
+import { createAdminPreviewCookieValue, createAdminSessionCookieValue } from "@/lib/adminAuth";
 
 type AdminRow = RowDataPacket & {
   id: number;
@@ -27,6 +27,15 @@ function sessionMaxAgeSeconds() {
   return Number.isFinite(configured) && configured > 0 ? configured : 8 * 60 * 60;
 }
 
+function isPreviewAdminRequest(request: Request) {
+  const url = new URL(request.url);
+  const forwardedHost = String(request.headers.get("x-forwarded-host") || "").split(",")[0].trim();
+  const hostname = (forwardedHost || url.hostname).toLowerCase().replace(/:\d+$/, "");
+  return process.env.NODE_ENV !== "production"
+    && process.env.ENABLE_LOCAL_MINIAPP_DEV === "true"
+    && (hostname === "preview.adsgalaxy.online" || hostname === "localhost" || hostname === "127.0.0.1");
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({})) as Record<string, unknown>;
@@ -47,14 +56,19 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
     }
 
-    const token = crypto.randomBytes(32).toString("base64url");
-    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
     const maxAge = sessionMaxAgeSeconds();
-    const [sessionResult]: any = await pool.query(
-      "INSERT INTO admin_sessions (admin_id, token_hash, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))",
-      [rows[0].id, tokenHash, maxAge]
-    );
-    const authString = createAdminSessionCookieValue(Number(sessionResult.insertId), token);
+    let authString: string;
+    if (isPreviewAdminRequest(request)) {
+      authString = createAdminPreviewCookieValue(rows[0].id, rows[0].username, Date.now() + maxAge * 1000);
+    } else {
+      const token = crypto.randomBytes(32).toString("base64url");
+      const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+      const [sessionResult] = await pool.query<ResultSetHeader>(
+        "INSERT INTO admin_sessions (admin_id, token_hash, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))",
+        [rows[0].id, tokenHash, maxAge]
+      );
+      authString = createAdminSessionCookieValue(Number(sessionResult.insertId), token);
+    }
     
     const response = NextResponse.json({ success: true });
     response.cookies.set("admin_auth", authString, {

@@ -165,7 +165,7 @@ test("admin navigation, dashboard removal, Promote feature, and mobile layout so
   assert.equal(fs.existsSync(path.join(root, "src/app/admin/promote-ads-galaxy/page.tsx")), true);
   assert.equal(fs.existsSync(path.join(root, "src/app/api/admin/promote-ads-galaxy/route.ts")), true);
   assert.doesNotMatch(page, /href="\/admin\/promote-ads-galaxy"|Promotion controls/);
-  assert.match(page, /Unknown audience/);
+  assert.match(page, /Needs audience classification/);
   assert.match(page, /Authoritative active inventory/);
   assert.match(page, /All delivery — channels \+ Mini App/);
   assert.match(page, /Last 7 days — totals/);

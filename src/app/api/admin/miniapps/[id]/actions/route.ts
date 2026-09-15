@@ -29,6 +29,7 @@ export async function POST(
   try {
     const { id } = await params;
     const { action } = await request.json();
+    if (action === "reject") return NextResponse.json({ error: "MODERATION_REASON_REQUIRED", code: "MODERATION_REASON_REQUIRED" }, { status: 400 });
     const statusMap: Record<string, string> = {
       await: "awaiting",
       approve: "approved",

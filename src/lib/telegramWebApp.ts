@@ -16,11 +16,10 @@ type TelegramWindow = Window & {
   };
 };
 
-// Some Telegram Android/WebView sessions expose WebApp.initData several
-// seconds after the document starts. Keep the boot screen alive long enough
-// for those sessions instead of permanently failing after only 2.4 seconds.
-const INIT_DATA_RETRIES = 80;
-const INIT_DATA_INTERVAL_MS = 150;
+// Keep the wait bounded. The application shell renders independently; only
+// authenticated card requests wait for a delayed Telegram bridge.
+const INIT_DATA_RETRIES = 30;
+const INIT_DATA_INTERVAL_MS = 100;
 let sessionInitData = "";
 let activeInitDataWait: Promise<string> | null = null;
 
@@ -42,6 +41,10 @@ function getSessionTelegramInitData() {
   // request per retry and can make a slow Mini App launch even slower. The
   // caller records one start event and one completion event instead.
   return currentInitData || sessionInitData;
+}
+
+export function getAvailableTelegramInitData() {
+  return getSessionTelegramInitData();
 }
 
 export function getTelegramWebApp() {

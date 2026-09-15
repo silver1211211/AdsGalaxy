@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import ts from "typescript";
 
 const root=process.cwd();
 const read=(file)=>fs.readFileSync(path.join(root,file),"utf8");
-function loadEngine(){const file=path.join(root,"src/lib/miniappPublisherCpmEngine.ts"),source=read("src/lib/miniappPublisherCpmEngine.ts");const js=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true},fileName:file}).outputText;const module={exports:{}};new Function("require","module","exports",js)((name)=>name==="@/lib/db"?{default:{}}:require(name),module,module.exports);return module.exports;}
+const nodeRequire=createRequire(import.meta.url);
+function loadEngine(){const file=path.join(root,"src/lib/miniappPublisherCpmEngine.ts"),source=read("src/lib/miniappPublisherCpmEngine.ts");const js=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true},fileName:file}).outputText;const testModule={exports:{}};new Function("require","module","exports",js)((name)=>name==="@/lib/db"?{default:{}}:nodeRequire(name),testModule,testModule.exports);return testModule.exports;}
 const engine=loadEngine();
 const settings={min_cpm:.5,recommended_cpm:1,max_cpm:32,max_publisher_share:.5,absolute_publisher_cpm_cap:11,reserve_share:.1,required_platform_margin_share:.1,geo_unknown_factor:.45,geo_factor_min:.25,geo_factor_max:1,geo_multipliers:{US:1,IN:.68},frequency_decay_rate:.16,frequency_zero_after:120,quality_factor_min:0,quality_factor_max:1,trust_factor_min:.1,trust_factor_max:1,fraud_factor_min:0,fraud_factor_max:1,formula_version:"miniapp_publisher_cpm_v2"};
 const economics=(overrides={})=>engine.calculateDynamicPublisherEconomics({economicValue:.02,country:"US",demandYieldFactor:1,uniquenessFactor:1,frequencyFactor:1,qualityFactor:1,trustFactor:1,fraudFactor:1,...overrides},settings);
@@ -19,7 +21,7 @@ test("5 unique quality traffic earns more",()=>assert.ok(economics({uniquenessFa
 test("6 publisher payout never exceeds default 50 percent envelope",()=>assert.ok(economics().publisher_payout<=.01));
 test("7 publisher CPM never exceeds eleven dollars",()=>{assert.ok(economics({economicValue:1}).publisher_cpm<=11);const batch=economics({economicValue:1000,impressionCount:10000});assert.ok(batch.publisher_cpm<=11);assert.equal(batch.publisher_cap,110);});
 test("8 publisher CPM can be zero",()=>assert.equal(economics({qualityFactor:0}).publisher_cpm,0));
-test("9 advertiser debit remains authoritative when publisher payout is zero",()=>{const source=read("src/lib/miniappInternalAds.ts");assert.match(source,/UPDATE users SET ad_balance = ad_balance - \?/);assert.match(source,/advertiser_debit/);assert.equal(economics({fraudFactor:0}).publisher_payout,0);});
+test("9 advertiser debit remains authoritative when publisher payout is zero",()=>{const source=read("src/lib/miniappInternalAds.ts"),directDebit=read("src/lib/advertiserDirectDebit.ts");assert.match(source,/claimAdvertiserDirectDebit/);assert.match(directDebit,/UPDATE users SET ad_balance=ad_balance-\? WHERE id=\? AND ad_balance>=\?/);assert.match(source,/advertiser_debit/);assert.equal(economics({fraudFactor:0}).publisher_payout,0);});
 test("10 platform margin never becomes negative",()=>assert.ok(economics({economicValue:.001}).platform_retained>=0));
 test("11 reserve accounting remains exact",()=>assert.equal(economics().reserve,.002));
 test("12 fixed mode remains inside economic and risk safeguards",()=>{const value=economics({cpmMode:"fixed",fixedPublisherCpm:100,frequencyFactor:.1,fraudFactor:.2});assert.ok(value.publisher_payout<value.publisher_cap&&value.publisher_cpm<=11);});

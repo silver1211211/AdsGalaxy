@@ -1,294 +1,63 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- legacy advertiser aggregate payloads are not schema-generated */
+/* eslint-disable @typescript-eslint/no-explicit-any -- aggregate rows are dynamically shaped */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
-import { advertiserConversionSummary } from "@/lib/conversionTracking";
-import { columnExists } from "@/lib/schemaGuards";
-import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByAdvertiser } from "@/lib/miniappCampaignMetrics";
+import { logSlowRequest } from "@/lib/performanceTiming";
+import { CACHE_TTL_SECONDS, cacheGetOrSet, redisKeys } from "@/lib/redisCache";
+import { getMiniAppCampaignMetricsByAdvertiser } from "@/lib/miniappCampaignMetrics";
 
 export async function GET(request: Request) {
+  const startedAt = Date.now();
   try {
-    const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUserStatus(initData, { request });
-    const [
-      hasCampaignPostViews,
-      hasBroadcastDeliveryCost,
-      hasClickSettlementAdvertiserPaid,
-      hasViewSettlementAdvertiserPaid,
-      hasViewSettlementCampaignId,
-    ] = await Promise.all([
-      columnExists(pool, "campaign_posts", "views"),
-      columnExists(pool, "broadcast_deliveries", "cost"),
-      columnExists(pool, "ad_settlements", "advertiser_paid"),
-      columnExists(pool, "ad_settlements_views", "advertiser_paid"),
-      columnExists(pool, "ad_settlements_views", "campaign_id"),
-    ]);
-    const canUseViewSettlementSpend = hasViewSettlementAdvertiserPaid && hasViewSettlementCampaignId;
-    const campaignPostImpressionsExpr = hasCampaignPostViews
-      ? "COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.campaign_id = c.id), 0)"
-      : "COALESCE((SELECT COUNT(*) FROM campaign_posts cp WHERE cp.campaign_id = c.id), 0)";
-    const campaignPostTodayImpressionsExpr = hasCampaignPostViews
-      ? "COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.campaign_id = c.id AND cp.created_at >= CURDATE()), 0)"
-      : "COALESCE((SELECT COUNT(*) FROM campaign_posts cp WHERE cp.campaign_id = c.id AND cp.created_at >= CURDATE()), 0)";
-    const campaignPostYesterdayImpressionsExpr = hasCampaignPostViews
-      ? "COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.campaign_id = c.id AND cp.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND cp.created_at < CURDATE()), 0)"
-      : "COALESCE((SELECT COUNT(*) FROM campaign_posts cp WHERE cp.campaign_id = c.id AND cp.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND cp.created_at < CURDATE()), 0)";
-    const totalCampaignPostViewsExpr = hasCampaignPostViews
-      ? "SELECT SUM(cp.views) as total_views"
-      : "SELECT COUNT(cp.id) as total_views";
-    const broadcastSpendExpr = hasBroadcastDeliveryCost
-      ? "COALESCE((SELECT SUM(bd.cost) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id), 0)"
-      : "0";
-    const broadcastTodaySpendExpr = hasBroadcastDeliveryCost
-      ? "COALESCE((SELECT SUM(bd.cost) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.created_at >= CURDATE()), 0)"
-      : "0";
-    const clickSettlementSpendExpr = hasClickSettlementAdvertiserPaid
-      ? "COALESCE((SELECT SUM(s.advertiser_paid) FROM ad_settlements s WHERE s.campaign_id = c.id), 0)"
-      : "0";
-    const viewSettlementSpendExpr = canUseViewSettlementSpend
-      ? "COALESCE((SELECT SUM(sv.advertiser_paid) FROM ad_settlements_views sv WHERE sv.campaign_id = c.id), 0)"
-      : "0";
-    const clickSettlementTodaySpendExpr = hasClickSettlementAdvertiserPaid
-      ? "COALESCE((SELECT SUM(s.advertiser_paid) FROM ad_settlements s WHERE s.campaign_id = c.id AND s.created_at >= CURDATE()), 0)"
-      : "0";
-    const viewSettlementTodaySpendExpr = canUseViewSettlementSpend
-      ? "COALESCE((SELECT SUM(sv.advertiser_paid) FROM ad_settlements_views sv WHERE sv.campaign_id = c.id AND sv.created_at >= CURDATE()), 0)"
-      : "0";
-    const totalClickSettlementSpendExpr = hasClickSettlementAdvertiserPaid
-      ? "COALESCE((SELECT SUM(s.advertiser_paid) FROM ad_settlements s JOIN campaigns c ON s.campaign_id = c.id WHERE c.user_id = ?), 0)"
-      : "0";
-    const totalViewSettlementSpendExpr = canUseViewSettlementSpend
-      ? "COALESCE((SELECT SUM(sv.advertiser_paid) FROM ad_settlements_views sv JOIN campaigns c ON sv.campaign_id = c.id WHERE c.user_id = ?), 0)"
-      : "0";
-    const totalBroadcastSpendExpr = hasBroadcastDeliveryCost
-      ? "COALESCE((SELECT SUM(bd.cost) FROM broadcast_deliveries bd JOIN campaigns c ON bd.campaign_id = c.id WHERE c.user_id = ?), 0)"
-      : "0";
-    const adSpendParams = [
-      ...(hasClickSettlementAdvertiserPaid ? [user.id] : []),
-      ...(canUseViewSettlementSpend ? [user.id] : []),
-      ...(hasBroadcastDeliveryCost ? [user.id] : []),
-    ];
-
-    // 1. Get Ad Balance from user table
-    const [userRows]: any = await pool.query("SELECT ad_balance FROM users WHERE id = ?", [user.id]);
-    const adBalance = parseFloat(userRows[0]?.ad_balance || "0");
-
-    // 2. Locked Balance is reserved only for Channel campaigns.
-    const [lockedResult]: any = await pool.query(
-      "SELECT COALESCE(SUM(budget), 0) as locked FROM campaigns WHERE user_id = ? AND status IN ('pending', 'active', 'paused')",
-      [user.id]
-    );
-    const lockedBalance = parseFloat(lockedResult[0]?.locked || "0");
-
-    // 3. Get Active Ads count
-    const [activeResult]: any = await pool.query(
-      "SELECT COUNT(*) as active_count FROM campaigns WHERE user_id = ? AND status = 'active'",
-      [user.id]
-    );
-    const [miniappActiveResult]: any = await pool.query(
-      "SELECT COUNT(*) as active_count FROM miniapp_rewarded_campaigns WHERE advertiser_id = ? AND status IN ('approved', 'active')",
-      [user.id]
-    );
-    const activeAds = Number(activeResult[0]?.active_count || 0) + Number(miniappActiveResult[0]?.active_count || 0);
-
-    // 4. Get Total Campaigns count
-    const [totalResult]: any = await pool.query(
-      "SELECT COUNT(*) as total_count FROM campaigns WHERE user_id = ?",
-      [user.id]
-    );
-    const [miniappTotalResult]: any = await pool.query(
-      "SELECT COUNT(*) as total_count FROM miniapp_rewarded_campaigns WHERE advertiser_id = ?",
-      [user.id]
-    );
-    const totalCampaigns = Number(totalResult[0]?.total_count || 0) + Number(miniappTotalResult[0]?.total_count || 0);
-
-    // 5. Get Recent Campaigns (channel/bot campaigns + Mini App campaigns, merged into one list)
-    const [channelAndBotCampaigns]: any = await pool.query(
-      `SELECT
-        c.id,
-        c.name,
-        c.type,
-        c.category,
-        c.status,
-        c.budget,
-        c.created_at,
-        COALESCE((SELECT COUNT(*) FROM ad_conversions conv WHERE conv.campaign_type = 'campaign' AND conv.campaign_id = c.id), 0) as conversions,
-        COALESCE((SELECT SUM(conv.conversion_value) FROM ad_conversions conv WHERE conv.campaign_type = 'campaign' AND conv.campaign_id = c.id), 0) as conversion_value,
-        CASE
-          WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
-          ELSE ${campaignPostImpressionsExpr}
-        END as impressions,
-        CASE
-          WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= CURDATE()), 0)
-          ELSE ${campaignPostTodayImpressionsExpr}
-        END as today_impressions,
-        CASE
-          WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND bd.created_at < CURDATE()), 0)
-          ELSE ${campaignPostYesterdayImpressionsExpr}
-        END as yesterday_impressions,
-        CASE
-          WHEN c.type = 'broadcast' THEN 0
-          ELSE COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0)
-        END as clicks,
-        CASE
-          WHEN c.type = 'broadcast' THEN ${broadcastSpendExpr}
-          ELSE (
-            ${clickSettlementSpendExpr}
-            + ${viewSettlementSpendExpr}
-          )
-        END as spend,
-        CASE
-          WHEN c.type = 'broadcast' THEN ${broadcastTodaySpendExpr}
-          ELSE (
-            ${clickSettlementTodaySpendExpr}
-            + ${viewSettlementTodaySpendExpr}
-          )
-        END as today_spend,
-        CASE
-          WHEN (
-            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
-            ELSE ${campaignPostImpressionsExpr} END
-          ) > 0
-          THEN (
-            CASE WHEN c.type = 'broadcast' THEN 0
-            ELSE COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0) END
-          ) / (
-            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
-            ELSE ${campaignPostImpressionsExpr} END
-          ) * 100
-          ELSE 0
-        END as ctr,
-        CASE
-          WHEN (
-            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
-            ELSE ${campaignPostImpressionsExpr} END
-          ) > 0
-          THEN (
-            CASE WHEN c.type = 'broadcast' THEN ${broadcastSpendExpr}
-            ELSE (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) END
-          ) / (
-            CASE WHEN c.type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
-            ELSE ${campaignPostImpressionsExpr} END
-          ) * 1000
-          ELSE 0
-        END as average_cpm,
-        CASE
-          WHEN c.type != 'broadcast' AND COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0) > 0
-          THEN (${clickSettlementSpendExpr} + ${viewSettlementSpendExpr}) / COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 1)
-          ELSE 0
-        END as average_cpc,
-        CASE
-          WHEN c.type = 'broadcast' THEN (SELECT MAX(bd.created_at) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id)
-          ELSE (SELECT MAX(cp.created_at) FROM campaign_posts cp WHERE cp.campaign_id = c.id)
-        END as last_displayed_at
-       FROM campaigns c
-       WHERE c.user_id = ?
-       ORDER BY c.created_at DESC
-       LIMIT 3`,
-      [user.id]
-    );
-    const [miniAppCampaigns]: any = await pool.query(
-      `SELECT
-        c.id,
-        c.campaign_name as name,
-        'miniapp' as type,
-        NULL as category,
-        c.status,
-        c.remaining_budget as budget,
-        c.remaining_budget,
-        c.advertiser_cpm_bid as cpm,
-        c.created_at,
-        COALESCE((SELECT COUNT(*) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0) as conversions,
-        COALESCE((SELECT SUM(conv.conversion_value) FROM ad_conversions conv WHERE conv.campaign_type = 'miniapp' AND conv.campaign_id = c.id), 0) as conversion_value,
-        0 as delivery_metrics_loaded_separately
-       FROM miniapp_rewarded_campaigns c
-       WHERE c.advertiser_id = ?
-       ORDER BY c.created_at DESC
-       LIMIT 3`,
-      [user.id]
-    );
-    const miniAppMetrics = await getMiniAppCampaignMetricsByAdvertiser(user.id);
-    const normalizedMiniAppCampaigns = miniAppCampaigns.map((row: any) => applyMiniAppCampaignMetrics(row, miniAppMetrics));
-    const recentCampaigns = [...channelAndBotCampaigns, ...normalizedMiniAppCampaigns]
-      .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-      .slice(0, 3);
-
-    // 6. Stats (Views, Clicks, Spent)
-    // Get actual clicks from campaign_clicks table
-    const [clicksResult]: any = await pool.query(
-      `SELECT COUNT(cc.id) as total_clicks 
-       FROM campaign_clicks cc
-       JOIN campaigns c ON cc.campaign_id = c.id
-       WHERE c.user_id = ?`,
-      [user.id]
-    );
-    const totalClicks = clicksResult[0]?.total_clicks || 0;
-
-    // Get views (from campaign_posts)
-    const [viewsResult]: any = await pool.query(
-      `${totalCampaignPostViewsExpr}
-       FROM campaign_posts cp
-       JOIN campaigns c ON cp.campaign_id = c.id
-       WHERE c.user_id = ?`,
-      [user.id]
-    );
-    const totalViews = viewsResult[0]?.total_views || 0;
-
-    // Deposits are account funding, not campaign spend. Keep them separate from live debits.
-    const [depositResult]: any = await pool.query(
-      "SELECT SUM(amount) as total FROM deposits WHERE user_id = ? AND status = 'paid'",
-      [user.id]
-    );
-    const totalDeposited = parseFloat(depositResult[0]?.total || "0");
-    const miniappImpressions = [...miniAppMetrics.values()].reduce((sum, metric) => sum + metric.impressions, 0);
-    const miniappClicks = [...miniAppMetrics.values()].reduce((sum, metric) => sum + metric.clicks, 0);
-    const [broadcastViewsResult]: any = await pool.query(
-      `SELECT COUNT(*) as total_views
-       FROM broadcast_deliveries bd
-       JOIN campaigns c ON bd.campaign_id = c.id
-       WHERE c.user_id = ? AND bd.status = 'sent'`,
-      [user.id]
-    );
-    const broadcastViews = Number(broadcastViewsResult[0]?.total_views || 0);
-
-    const conversionSummary = await advertiserConversionSummary(user.id);
-    const conversions = Number(conversionSummary.conversions || 0);
-    const trackedClicks = Number(conversionSummary.tracked_clicks || 0);
-    const conversionValue = Number(conversionSummary.conversion_value || 0);
-    const adSpendRows: any = await pool.query(
-      `SELECT
-        (
-          ${totalClickSettlementSpendExpr}
-          + ${totalViewSettlementSpendExpr}
-          + ${totalBroadcastSpendExpr}
-          + 0
-        ) as spend`,
-      adSpendParams
-    );
-    const miniappSpend = [...miniAppMetrics.values()].reduce((sum, metric) => sum + metric.spend, 0);
-    const adSpend = Number(adSpendRows[0]?.[0]?.spend || 0) + miniappSpend;
-
-    return NextResponse.json({
-      ad_balance: adBalance,
-      ad_balance_locked: lockedBalance,
-      active_ads: activeAds,
-      total_campaigns: totalCampaigns,
-      total_views: Number(totalViews || 0) + broadcastViews + miniappImpressions,
-      total_clicks: Number(totalClicks || 0) + miniappClicks,
-      total_spent: adSpend,
-      total_deposited: totalDeposited,
-      tracked_clicks: trackedClicks,
-      conversions,
-      conversion_rate: trackedClicks > 0 ? conversions / trackedClicks : 0,
-      cost_per_conversion: conversions > 0 ? adSpend / conversions : 0,
-      conversion_value: conversionValue,
-      miniapp_impressions: miniappImpressions,
-      recent_campaigns: recentCampaigns
-    }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
-
-  } catch (error: any) {
-    console.error("Stats API Error:", error);
+    const user = await getAuthenticatedUserStatus(request.headers.get("x-telegram-init-data"), { request });
+    const userId = Number(user.id);
+    const payload = await cacheGetOrSet(redisKeys.advertiserStats(userId), CACHE_TTL_SECONDS.ADVERTISER_ANALYTICS, async () => {
+      const [campaignResult, deliveryResult, miniappCampaignResult, miniappMetrics, accountResult, conversionResult, recentResult] = await Promise.all([
+        pool.query(`SELECT COUNT(*) total_campaigns,SUM(status='active') active_ads,COALESCE(SUM(channel_spend),0) channel_spend FROM campaigns WHERE user_id=?`, [userId]),
+        pool.query(`SELECT
+          (SELECT COALESCE(COUNT(*),0) FROM broadcast_deliveries bd JOIN campaigns c ON c.id=bd.campaign_id WHERE c.user_id=? AND bd.status='sent') broadcast_views,
+          (SELECT COALESCE(SUM(cp.views),0) FROM campaign_posts cp JOIN campaigns c ON c.id=cp.campaign_id WHERE c.user_id=? AND c.type<>'broadcast') channel_views,
+          (SELECT COALESCE(COUNT(*),0) FROM campaign_clicks cc JOIN campaigns c ON c.id=cc.campaign_id WHERE c.user_id=? AND c.type<>'broadcast') channel_clicks,
+          (SELECT COALESCE(SUM(bd.cost),0) FROM broadcast_deliveries bd JOIN campaigns c ON c.id=bd.campaign_id WHERE c.user_id=? AND bd.status='sent') broadcast_spend`, [userId, userId, userId, userId]),
+        pool.query(`SELECT COUNT(*) total_campaigns,
+          COALESCE(SUM(status IN ('approved','active')),0) active_ads
+          FROM miniapp_rewarded_campaigns WHERE advertiser_id=?`, [userId]),
+        getMiniAppCampaignMetricsByAdvertiser(userId),
+        pool.query("SELECT COALESCE(SUM(amount),0) total_deposited FROM deposits WHERE user_id=? AND status='paid'", [userId]),
+        pool.query(`SELECT COUNT(*) conversions,COALESCE(SUM(conversion_value),0) conversion_value,
+          COUNT(DISTINCT click_id) tracked_clicks FROM ad_conversions WHERE advertiser_id=?`, [userId]),
+        pool.query(`(SELECT 'regular' source,id,name,type,campaign_kind,status,created_at,
+          CASE WHEN type='broadcast' THEN (SELECT COALESCE(SUM(cost),0) FROM broadcast_deliveries WHERE campaign_id=campaigns.id AND status='sent') ELSE channel_spend END spend
+          FROM campaigns WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 1)
+          UNION ALL (SELECT 'miniapp' source,id,campaign_name name,'miniapp' type,NULL campaign_kind,status,created_at,total_spend spend
+          FROM miniapp_rewarded_campaigns WHERE advertiser_id=? ORDER BY created_at DESC,id DESC LIMIT 1)
+          ORDER BY created_at DESC,id DESC,source ASC LIMIT 1`, [userId, userId]),
+      ]);
+      const campaign: any = (campaignResult[0] as any[])[0] || {};
+      const delivery: any = (deliveryResult[0] as any[])[0] || {};
+      const miniappCampaign: any = (miniappCampaignResult[0] as any[])[0] || {};
+      const miniapp = [...miniappMetrics.values()].reduce((totals, metric) => ({
+        views: totals.views + Number(metric.impressions || 0),
+        clicks: totals.clicks + Number(metric.clicks || 0),
+        spend: totals.spend + Number(metric.spend || 0),
+      }), { views: 0, clicks: 0, spend: 0 });
+      const account: any = (accountResult[0] as any[])[0] || {};
+      const conversion: any = (conversionResult[0] as any[])[0] || {};
+      const totalSpent = Number(campaign.channel_spend || 0) + Number(delivery.broadcast_spend || 0) + Number(miniapp.spend || 0);
+      const trackedClicks = Number(conversion.tracked_clicks || 0);
+      const conversions = Number(conversion.conversions || 0);
+      return {
+        active_ads: Number(campaign.active_ads || 0) + Number(miniappCampaign.active_ads || 0), total_campaigns: Number(campaign.total_campaigns || 0) + Number(miniappCampaign.total_campaigns || 0),
+        total_views: Number(delivery.channel_views || 0) + Number(delivery.broadcast_views || 0) + Number(miniapp.views || 0), total_clicks: Number(delivery.channel_clicks || 0) + Number(miniapp.clicks || 0), total_spent: totalSpent,
+        total_deposited: Number(account.total_deposited || 0), tracked_clicks: trackedClicks, conversions,
+        conversion_rate: trackedClicks > 0 ? conversions / trackedClicks : 0, cost_per_conversion: conversions > 0 ? totalSpent / conversions : 0,
+        conversion_value: Number(conversion.conversion_value || 0), miniapp_impressions: Number(miniapp.views || 0), recent_campaigns: recentResult[0],
+      };
+    });
+    return NextResponse.json({ ...payload, ad_balance: Number(user.ad_balance || 0), ad_balance_locked: Number(user.advertiser_balance_locked || 0) }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
+  } catch (error) {
     const status = getAuthErrorStatus(error);
+    console.error("Stats API Error:", error);
     return NextResponse.json({ error: status === 500 ? "Failed to load advertiser stats" : "Unauthorized" }, { status });
-  }
+  } finally { logSlowRequest("/api/advertiser/stats", startedAt); }
 }

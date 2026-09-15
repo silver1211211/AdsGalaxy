@@ -2,9 +2,10 @@
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
+import { useAdminRequestGuard } from "@/hooks/useAdminRequestGuard";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Modal from "@/components/ui/Modal";
-import { Ban, CheckCircle2, ChevronLeft, ChevronRight, Edit2, ExternalLink, Loader2, Search, ShieldOff } from "lucide-react";
+import { Ban, CheckCircle2, ChevronLeft, ChevronRight, Edit2, ExternalLink, Loader2, Percent, Search, ShieldOff } from "lucide-react";
 
 type UserRow = {
   id: number;
@@ -28,6 +29,10 @@ type UserRow = {
   advertiser_approved_campaigns?: string | number;
   advertiser_rejected_campaigns?: string | number;
   advertiser_total_spend?: string | number;
+  advertiser_cpm_discount?: string | number;
+  advertiser_cpc_discount?: string | number;
+  advertiser_discount_expires_at?: string | null;
+  advertiser_discount_active?: boolean | number;
 };
 
 type UserAction = {
@@ -60,6 +65,13 @@ function isUserBanned(user: UserRow) {
   return user.status === "banned" || Boolean(user.is_banned);
 }
 
+function localDateTime(value?: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
 function StatusBadge({ user }: { user: UserRow }) {
   const banned = isUserBanned(user);
   return (
@@ -72,6 +84,7 @@ function StatusBadge({ user }: { user: UserRow }) {
 }
 
 export default function AdminUsersPage() {
+  const beginListRequest = useAdminRequestGuard();
   const [users, setUsers] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
@@ -90,28 +103,33 @@ export default function AdminUsersPage() {
   const [unbanDisposition, setUnbanDisposition] = useState("trust_remediation");
   const [exemptionType, setExemptionType] = useState("test_account");
   const [exemptionExpiresAt, setExemptionExpiresAt] = useState("");
+  const [discountModalOpen, setDiscountModalOpen] = useState(false);
+  const [discountUser, setDiscountUser] = useState<UserRow | null>(null);
+  const [discountData, setDiscountData] = useState({ cpm: false, cpc: false, cpmAmount: "", cpcAmount: "", expiresAt: "" });
 
   const fetchUsers = async (p: number, q: string, trust = trustFilter) => {
+    const controller = beginListRequest();
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/users?page=${p}&limit=10&search=${encodeURIComponent(q)}&trust=${encodeURIComponent(trust)}`);
+      const res = await fetch(`/api/admin/users?page=${p}&limit=10&search=${encodeURIComponent(q)}&trust=${encodeURIComponent(trust)}`, { signal: controller.signal });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to fetch users");
       setUsers(data.users || []);
       setTotalPages(data.totalPages || 1);
     } catch (err: unknown) {
+      if (controller.signal.aborted) return;
       setError(errorMessage(err, "Failed to fetch users"));
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       fetchUsers(page, searchQuery, trustFilter);
-    }, 0);
+    }, 300);
     return () => window.clearTimeout(timer);
-  }, [page, searchQuery, trustFilter]);
+  }, [page, searchQuery, trustFilter, beginListRequest]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -212,6 +230,49 @@ export default function AdminUsersPage() {
     }
   };
 
+  const openDiscountModal = (user: UserRow) => {
+    const cpmAmount = Number(user.advertiser_cpm_discount || 0);
+    const cpcAmount = Number(user.advertiser_cpc_discount || 0);
+    setDiscountUser(user);
+    setDiscountData({
+      cpm: cpmAmount > 0,
+      cpc: cpcAmount > 0,
+      cpmAmount: cpmAmount > 0 ? String(cpmAmount) : "",
+      cpcAmount: cpcAmount > 0 ? String(cpcAmount) : "",
+      expiresAt: localDateTime(user.advertiser_discount_expires_at),
+    });
+    setDiscountModalOpen(true);
+  };
+
+  const saveDiscount = async () => {
+    if (!discountUser) return;
+    setIsUpdating(true);
+    try {
+      const res = await fetch("/api/admin/users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: discountUser.id,
+          action: "set_advertiser_discount",
+          discount_cpm_enabled: discountData.cpm,
+          discount_cpc_enabled: discountData.cpc,
+          cpm_discount: discountData.cpmAmount,
+          cpc_discount: discountData.cpcAmount,
+          discount_expires_at: discountData.expiresAt ? new Date(discountData.expiresAt).toISOString() : null,
+          reason: "Admin updated advertiser rate discount",
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to update advertiser discount");
+      setDiscountModalOpen(false);
+      await fetchUsers(page, searchQuery, trustFilter);
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to update advertiser discount"));
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
   const ActionButtons = ({ user }: { user: UserRow }) => {
     const banned = isUserBanned(user);
     return (
@@ -222,6 +283,13 @@ export default function AdminUsersPage() {
           title="Edit balances"
         >
           <Edit2 size={14} /> Edit
+        </button>
+        <button
+          onClick={() => openDiscountModal(user)}
+          className={`inline-flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs font-semibold ${user.advertiser_discount_active ? "border-violet-200 bg-violet-50 text-violet-700" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}
+          title="Set advertiser CPM/CPC discount"
+        >
+          <Percent size={14} /> Discount
         </button>
         {banned ? (
           <button
@@ -343,6 +411,31 @@ export default function AdminUsersPage() {
                 {isUpdating ? "Saving..." : "Save"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {discountModalOpen && discountUser && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-bold text-slate-900">Advertiser Discount</h3>
+            <p className="mb-4 text-xs text-slate-500">{displayUsername(discountUser)} · subtracts from the bid per 1,000</p>
+            <div className="space-y-3">
+              {(["cpm", "cpc"] as const).map((model) => {
+                const enabled = discountData[model];
+                const amountKey = model === "cpm" ? "cpmAmount" : "cpcAmount";
+                return <div key={model} className="rounded-md border border-slate-200 p-3">
+                  <label className="flex items-center justify-between text-sm font-semibold text-slate-700">
+                    <span>{model.toUpperCase()} discount</span>
+                    <input type="checkbox" checked={enabled} onChange={(event) => setDiscountData((current) => ({ ...current, [model]: event.target.checked }))} className="h-4 w-4 rounded border-slate-300 text-violet-600" />
+                  </label>
+                  {enabled && <div className="relative mt-2"><span className="absolute left-3 top-2 text-sm text-slate-400">$</span><input type="number" min="0.01" max="1000" step="0.01" value={discountData[amountKey]} onChange={(event) => setDiscountData((current) => ({ ...current, [amountKey]: event.target.value }))} className="w-full rounded-md border border-slate-200 py-2 pl-7 pr-3 text-sm outline-none focus:border-violet-500" placeholder="Discount per 1,000" /></div>}
+                </div>;
+              })}
+              {(discountData.cpm || discountData.cpc) && <div><label className="mb-1 block text-xs font-bold text-slate-500">Expires</label><input type="datetime-local" value={discountData.expiresAt} onChange={(event) => setDiscountData((current) => ({ ...current, expiresAt: event.target.value }))} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-violet-500" /></div>}
+              <p className="text-[11px] text-slate-500">Applies immediately to new and running campaigns. Uncheck both to disable.</p>
+            </div>
+            <div className="mt-5 flex gap-3"><button onClick={() => setDiscountModalOpen(false)} className="flex-1 rounded-md border border-slate-200 py-2 text-sm font-medium text-slate-600">Cancel</button><button onClick={saveDiscount} disabled={isUpdating} className="flex-1 rounded-md bg-violet-600 py-2 text-sm font-medium text-white disabled:opacity-50">{isUpdating ? "Saving..." : "Save"}</button></div>
           </div>
         </div>
       )}

@@ -3,6 +3,8 @@
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
 import { Loader2, Edit2, ShieldAlert, Upload, Megaphone } from "lucide-react";
+import { useTranslations } from "@/i18n/client";
+import { teaserErrorMessageKey } from "@/lib/teaserErrorMessage";
 
 type SelfPromotionForm = {
   enabled: boolean;
@@ -90,10 +92,28 @@ const CPM_GROUPS: CpmGroup[] = [
     recommendedKey: "miniapp_internal_recommended_cpm",
     maxKey: "miniapp_internal_max_cpm",
   },
+  {
+    id: "growth",
+    title: "Channel Growth CPS",
+    description: "Controls minimum, recommended, and maximum cost per verified subscriber.",
+    minKey: "channel_growth_cps_min",
+    recommendedKey: "channel_growth_cps_recommended",
+    maxKey: "channel_growth_cps_max",
+  },
+  {
+    id: "teaser",
+    title: "Teaser CPM",
+    description: "Controls server-authoritative Teaser impression pricing.",
+    minKey: "teaser_min_cpm",
+    recommendedKey: "teaser_recommended_cpm",
+    maxKey: "teaser_max_cpm",
+  },
 ];
 
 const GROUPED_CPM_KEYS = new Set(CPM_GROUPS.flatMap((group) => [group.minKey, group.recommendedKey, group.maxKey]));
 const BOT_REVENUE_SPLIT_KEYS = new Set(["broadcast_publisher_share_percent", "broadcast_reserve_percent"]);
+const GROWTH_REVENUE_SPLIT_KEYS = new Set(["channel_growth_publisher_share", "channel_growth_platform_share", "channel_growth_reserve_share"]);
+const TEASER_REVENUE_SPLIT_KEYS = new Set(["teaser_publisher_share", "teaser_platform_share", "teaser_reserve_share"]);
 
 const defaultSelfPromotionForm: SelfPromotionForm = {
   enabled: true,
@@ -118,6 +138,8 @@ function datetimeLocal(value: unknown) {
 }
 
 export default function AdminSettingsPage() {
+  const { t } = useTranslations();
+  const safeTeaserError = (code: unknown) => t(teaserErrorMessageKey(code) as never);
   const [settings, setSettings] = useState<SettingRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -130,6 +152,10 @@ export default function AdminSettingsPage() {
   const [cpmGroupValues, setCpmGroupValues] = useState({ min: "", recommended: "", max: "" });
   const [editingBotRevenueSplit, setEditingBotRevenueSplit] = useState(false);
   const [botRevenueSplitValues, setBotRevenueSplitValues] = useState({ publisher: "30", reserve: "10" });
+  const [editingGrowthRevenueSplit, setEditingGrowthRevenueSplit] = useState(false);
+  const [growthRevenueSplitValues, setGrowthRevenueSplitValues] = useState({ publisher: "60", platform: "30", reserve: "10" });
+  const [editingTeaserSettings, setEditingTeaserSettings] = useState(false);
+  const [teaserValues, setTeaserValues] = useState({ min: "0.50", recommended: "0.89", max: "6.50", publisher: "60", platform: "30", reserve: "10" });
   const [revenueSplits, setRevenueSplits] = useState<RevenueSplits | null>(null);
   const [editingRevenueSplit, setEditingRevenueSplit] = useState<"channel" | "miniapp" | null>(null);
   const [revenueSplitValues, setRevenueSplitValues] = useState({ publisher: "", reserve: "" });
@@ -217,6 +243,15 @@ export default function AdminSettingsPage() {
     setEditingBotRevenueSplit(true);
   };
 
+  const openGrowthRevenueSplitModal = () => {
+    setGrowthRevenueSplitValues({
+      publisher: settingValue("channel_growth_publisher_share", "60"),
+      platform: settingValue("channel_growth_platform_share", "30"),
+      reserve: settingValue("channel_growth_reserve_share", "10"),
+    });
+    setEditingGrowthRevenueSplit(true);
+  };
+
   const openRevenueSplitModal = (type: "channel" | "miniapp") => {
     const split = revenueSplits?.[type];
     setRevenueSplitValues({
@@ -224,6 +259,27 @@ export default function AdminSettingsPage() {
       reserve: String(split?.reserve_percent ?? (type === "miniapp" ? 10 : 6)),
     });
     setEditingRevenueSplit(type);
+  };
+
+  const openTeaserSettings = () => {
+    setTeaserValues({
+      min: settingValue("teaser_min_cpm", "0.50"), recommended: settingValue("teaser_recommended_cpm", "0.89"), max: settingValue("teaser_max_cpm", "6.50"),
+      publisher: settingValue("teaser_publisher_share", "60"), platform: settingValue("teaser_platform_share", "30"), reserve: settingValue("teaser_reserve_share", "10"),
+    });
+    setEditingTeaserSettings(true);
+  };
+  const teaserSplitTotal = Number(teaserValues.publisher) + Number(teaserValues.platform) + Number(teaserValues.reserve);
+  const handleTeaserSettingsSave = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (Math.abs(teaserSplitTotal - 100) > 0.000001) { setError(safeTeaserError("TEASER_SPLIT_INVALID")); return; }
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/admin/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings: {
+        teaser_publisher_share: teaserValues.publisher, teaser_platform_share: teaserValues.platform, teaser_reserve_share: teaserValues.reserve,
+      } }) });
+      const data = await res.json().catch(() => ({})); if (!res.ok) { setError(safeTeaserError(data?.error || "TEASER_SETTINGS_SAVE_FAILED")); return; }
+      setEditingTeaserSettings(false); await fetchSettings();
+    } catch { setError(safeTeaserError("TEASER_SETTINGS_SAVE_FAILED")); } finally { setSubmitting(false); }
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -298,6 +354,30 @@ export default function AdminSettingsPage() {
       fetchSettings();
     } catch (err: unknown) {
       setError(errorMessage(err, "Failed to save Bot revenue settings"));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleGrowthRevenueSplitSave = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/admin/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ settings: {
+          channel_growth_publisher_share: growthRevenueSplitValues.publisher,
+          channel_growth_platform_share: growthRevenueSplitValues.platform,
+          channel_growth_reserve_share: growthRevenueSplitValues.reserve,
+        } }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to save Channel Growth revenue settings");
+      setEditingGrowthRevenueSplit(false);
+      void fetchSettings();
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to save Channel Growth revenue settings"));
     } finally {
       setSubmitting(false);
     }
@@ -532,6 +612,17 @@ export default function AdminSettingsPage() {
         </div>
       )}
 
+      {editingTeaserSettings && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/50 p-4">
+          <form onSubmit={handleTeaserSettingsSave} className="w-full max-w-xl space-y-5 rounded-2xl bg-white p-6 shadow-2xl">
+            <div><h3 className="text-xl font-black text-slate-950">Teaser Revenue Split</h3><p className="text-sm text-slate-500">Controls how Teaser campaign revenue is allocated.</p></div>
+            <fieldset className="grid grid-cols-3 gap-3"><legend className="mb-2 text-xs font-black uppercase text-slate-400">{t("teaser.revenueSplit")}</legend>{([['publisher',t('teaser.publisher')],['platform',t('teaser.platform')],['reserve',t('teaser.reserve')]] as const).map(([key,label])=><label key={key} className="text-xs font-bold text-slate-600">{label} %<input type="number" min="0" max="100" step="0.01" required value={teaserValues[key]} onChange={e=>setTeaserValues(v=>({...v,[key]:e.target.value}))} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 font-mono"/></label>)}</fieldset>
+            <p className={`rounded-xl px-3 py-2 text-sm font-black ${Math.abs(teaserSplitTotal-100)<0.000001?'bg-emerald-50 text-emerald-700':'bg-red-50 text-red-700'}`}>{t("teaser.total")}: {Number.isFinite(teaserSplitTotal)?teaserSplitTotal.toFixed(2):'—'}%{Math.abs(teaserSplitTotal-100)>=0.000001?` — ${t("teaser.totalMustEqual")}`:''}</p>
+            <div className="flex gap-3"><button type="button" onClick={()=>setEditingTeaserSettings(false)} className="flex-1 rounded-xl border px-4 py-2 font-bold">{t("common.cancel")}</button><button disabled={submitting||Math.abs(teaserSplitTotal-100)>=0.000001} className="flex-1 rounded-xl bg-blue-600 px-4 py-2 font-bold text-white disabled:opacity-40">{submitting?t("common.saving"):t("common.save")}</button></div>
+          </form>
+        </div>
+      )}
+
       {editingBotRevenueSplit && (
         <div className="fixed inset-0 z-[100] bg-slate-900/50 flex items-center justify-center p-4">
           <div className="w-full max-w-lg overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
@@ -546,6 +637,26 @@ export default function AdminSettingsPage() {
                 <div className="space-y-1"><span className="text-xs font-bold text-slate-600">Platform remainder</span><div className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-mono font-bold text-slate-700">{Math.max(0, 100 - (Number(botRevenueSplitValues.publisher) || 0) - (Number(botRevenueSplitValues.reserve) || 0)).toFixed(2)}%</div></div>
               </div>
               <div className="flex gap-3 pt-4"><button type="button" onClick={() => setEditingBotRevenueSplit(false)} className="flex-1 rounded-md border border-slate-200 py-2 text-sm font-medium text-slate-600">Cancel</button><button type="submit" disabled={submitting} className="flex-1 rounded-md bg-blue-600 py-2 text-sm font-medium text-white disabled:opacity-50">{submitting ? "Saving..." : "Save revenue split"}</button></div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {editingGrowthRevenueSplit && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="w-full max-w-lg overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
+            <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+              <h3 className="text-lg font-bold text-slate-900">Channel Growth Revenue Split</h3>
+              <p className="text-xs font-semibold text-slate-500">Publisher, Ads Galaxy, and reserve shares must total exactly 100%.</p>
+            </div>
+            <form onSubmit={handleGrowthRevenueSplitSave} className="space-y-4 p-6">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <label className="space-y-1"><span className="text-xs font-bold text-slate-600">Publisher %</span><input type="number" min="0" max="100" step="0.01" required value={growthRevenueSplitValues.publisher} onChange={(e) => setGrowthRevenueSplitValues((v) => ({ ...v, publisher: e.target.value }))} className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono" /></label>
+                <label className="space-y-1"><span className="text-xs font-bold text-slate-600">Ads Galaxy %</span><input type="number" min="0" max="100" step="0.01" required value={growthRevenueSplitValues.platform} onChange={(e) => setGrowthRevenueSplitValues((v) => ({ ...v, platform: e.target.value }))} className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono" /></label>
+                <label className="space-y-1"><span className="text-xs font-bold text-slate-600">Reserve %</span><input type="number" min="0" max="100" step="0.01" required value={growthRevenueSplitValues.reserve} onChange={(e) => setGrowthRevenueSplitValues((v) => ({ ...v, reserve: e.target.value }))} className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono" /></label>
+              </div>
+              <p className="text-xs font-bold text-slate-500">Total: {(Number(growthRevenueSplitValues.publisher || 0) + Number(growthRevenueSplitValues.platform || 0) + Number(growthRevenueSplitValues.reserve || 0)).toFixed(2)}%</p>
+              <div className="flex gap-3 pt-4"><button type="button" onClick={() => setEditingGrowthRevenueSplit(false)} className="flex-1 rounded-md border border-slate-200 py-2 text-sm font-medium text-slate-600">Cancel</button><button type="submit" disabled={submitting} className="flex-1 rounded-md bg-blue-600 py-2 text-sm font-medium text-white disabled:opacity-50">{submitting ? "Saving..." : "Save revenue split"}</button></div>
             </form>
           </div>
         </div>
@@ -760,14 +871,22 @@ export default function AdminSettingsPage() {
           )}
 
           {!loading && (
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-5">
               <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="mb-3 flex items-start justify-between gap-2"><div><h3 className="text-sm font-bold text-slate-900">Bot Broadcast Revenue Split</h3><p className="mt-1 text-xs text-slate-500">Applies to successful Bot broadcasts only.</p></div><button onClick={openBotRevenueSplitModal} className="rounded p-1.5 text-slate-400 hover:bg-blue-50 hover:text-blue-600" title="Edit Bot revenue split"><Edit2 size={16} /></button></div>
                 <div className="grid grid-cols-3 gap-2"><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Publisher</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{settingValue("broadcast_publisher_share_percent", "30")}%</p></div><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Reserve</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{settingValue("broadcast_reserve_percent", "10")}%</p></div><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Platform</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{Math.max(0, 100 - Number(settingValue("broadcast_publisher_share_percent", "30")) - Number(settingValue("broadcast_reserve_percent", "10"))).toFixed(2)}%</p></div></div>
               </div>
               <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                <div className="mb-3 flex items-start justify-between gap-2"><div><h3 className="text-sm font-bold text-slate-900">Channel Growth Revenue Split</h3><p className="mt-1 text-xs text-slate-500">Applied atomically to each verified subscriber conversion.</p></div><button onClick={openGrowthRevenueSplitModal} className="rounded p-1.5 text-slate-400 hover:bg-blue-50 hover:text-blue-600" title="Edit Growth revenue split"><Edit2 size={16} /></button></div>
+                <div className="grid grid-cols-3 gap-2"><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Publisher</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{settingValue("channel_growth_publisher_share", "60")}%</p></div><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Ads Galaxy</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{settingValue("channel_growth_platform_share", "30")}%</p></div><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Reserve</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{settingValue("channel_growth_reserve_share", "10")}%</p></div></div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="mb-3 flex items-start justify-between gap-2"><div><h3 className="text-sm font-bold text-slate-900">Channel Revenue Split</h3><p className="mt-1 text-xs text-slate-500">Direct split for new Channel settlements.</p></div><button onClick={() => openRevenueSplitModal("channel")} className="rounded p-1.5 text-slate-400 hover:bg-blue-50 hover:text-blue-600" title="Edit Channel revenue split"><Edit2 size={16} /></button></div>
                 <div className="grid grid-cols-3 gap-2"><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Publisher</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{revenueSplits?.channel.publisher_percent ?? 54}%</p></div><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Reserve</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{revenueSplits?.channel.reserve_percent ?? 6}%</p></div><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Platform</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{revenueSplits?.channel.platform_percent ?? 40}%</p></div></div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                <div className="mb-3 flex items-start justify-between gap-2"><div><h3 className="text-sm font-bold text-slate-900">Teaser Revenue Split</h3><p className="mt-1 text-xs text-slate-500">Applies to settled Teaser impressions.</p></div><button onClick={openTeaserSettings} className="rounded p-1.5 text-slate-400 hover:bg-blue-50 hover:text-blue-600" title="Edit Teaser revenue split"><Edit2 size={16} /></button></div>
+                <div className="grid grid-cols-3 gap-2"><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Publisher</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{settingValue("teaser_publisher_share", "60")}%</p></div><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Platform</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{settingValue("teaser_platform_share", "30")}%</p></div><div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[9px] font-black uppercase text-slate-400">Reserve</p><p className="mt-1 font-mono text-sm font-bold text-blue-700">{settingValue("teaser_reserve_share", "10")}%</p></div></div>
               </div>
               <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="mb-3 flex items-start justify-between gap-2"><div><h3 className="text-sm font-bold text-slate-900">Mini App Revenue Split</h3><p className="mt-1 text-xs text-slate-500">Publisher is a dynamic maximum; payout may be lower or zero.</p></div><button onClick={() => openRevenueSplitModal("miniapp")} className="rounded p-1.5 text-slate-400 hover:bg-blue-50 hover:text-blue-600" title="Edit Mini App revenue split"><Edit2 size={16} /></button></div>
@@ -783,7 +902,7 @@ export default function AdminSettingsPage() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {settings
-                .filter((s) => s.key !== "last_broadcast_cron_run" && !GROUPED_CPM_KEYS.has(s.key) && !BOT_REVENUE_SPLIT_KEYS.has(s.key))
+                .filter((s) => s.key !== "last_broadcast_cron_run" && !GROUPED_CPM_KEYS.has(s.key) && !BOT_REVENUE_SPLIT_KEYS.has(s.key) && !GROWTH_REVENUE_SPLIT_KEYS.has(s.key) && !TEASER_REVENUE_SPLIT_KEYS.has(s.key))
                 .map((setting) => (
                 <div key={setting.key} className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm flex flex-col justify-between">
                   <div>

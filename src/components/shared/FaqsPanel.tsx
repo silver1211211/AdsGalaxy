@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
+import { useTranslations } from "@/i18n/client";
 
 type FaqType = "referral" | "publisher" | "advertiser";
 
@@ -19,13 +20,8 @@ const emptyFaqs: FaqGroups = {
   advertiser: [],
 };
 
-const tabs: Array<{ key: FaqType; label: string }> = [
-  { key: "referral", label: "Referral FAQs" },
-  { key: "publisher", label: "Publisher FAQs" },
-  { key: "advertiser", label: "Advertiser FAQs" },
-];
-
 export default function FaqsPanel({ defaultTab = "referral" }: { defaultTab?: FaqType }) {
+  const { locale } = useTranslations();
   const [faqs, setFaqs] = useState<FaqGroups>(emptyFaqs);
   const [activeTab, setActiveTab] = useState<FaqType>(defaultTab);
   const [expandedId, setExpandedId] = useState<number | null>(null);
@@ -34,7 +30,7 @@ export default function FaqsPanel({ defaultTab = "referral" }: { defaultTab?: Fa
   useEffect(() => {
     let cancelled = false;
 
-    fetch("/api/faqs")
+    fetch(`/api/faqs?locale=${locale}`)
       .then((res) => res.json())
       .then((data) => {
         if (cancelled) return;
@@ -52,13 +48,19 @@ export default function FaqsPanel({ defaultTab = "referral" }: { defaultTab?: Fa
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [locale]);
+
+  const tabs: Array<{ key: FaqType; label: string }> = [
+    { key: "referral", label: locale === "ru" ? "Реферальная программа" : "Referral FAQs" },
+    { key: "publisher", label: locale === "ru" ? "Для издателей" : "Publisher FAQs" },
+    { key: "advertiser", label: locale === "ru" ? "Для рекламодателей" : "Advertiser FAQs" },
+  ];
 
   const currentFaqs = faqs[activeTab] || [];
 
   return (
     <div className="max-w-3xl mx-auto">
-      <h1 className="mb-6 text-2xl font-bold text-slate-900">Frequently Asked Questions</h1>
+      <h1 className="mb-6 text-2xl font-bold text-slate-900">{locale === "ru" ? "Часто задаваемые вопросы" : "Frequently Asked Questions"}</h1>
 
       <div className="mb-8 grid grid-cols-1 gap-2 rounded-xl bg-slate-100 p-1 sm:grid-cols-3">
         {tabs.map((tab) => (
@@ -81,9 +83,9 @@ export default function FaqsPanel({ defaultTab = "referral" }: { defaultTab?: Fa
 
       <div className="space-y-4">
         {isLoading ? (
-          <div className="py-10 text-center text-slate-500">Loading FAQs...</div>
+          <div className="py-10 text-center text-slate-500">{locale === "ru" ? "Загрузка вопросов…" : "Loading FAQs..."}</div>
         ) : currentFaqs.length === 0 ? (
-          <div className="py-10 text-center text-slate-500">No FAQs available yet.</div>
+          <div className="py-10 text-center text-slate-500">{locale === "ru" ? "Вопросов пока нет." : "No FAQs available yet."}</div>
         ) : (
           currentFaqs.map((faq) => (
             <div

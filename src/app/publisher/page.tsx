@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy dashboard API rows are not yet fully typed */
 
 import React from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
@@ -24,7 +25,6 @@ import { apiFetch } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { AnimatePresence } from "framer-motion";
 import { useHeader } from "@/context/HeaderContext";
-import AppBootState from "@/components/shared/AppBootState";
 import { getTelegramWebApp, waitForTelegramInitData } from "@/lib/telegramWebApp";
 import { miniappReloadDebug } from "@/lib/miniappReloadDebug";
 import ChannelDetailsScreen from "@/components/publisher/ChannelDetailsScreen";
@@ -32,14 +32,21 @@ import AddChannelScreen from "@/components/publisher/AddChannelScreen";
 import BotDetailsScreen from "@/components/publisher/BotDetailsScreen";
 import AddBotScreen from "@/components/publisher/AddBotScreen";
 import MiniAppDetailsScreen from "@/components/publisher/MiniAppDetailsScreen";
+import { StatusText } from "@/components/i18n/LocalizedEnum";
 import Toast from "@/components/ui/Toast";
 import { publicChannelUrl } from "@/lib/telegramChannelInput";
 import PromoteAdsGalaxyBanner from "@/components/publisher/PromoteAdsGalaxyBanner";
+import { useTranslations } from "@/i18n/client";
+import { readDashboardSnapshot, writeDashboardSnapshot } from "@/lib/dashboardSnapshot";
 
 type PublisherStats = {
   balance_locked?: string | number;
   balance_available?: string | number;
+  today_earnings?: string | number;
+  lifetime_earnings?: string | number;
   total_channels?: string | number;
+  total_bots?: string | number;
+  total_miniapps?: string | number;
   total_monetized?: string | number;
   total_withdrawn?: string | number;
   join_rewarded?: number | boolean;
@@ -77,8 +84,10 @@ const canReactivate = (status: string) =>
 
 export default function PublisherDashboard() {
   const { setTitle } = useHeader();
-  const [stats, setStats] = React.useState<PublisherStats | null>(null);
-  const [isLoading, setIsLoading] = React.useState(true);
+  const { t } = useTranslations();
+  const initialSnapshot = React.useMemo(() => readDashboardSnapshot<PublisherStats>("publisher"), []);
+  const [stats, setStats] = React.useState<PublisherStats | null>(initialSnapshot);
+  const [isLoading, setIsLoading] = React.useState(!initialSnapshot);
   const [loadError, setLoadError] = React.useState(false);
   const [isVerifying, setIsVerifying] = React.useState(false);
   const [verifyError, setVerifyError] = React.useState("");
@@ -98,13 +107,14 @@ export default function PublisherDashboard() {
 
   const fetchStats = React.useCallback(async () => {
     miniappReloadDebug("publisher_dashboard_fetch_started", { route: "/api/publisher/stats", phase: "started" });
-    setIsLoading(true);
+    if (!initialSnapshot) setIsLoading(true);
     setLoadError(false);
     try {
       const res  = await apiFetch("/api/publisher/stats");
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to load publisher stats");
       setStats(data);
+      writeDashboardSnapshot("publisher", data);
       miniappReloadDebug("publisher_dashboard_fetch_completed", { route: "/api/publisher/stats", phase: "completed", status: res.status });
     } catch (error) {
       miniappReloadDebug("publisher_dashboard_fetch_failed", { route: "/api/publisher/stats", phase: error instanceof DOMException && error.name === "AbortError" ? "aborted" : "failed", error_name: error instanceof Error ? error.name : "UnknownError", error_message: error instanceof Error ? error.message : "Publisher fetch failed" });
@@ -113,13 +123,13 @@ export default function PublisherDashboard() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [initialSnapshot]);
 
   React.useEffect(() => {
-    setTitle("Dashboard");
-    const timer = window.setTimeout(() => { fetchStats(); }, 0);
+    setTitle(t("common.dashboard"));
+    const timer = window.setTimeout(() => { void fetchStats(); }, 0);
     return () => window.clearTimeout(timer);
-  }, [fetchStats, setTitle]);
+  }, [fetchStats, setTitle, t]);
 
   React.useEffect(() => {
     function close() { setOpenMenu(null); }
@@ -179,10 +189,10 @@ export default function PublisherDashboard() {
   }
 
   const statCards = stats ? [
-    { label: "Locked Balance",    value: toFixedMoney(stats.balance_locked),    icon: Lock,    color: "text-amber-600",  bg: "bg-amber-50"  },
-    { label: "Available Balance", value: toFixedMoney(stats.balance_available),  icon: Wallet,  color: "text-emerald-600", bg: "bg-emerald-50" },
-    { label: "Monetized",          value: (stats.total_monetized ?? 0).toString(), icon: Tv,      color: "text-emerald-600", bg: "bg-emerald-50" },
-    { label: "Lifetime Withdrawn",value: toFixedMoney(stats.total_withdrawn),    icon: History, color: "text-emerald-600", bg: "bg-emerald-50" },
+    { label: t("publisher.dashboard.lockedBalance"), value: toFixedMoney(stats.balance_locked), icon: Lock, color: "text-amber-600", bg: "bg-amber-50" },
+    { label: t("publisher.dashboard.availableBalance"), value: toFixedMoney(stats.balance_available), icon: Wallet, color: "text-emerald-600", bg: "bg-emerald-50" },
+    { label: t("publisher.dashboard.monetized"), value: (stats.total_monetized ?? 0).toString(), icon: Tv, color: "text-emerald-600", bg: "bg-emerald-50" },
+    { label: t("publisher.dashboard.lifetimeWithdrawn"), value: toFixedMoney(stats.total_withdrawn), icon: History, color: "text-emerald-600", bg: "bg-emerald-50" },
   ] : [];
 
   return (
@@ -279,33 +289,27 @@ export default function PublisherDashboard() {
           <div className="relative">
             <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.22em] text-blue-100">
               <Sparkles size={12} />
-              Publisher Command Center
+              {t("publisher.dashboard.commandCenter")}
             </div>
             <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
               <div>
-                <h1 className="text-3xl font-black tracking-tight">Grow, monetize, withdraw.</h1>
+                <h1 className="text-3xl font-black tracking-tight">{t("publisher.dashboard.hero")}</h1>
                 <p className="mt-2 max-w-xl text-sm font-medium leading-6 text-white/65">
-                  Your Telegram inventory, earnings, and monetized assets in one polished control room.
+                  {t("publisher.dashboard.heroDescription")}
                 </p>
               </div>
               <Link href="/publisher/monetize" className="inline-flex items-center justify-center gap-2 rounded-2xl bg-white px-5 py-3 text-xs font-black uppercase tracking-wide text-[#0c9de8] shadow-lg shadow-white/10">
                 <TrendingUp size={15} />
-                Monetize More
+                {t("publisher.dashboard.monetizeMore")}
               </Link>
             </div>
           </div>
         </div>
 
         {loadError && (
-          <div className="-mx-4 sm:mx-0">
-            <AppBootState
-              mode="error"
-              title="Unable to load AdsGalaxy"
-              message="We couldn't start the Mini App. Please reload and try again."
-              detail="If this continues, contact support."
-              actionLabel="Retry"
-              onAction={fetchStats}
-            />
+          <div className="flex items-center justify-between rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+            <span>Dashboard analytics are temporarily unavailable.</span>
+            <button className="font-black text-blue-600" onClick={fetchStats}>{t("common.retry")}</button>
           </div>
         )}
 
@@ -324,7 +328,7 @@ export default function PublisherDashboard() {
                 rel="noreferrer"
                 className="flex-1 md:flex-none text-center bg-white text-blue-600 px-5 py-2.5 rounded-xl font-bold text-sm hover:bg-blue-50 transition-colors shadow-sm"
               >
-                Join Channel
+                {t("publisher.dashboard.joinChannel")}
               </a>
               <button
                 onClick={handleVerifyJoin}
@@ -365,9 +369,9 @@ export default function PublisherDashboard() {
           <div className="lg:col-span-2 space-y-6">
             <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
               <div className="flex items-center justify-between mb-6">
-                <h3 className="text-lg font-bold text-slate-900">Recent Activity</h3>
+                <h3 className="text-lg font-bold text-slate-900">{t("publisher.dashboard.recentActivity")}</h3>
                 <Link href="/publisher/monetize" className="text-sm text-blue-600 font-semibold hover:underline flex items-center gap-1">
-                  View all <ArrowRight size={14} />
+                  {t("publisher.dashboard.viewAll")} <ArrowRight size={14} />
                 </Link>
               </div>
               <div className="space-y-4">
@@ -377,7 +381,7 @@ export default function PublisherDashboard() {
                   ))
                 ) : !stats?.recent_monetized || stats.recent_monetized.length === 0 ? (
                   <div className="text-center py-8">
-                    <p className="text-slate-400 text-sm">No monetized assets yet.</p>
+                    <p className="text-slate-400 text-sm">{t("publisher.dashboard.noAssets")}</p>
                   </div>
                 ) : (
                   stats.recent_monetized.map((item) => {
@@ -480,7 +484,7 @@ export default function PublisherDashboard() {
                                 </a>
                               ) : <>@{item.username}</>} ·{" "}
                               <span className={item.status === "active" || item.status === "approved" ? "text-emerald-500 font-semibold" : ""}>
-                                {item.status}
+                                <StatusText value={item.status} />
                               </span>
                             </p>
                           </div>
@@ -503,7 +507,7 @@ export default function PublisherDashboard() {
                                 className="flex items-center gap-3 w-full px-4 py-3 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors"
                               >
                                 <FileText size={15} className="text-slate-400 shrink-0" />
-                                View Details
+                                {t("common.statistics")}
                               </button>
                               <div className="border-t border-slate-100" />
                               <button
@@ -525,7 +529,7 @@ export default function PublisherDashboard() {
                                 )}
                               >
                                 {isProcessing ? (
-                                  <><Loader2 size={15} className="animate-spin shrink-0" />Processing...</>
+                                  <><Loader2 size={15} className="animate-spin shrink-0" />{t("common.processing")}</>
                                 ) : shouldResume ? (
                                   <><Play size={15} className="text-emerald-500 shrink-0" />Resume {iconConfig.label}</>
                                 ) : (

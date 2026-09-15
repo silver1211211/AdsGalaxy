@@ -82,10 +82,13 @@ test("settlement keeps click accounting and idempotency source-key protections",
   assert.ok(settlement.indexOf("await connection.commit()", exhaustionIndex) > exhaustionIndex);
 });
 
-test("cleanup retry surfaces do not run settlement or financial writes", () => {
+test("paused cleanup finalizes once before deletion while generic retries remain cleanup-only", () => {
   assert.match(retryCleanupCron, /retryCampaignPostCleanup/);
   assert.match(retryCleanupEndpoint, /retryCampaignPostCleanup/);
-  assert.doesNotMatch(retryCleanupCron, /settleChannelCampaigns|settlePendingChannelPublisherCredits|channelSettlement|channelFastBilling/);
+  assert.match(retryCleanupCron, /processPausedCampaignCleanup/);
+  assert.match(retryCleanupCron, /settleCampaignEngagementBeforeDeletion/);
+  assert.match(retryCleanupCron, /if \(!campaign\.channel_settlement_finalized_at\)/);
+  assert.match(retryCleanupCron, /deleteActiveCampaignPosts\(campaign\.id\)/);
   assert.doesNotMatch(retryCleanupEndpoint, /settleChannelCampaigns|settlePendingChannelPublisherCredits|channelSettlement|channelFastBilling/);
 });
 
@@ -169,8 +172,8 @@ test("admin UI exposes Phase 2 controls and visibility cards", () => {
   assert.match(adminPage, /Cleanup Errors/);
 });
 
-test("advertiser channel pause finalizes, locks resume for one hour, and keeps cleanup best-effort", () => {
-  assert.match(advertiserCampaignRoute, /settleCampaignEngagementBeforeDeletion\(Number\(id\), "advertiser_pause"\)/);
+test("advertiser channel pause queues idempotent background finalization, locks resume for one hour, and keeps cleanup best-effort", () => {
+  assert.match(retryCleanupCron, /settleCampaignEngagementBeforeDeletion\(\s*Number\(campaign\.id\),\s*"advertiser_pause"/);
   assert.match(advertiserCampaignRoute, /resume_locked_until = DATE_ADD\(NOW\(\), INTERVAL 1 HOUR\)/);
   assert.match(advertiserCampaignRoute, /pause_reason = 'user_paused'/);
   assert.match(advertiserCampaignRoute, /campaignKind === "channel"/);

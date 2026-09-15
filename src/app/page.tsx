@@ -22,6 +22,11 @@ export default function Home() {
     let cancelled = false;
 
     async function boot() {
+      if (window.location.hostname === "preview.adsgalaxy.online") {
+        router.replace("/publisher");
+        return;
+      }
+
       safePrepareTelegramWebApp();
 
       if (!isTelegramMiniApp() && !hasTelegramLaunchParams()) {

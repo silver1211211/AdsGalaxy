@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy deposit result rows are not schema-generated */
 import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
+import { parseAdminPagination } from "@/lib/adminPagination";
 
 export async function GET(request: Request) {
   if (!(await checkAdminAuth())) {
@@ -8,11 +10,9 @@ export async function GET(request: Request) {
   }
 
   const { searchParams } = new URL(request.url);
-  const page = parseInt(searchParams.get("page") || "1");
-  const limit = parseInt(searchParams.get("limit") || "10");
+  const { page, limit, offset } = parseAdminPagination(searchParams, { defaultLimit: 10 });
   const statusFilter = searchParams.get("status") || "all";
   const search = searchParams.get("search") || "";
-  const offset = (page - 1) * limit;
 
   try {
     let query = `

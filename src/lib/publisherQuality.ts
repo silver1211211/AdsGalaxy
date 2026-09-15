@@ -147,20 +147,20 @@ export async function getPublisherQuality(channelId: number, connection?: PoolCo
      LEFT JOIN (
        SELECT channel_id, SUM(views) AS views, SUM(clicks) AS clicks, AVG(views) AS average_daily_views,
          STDDEV_POP(views) AS daily_view_stddev, SUM(views > 0 OR clicks > 0) AS active_days
-       FROM channel_daily_stats WHERE stat_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) GROUP BY channel_id
+       FROM channel_daily_stats WHERE channel_id = ? AND stat_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) GROUP BY channel_id
      ) ds ON ds.channel_id = ch.id
      LEFT JOIN (
        SELECT channel_id, COUNT(DISTINCT post_id) AS post_count
-       FROM channel_post_daily_stats WHERE stat_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) GROUP BY channel_id
+       FROM channel_post_daily_stats WHERE channel_id = ? AND stat_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) GROUP BY channel_id
      ) ps ON ps.channel_id = ch.id
      LEFT JOIN (
        SELECT cp.channel_id, COUNT(cva.id) AS audits,
          SUM(CASE WHEN cva.status = 'invalid' THEN 1 ELSE 0 END) AS invalid_audits
        FROM campaign_posts cp JOIN campaign_views_audit cva ON cva.post_id = cp.id
-       WHERE cp.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) GROUP BY cp.channel_id
+       WHERE cp.channel_id = ? AND cp.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) GROUP BY cp.channel_id
      ) a ON a.channel_id = ch.id
      WHERE ch.id = ? LIMIT 1`,
-    [channelId]
+    [channelId, channelId, channelId, channelId]
   );
   const row = rows[0];
   if (!row) throw new Error("publisher_quality_channel_not_found");

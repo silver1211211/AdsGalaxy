@@ -10,9 +10,9 @@ const botDetails = readFileSync("src/app/api/publisher/bots/[id]/route.ts", "utf
 const advertiserCampaignDetails = readFileSync("src/app/api/advertiser/campaigns/[id]/route.ts", "utf8");
 const botDetailsScreen = readFileSync("src/components/publisher/BotDetailsScreen.tsx", "utf8");
 
-test("Bot reporting displays one impression per five successful deliveries while preserving earnings sums", () => {
+test("Bot reporting displays one impression per successful delivery while preserving earnings sums", () => {
   for (const source of [publisherBots, publisherStats, advertiserStats]) {
-    assert.match(source, /FLOOR\(COUNT\(\*\) \/ 5\)|FLOOR\(COALESCE\(SUM\(CASE WHEN bd\.status = 'sent' THEN 1 ELSE 0 END\), 0\) \/ 5\)/);
+    assert.match(source, /COUNT\(\*\)|COUNT\(CASE WHEN bd\.status = 'sent' THEN 1 END\)|SUM\(CASE WHEN bd\.status = 'sent' THEN 1 ELSE 0 END\)/);
   }
   assert.match(publisherBots, /SUM\(bd\.publisher_reward\)/);
   assert.match(publisherStats, /SUM\(CASE WHEN bd\.status = 'sent' THEN bd\.publisher_reward ELSE 0 END\)/);
@@ -45,8 +45,8 @@ test("Bot campaign details use the compatible Bot-only field set and invalid IDs
   assert.match(advertiserCampaignDetails, /\{ error: "Campaign not found" \}, \{ status: 404 \}/);
 });
 
-test("Bot detail formatting accepts MySQL numeric strings from the listing response", () => {
-  assert.match(botDetailsScreen, /function formatMoney\(value: unknown\)/);
-  assert.match(botDetailsScreen, /const amount = Number\(value\)/);
-  assert.match(botDetailsScreen, /amount\.toFixed/);
+test("Bot detail parsing accepts MySQL numeric strings from the listing response", () => {
+  assert.match(botDetailsScreen, /successful_sends: Number\(data\.successful_sends/);
+  assert.match(botDetailsScreen, /publisher_revenue: Number\(data\.publisher_revenue/);
+  assert.match(botDetailsScreen, /effective_cpm: Number\(data\.effective_cpm/);
 });

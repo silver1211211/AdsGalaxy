@@ -18,6 +18,12 @@ const cpcMigration = readFileSync("db/migrations/20260708_0098_campaign_cpc_bill
 const adminDeposits = readFileSync("src/app/api/admin/deposits/route.ts", "utf8");
 const emergencyPush = readFileSync("src/app/api/admin/campaigns/[id]/emergency-push/route.ts", "utf8");
 const modal = readFileSync("src/components/ui/Modal.tsx", "utf8");
+const discountSource = readFileSync("src/lib/advertiserDiscount.ts", "utf8");
+const discountMigration = readFileSync("db/migrations/20260905_0127_advertiser_rate_discounts.sql", "utf8");
+const discountApi = readFileSync("src/app/api/advertiser/rate-discount/route.ts", "utf8");
+const adminUsers = readFileSync("src/app/api/admin/users/route.ts", "utf8");
+const adminUsersPage = readFileSync("src/app/admin/users/page.tsx", "utf8");
+const processBroadcast = readFileSync("src/app/api/cron/process-broadcast/route.ts", "utf8");
 
 function debit(units, bidPerThousand) {
   return Number((Math.floor(units) * (bidPerThousand / 1000)).toFixed(8));
@@ -27,14 +33,28 @@ test("view campaign billing uses CPM divided by 1000", () => {
   assert.equal(debit(1000, 3), 3);
   assert.equal(debit(1, 3), 0.003);
   assert.match(billing, /input\.type === "clicks" \? Number\(input\.cpc \|\| 0\) : Number\(input\.cpm \|\| 0\)/);
-  assert.match(settlement, /getChannelUnitPrice\(\{ type: post\.campaign_type, cpm: post\.cpm, cpc: post\.cpc \}\)/);
+  assert.match(settlement, /getChannelUnitPrice\(\{ type: post\.campaign_type, cpm: post\.cpm, cpc: post\.cpc, discount: post\.advertiser_discount \}\)/);
 });
 
 test("click campaign billing uses CPC divided by 1000", () => {
   assert.equal(debit(1000, 50), 50);
   assert.equal(debit(1, 50), 0.05);
-  assert.match(fastBilling, /getChannelUnitPrice\(\{ type: post\.campaign_type, cpm: post\.cpm, cpc: post\.cpc \}\)/);
-  assert.match(processAds, /CASE WHEN c\.type = 'clicks' THEN COALESCE\(c\.cpc, 0\) ELSE COALESCE\(c\.cpm, 0\) END \/ 1000/);
+  assert.match(fastBilling, /getChannelUnitPrice\(\{ type: post\.campaign_type, cpm: post\.cpm, cpc: post\.cpc, discount: post\.advertiser_discount \}\)/);
+  assert.match(processAds, /ard\.expires_at > UTC_TIMESTAMP\(\)/);
+});
+
+test("per-user CPM and CPC discounts are absolute, expiring, and applied to live billing", () => {
+  assert.equal(debit(1000, 65 - 3), 62);
+  assert.equal(debit(1000, 3 - 0.2), 2.8);
+  assert.match(discountSource, /Math\.max\(0\.01, gross - reduction\)/);
+  assert.match(discountSource, /expires_at > UTC_TIMESTAMP\(\)/);
+  assert.match(discountMigration, /CREATE TABLE IF NOT EXISTS advertiser_rate_discounts/);
+  assert.match(discountApi, /getAuthenticatedUser/);
+  assert.match(adminUsers, /action === "set_advertiser_discount"/);
+  assert.match(adminUsersPage, /CPM\/CPC discount/);
+  assert.match(advertiserWizard, /charged \$\{effectiveBid\.toFixed\(2\)\} \/ 1k/);
+  assert.match(processBroadcast, /calculateBroadcastPayout\(campaign\.effective_cpm/);
+  assert.match(emergencyPush, /campaign\.effective_cpm \?\? campaign\.cpm/);
 });
 
 test("channel budget exhaustion uses the next billable unit for CPM and CPC", () => {
@@ -60,7 +80,9 @@ test("CPC schema and campaign forms agree without opening financial counters", (
   assert.match(cpcMigration, /ALTER TABLE campaigns ADD COLUMN cpc DECIMAL\(18,8\) NOT NULL DEFAULT 0 AFTER cpm/);
   assert.match(cpcMigration, /UPDATE campaigns\s+SET cpc = cpm\s+WHERE type = 'clicks'/);
   assert.match(campaignCreate, /const cpc = type === "clicks"/);
-  assert.match(campaignCreate, /budget, total_budget, cpm, cpc, category/);
+  for (const column of ["budget", "total_budget", "cpm", "cpc", "category", "teaser_mode", "teaser_enabled", "teaser_cpm"]) {
+    assert.match(campaignCreate, new RegExp(`\\b${column}\\b`));
+  }
   assert.match(adminCampaignRoute, /cpc: \{ type: "number", min: 0 \}/);
   assert.match(advertiserWizard, /bidField = formData\.type === "clicks" \? "cpc" : "cpm"/);
   for (const field of ["budget", "channel_spend", "settled_views", "settled_clicks", "status"]) {

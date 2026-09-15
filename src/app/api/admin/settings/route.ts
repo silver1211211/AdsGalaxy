@@ -5,6 +5,7 @@ import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { isMiniAppDynamicCpmSettingKey, protectedAdminSettingKeys } from "@/lib/protectedAdminSettings";
 import { assertDirectRevenueSplit, channelRevenueSplitFromStored, channelStoredPolicyFromRevenueSplit, miniAppRevenueSplitFromStored } from "@/lib/revenueSplitSettings";
+import { CACHE_TTL_SECONDS, cacheGetOrSet, invalidateSettingsCaches, redisKeys } from "@/lib/redisCache";
 
 const MINIAPP_INTERNAL_SPLIT_KEYS = new Set([
   "miniapp_internal_publisher_share_percent",
@@ -15,6 +16,8 @@ const CHANNEL_SETTLEMENT_PERCENT_KEYS = new Set(["platform_margin_percent", "saf
 const BROADCAST_REVENUE_SPLIT_KEYS = new Set(["broadcast_publisher_share_percent", "broadcast_reserve_percent"]);
 const CHANNEL_REVENUE_SPLIT_KEYS = new Set(["channel_publisher_share_percent", "channel_reserve_percent"]);
 const MINIAPP_REVENUE_SPLIT_KEYS = new Set(["miniapp_publisher_cpm_v2_max_share", "miniapp_publisher_cpm_v2_reserve_share"]);
+const GROWTH_REVENUE_SPLIT_KEYS = new Set(["channel_growth_publisher_share", "channel_growth_platform_share", "channel_growth_reserve_share"]);
+const TEASER_REVENUE_SPLIT_KEYS = new Set(["teaser_publisher_share","teaser_platform_share","teaser_reserve_share"]);
 const CPM_SETTING_KEYS = new Set([
   "min_cpm_views",
   "recommended_cpm_views",
@@ -28,6 +31,12 @@ const CPM_SETTING_KEYS = new Set([
   "miniapp_internal_min_cpm",
   "miniapp_internal_recommended_cpm",
   "miniapp_internal_max_cpm",
+  "channel_growth_cps_min",
+  "channel_growth_cps_recommended",
+  "channel_growth_cps_max",
+  "teaser_min_cpm",
+  "teaser_recommended_cpm",
+  "teaser_max_cpm",
 ]);
 const HIDDEN_CPM_KEYS = new Set([
   "global_min_cpm",
@@ -40,6 +49,8 @@ const CPM_GROUPS = [
   ["Channel clicks", "min_cpm_clicks", "recommended_cpm_clicks", "max_cpm_clicks"],
   ["Bot broadcast", "min_cpm_broadcast", "recommended_cpm_broadcast", "max_cpm_broadcast"],
   ["Mini App", "miniapp_internal_min_cpm", "miniapp_internal_recommended_cpm", "miniapp_internal_max_cpm"],
+  ["Channel Growth CPS", "channel_growth_cps_min", "channel_growth_cps_recommended", "channel_growth_cps_max"],
+  ["Teaser", "teaser_min_cpm", "teaser_recommended_cpm", "teaser_max_cpm"],
 ] as const;
 
 function validateCpmGroup(label: string, minValue: unknown, recommendedValue: unknown, maxValue: unknown) {
@@ -57,12 +68,21 @@ function validateCpmGroup(label: string, minValue: unknown, recommendedValue: un
   }
 }
 
+async function settingsSuccess() {
+  await invalidateSettingsCaches();
+  return NextResponse.json({ success: true });
+}
+
 export async function GET() {
   if (!(await checkAdminAuth())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   try {
+    const payload = await cacheGetOrSet(
+      redisKeys.adminSettings(),
+      CACHE_TTL_SECONDS.ADMIN_SETTINGS,
+      async () => {
     const [rows] = await pool.query<Array<RowDataPacket & { key: string; value: string }>>(
       "SELECT * FROM settings WHERE `key` NOT IN (?, ?, ?, ?, ?, ?, ?) AND `key` NOT LIKE 'miniapp_category_cpm_adjustment_%' ORDER BY `key` ASC",
       [
@@ -82,13 +102,16 @@ export async function GET() {
       && !CHANNEL_SETTLEMENT_PERCENT_KEYS.has(row.key)
       && !MINIAPP_INTERNAL_SPLIT_KEYS.has(row.key)
     );
-    return NextResponse.json({
+    return {
       settings: visibleRows,
       revenue_splits: {
         channel: channelRevenueSplitFromStored(values.get("platform_margin_percent"), values.get("safety_reserve_percent")),
         miniapp: miniAppRevenueSplitFromStored(values.get("miniapp_publisher_cpm_v2_max_share"), values.get("miniapp_publisher_cpm_v2_reserve_share")),
       },
-    });
+    };
+      },
+    );
+    return NextResponse.json(payload);
   } catch (error) {
     console.error("Admin Settings GET Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
@@ -114,6 +137,11 @@ export async function PUT(request: Request) {
         }, { status: 403 });
       }
       const suppliedKeys = new Set(atomicSettings.map(([settingKey]) => settingKey));
+      if(atomicSettings.every(([key])=>TEASER_REVENUE_SPLIT_KEYS.has(key))){
+        if(suppliedKeys.size!==3||[...TEASER_REVENUE_SPLIT_KEYS].some(key=>!suppliedKeys.has(key)))return NextResponse.json({error:"Teaser Publisher, Platform, and Reserve percentages must be submitted together"},{status:400});
+        const values=atomicSettings.map(([,value])=>Number(value));if(values.some(value=>!Number.isFinite(value)||value<0||value>100)||Math.abs(values.reduce((sum,value)=>sum+value,0)-100)>1e-9)return NextResponse.json({error:"Teaser financial split must total exactly 100%"},{status:400});
+        const conn=await pool.getConnection();try{await conn.beginTransaction();for(const [key,value] of atomicSettings)await conn.query("INSERT INTO settings (`key`,value) VALUES(?,?) ON DUPLICATE KEY UPDATE value=VALUES(value)",[key,String(Number(value))]);await conn.commit();}catch(error){await conn.rollback();throw error;}finally{conn.release();}await recordAdminActionAudit({adminId:admin?.id,action:"teaser_revenue_split_updated",entityType:"setting_group",entityId:"teaser_revenue_split",reason:"admin_settings_update",metadata:{publisher:values[0],platform:values[1],reserve:values[2]}});return settingsSuccess();
+      }
       if (atomicSettings.some(([settingKey]) => MINIAPP_INTERNAL_SPLIT_KEYS.has(settingKey))) {
         return NextResponse.json({ error: "Legacy Mini App split settings are inactive and read-only; use the dynamic CPM envelope control" }, { status: 403 });
       }
@@ -153,7 +181,7 @@ export async function PUT(request: Request) {
         } finally {
           conn.release();
         }
-        return NextResponse.json({ success: true });
+        return settingsSuccess();
       }
 
       if (atomicSettings.every(([settingKey]) => BROADCAST_REVENUE_SPLIT_KEYS.has(settingKey))) {
@@ -208,7 +236,15 @@ export async function PUT(request: Request) {
             },
           },
         });
-        return NextResponse.json({ success: true });
+        return settingsSuccess();
+      }
+
+      if (atomicSettings.every(([settingKey]) => GROWTH_REVENUE_SPLIT_KEYS.has(settingKey))) {
+        if (suppliedKeys.size !== 3 || [...GROWTH_REVENUE_SPLIT_KEYS].some((key) => !suppliedKeys.has(key))) return NextResponse.json({error:"All Growth shares must be submitted together"},{status:400});
+        const values=atomicSettings.map(([,value])=>Number(value));
+        if(values.some((value)=>!Number.isFinite(value)||value<0||value>100)||Math.abs(values.reduce((sum,value)=>sum+value,0)-100)>1e-8) return NextResponse.json({error:"Growth shares must total 100%"},{status:400});
+        const conn=await pool.getConnection();try{await conn.beginTransaction();for(const [key,value] of atomicSettings)await conn.query("INSERT INTO settings (`key`,value) VALUES (?,?) ON DUPLICATE KEY UPDATE value=VALUES(value)",[key,String(value)]);await conn.commit();}catch(error){await conn.rollback();throw error;}finally{conn.release();}
+        return settingsSuccess();
       }
 
       if (atomicSettings.every(([settingKey]) => CHANNEL_REVENUE_SPLIT_KEYS.has(settingKey))) {
@@ -252,7 +288,7 @@ export async function PUT(request: Request) {
             platform_percent: nextPolicy.split.platform,
           } },
         });
-        return NextResponse.json({ success: true });
+        return settingsSuccess();
       }
 
       if (atomicSettings.every(([settingKey]) => MINIAPP_REVENUE_SPLIT_KEYS.has(settingKey))) {
@@ -296,7 +332,7 @@ export async function PUT(request: Request) {
             platform_percent: nextSplit.platform,
           } },
         });
-        return NextResponse.json({ success: true });
+        return settingsSuccess();
       }
 
       return NextResponse.json({ error: "Atomic settings updates are limited to CPM groups and the Bot, Channel, or Mini App revenue split controls" }, { status: 400 });
@@ -360,7 +396,7 @@ export async function PUT(request: Request) {
       );
     }
 
-    return NextResponse.json({ success: true });
+    return settingsSuccess();
   } catch (error) {
     console.error("Admin Settings PUT Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });

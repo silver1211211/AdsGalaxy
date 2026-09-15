@@ -1,14 +1,20 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any, @next/next/no-img-element -- legacy campaign rows and creative previews */
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
+import { useAdminRequestGuard } from "@/hooks/useAdminRequestGuard";
 import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Zap, Megaphone, CircleHelp } from "lucide-react";
 import EmptyState from "@/components/ui/EmptyState";
 import { SkeletonTableRows } from "@/components/ui/Skeleton";
 import Modal from "@/components/ui/Modal";
 import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import Toast from "@/components/ui/Toast";
+import ModerationRejectFields from "@/components/admin/ModerationRejectFields";
+import { campaignPolicyScopes, type PolicyScope } from "@/lib/policyRegistry";
+import ModerationHistory from "@/components/admin/ModerationHistory";
+import { getApiErrorMessage } from "@/lib/apiErrorMessage";
 
 type CampaignConfirmActionType = "approve" | "reject" | "pause" | "resume";
 type ConfirmAction = {
@@ -29,6 +35,15 @@ type EmergencyAction = {
 type AdminCampaignRow = {
   id: number;
   campaign_kind: "campaign" | "miniapp";
+  source_campaign_kind?: string | null;
+  teaser_mode?: string | null;
+  teaser_creatives?: Array<{
+    id?: number;
+    copy_text: string;
+    position?: number;
+    active?: boolean | number;
+  }>;
+  teaser_enabled?: boolean | number;
   user_id: number;
   name: string;
   type: string;
@@ -158,6 +173,7 @@ function renderDateRestriction(value: unknown) {
 }
 
 export default function AdminCampaignsPage() {
+  const beginListRequest = useAdminRequestGuard();
   const [campaigns, setCampaigns] = useState<AdminCampaignRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
@@ -173,23 +189,26 @@ export default function AdminCampaignsPage() {
   const [emergencySendAll, setEmergencySendAll] = useState(true);
   const [emergencyRecipientCount, setEmergencyRecipientCount] = useState("100");
   const [ignoreEmergencyRules, setIgnoreEmergencyRules] = useState(false);
-  const [rejectionReason, setRejectionReason] = useState("");
+  const [policyRuleKey, setPolicyRuleKey] = useState("");
+  const [internalNote, setInternalNote] = useState("");
   const [toast, setToast] = useState<{ type: "success" | "error"; title: string; message: string } | null>(null);
   
   const [viewModalOpen, setViewModalOpen] = useState(false);
   const [selectedCampaign, setSelectedCampaign] = useState<AdminCampaignRow | null>(null);
 
   const fetchCampaigns = async (p: number, s: string, q: string, trust = trustFilter) => {
+    const controller = beginListRequest();
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/campaigns?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}&trust=${encodeURIComponent(trust)}`);
+      const res = await fetch(`/api/admin/campaigns?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}&trust=${encodeURIComponent(trust)}`, { signal: controller.signal });
       const data = await res.json();
       setCampaigns(data.campaigns);
       setTotalPages(data.totalPages);
     } catch (err) {
+      if (controller.signal.aborted) return;
       console.error(err);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 
@@ -198,19 +217,19 @@ export default function AdminCampaignsPage() {
       fetchCampaigns(page, statusFilter, search, trustFilter);
     }, 500);
     return () => clearTimeout(timer);
-  }, [page, statusFilter, trustFilter, search]);
+  }, [page, statusFilter, trustFilter, search, beginListRequest]);
 
-  const handleAction = async (id: number, action: string, kind = "campaign", moderationNotes = "") => {
+  const handleAction = async (id: number, action: string, kind = "campaign", ruleKey = "", note = "") => {
     setActionLoading(id);
     try {
-      const endpoint = kind === "miniapp" ? "/api/admin/miniapp-rewarded-campaigns" : "/api/admin/campaigns";
+      const endpoint = action === "reject" ? "/api/admin/moderation-rejections" : kind === "miniapp" ? "/api/admin/miniapp-rewarded-campaigns" : "/api/admin/campaigns";
       const res = await fetch(endpoint, {
-        method: "PATCH",
+        method: action === "reject" ? "POST" : "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, action, moderation_notes: moderationNotes })
+        body: JSON.stringify(action === "reject" ? { entity_type: kind === "miniapp" ? "miniapp_rewarded_campaign" : "campaign", entity_id: id, policy_rule_key: ruleKey, internal_note: note } : { id, action })
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Action failed");
+      if (!res.ok) throw new Error(getApiErrorMessage(data, "Campaign action failed"));
       await fetchCampaigns(page, statusFilter, search, trustFilter);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Action failed");
@@ -304,17 +323,17 @@ export default function AdminCampaignsPage() {
   };
 
   const openConfirmAction = (id: number, kind: string, action: CampaignConfirmActionType, title: string, message: string, danger = false) => {
-    setRejectionReason("");
+    setPolicyRuleKey(""); setInternalNote("");
     setConfirmAction({ id, kind, action, title, message, danger });
   };
 
   const runConfirmedAction = async () => {
     if (!confirmAction) return;
     const { id, kind, action } = confirmAction;
-    const reason = rejectionReason;
+    if (action === "reject" && !policyRuleKey) { setError("MODERATION_REASON_REQUIRED"); return; }
     setConfirmAction(null);
     if (action === "approve" || action === "reject") {
-      await handleAction(id, action, kind, action === "reject" ? reason : "");
+      await handleAction(id, action, kind, policyRuleKey, internalNote);
     } else {
       await handleManagementAction(id, action as "pause" | "resume", kind);
     }
@@ -387,10 +406,7 @@ export default function AdminCampaignsPage() {
         isLoading={actionLoading !== null}
       >
         {confirmAction?.action === "reject" && (
-          <div className="space-y-2">
-            <label className="block text-[11px] font-black uppercase tracking-widest text-slate-400">Reason (optional)</label>
-            <textarea value={rejectionReason} onChange={(event) => setRejectionReason(event.target.value)} rows={3} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-red-400" />
-          </div>
+          <ModerationRejectFields scopes={(() => { const row = campaigns.find((item: AdminCampaignRow) => item.id === confirmAction.id && item.campaign_kind === confirmAction.kind); const specific: PolicyScope[] = confirmAction.kind === "miniapp" ? ["advertiser.mini-app"] : campaignPolicyScopes(row || {}); return ["advertiser.general", ...specific]; })()} ruleKey={policyRuleKey} internalNote={internalNote} onRuleKey={setPolicyRuleKey} onInternalNote={setInternalNote} />
         )}
       </ConfirmationModal>
       <ConfirmationModal
@@ -449,7 +465,7 @@ export default function AdminCampaignsPage() {
           <div className="bg-white rounded-lg w-full max-w-2xl shadow-xl border border-slate-200 flex flex-col max-h-[90vh]">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
               <h3 className="text-lg font-bold text-slate-900">Campaign Details (#{selectedCampaign.id})</h3>
-              <span className="rounded border border-slate-200 bg-slate-100 px-2 py-1 text-[10px] font-black text-slate-700">{selectedCampaign.type_label}</span>
+              <span className="rounded border border-slate-200 bg-slate-100 px-2 py-1 text-[10px] font-black text-slate-700">{selectedCampaign.teaser_mode === "teaser_only" ? "TEASER" : selectedCampaign.type_label}</span>
               <button onClick={() => setViewModalOpen(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
                 <X size={20} />
               </button>
@@ -479,13 +495,43 @@ export default function AdminCampaignsPage() {
                       <img src={selectedCampaign.image_url} alt="Campaign" className="max-w-full h-auto max-h-48 rounded-md border border-slate-200 object-cover" />
                     </div>
                   )}
-                  <div>
-                    <span className="text-slate-500 block mb-1">Message ({selectedCampaign.parse_mode}):</span>
-                    <div className="bg-white p-3 rounded border border-slate-200 whitespace-pre-wrap font-mono text-xs max-h-60 overflow-y-auto">{selectedCampaign.message_text}</div>
-                  </div>
+                  {selectedCampaign.teaser_mode === "teaser_only" ? (
+                    <div>
+                      <span className="text-slate-500 block mb-2">Teaser Messages:</span>
+                      <div className="space-y-2">
+                        {(selectedCampaign.teaser_creatives?.length
+                          ? selectedCampaign.teaser_creatives
+                          : [{ copy_text: selectedCampaign.message_text || "" }]
+                        ).map((creative, index) => (
+                          <div
+                            key={creative.id || index}
+                            className="bg-white p-3 rounded border border-slate-200 whitespace-pre-wrap text-xs"
+                          >
+                            <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                              Message {index + 1}
+                            </div>
+                            {creative.copy_text}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <span className="text-slate-500 block mb-1">
+                        Message ({selectedCampaign.parse_mode}):
+                      </span>
+                      <div className="bg-white p-3 rounded border border-slate-200 whitespace-pre-wrap font-mono text-xs max-h-60 overflow-y-auto">
+                        {selectedCampaign.message_text}
+                      </div>
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-2">
                     <div><span className="text-slate-500">Link URL:</span> <a href={selectedCampaign.link} target="_blank" className="font-medium text-blue-600 hover:underline block truncate" title={selectedCampaign.link}>{selectedCampaign.link}</a></div>
-                    <div><span className="text-slate-500">Button Text:</span> <span className="font-medium text-slate-900">{selectedCampaign.button_text || "N/A"}</span></div>
+                    <div><span className="text-slate-500">Button Text:</span> <span className="font-medium text-slate-900">{selectedCampaign.teaser_mode === "teaser_only"
+                      ? String(selectedCampaign.button_text || "N/A")
+                          .replace(/_/g, " ")
+                          .replace(/\b\w/g, (character) => character.toUpperCase())
+                      : selectedCampaign.button_text || "N/A"}</span></div>
                   </div>
                 </div>
               </div>
@@ -495,7 +541,7 @@ export default function AdminCampaignsPage() {
                 <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Configuration</h4>
                 <div className="bg-slate-50 p-3 rounded-md border border-slate-200 text-sm">
                   <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                    <div><span className="text-slate-500">Type:</span> <span className="font-medium text-slate-900">{selectedCampaign.type_label}</span></div>
+                    <div><span className="text-slate-500">Type:</span> <span className="font-medium text-slate-900">{selectedCampaign.teaser_mode === "teaser_only" ? "TEASER" : selectedCampaign.type_label}</span></div>
                     <div><span className="text-slate-500">Budget:</span> <span className="font-medium text-slate-900">{money(selectedCampaign.budget)}</span></div>
                     <div><span className="text-slate-500">Remaining:</span> <span className="font-medium text-slate-900">{money(selectedCampaign.remaining_budget)}</span></div>
                     <div><span className="text-slate-500">CPM:</span> <span className="font-medium text-slate-900">${selectedCampaign.cpm}</span></div>
@@ -509,6 +555,7 @@ export default function AdminCampaignsPage() {
                     <div><span className="text-slate-500">Approved:</span> <span className="font-medium text-slate-900">{selectedCampaign.advertiser_approved_campaigns || 0}</span></div>
                     <div><span className="text-slate-500">Rejected:</span> <span className="font-medium text-slate-900">{selectedCampaign.advertiser_rejected_campaigns || 0}</span></div>
                     {selectedCampaign.status === "rejected" && selectedCampaign.rejection_reason && <div className="col-span-2 rounded-md border border-red-100 bg-red-50 p-2 text-red-700"><span className="font-semibold">Rejection reason:</span> {selectedCampaign.rejection_reason}</div>}
+                    <div className="col-span-2"><ModerationHistory entityType={selectedCampaign.campaign_kind === "miniapp" ? "miniapp_rewarded_campaign" : "campaign"} entityId={selectedCampaign.id} /></div>
                     <div className="col-span-2 border-t border-slate-200 pt-3">
                       <span className="text-slate-500 block mb-2">Full Targeting Configuration</span>
                       <div className="grid grid-cols-1 gap-2 rounded-md bg-white p-3 text-xs sm:grid-cols-2">

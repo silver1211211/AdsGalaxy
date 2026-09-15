@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { queryWithRetry } from "@/lib/dbResilience";
 import type { RowDataPacket } from "mysql2/promise";
+import { CACHE_TTL_SECONDS, cacheGetOrSet, redisKeys } from "@/lib/redisCache";
 
 type PublicSettingRow = RowDataPacket & { key: string; value: string };
 
@@ -23,19 +24,29 @@ const PUBLIC_SETTING_KEYS = [
   "miniapp_internal_min_cpm",
   "miniapp_internal_recommended_cpm",
   "miniapp_internal_max_cpm",
+  "teaser_enabled",
+  "teaser_min_cpm",
+  "teaser_recommended_cpm",
+  "teaser_max_cpm",
 ] as const;
 
 export async function GET() {
   try {
+    const settings = await cacheGetOrSet(
+      redisKeys.publicSettings(),
+      CACHE_TTL_SECONDS.PUBLIC_SETTINGS,
+      async () => {
     const [rows] = await queryWithRetry<PublicSettingRow[]>(
       "SELECT `key`, value FROM settings WHERE `key` IN (?)",
       [PUBLIC_SETTING_KEYS],
       { timeoutMs: 5_000, attempts: 3, operation: "public_settings" },
     );
-    const settings = rows.reduce<Record<string, string>>((acc, row) => {
+    return rows.reduce<Record<string, string>>((acc, row) => {
       acc[row.key] = row.value;
       return acc;
     }, {});
+      },
+    );
 
     return NextResponse.json(settings);
   } catch (error: unknown) {

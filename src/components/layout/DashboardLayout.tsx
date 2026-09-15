@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import Header from "./Header";
 import Sidebar from "./Sidebar";
@@ -8,8 +8,9 @@ import { apiFetch } from "@/lib/api";
 import BannedScreen from "@/components/auth/BannedScreen";
 import SelfPromotionAd from "@/components/shared/SelfPromotionAd";
 import ReferralSprintPopup from "@/components/shared/ReferralSprintPopup";
-import { isTelegramMiniApp, safePrepareTelegramWebApp, waitForTelegramInitData } from "@/lib/telegramWebApp";
+import { safePrepareTelegramWebApp } from "@/lib/telegramWebApp";
 import { miniappReloadDebug } from "@/lib/miniappReloadDebug";
+import { useTranslations } from "@/i18n/client";
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
@@ -19,6 +20,8 @@ interface DashboardLayoutProps {
 type BootState = "ready" | "banned";
 
 export default function DashboardLayout({ children, type }: DashboardLayoutProps) {
+  const { initializeLocale, localeInitialized } = useTranslations();
+  const localeInitializedAtMount = useRef(localeInitialized);
   const pathname = usePathname();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [bootState, setBootState] = useState<BootState>("ready");
@@ -30,6 +33,7 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- pathname transitions reset popup ownership
     setReferralPopupBlockingPromo(isPublisherDashboard);
   }, [isPublisherDashboard]);
 
@@ -40,60 +44,42 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
       if (!cancelled) setBootState("banned");
     };
 
-    async function bootDashboard() {
+    async function refreshAccountState() {
       miniappReloadDebug("dashboard_boot_started", { phase: "started" });
       window.addEventListener("adsgalaxy:account-restricted", handleRestricted);
       safePrepareTelegramWebApp();
 
-      try {
-        const initData = await waitForTelegramInitData({ requireTelegram: isTelegramMiniApp() });
-        miniappReloadDebug("dashboard_boot_init_data", { init_data_present: Boolean(initData) });
+      // Locale and account status are enhancements to an already visible shell.
+      // English is a safe immediate fallback; a valid stored preference replaces it.
+      if (!localeInitializedAtMount.current) initializeLocale("en");
 
-        let res: Response | null = null;
-        let data: Record<string, unknown> = {};
-        let lastError: unknown = null;
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          try {
-            miniappReloadDebug("dashboard_me_status_started", { route: "/api/me/status", phase: "started", attempt: attempt + 1 });
-            res = await apiFetch("/api/me/status", { timeoutMs: 8000 });
-            miniappReloadDebug("dashboard_me_status_completed", { route: "/api/me/status", status: res.status, phase: "completed", attempt: attempt + 1 });
-            data = await res.json().catch(() => ({}));
-            if (res.ok || res.status === 401 || res.status === 403) break;
-          } catch (error) {
-            lastError = error;
-          }
-          if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 500 * (2 ** attempt)));
-        }
-        if (!res) throw lastError || new Error("Unable to verify account status");
+      try {
+        miniappReloadDebug("dashboard_me_status_started", { route: "/api/me/status", phase: "started" });
+        const res = await apiFetch("/api/me/status", { timeoutMs: 4000 });
+        const data: Record<string, unknown> = await res.json().catch(() => ({}));
+        miniappReloadDebug("dashboard_me_status_completed", { route: "/api/me/status", status: res.status, phase: "completed" });
 
         if (cancelled) return;
+        if (typeof data.language === "string") initializeLocale(data.language);
         if (res.status === 403 || data.status === "banned" || data.is_banned === true) {
           setBootState("banned");
           return;
         }
-
-        if (!res.ok && isTelegramMiniApp()) {
-          throw new Error(String(data.error || "Unable to verify account status"));
-        }
-
-        window.localStorage.setItem("last_dashboard", type);
-        miniappReloadDebug("dashboard_ready", { result: "ready" });
-        setBootState("ready");
+        if (res.ok) window.localStorage.setItem("last_dashboard", type);
       } catch (error) {
         miniappReloadDebug("dashboard_failed", { result: "failed", error_name: error instanceof Error ? error.name : "UnknownError", error_message: error instanceof Error ? error.message : "Dashboard boot failed" });
-        console.error("Dashboard boot failed:", error);
-        // Authentication retries run in the background. API routes still enforce
-        // authorization, so a transient dependency failure must not blank the shell.
+        // Route APIs independently enforce authorization. A transient status or
+        // locale failure must never replace the usable application with a loader.
       }
     }
 
-    bootDashboard();
+    refreshAccountState();
 
     return () => {
       cancelled = true;
       window.removeEventListener("adsgalaxy:account-restricted", handleRestricted);
     };
-  }, [type]);
+  }, [initializeLocale, type]);
 
   if (bootState === "banned") {
     return <BannedScreen />;

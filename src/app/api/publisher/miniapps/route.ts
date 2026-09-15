@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthenticatedUser, getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 import { MiniAppSubmissionValidationError, validateMiniAppSubmission } from "@/lib/miniappSubmissionValidation";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import { notifyMiniAppSubmitted } from "@/lib/publisherNotifications";
@@ -20,7 +20,7 @@ function errorMessage(error: unknown, fallback: string) {
 export async function GET(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await getAuthenticatedUserStatus(initData, { request });
 
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT

@@ -1,17 +1,16 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/set-state-in-effect -- legacy campaign DTO hydration remains intentionally dynamic */
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import {
   Plus,
+  PlusCircle,
   Tv,
   MoreVertical,
   Pause,
   Play,
   CheckCircle2,
-  Clock,
-  XCircle,
-  PauseCircle,
   FileText,
   Target,
   BarChart3,
@@ -39,7 +38,8 @@ import ConfirmationModal from "@/components/ui/ConfirmationModal";
 import CampaignDetailsScreen from "@/components/advertiser/CampaignDetailsScreen";
 import Modal from "@/components/ui/Modal";
 import Toast from "@/components/ui/Toast";
-import Link from "next/link";
+import CampaignStatusBadge from "@/components/advertiser/CampaignStatusBadge";
+import { useTranslations } from "@/i18n/client";
 
 const CREATE_OPTIONS = [
   {
@@ -70,11 +70,21 @@ const CREATE_OPTIONS = [
 
 interface Campaign {
   id: number;
+  source?: "regular" | "miniapp";
   name: string;
   kind: "channel" | "bot" | "miniapp";
   type: string;
+  campaign_kind?: string;
+  cost_per_subscriber?: string | number | null;
+  subscribers_acquired?: number;
+  pending_verifications?: number;
+  teaser_mode?: "none" | "standard_plus_teaser" | "teaser_only" | null;
   status: "pending" | "approved" | "active" | "paused" | "completed" | "rejected" | "budget_exhausted";
   budget: string | number;
+  budget_cap?: string | number;
+  remaining_allowance?: string | number;
+  actual_spend?: string | number;
+  pause_reason?: string | null;
   cpm: string | number;
   message_text: string;
   image_url: string | null;
@@ -91,21 +101,28 @@ interface Campaign {
 }
 
 function campaignTypeLabel(campaign: Campaign) {
+  if (campaign.teaser_mode === "teaser_only") return "TEASER";
   if (campaign.kind === "miniapp") return "MINI APP";
+  if (campaign.campaign_kind === "channel_growth") return "CHANNEL GROWTH";
   return campaign.kind === "bot" ? "BOT" : "CHANNEL";
 }
 
 export default function MyCampaignsPage() {
   const { setTitle } = useHeader();
+  const { t } = useTranslations();
   const router = useRouter();
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isActionLoading, setIsActionLoading] = useState(false);
   const [viewingCampaign, setViewingCampaign] = useState<Campaign | null>(null);
+  const statisticsRequestHandled = useRef(false);
   const [fundingCampaign, setFundingCampaign] = useState<Campaign | null>(null);
   const [fundingAmount, setFundingAmount] = useState("");
   const [error, setError] = useState("");
-  const [menuOpenId, setMenuOpenId] = useState<number | null>(null);
+  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [processingId, setProcessingId] = useState<number | null>(null);
   const [notification, setNotification] = useState<{ type: "success" | "error"; title: string; message: string } | null>(null);
 
@@ -129,63 +146,18 @@ export default function MyCampaignsPage() {
     action: "remove"
   });
 
-  const fetchCampaigns = async (silent = false) => {
+  const fetchCampaigns = async (silent = false, cursor: string | null = null) => {
     miniappReloadDebug("advertiser_campaign_fetch_started", { phase: "started" });
     if (!silent) setIsLoading(true);
     setError("");
     try {
-      const [regularRes, miniappRes] = await Promise.all([
-        apiFetch("/api/advertiser/campaigns"),
-        apiFetch("/api/advertiser/miniapp-rewarded-campaigns"),
-      ]);
-      const regularData = await regularRes.json().catch(() => null);
-      const miniappData = await miniappRes.json().catch(() => null);
-
-      const failures: string[] = [];
-      if (!regularRes.ok) {
-        failures.push("channel_or_bot");
-        console.error("Failed to load channel/bot campaigns", regularData || regularRes.status);
-      }
-      if (!miniappRes.ok) {
-        failures.push("miniapp");
-        console.error("Failed to load Mini App campaigns", miniappData || miniappRes.status);
-      }
-
-      const regular = (regularRes.ok && Array.isArray(regularData) ? regularData : []).map((c: any) => ({
-        ...c,
-        kind: c.type === "broadcast" ? "bot" : "channel",
-      }));
-
-      const miniapp = (miniappRes.ok && Array.isArray(miniappData) ? miniappData : []).map((c: any) => ({
-        id: c.id,
-        name: c.campaign_name,
-        kind: "miniapp" as const,
-        type: "rewarded",
-        status: c.status,
-        budget: c.budget,
-        cpm: c.advertiser_cpm_bid,
-        message_text: c.description || "",
-        image_url: c.image_url || null,
-        link: c.landing_url || "",
-        button_text: c.cta_text || "",
-        category: "",
-        continents: "[]",
-        created_at: c.created_at,
-        impressions: Number(c.impressions || 0),
-        spend: Number(c.spend || 0),
-        clicks: Number(c.clicks || 0),
-        rejection_reason: c.creative_review_notes || null,
-      }));
-
-      if (failures.length > 0) {
-        setError("We couldn't load all campaigns right now. Please refresh or try again shortly.");
-      }
-
-      const all = [...regular, ...miniapp].sort(
-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-      );
-      setCampaigns(all);
-      miniappReloadDebug("advertiser_campaign_fetch_completed", { phase: "completed", status: failures.length ? 207 : 200 });
+      const response = await apiFetch(`/api/advertiser/campaign-feed${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !Array.isArray(data?.results)) throw new Error(data?.error || "Campaign fetch failed");
+      setCampaigns((current) => cursor ? [...current, ...data.results] : data.results);
+      setNextCursor(data.next_cursor || null);
+      setHasMore(Boolean(data.has_more));
+      miniappReloadDebug("advertiser_campaign_fetch_completed", { phase: "completed", status: 200 });
     } catch (error) {
       miniappReloadDebug("advertiser_campaign_fetch_failed", { phase: error instanceof DOMException && error.name === "AbortError" ? "aborted" : "failed", error_name: error instanceof Error ? error.name : "UnknownError", error_message: error instanceof Error ? error.message : "Campaign fetch failed" });
       console.error("Error fetching campaigns:", error);
@@ -193,6 +165,13 @@ export default function MyCampaignsPage() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const loadMore = async () => {
+    if (!nextCursor || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try { await fetchCampaigns(true, nextCursor); }
+    finally { setIsLoadingMore(false); }
   };
 
   useEffect(() => {
@@ -225,6 +204,64 @@ export default function MyCampaignsPage() {
     return () => window.removeEventListener("click", handleClick);
   }, [setTitle, fundingCampaign, viewingCampaign]);
 
+  useEffect(() => {
+    if (isLoading || viewingCampaign || statisticsRequestHandled.current || typeof window === "undefined") return;
+    const targetStorageKey = "adsgalaxy:campaign-statistics-target";
+    const requested = new URLSearchParams(window.location.search).get("statistics")
+      || window.sessionStorage.getItem(targetStorageKey);
+    if (!requested) return;
+    const [source, rawId] = requested.split(":");
+    const id = Number(rawId);
+    if (!Number.isSafeInteger(id) || !["regular", "miniapp"].includes(source)) {
+      window.sessionStorage.removeItem(targetStorageKey);
+      statisticsRequestHandled.current = true;
+      return;
+    }
+
+    let cancelled = false;
+    const campaign = campaigns.find((item) => item.id === id && (item.source || (item.kind === "miniapp" ? "miniapp" : "regular")) === source);
+    if (campaign) {
+      window.sessionStorage.removeItem(targetStorageKey);
+      statisticsRequestHandled.current = true;
+      setViewingCampaign(campaign);
+      return;
+    }
+
+    statisticsRequestHandled.current = true;
+    void (async () => {
+      try {
+        const endpoint = source === "miniapp"
+          ? `/api/advertiser/miniapp-rewarded-campaigns/${id}`
+          : `/api/advertiser/campaigns/${id}`;
+        const response = await apiFetch(endpoint);
+        const data = await response.json().catch(() => null);
+        if (!response.ok || !data || cancelled) return;
+        const exactCampaign: Campaign = source === "miniapp"
+          ? {
+              ...data,
+              id,
+              source: "miniapp",
+              kind: "miniapp",
+              name: data.campaign_name,
+              type: "rewarded",
+              message_text: data.description,
+              link: data.landing_url,
+              button_text: data.cta_text,
+              cpm: data.advertiser_cpm_bid,
+            }
+          : {
+              ...data,
+              source: "regular",
+              kind: data.type === "broadcast" ? "bot" : "channel",
+            };
+        setViewingCampaign(exactCampaign);
+      } finally {
+        window.sessionStorage.removeItem(targetStorageKey);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [campaigns, isLoading, viewingCampaign]);
+
   const handleAddFund = async () => {
     if (!fundingCampaign || !fundingAmount || isActionLoading) return;
     
@@ -236,10 +273,10 @@ export default function MyCampaignsPage() {
     try {
       const res = await apiFetch(`/api/advertiser/campaigns/${fundingCampaign.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ action: "add_fund", amount: fundingAmount })
+        body: JSON.stringify({ action: "set_budget_cap", amount: fundingAmount })
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to add funds");
+      if (!res.ok) throw new Error(data.error || "Failed to update campaign budget");
       
       setFundingCampaign(null);
       setFundingAmount("");
@@ -247,14 +284,14 @@ export default function MyCampaignsPage() {
       if (webapp) webapp.HapticFeedback.notificationOccurred('success');
       setNotification({
         type: "success",
-        title: "Funds Added",
-        message: `$${fundingAmount} has been added to your campaign budget.`
+        title: "Budget Updated",
+        message: `Campaign spending cap updated to $${fundingAmount}.`
       });
     } catch (error: any) {
       if (webapp) webapp.HapticFeedback.notificationOccurred('error');
       setNotification({
         type: "error",
-        title: "Funding Failed",
+        title: "Budget Update Failed",
         message: error.message
       });
     } finally {
@@ -363,20 +400,9 @@ export default function MyCampaignsPage() {
     router.push(`/advertiser/campaigns/new/${campaign.kind}?edit=${campaign.id}`);
   };
 
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case "approved":
-      case "active": return <CheckCircle2 className="text-emerald-500" size={14} />;
-      case "pending": return <Clock className="text-amber-500" size={14} />;
-      case "rejected": return <XCircle className="text-red-500" size={14} />;
-      case "paused": return <PauseCircle className="text-slate-400" size={14} />;
-      default: return null;
-    }
-  };
-
   return (
     <DashboardLayout type="advertiser">
-      <div className="space-y-6">
+      <div className="min-w-0 space-y-6 overflow-hidden pb-[max(2rem,env(safe-area-inset-bottom))]">
         {/* Header */}
         <div className="relative overflow-hidden rounded-[2rem] bg-slate-950 p-6 text-white shadow-2xl shadow-blue-950/20">
           <div className="absolute -right-10 -top-12 h-32 w-32 rounded-full bg-[#0c9de8]/30 blur-3xl" />
@@ -400,7 +426,7 @@ export default function MyCampaignsPage() {
           </div>
           <button
             onClick={() => setShowCreateModal(true)}
-            className="relative mt-5 w-full rounded-2xl bg-[#0c9de8] px-5 py-4 text-sm font-black uppercase tracking-widest text-white flex items-center justify-center gap-2 hover:bg-blue-500 transition-all active:scale-95 shadow-lg shadow-blue-500/20"
+            className="relative mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-[#0c9de8] px-5 py-4 text-sm font-black uppercase tracking-widest text-white shadow-lg shadow-blue-500/20 transition-all hover:bg-blue-500 active:scale-95"
           >
             <Plus size={18} />
             Launch Campaign
@@ -452,11 +478,11 @@ export default function MyCampaignsPage() {
             </button>
           </div>
         ) : (
-          <div className="space-y-3">
+          <div className="min-w-0 space-y-3">
             {campaigns.map((campaign) => (
               <div
                 key={`${campaign.kind}-${campaign.id}`}
-                className="relative bg-white border border-slate-100 rounded-[2rem] p-5 group hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50 transition-all"
+                className="group relative min-w-0 rounded-[2rem] border border-slate-100 bg-white p-5 transition-all hover:-translate-y-0.5 hover:border-blue-100 hover:shadow-xl hover:shadow-blue-100/50"
               >
                 <div className="flex items-center gap-4">
                   <div className={cn(
@@ -471,16 +497,16 @@ export default function MyCampaignsPage() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <h3 className="font-black text-slate-900 truncate text-sm uppercase">{campaign.name}</h3>
-                      {getStatusIcon(campaign.status)}
+                      <CampaignStatusBadge status={campaign.status} reason={campaign.pause_reason} />
                     </div>
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] font-bold uppercase tracking-tight text-slate-400">
                       <span className="flex items-center gap-1 font-black text-slate-900">
-                        <DollarSign size={10} />{parseFloat(String(campaign.budget)).toFixed(2)}
+                        <DollarSign size={10} />{Number(campaign.actual_spend ?? campaign.spend ?? 0).toFixed(2)} / {Number(campaign.budget_cap ?? campaign.budget ?? 0).toFixed(2)}
                       </span>
                       <span className="w-1 h-1 bg-slate-200 rounded-full" />
                       <span className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[9px] text-slate-600">{campaignTypeLabel(campaign)}</span>
                       <span className="w-1 h-1 bg-slate-200 rounded-full" />
-                      <span className="text-[#0c9de8]">{campaign.status}</span>
+                      <span className="text-[#0c9de8]">Spent / Budget</span>
                     </div>
                     {campaign.status === "rejected" && campaign.rejection_reason && <p className="mt-1 text-[11px] font-semibold text-red-600">{campaign.rejection_reason}</p>}
                   </div>
@@ -489,7 +515,11 @@ export default function MyCampaignsPage() {
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        setMenuOpenId(menuOpenId === campaign.id ? null : campaign.id);
+                        setMenuOpenId(
+                          menuOpenId === `${campaign.kind}:${campaign.id}`
+                            ? null
+                            : `${campaign.kind}:${campaign.id}`
+                        );
                       }}
                       className="w-10 h-10 flex items-center justify-center text-slate-400 hover:bg-slate-50 rounded-full transition-all"
                     >
@@ -497,7 +527,7 @@ export default function MyCampaignsPage() {
                     </button>
 
                     <AnimatePresence>
-                      {menuOpenId === campaign.id && (
+                      {menuOpenId === `${campaign.kind}:${campaign.id}` && (
                         <motion.div
                           initial={{ opacity: 0, scale: 0.95, y: -10 }}
                           animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -511,7 +541,7 @@ export default function MyCampaignsPage() {
                                 onClick={() => { setViewingCampaign(campaign); setMenuOpenId(null); }}
                                 className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all"
                               >
-                                <FileText size={16} /> View Details
+                                <FileText size={16} /> Statistics
                               </button>
                               <button
                                 onClick={() => openEdit(campaign)}
@@ -540,7 +570,7 @@ export default function MyCampaignsPage() {
                                 onClick={() => { setViewingCampaign(campaign); setMenuOpenId(null); }}
                                 className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all"
                               >
-                                <FileText size={16} /> View Details
+                                <FileText size={16} /> Statistics
                               </button>
                               <button
                                 onClick={() => openEdit(campaign)}
@@ -549,10 +579,10 @@ export default function MyCampaignsPage() {
                                 <Edit2 size={16} /> Edit Campaign
                               </button>
                               <button
-                                onClick={() => { setFundingCampaign(campaign); setMenuOpenId(null); }}
+                                onClick={() => { setFundingCampaign(campaign); setFundingAmount(String(campaign.budget_cap ?? campaign.budget ?? "")); setMenuOpenId(null); }}
                                 className="w-full flex items-center gap-3 px-3 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 rounded-xl transition-all mt-1"
                               >
-                                <DollarSign size={16} /> Add Fund
+                                <DollarSign size={16} /> Change Budget
                               </button>
                               <button
                                 disabled={campaign.status === "pending" || campaign.status === "rejected" || campaign.status === "completed" || campaign.status === "budget_exhausted" || processingId === campaign.id}
@@ -587,6 +617,22 @@ export default function MyCampaignsPage() {
                   </div>
                 </div>
 
+                {campaign.campaign_kind === "channel_growth" && (
+                  <div className="mt-3 flex items-center gap-4 border-t border-slate-50 pt-3">
+                    <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400">
+                      <TrendingUp size={11} className="text-emerald-500" />
+                      <span className="font-black text-slate-700">{Number(campaign.subscribers_acquired || 0).toLocaleString()}</span>
+                      <span>SUB</span>
+                    </div>
+                    <div className="h-3 w-px bg-slate-100" />
+                    <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400">
+                      <DollarSign size={11} className="text-slate-300" />
+                      <span className="font-black text-slate-700">${Number(campaign.actual_spend || 0).toFixed(2)}</span>
+                      <span>SPEND</span>
+                    </div>
+                  </div>
+                )}
+
                 {/* Stats row for miniapp campaigns */}
                 {campaign.kind === 'miniapp' && (campaign.impressions! > 0 || campaign.status === 'active') && (
                   <div className="mt-3 pt-3 border-t border-slate-50 flex items-center gap-4">
@@ -611,11 +657,16 @@ export default function MyCampaignsPage() {
                 )}
               </div>
             ))}
+            {hasMore && (
+              <button onClick={loadMore} disabled={isLoadingMore} className="w-full rounded-2xl border border-blue-100 bg-white px-5 py-4 text-sm font-black uppercase tracking-widest text-[#0c9de8] disabled:opacity-60">
+                {isLoadingMore ? <Loader2 className="mx-auto animate-spin" size={18} /> : "See More"}
+              </button>
+            )}
           </div>
         )}
       </div>
 
-      {/* Add Fund Bottom Sheet (Styled Modal) */}
+      {/* Campaign budget-cap bottom sheet */}
       <AnimatePresence>
         {fundingCampaign && (
           <div className="fixed inset-0 z-[500] flex items-end justify-center p-0 sm:p-4">
@@ -638,7 +689,7 @@ export default function MyCampaignsPage() {
               
               <div className="space-y-6 mt-4">
                 <div className="text-center">
-                  <h3 className="text-xl font-black text-slate-900 uppercase">Add Funds</h3>
+                  <h3 className="text-xl font-black text-slate-900 uppercase">Change Budget</h3>
                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">
                     To: {fundingCampaign.name}
                   </p>
@@ -661,7 +712,7 @@ export default function MyCampaignsPage() {
 
                 <div className="p-4 bg-blue-50 border border-blue-100 rounded-2xl">
                   <p className="text-[10px] font-medium text-blue-600 leading-relaxed">
-                    Funds will be deducted from your main ad balance and locked for this campaign.
+                    This is a spending cap. Your ad balance is charged only when valid campaign activity is confirmed.
                   </p>
                 </div>
 
@@ -671,7 +722,7 @@ export default function MyCampaignsPage() {
                   className="w-full py-4 bg-[#0c9de8] text-white rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20 disabled:opacity-50 disabled:grayscale transition-all active:scale-95"
                 >
                   {isActionLoading ? <Loader2 className="animate-spin" size={20} /> : <CheckCircle2 size={20} />}
-                  {isActionLoading ? "Processing..." : "Confirm & Add"}
+                  {isActionLoading ? "Processing..." : "Update Budget"}
                 </button>
               </div>
             </motion.div>
@@ -755,8 +806,8 @@ export default function MyCampaignsPage() {
                     <Eye size={22} />
                   </div>
                   <div className="flex-1">
-                    <p className="text-sm font-black text-slate-900 uppercase tracking-tight">Views Campaign</p>
-                    <p className="text-xs text-slate-400 font-medium mt-0.5">Pay per 1,000 channel post views</p>
+                    <p className="text-sm font-black text-slate-900 uppercase tracking-tight">{t("advertiser.dashboard.viewsCampaign")}</p>
+                    <p className="text-xs text-slate-400 font-medium mt-0.5 truncate">{t("advertiser.chooser.views.description")}</p>
                   </div>
                   <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
                 </button>
@@ -769,9 +820,27 @@ export default function MyCampaignsPage() {
                     <MousePointer2 size={22} />
                   </div>
                   <div className="flex-1">
-                    <p className="text-sm font-black text-slate-900 uppercase tracking-tight">Click Campaign</p>
-                    <p className="text-xs text-slate-400 font-medium mt-0.5">Pay per button or link click</p>
+                    <p className="text-sm font-black text-slate-900 uppercase tracking-tight">{t("advertiser.dashboard.clickCampaign")}</p>
+                    <p className="text-xs text-slate-400 font-medium mt-0.5 truncate">{t("advertiser.chooser.clicks.description")}</p>
                   </div>
+                  <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
+                </button>
+
+                <button
+                  onClick={() => { setShowTypeModal(false); router.push("/advertiser/campaigns/new/growth"); }}
+                  className="w-full flex items-center gap-4 px-4 py-4 rounded-2xl border border-slate-100 bg-white hover:border-[#0c9de8] hover:bg-blue-50/50 transition-all group text-left"
+                >
+                  <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center shrink-0 text-[#0c9de8] group-hover:bg-[#0c9de8] group-hover:text-white transition-colors"><PlusCircle size={22} /></div>
+                  <div className="min-w-0 flex-1"><p className="text-sm font-black text-slate-900 uppercase tracking-tight">{t("advertiser.chooser.growth.title")}</p><p className="text-xs text-slate-400 font-medium mt-0.5 truncate">{t("advertiser.chooser.growth.description")}</p></div>
+                  <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
+                </button>
+
+                <button
+                  onClick={() => { setShowTypeModal(false); router.push("/advertiser/campaigns/new/channel?type=teaser"); }}
+                  className="w-full flex items-center gap-4 px-4 py-4 rounded-2xl border border-slate-100 bg-white hover:border-[#0c9de8] hover:bg-blue-50/50 transition-all group text-left"
+                >
+                  <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center shrink-0 text-[#0c9de8] group-hover:bg-[#0c9de8] group-hover:text-white transition-colors"><Sparkles size={22} /></div>
+                  <div className="min-w-0 flex-1"><p className="text-sm font-black text-slate-900 uppercase tracking-tight">{t("advertiser.chooser.teaser.title")}</p><p className="text-xs text-slate-400 font-medium mt-0.5 truncate">{t("advertiser.chooser.teaser.description")}</p></div>
                   <ArrowRight size={16} className="text-slate-300 group-hover:text-[#0c9de8] shrink-0 transition-colors" />
                 </button>
               </div>

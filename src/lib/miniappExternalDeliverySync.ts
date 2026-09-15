@@ -1,4 +1,5 @@
 import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import { claimAdvertiserDirectDebit } from "@/lib/advertiserDirectDebit";
 import pool from "@/lib/db";
 import {
   affordableExternalImpressions,
@@ -393,11 +394,16 @@ async function processOneSync(syncId: number) {
 
     if (fundedImpressions > 0) {
       const cost = moneyUnitsToDecimal(batchCost);
-      const [balanceUpdate] = await conn.query<ResultSetHeader>(
-        "UPDATE users SET ad_balance = ad_balance - ? WHERE id = ? AND ad_balance >= ?",
-        [cost, campaign.advertiser_id, cost],
-      );
-      if (balanceUpdate.affectedRows !== 1) throw new Error("Advertiser balance changed during external delivery sync");
+      const walletDebit = await claimAdvertiserDirectDebit(conn, {
+        sourceKey: `miniapp:external:${job.id}:${campaignId}`,
+        advertiserId: Number(campaign.advertiser_id),
+        campaignId,
+        campaignTable: "miniapp_rewarded_campaigns",
+        billingType: "miniapp_external",
+        amount: cost,
+        description: `External Mini App delivery sync #${job.id}: ${fundedImpressions} impressions`,
+      });
+      if (!walletDebit.ok) throw new Error(walletDebit.duplicate ? "External delivery already billed" : "INSUFFICIENT_AD_BALANCE");
       const [campaignUpdate] = await conn.query<ResultSetHeader>(
         `UPDATE miniapp_rewarded_campaigns
          SET remaining_budget = GREATEST(remaining_budget - ?, 0),
@@ -406,10 +412,6 @@ async function processOneSync(syncId: number) {
         [cost, cost, fundedImpressions, campaignId, cost],
       );
       if (campaignUpdate.affectedRows !== 1) throw new Error("Campaign budget changed during external delivery sync");
-      await conn.query(
-        "INSERT INTO advertiser_transactions (user_id, amount, type, description) VALUES (?, ?, 'debit', ?)",
-        [campaign.advertiser_id, cost, `External Mini App delivery sync #${job.id}: ${fundedImpressions} impressions`],
-      );
     }
 
     if (fundedImpressions > 0 || fundedClicks > 0) {

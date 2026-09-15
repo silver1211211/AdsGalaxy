@@ -97,13 +97,37 @@ export function normalizeCampaignCategoryList(input: unknown): CampaignCategory[
   }).filter((value): value is CampaignCategory => Boolean(value))));
 }
 
+export function normalizeCampaignCategories(input: unknown, maximum = 3): CampaignCategory[] {
+  const rawValues = Array.isArray(input) ? input : (() => {
+    const value = String(input || "").trim();
+    if (!value) return [ALL_CATEGORIES];
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {}
+    return value.split(",");
+  })();
+  const categories = Array.from(new Set(rawValues.map((value) => normalizeCampaignCategory(value))));
+  if (categories.includes(ALL_CATEGORIES)) return [ALL_CATEGORIES];
+  if (categories.length === 0) return [ALL_CATEGORIES];
+  if (categories.length > maximum) {
+    throw new Error(`Select no more than ${maximum} campaign categories.`);
+  }
+  return categories;
+}
+
+export function serializeCampaignCategories(input: unknown, maximum = 3) {
+  return normalizeCampaignCategories(input, maximum).join(",");
+}
+
 export function campaignCategoryMatches(campaignCategory: unknown, inventoryCategories: unknown) {
-  const campaign = normalizeCampaignCategory(campaignCategory);
-  if (campaign === ALL_CATEGORIES) return true;
-  return normalizeCampaignCategoryList(inventoryCategories).includes(campaign);
+  const campaign = normalizeCampaignCategories(campaignCategory);
+  if (campaign.includes(ALL_CATEGORIES)) return true;
+  const inventory = normalizeCampaignCategoryList(inventoryCategories);
+  return campaign.some((category) => inventory.includes(category));
 }
 
 export function campaignCategoryLabel(input: unknown) {
-  const category = normalizeCampaignCategory(input);
-  return CAMPAIGN_CATEGORY_OPTIONS.find((option) => option.value === category)?.label || "All Categories";
+  const categories = normalizeCampaignCategories(input);
+  return categories.map((category) => CAMPAIGN_CATEGORY_OPTIONS.find((option) => option.value === category)?.label || "All Categories").join(", ");
 }

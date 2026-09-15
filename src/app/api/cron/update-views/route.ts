@@ -2,10 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
+import { CACHE_TTL_SECONDS, cacheGet, cacheSet, redisKeys } from "@/lib/redisCache";
 import { debitConfirmedChannelViews } from "@/lib/channelFastBilling";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import { aggregateChannelStatistics } from "@/lib/channelStatistics";
-import { getPrivatePostViews, mtprotoAccountNumber } from "@/lib/telegramMtproto";
+import { getPrivatePostViews, isMtprotoReauthenticationRequired, mtprotoAccountNumber } from "@/lib/telegramMtproto";
+import { settleGrowthSeedViews } from "@/lib/channelGrowth";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +22,7 @@ type ViewPost = RowDataPacket & {
   tracking_account: number | string | null;
   tracking_account_status: string | null;
   tracking_account_member_status: string | null;
+  campaign_kind: string | null;
 };
 
 type PublicViewResult =
@@ -102,6 +105,9 @@ async function fetchPublicViews(username: string, messageId: number | string): P
 async function refreshPublicUsername(chatId: string | null) {
   const token = process.env.BOT_TOKEN;
   if (!token || !chatId) return { username: null, error: "missing_bot_token_or_chat_id" };
+  const metadataKey = redisKeys.telegramChat(chatId);
+  const cached = await cacheGet<{ username: string }>(metadataKey);
+  if (cached.hit && cached.value.username) return { username: cached.value.username, error: null };
   try {
     const response = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
       method: "POST",
@@ -110,9 +116,12 @@ async function refreshPublicUsername(chatId: string | null) {
       signal: AbortSignal.timeout(6_000),
     });
     const data = await response.json().catch(() => ({})) as { ok?: boolean; result?: { username?: string }; description?: string };
-    return data.ok && data.result?.username
-      ? { username: data.result.username, error: null }
-      : { username: null, error: String(data.description || `getChat_http_${response.status}`).slice(0, 120) };
+    if (data.ok && data.result?.username) {
+      const metadata = { username: data.result.username };
+      await cacheSet(metadataKey, metadata, CACHE_TTL_SECONDS.TELEGRAM_METADATA);
+      return { username: metadata.username, error: null };
+    }
+    return { username: null, error: String(data.description || `getChat_http_${response.status}`).slice(0, 120) };
   } catch (error) {
     return { username: null, error: errorCode(error) };
   }
@@ -207,10 +216,11 @@ export async function GET(request: NextRequest) {
     const batchEligiblePosts = Number(workloadRows[0]?.batchEligiblePosts || 0);
     const duePosts = Number(workloadRows[0]?.duePosts || 0);
     const [posts] = await pool.query<ViewPost[]>(
-      `SELECT cp.id, cp.channel_id, cp.message_id, cp.views, ch.chat_id,
+      `SELECT cp.id, cp.channel_id, cp.message_id, cp.views, ch.chat_id, c.campaign_kind,
          ch.username AS channel_username, ${channelType} AS channel_type, ${trackingAccount} AS tracking_account,
          ${trackingAccountStatus} AS tracking_account_status,${trackingMemberStatus} AS tracking_account_member_status
        FROM campaign_posts cp
+       JOIN campaigns c ON c.id = cp.campaign_id
        JOIN channels ch ON ch.id = cp.channel_id
        WHERE ${activePostConditions}
          AND MOD(cp.id, 4) = ?
@@ -263,7 +273,8 @@ export async function GET(request: NextRequest) {
           } else {
             stats.mtprotoErrors += 1;
             if (privacy.hasViewTrackingStatus) {
-              const unavailable = ["missing_api_id", "missing_api_hash", "missing_account_sessions", "session_auth_error"].includes(result.code);
+              const unavailable = ["missing_api_id", "missing_api_hash", "missing_account_sessions"].includes(result.code)
+                || isMtprotoReauthenticationRequired(result.code);
               await pool.query("UPDATE channels SET view_tracking_status = ? WHERE id = ?", [unavailable ? "unavailable" : "limited", post.channel_id]);
             }
             if (privacy.hasTrackingAccountStatus && privacy.hasTrackingAccountLastFailureAt && privacy.hasTrackingAccountFailureReason) {
@@ -356,12 +367,17 @@ export async function GET(request: NextRequest) {
           [post.id, post.channel_id, monotonicViews, previousViews]
         );
         await pool.query("UPDATE channels SET last_successful_view_fetch_at=NOW() WHERE id=?", [post.channel_id]);
-        await debitConfirmedChannelViews(Number(post.id), monotonicViews);
+        if(post.campaign_kind === "channel_growth") await settleGrowthSeedViews(Number(post.id),monotonicViews);
+        else await debitConfirmedChannelViews(Number(post.id), monotonicViews);
         stats.viewsUpdated += 1;
         if (post.channel_type === "private") stats.privateViewsUpdated += 1;
         else stats.publicViewsUpdated += 1;
       } catch (error) {
         const reason = errorCode(error);
+        const permanentPeerFailure = /channel_invalid|peer_id_invalid|channel-not-found|chat not found/i.test(reason);
+        const failureUpdateValue = permanentPeerFailure
+          ? (numericTimestamp ? Date.now() + 24 * 60 * 60 * 1000 : new Date(Date.now() + 24 * 60 * 60 * 1000))
+          : lastUpdateValue;
         stats.failedPosts += 1;
         errors.push({ post_id: post.id, source, reason });
         console.error("Channel view post failed", {
@@ -371,7 +387,7 @@ export async function GET(request: NextRequest) {
           source,
           reason,
         });
-        await markFailure(post, reason, source, lastUpdateValue).catch((storageError) => {
+        await markFailure(post, reason, source, failureUpdateValue).catch((storageError) => {
           console.error("View fetch failure could not be stored", { post_id: post.id, error: errorCode(storageError) });
         });
       }

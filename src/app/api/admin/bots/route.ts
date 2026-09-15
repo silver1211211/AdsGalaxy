@@ -236,6 +236,7 @@ export async function PATCH(request: Request) {
   try {
     const { id, action } = await request.json();
     const normalizedAction = action === "deny" ? "reject" : action === "approve" ? "activate" : action;
+    if (normalizedAction === "reject") return NextResponse.json({ error: "MODERATION_REASON_REQUIRED", code: "MODERATION_REASON_REQUIRED" }, { status: 400 });
 
     // Fetch bot and owner details
     const [rows] = await pool.query<BotActionRow[]>(

@@ -1,5 +1,6 @@
 import localFont from "next/font/local";
 import Script from "next/script";
+import { cookies } from "next/headers";
 import "./globals.css";
 
 const geistSans = localFont({
@@ -20,19 +21,25 @@ const geistMono = localFont({
 
 import { HeaderProvider } from "@/context/HeaderContext";
 import { PopupQueueProvider } from "@/context/PopupQueueContext";
+import { LocalizationProvider } from "@/i18n/client";
 
 import TelegramScript from "@/components/shared/TelegramScript";
+import { DEFAULT_LOCALE, isLocale } from "@/i18n";
 
 const appBuildMarker = process.env.NEXT_PUBLIC_APP_VERSION || "ui-render-stability-20260621";
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const cookieStore = await cookies();
+  const savedLocale = cookieStore.get("ag_locale")?.value;
+  const initialLocale = isLocale(savedLocale) ? savedLocale : DEFAULT_LOCALE;
+
   return (
     <html
-      lang="en"
+      lang={initialLocale}
       className={`${geistSans.variable} ${geistMono.variable} h-full`}
       suppressHydrationWarning
     >
@@ -52,11 +59,13 @@ export default function RootLayout({
           strategy="beforeInteractive"
         />
         <TelegramScript />
-        <PopupQueueProvider>
-          <HeaderProvider>
-            {children}
-          </HeaderProvider>
-        </PopupQueueProvider>
+        <LocalizationProvider initialLocale={initialLocale}>
+          <PopupQueueProvider>
+            <HeaderProvider>
+              {children}
+            </HeaderProvider>
+          </PopupQueueProvider>
+        </LocalizationProvider>
       </body>
     </html>
   );

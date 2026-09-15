@@ -1,6 +1,8 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars -- third-party ad SDK adapters expose provider-owned dynamic payloads */
 
 import { RICHADS_PRODUCTION_PLACEMENT, type MiniAppAdFormat, type MiniAppNetworkName, type MiniAppSdkErrorCode } from "@/lib/miniappNetworkAdapters";
+import { translate } from "@/i18n";
 
 const ADSGALAXY_BOT_URL = `https://t.me/${process.env.NEXT_PUBLIC_BOT_USERNAME || "Ads_Galaxy_bot"}`;
 
@@ -149,12 +151,12 @@ function errorResult(network: MiniAppNetworkName | null, errorCode: MiniAppSdkEr
   return { success: false, network, error_code: errorCode, error_message: errorMessage };
 }
 
-function friendlySdkMessage(errorCode?: string, fallback = "Unable to load this advertisement. Please try again.") {
+function friendlySdkMessage(errorCode?: string, fallback = translate("miniapp.ad.unableToLoad")) {
   if (errorCode === "NO_FILL" || errorCode === "AD_UNAVAILABLE") {
-    return "No advertisements are available at the moment. Please try again shortly.";
+    return translate("miniapp.ad.noAdsLong");
   }
   if (errorCode === "TIMEOUT" || errorCode === "NETWORK_ERROR" || errorCode === "SDK_LOAD_FAILED") {
-    return "Network temporarily unavailable.";
+    return translate("miniapp.ad.networkUnavailable");
   }
   return fallback;
 }
@@ -860,16 +862,16 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
     panel.className = "agx-rewarded-card" + (ad.image_url ? "" : " agx-rewarded-card--no-media");
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "true");
-    panel.setAttribute("aria-label", "Sponsored ad");
+    panel.setAttribute("aria-label", translate("miniapp.ad.sponsoredAd"));
     const header = document.createElement("div");
     header.className = "agx-rewarded-top";
     const heading = document.createElement("div");
     heading.className = "agx-rewarded-heading";
-    heading.textContent = "Ads";
+    heading.textContent = translate("miniapp.ad.ads");
     const close = document.createElement("button");
     close.type = "button";
     close.textContent = "x";
-    close.setAttribute("aria-label", "Close ad");
+    close.setAttribute("aria-label", translate("miniapp.ad.close"));
     close.disabled = true;
     close.hidden = true;
     close.className = "agx-rewarded-close";
@@ -890,7 +892,7 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
         image.remove();
         const placeholder = document.createElement("div");
         placeholder.className = "agx-rewarded-placeholder";
-        placeholder.setAttribute("aria-label", "AdsGalaxy ad creative");
+        placeholder.setAttribute("aria-label", translate("miniapp.ad.creative"));
         placeholder.innerHTML = `<span class="agx-rewarded-placeholder-mark" aria-hidden="true"></span><span class="agx-rewarded-placeholder-text">AdsGalaxy</span>`;
         media.appendChild(placeholder);
       };
@@ -934,12 +936,12 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
     attribution.target = "_blank";
     attribution.rel = "noopener noreferrer";
     attribution.className = "agx-rewarded-sponsored";
-    attribution.innerHTML = `<span class="agx-rewarded-mark" aria-hidden="true"></span><span>Ad &middot; Sponsored by</span><strong>AdsGalaxy</strong>`;
+    attribution.innerHTML = `<span class="agx-rewarded-mark" aria-hidden="true"></span><span>${translate("miniapp.ad.sponsoredBy")}</span><strong>AdsGalaxy</strong>`;
     const countdownBox = document.createElement("div");
     countdownBox.className = "agx-rewarded-countdown";
     const countdownLabel = document.createElement("div");
     countdownLabel.className = "agx-rewarded-countdown-label";
-    countdownLabel.innerHTML = `<svg class="agx-rewarded-clock" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v6l4 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Skip in <strong>15s</strong></span>`;
+    countdownLabel.innerHTML = `<svg class="agx-rewarded-clock" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v6l4 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>${translate("miniapp.ad.skipIn", { count: 15 })}</span>`;
     const ringWrap = document.createElement("div");
     ringWrap.className = "agx-rewarded-ring-wrap";
     ringWrap.innerHTML = `<svg class="agx-rewarded-ring" viewBox="0 0 48 48" aria-hidden="true"><circle class="agx-rewarded-ring-track" cx="24" cy="24" r="20"></circle><circle class="agx-rewarded-ring-progress" cx="24" cy="24" r="20"></circle></svg><span class="agx-rewarded-ring-text">15</span>`;
@@ -968,7 +970,7 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
       completionNotified = true;
       sendQualityEvent({ event_type: "completed", watch_duration_seconds: maxSeconds, completed: true });
       if (countdownTimer !== undefined) window.clearInterval(countdownTimer);
-      countdownLabel.innerHTML = `<svg class="agx-rewarded-clock" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v6l4 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Skip in <strong>0s</strong></span>`;
+      countdownLabel.innerHTML = `<svg class="agx-rewarded-clock" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v6l4 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>${translate("miniapp.ad.skipIn", { count: 0 })}</span>`;
       ringText.textContent = "0";
       ringProgress.style.strokeDashoffset = `${ringLength}`;
       close.hidden = false;
@@ -984,7 +986,7 @@ function showInternalRewardedAd(ad: InternalAdPayload, lifecycle?: InternalAdLif
     countdownTimer = window.setInterval(() => {
       const remaining = Math.max(0, Math.ceil(maxSeconds - elapsedSeconds()));
       const elapsed = Math.min(maxSeconds, elapsedSeconds());
-      countdownLabel.innerHTML = `<svg class="agx-rewarded-clock" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v6l4 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Skip in <strong>${remaining}s</strong></span>`;
+      countdownLabel.innerHTML = `<svg class="agx-rewarded-clock" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v6l4 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>${translate("miniapp.ad.skipIn", { count: remaining })}</span>`;
       ringText.textContent = String(remaining);
       ringProgress.style.strokeDashoffset = `${ringLength * (elapsed / maxSeconds)}`;
       if (remaining <= 0) {
@@ -1265,7 +1267,7 @@ async function requestFallback(
   diagnostics: { started_at?: string; finished_at?: string; duration_ms?: number } = {}
 ): Promise<MediationResponse> {
   if (!decision.request_id || !decision.selected_network) {
-    return { success: false, error_code: "NO_FILL", message: "No advertisements are available at the moment. Please try again shortly." };
+    return { success: false, error_code: "NO_FILL", message: translate("miniapp.ad.noAdsLong") };
   }
 
   const response = await fetch("/api/miniapp/mediation/fallback", {

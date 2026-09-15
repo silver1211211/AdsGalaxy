@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/set-state-in-effect -- legacy form/API shapes and edit bootstrap predate FAST V2 */
 
 import React, { useEffect, useState, useMemo, useRef } from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
@@ -12,6 +13,9 @@ import {
   Zap, Target, Wifi, WifiOff, X, Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import dynamic from "next/dynamic";
+
+const ImageCropDialog = dynamic(() => import("@/components/advertiser/ImageCropDialog"), { ssr: false });
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -207,6 +211,7 @@ export default function AdvertiserMiniAppRewardedPage() {
   const [imagePreview, setImagePreview] = useState<string>("");
   const [imageUploading, setImageUploading] = useState(false);
   const [imageError, setImageError] = useState<string>("");
+  const [cropSource, setCropSource] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [logoPreview, setLogoPreview] = useState("");
   const [logoUploading, setLogoUploading] = useState(false);
@@ -345,7 +350,7 @@ export default function AdvertiserMiniAppRewardedPage() {
     });
   };
 
-  const handleImageFile = async (file: File) => {
+  const uploadCroppedImage = async (file: File) => {
     if (!REWARDED_IMAGE_TYPES.includes(file.type)) {
       setImageError("Unsupported format. Upload a PNG, JPG, or WEBP image.");
       return;
@@ -380,6 +385,15 @@ export default function AdvertiserMiniAppRewardedPage() {
     } finally {
       setImageUploading(false);
     }
+  };
+
+  const handleImageFile = (file: File) => {
+    if (!REWARDED_IMAGE_TYPES.includes(file.type)) {
+      setImageError("Unsupported format. Upload a PNG, JPG, or WEBP image.");
+      return;
+    }
+    setCropSource(file);
+    setImageError("");
   };
 
   const handleLogoFile = async (file: File) => {
@@ -484,6 +498,10 @@ export default function AdvertiserMiniAppRewardedPage() {
 
   return (
     <DashboardLayout type="advertiser">
+      {cropSource && <ImageCropDialog file={cropSource} onCancel={() => setCropSource(null)} onConfirm={(cropped) => {
+        setCropSource(null);
+        void uploadCroppedImage(cropped);
+      }} />}
       <style>{`
         .shiny-btn { background: linear-gradient(135deg,#0c9de8 0%,#0b7ec9 100%); box-shadow: 0 4px 16px rgba(12,157,232,.32); transition: background .2s, box-shadow .2s, transform .15s; }
         .shiny-btn:hover { background: linear-gradient(135deg,#3dbfff 0%,#0c9de8 100%); box-shadow: 0 6px 24px rgba(12,157,232,.52); transform: translateY(-1px); }
@@ -1041,11 +1059,11 @@ export default function AdvertiserMiniAppRewardedPage() {
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-slate-100 bg-white px-5 py-4 space-y-3 shadow-sm">
+                <div className="min-w-0 overflow-hidden rounded-2xl border border-slate-100 bg-white px-4 py-4 space-y-3 shadow-sm sm:px-5">
                   <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-400">
                     <span>Drag to adjust</span>
                   </div>
-                  <div className="relative flex items-center" style={{ height: 44 }}>
+                  <div className="relative mx-[15px] flex min-w-0 items-center" style={{ height: 44 }}>
                     <div className="absolute inset-x-0 rounded-full" style={{ height: 8, background: "#e2e8f0" }} />
                     <div className="absolute left-0 rounded-full pointer-events-none" style={{ height: 8, width: `${cpmPercent}%`, background: "linear-gradient(90deg,#0c9de8,#0b7ec9)" }} />
                     {/* Recommended tick */}
@@ -1054,14 +1072,14 @@ export default function AdvertiserMiniAppRewardedPage() {
                       type="range" min="0" max="100" step="0.5"
                       value={cpmPercent}
                       onChange={e => handleCpmSlider(Number(e.target.value))}
-                      className="miniapp-cpm absolute inset-x-0 w-full"
+                      className="miniapp-cpm absolute inset-x-0 box-border max-w-full"
                       style={{ height: 8 }}
                     />
                   </div>
-                  <div className="flex justify-between text-[10px] font-bold text-slate-400">
+                  <div className="grid grid-cols-3 gap-1 text-[9px] font-bold text-slate-400 sm:text-[10px]">
                     <span>${cpmMin}</span>
-                    <span className="text-amber-500 font-black">⭐ ${recommendedCpm.toFixed(2)} rec.</span>
-                    <span>${cpmMax}</span>
+                    <span className="text-center text-amber-500 font-black">⭐ ${recommendedCpm.toFixed(2)} rec.</span>
+                    <span className="text-right">${cpmMax}</span>
                   </div>
                 </div>
                 {cpmAdjustmentWarning && <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] font-bold text-amber-700">{cpmAdjustmentWarning}</p>}
@@ -1082,7 +1100,7 @@ export default function AdvertiserMiniAppRewardedPage() {
                     />
                   </div>
                 )}
-                <p className="text-[11px] font-semibold text-slate-400 px-1">Minimum total budget: $10.</p>
+                <p className="px-1 text-[11px] font-semibold text-slate-500">Minimum budget: $10. You are charged only for valid impressions, up to this spending cap.</p>
               </div>
 
               {/* Daily Budget */}

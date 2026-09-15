@@ -1,8 +1,10 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy audit result rows are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { escapeTelegramHtml, sendTelegramMessage } from "@/lib/telegram";
+import { parseAdminPagination } from "@/lib/adminPagination";
 
 export async function GET(request: Request) {
   if (!(await checkAdminAuth())) {
@@ -10,10 +12,8 @@ export async function GET(request: Request) {
   }
 
   const { searchParams } = new URL(request.url);
-  const page = parseInt(searchParams.get("page") || "1");
-  const limit = parseInt(searchParams.get("limit") || "10");
+  const { page, limit, offset } = parseAdminPagination(searchParams, { defaultLimit: 10 });
   const postIdFilter = searchParams.get("post_id");
-  const offset = (page - 1) * limit;
 
   try {
     let postQuery = `
@@ -50,7 +50,7 @@ export async function GET(request: Request) {
     const postIds = postRows.map((r: any) => r.post_id);
 
     const [auditRows]: any = await pool.query(
-      "SELECT * FROM campaign_views_audit WHERE post_id IN (?) ORDER BY check_time DESC", 
+      "SELECT * FROM campaign_views_audit WHERE post_id IN (?) ORDER BY check_time DESC LIMIT 500",
       [postIds]
     );
 
@@ -108,7 +108,7 @@ export async function PATCH(request: Request) {
 
     const [details]: any = await conn.query(`
       SELECT p.status as post_status, c.name as campaign_name, ch.title as channel_title,
-      c.id as campaign_id, c.user_id as advertiser_id, ch.user_id as publisher_id, c.type as campaign_type,
+      c.id as campaign_id, c.user_id as advertiser_id, ch.user_id as publisher_id, c.type as campaign_type, c.funding_model,
       u_adv.telegram_id as advertiser_telegram_id, u_pub.telegram_id as publisher_telegram_id
       FROM campaign_posts p
       LEFT JOIN campaigns c ON p.campaign_id = c.id
@@ -143,7 +143,14 @@ export async function PATCH(request: Request) {
     const totalPubReward = settlements.reduce((acc: number, s: any) => acc + parseFloat(s.publisher_reward), 0);
 
     if (totalAdvPaid > 0) {
-      await conn.query("UPDATE campaigns SET budget = budget + ? WHERE id = ?", [totalAdvPaid, post.campaign_id]);
+      await conn.query("UPDATE campaigns SET budget = LEAST(total_budget,budget + ?) WHERE id = ?", [totalAdvPaid, post.campaign_id]);
+      if (post.funding_model === "direct_debit") {
+        await conn.query("UPDATE users SET ad_balance=ad_balance+? WHERE id=?", [totalAdvPaid, post.advertiser_id]);
+        await conn.query(
+          "INSERT INTO advertiser_transactions (user_id,amount,type,description) VALUES (?,?,'credit',?)",
+          [post.advertiser_id, totalAdvPaid, `Admin invalid-view reversal for campaign #${post.campaign_id}, post #${post_id}`],
+        );
+      }
     }
     if (totalPubReward > 0) {
       await conn.query("UPDATE users SET balance_locked = balance_locked - ? WHERE id = ?", [totalPubReward, post.publisher_id]);

@@ -1,11 +1,14 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy deposit rows are not schema-generated */
 
 import React, { useEffect, useState } from "react";
 import AdminLayout from "@/components/layout/AdminLayout";
+import { useAdminRequestGuard } from "@/hooks/useAdminRequestGuard";
 import { Loader2, ChevronLeft, ChevronRight, Eye, X, Search } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 
 export default function AdminDepositsPage() {
+  const beginListRequest = useAdminRequestGuard();
   const [deposits, setDeposits] = useState([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
@@ -19,17 +22,19 @@ export default function AdminDepositsPage() {
   const [selectedDeposit, setSelectedDeposit] = useState<any>(null);
 
   const fetchDeposits = async (p: number, s: string, q: string) => {
+    const controller = beginListRequest();
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/deposits?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`);
+      const res = await fetch(`/api/admin/deposits?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}`, { signal: controller.signal });
       const data = await res.json();
       setDeposits(data.deposits);
       setTotalPages(data.totalPages);
     } catch (err) {
+      if (controller.signal.aborted) return;
       console.error(err);
       setError("Failed to fetch deposits");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 
@@ -38,7 +43,7 @@ export default function AdminDepositsPage() {
       fetchDeposits(page, statusFilter, search);
     }, 500);
     return () => clearTimeout(timer);
-  }, [page, statusFilter, search]);
+  }, [page, statusFilter, search, beginListRequest]);
 
   const openViewModal = (deposit: any) => {
     setSelectedDeposit(deposit);

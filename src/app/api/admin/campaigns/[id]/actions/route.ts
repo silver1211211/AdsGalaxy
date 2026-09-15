@@ -8,6 +8,7 @@ import { forceRefreshCampaignStatistics, forceSettleCampaignDeltas, refreshAndSe
 import { settleCampaignEngagementBeforeDeletion, type CampaignSettlementBeforeDeletionResult } from "@/lib/channelSettlement";
 import { acquireCronLock, releaseCronLock } from "@/lib/cronSecurity";
 import { CAMPAIGN_LIFECYCLE_ACTION_SPECS, isCampaignLifecycleAction, type CampaignLifecycleAction } from "@/lib/campaignLifecycleActions";
+import { effectiveBidPerThousand, getAdvertiserDiscount } from "@/lib/advertiserDiscount";
 
 const LIFECYCLE_COLUMNS = [
   "paused_at",
@@ -30,6 +31,8 @@ type CampaignActionRow = RowDataPacket & {
   pause_reason: string | null;
   budget: string | number;
   cpm: string | number;
+  cpc: string | number;
+  type: string;
   user_id: number;
 };
 
@@ -116,7 +119,10 @@ async function resumeCampaign(campaign: CampaignActionRow, campaignId: string, c
   }
 
   if (parseFloat(String(campaign.budget || "0")) <= 0) {
-    const unitPrice = parseFloat(String(campaign.cpm || "0")) / 1000;
+    const discount = await getAdvertiserDiscount(pool, campaign.user_id);
+    const isClickCampaign = campaign.type === "clicks";
+    const grossRate = isClickCampaign ? campaign.cpc : campaign.cpm;
+    const unitPrice = effectiveBidPerThousand(grossRate, isClickCampaign ? discount.cpc_discount : discount.cpm_discount) / 1000;
     const [balanceRows] = await pool.query<RowDataPacket[]>(
       "SELECT ad_balance FROM users WHERE id = ?",
       [campaign.user_id]
@@ -161,7 +167,7 @@ export async function POST(
       }, { status: 409 });
     }
 
-    const [rows] = await pool.query<CampaignActionRow[]>("SELECT id, status, pause_reason, budget, cpm, user_id FROM campaigns WHERE id = ?", [id]);
+    const [rows] = await pool.query<CampaignActionRow[]>("SELECT id, status, pause_reason, budget, cpm, cpc, type, user_id FROM campaigns WHERE id = ?", [id]);
     if (rows.length === 0) {
       return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
     }

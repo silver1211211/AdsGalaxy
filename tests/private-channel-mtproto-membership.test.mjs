@@ -59,3 +59,41 @@ test("deployment installs one corrected identity sync schedule and the wrapper u
   assert.match(wrapper, /\/root\/\.nvm\/versions\/node\/v24\.15\.0\/bin\/node scripts\/sync-channel-identities\.mjs/);
   assert.match(wrapper, /nice -n 15/);
 });
+
+test("private onboarding balances configured MTProto accounts and serializes assignments", () => {
+  const onboarding = read("src/lib/privateChannelTrackingOnboarding.ts");
+
+  assert.doesNotMatch(onboarding, /account 2 only/i);
+  assert.doesNotMatch(onboarding, /return \(\[2\]/);
+  assert.match(onboarding, /GET_LOCK/);
+  assert.match(onboarding, /RELEASE_LOCK/);
+  assert.match(onboarding, /active_count/);
+  assert.match(onboarding, /assigned_count/);
+  assert.match(onboarding, /leftLoad\.active - rightLoad\.active/);
+  assert.match(onboarding, /reserveTrackingAccount/);
+  assert.match(onboarding, /getExistingTrackingAssignment/);
+  assert.match(onboarding, /getMtprotoAccountAvailability/);
+});
+
+test("MTProto join path quarantines reauth failures and observes flood cooldown", () => {
+  const mtproto = read("src/lib/telegramMtproto.ts");
+
+  assert.match(mtproto, /unhealthyAccountCodes/);
+  assert.match(mtproto, /accountCooldownUntil/);
+  assert.match(mtproto, /parseFloodWait\(error\)/);
+  assert.match(mtproto, /getMtprotoAccountAvailability/);
+  assert.match(mtproto, /markMtprotoAccountFailure\(account\.key, error, code\)/);
+});
+
+test("visible Teaser analytics labels do not use the obsolete Teza spelling", () => {
+  const files = [
+    "src/app/admin/teaser-analytics/page.tsx",
+    "src/app/api/admin/teaser-analytics/route.ts",
+    "src/components/publisher/ChannelAnalyticsDashboard.tsx",
+  ];
+
+  for (const file of files) {
+    const source = read(file);
+    assert.doesNotMatch(source, /\bTeza\b/i, `${file} must use Teaser, not Teza`);
+  }
+});

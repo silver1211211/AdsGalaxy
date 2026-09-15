@@ -1,9 +1,28 @@
-import { isTelegramMiniApp, waitForTelegramInitData } from "./telegramWebApp";
+import { getAvailableTelegramInitData, isTelegramMiniApp, waitForTelegramInitData } from "./telegramWebApp";
 import { miniappReloadDebug } from "./miniappReloadDebug";
 
 const LOCAL_MINIAPP_DEV_STORAGE_KEY = "adsgalaxy_local_miniapp_dev";
 const LOCAL_MINIAPP_DEV_INIT_DATA_PREFIX = "adsgalaxy-local-miniapp-dev:";
 const DEVICE_ID_STORAGE_KEY = "adsgalaxy_device_id";
+const inFlightGetRequests = new Map<string, Promise<Response>>();
+
+const SESSION_FIRST_GET_ROUTES = new Set([
+  "/api/me/status",
+  "/api/publisher/stats",
+  "/api/publisher/channels",
+  "/api/publisher/referrals",
+  "/api/publisher/earnings",
+  "/api/advertiser/stats",
+  "/api/advertiser/campaigns",
+  "/api/advertiser/campaign-feed",
+  "/api/advertiser/miniapp-rewarded-campaigns",
+  "/api/advertiser/deposits",
+  "/api/advertiser/enterprise",
+  "/api/publisher/withdrawals",
+  "/api/publisher/bots",
+  "/api/publisher/miniapps",
+  "/api/ai-support",
+]);
 
 type ApiFetchOptions = RequestInit & {
   requireAuth?: boolean;
@@ -26,7 +45,12 @@ async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: nu
 
 function isLocalBrowserHost() {
   if (typeof window === "undefined") return false;
-  return window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+
+  const hostname = window.location.hostname.toLowerCase();
+
+  return hostname === "localhost"
+    || hostname === "127.0.0.1"
+    || hostname === "preview.adsgalaxy.online";
 }
 
 function encodeLocalMiniappDevPayload(payload: unknown) {
@@ -39,11 +63,12 @@ function getOrCreateLocalMiniappDevInitData() {
   if (!isLocalBrowserHost()) return "";
 
   const existing = window.localStorage.getItem(LOCAL_MINIAPP_DEV_STORAGE_KEY) || "";
-  if (existing) return existing;
-
   const params = new URLSearchParams(window.location.search);
+  const isOwnerPreview = window.location.hostname.toLowerCase() === "preview.adsgalaxy.online";
+  if (existing && !isOwnerPreview) return existing;
+
   const initData = `${LOCAL_MINIAPP_DEV_INIT_DATA_PREFIX}${encodeLocalMiniappDevPayload({
-    user: params.get("user") || "1",
+    user: isOwnerPreview ? "silver" : params.get("user") || "1",
     ref: params.get("ref") || "",
   })}`;
 
@@ -70,10 +95,28 @@ export async function apiFetch(url: string, options: ApiFetchOptions = {}) {
   const shouldDiagnose = diagnosticRoutes.has(route);
   const requestStartedAt = Date.now();
   const { requireAuth = true, timeoutMs = 15000, ...fetchOptions } = options;
+  const method = String(fetchOptions.method || "GET").toUpperCase();
   const localDevInitData = typeof window !== "undefined" ? getOrCreateLocalMiniappDevInitData() : "";
-  const initData = localDevInitData || (typeof window !== "undefined"
-    ? await waitForTelegramInitData({ requireTelegram: requireAuth && isTelegramMiniApp() })
-    : "");
+
+  const sessionFirstGet =
+    method === "GET" &&
+    SESSION_FIRST_GET_ROUTES.has(route);
+
+  // Keep the fast session-first path for ordinary browser reloads, but use
+  // Telegram's signed identity immediately when the bridge already exposed it.
+  // This avoids parallel 401s while the 48-hour session is being established.
+  let initData = localDevInitData
+    || (sessionFirstGet && typeof window !== "undefined" ? getAvailableTelegramInitData() : "");
+
+  if (
+    !initData &&
+    typeof window !== "undefined" &&
+    !sessionFirstGet
+  ) {
+    initData = await waitForTelegramInitData({
+      requireTelegram: requireAuth && isTelegramMiniApp(),
+    });
+  }
 
   const headers = new Headers(fetchOptions.headers);
   headers.set("x-telegram-init-data", initData || "");
@@ -86,9 +129,53 @@ export async function apiFetch(url: string, options: ApiFetchOptions = {}) {
 
   let response: Response;
   try {
-    response = typeof window !== "undefined"
-      ? await fetchWithTimeout(url, { ...fetchOptions, headers }, timeoutMs)
-      : await fetch(url, { ...fetchOptions, headers });
+    const canCoalesce = typeof window !== "undefined" && method === "GET" && !fetchOptions.signal;
+    const requestKey = canCoalesce ? url : "";
+    const existing = requestKey ? inFlightGetRequests.get(requestKey) : undefined;
+    if (existing) {
+      response = (await existing).clone();
+    } else {
+      const requestPromise = typeof window !== "undefined"
+        ? fetchWithTimeout(url, { ...fetchOptions, headers }, timeoutMs)
+        : fetch(url, { ...fetchOptions, headers });
+      if (requestKey) inFlightGetRequests.set(requestKey, requestPromise);
+      try {
+        const fetched = await requestPromise;
+        response = requestKey ? fetched.clone() : fetched;
+      } finally {
+        if (requestKey) inFlightGetRequests.delete(requestKey);
+      }
+    }
+    // Session-first GET fallback:
+    // if the server does not have a valid 48-hour session, obtain Telegram
+    // initData only then and retry the request once.
+    if (
+      response.status === 401 &&
+      requireAuth &&
+      sessionFirstGet &&
+      !localDevInitData &&
+      typeof window !== "undefined"
+    ) {
+      const telegramInitData = await waitForTelegramInitData({
+        requireTelegram: isTelegramMiniApp(),
+      });
+
+      if (telegramInitData) {
+        initData = telegramInitData;
+
+        const retryHeaders = new Headers(headers);
+        retryHeaders.set("x-telegram-init-data", telegramInitData);
+
+        response = await fetchWithTimeout(
+          url,
+          {
+            ...fetchOptions,
+            headers: retryHeaders,
+          },
+          timeoutMs,
+        );
+      }
+    }
   } catch (error) {
     if (shouldDiagnose) miniappReloadDebug("api_fetch_failed", {
       route, phase: error instanceof DOMException && error.name === "AbortError" ? "aborted" : "failed",

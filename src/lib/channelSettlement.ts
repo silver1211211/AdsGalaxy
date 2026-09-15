@@ -16,6 +16,7 @@ import { createSystemLog } from "@/lib/systemLogs";
 import { settlePendingChannelPublisherCredits } from "@/lib/channelFastBilling";
 import { getChannelUnitPrice, money } from "@/lib/channelBilling";
 import { calculateCurrentCanonicalAllocation, shadowWriteChannelAllocation, unitsToDecimal } from "@/lib/channelAllocationLedger";
+import { claimAdvertiserDirectDebit } from "@/lib/advertiserDirectDebit";
 
 type SettlementKind = "view" | "click";
 type ChannelPayoutPolicy = {
@@ -39,6 +40,7 @@ type LockedPost = RowDataPacket & {
   campaign_type: string;
   campaign_name: string;
   advertiser_id: number;
+  funding_model: "legacy_reserved" | "direct_debit";
   advertiser_telegram_id: string | number;
   publisher_id: number;
   campaign_status: string;
@@ -46,6 +48,7 @@ type LockedPost = RowDataPacket & {
   daily_budget_limit: string | number | null;
   cpm: string | number;
   cpc: string | number;
+  advertiser_discount: string | number;
   views: string | number;
   settled_views: string | number;
   current_clicks: string | number;
@@ -138,8 +141,9 @@ export function calculateChannelPayoutSplit(advertiserDebit: number, policy: Cha
 async function lockedPost(connection: PoolConnection, postId: number) {
   const [rows] = await connection.query<LockedPost[]>(
     `SELECT cp.id AS post_id, cp.campaign_id, cp.channel_id, cp.views, cp.settled_views, cp.settled_clicks,
-       c.type AS campaign_type, c.name AS campaign_name, c.user_id AS advertiser_id,
+       c.type AS campaign_type, c.name AS campaign_name, c.user_id AS advertiser_id, c.funding_model,
        c.status AS campaign_status, c.budget, c.daily_budget_limit, c.cpm, c.cpc,
+       CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END AS advertiser_discount,
        ch.user_id AS publisher_id, ch.status AS channel_status, ch.settlement_excluded_until,
        publisher.status AS publisher_status, publisher.is_banned AS publisher_is_banned,
        u.telegram_id AS advertiser_telegram_id,
@@ -149,6 +153,7 @@ async function lockedPost(connection: PoolConnection, postId: number) {
      JOIN channels ch ON ch.id = cp.channel_id
      JOIN users u ON u.id = c.user_id
      JOIN users publisher ON publisher.id = ch.user_id
+     LEFT JOIN advertiser_rate_discounts ard ON ard.user_id = c.user_id
      WHERE cp.id = ?
      FOR UPDATE`,
     [postId]
@@ -162,6 +167,7 @@ async function countOutstandingCampaignEngagement(campaignId: number) {
      FROM campaign_posts cp
      JOIN campaigns c ON c.id = cp.campaign_id
      WHERE cp.campaign_id = ?
+       AND COALESCE(c.campaign_kind, 'standard') <> 'channel_growth'
        AND cp.delivery_confirmed_at IS NOT NULL
        AND cp.delivery_failed_at IS NULL
        AND cp.deleted_at IS NULL
@@ -224,6 +230,7 @@ export async function settleChannelCampaigns(options: {
      JOIN channels ch ON ch.id = cp.channel_id
      JOIN users publisher ON publisher.id = ch.user_id
      WHERE c.status IN (${campaignStatusPlaceholders})
+       AND COALESCE(c.campaign_kind, 'standard') <> 'channel_growth'
        AND ch.status = 'active'
        AND ch.is_deleted = FALSE
        AND (ch.settlement_excluded_until IS NULL OR ch.settlement_excluded_until <= NOW())
@@ -273,7 +280,7 @@ export async function settleChannelCampaigns(options: {
         const oldClicks = Number(post.settled_clicks || 0);
         const totalClicks = Number(post.current_clicks || 0);
         const dueUnits = kind === "view" ? totalViews - oldViews : totalClicks - oldClicks;
-        const unitPrice = getChannelUnitPrice({ type: post.campaign_type, cpm: post.cpm, cpc: post.cpc });
+        const unitPrice = getChannelUnitPrice({ type: post.campaign_type, cpm: post.cpm, cpc: post.cpc, discount: post.advertiser_discount });
         const currentBudget = Number(post.budget || 0);
 
         if (dueUnits <= 0) {
@@ -353,6 +360,30 @@ export async function settleChannelCampaigns(options: {
           failedPosts += 1;
           failedDetails.push({ postId: post.post_id, reason: "payout_safety_check_failed" });
           continue;
+        }
+
+        if (post.funding_model === "direct_debit") {
+          const walletDebit = await claimAdvertiserDirectDebit(connection, {
+            sourceKey: `channel:settlement:${kind}:${post.post_id}:${settledThrough}`,
+            advertiserId: post.advertiser_id,
+            campaignId: post.campaign_id,
+            campaignTable: "campaigns",
+            billingType: kind === "click" ? "channel_click" : "channel_view",
+            amount: debit,
+            description: `Channel ${kind} settlement for campaign #${post.campaign_id}`,
+          });
+          if (!walletDebit.ok) {
+            if (!walletDebit.duplicate) {
+              await connection.query(
+                "UPDATE campaigns SET status='paused',pause_reason='insufficient_balance' WHERE id=? AND status IN ('active','paused')",
+                [post.campaign_id],
+              );
+              await connection.commit();
+            } else {
+              await connection.rollback();
+            }
+            continue;
+          }
         }
 
         const [campaignUpdate] = await connection.query(
@@ -534,7 +565,7 @@ export type CampaignSettlementBeforeDeletionResult = {
   error?: string;
 };
 
-type SettlementCampaignRow = RowDataPacket & { id: number; type: string; status: string };
+type SettlementCampaignRow = RowDataPacket & { id: number; type: string; status: string; campaign_kind: string | null };
 
 // Settles any outstanding, already-delivered (but not yet billed) views/clicks for a
 // single channel campaign before its active posts are removed due to a manual pause
@@ -552,12 +583,12 @@ export async function settleCampaignEngagementBeforeDeletion(
   options: { includePausedCampaign?: boolean } = {}
 ): Promise<CampaignSettlementBeforeDeletionResult> {
   const [rows] = await pool.query<SettlementCampaignRow[]>(
-    "SELECT id, type, status FROM campaigns WHERE id = ?",
+    "SELECT id, type, status, campaign_kind FROM campaigns WHERE id = ?",
     [campaignId]
   );
   const campaign = rows[0];
 
-  if (!campaign || campaign.type === "broadcast") {
+  if (!campaign || campaign.type === "broadcast" || campaign.campaign_kind === "channel_growth") {
     return {
       ok: true, campaignId, skipped: true, viewRefresh: null,
       outstandingPosts: 0,
