@@ -12,6 +12,7 @@ import {
 import { decryptPrivateInviteLink } from "@/lib/privateInviteLinkVault";
 import { classifyChannelGeoConfidence } from "@/lib/channelGeoQuality";
 import { parseAdminPagination } from "@/lib/adminPagination";
+import { verifyAndStoreChannelIdentity } from "@/lib/channelTelegramIdentity";
 
 async function tableExists(table: string) {
   const [rows]: any = await pool.query("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? LIMIT 1", [table]);
@@ -178,6 +179,14 @@ export async function PATCH(request: Request) {
     const status = statusMap[normalizedAction];
 
     if (normalizedAction === "activate") {
+      const identity = await verifyAndStoreChannelIdentity({
+        channelId: id,
+        chatId: channel.chat_id,
+        username: channel.username,
+        source: "admin_activate",
+      });
+      channel.chat_id = identity.chatId;
+      channel.username = identity.username;
       const privacySchema = await getChannelPrivacySchema();
       const tracking = await onboardPrivateChannelTracking({
         channelId: id,

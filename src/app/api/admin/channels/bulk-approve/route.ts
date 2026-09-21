@@ -6,12 +6,14 @@ import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { notifyChannelApproved } from "@/lib/publisherNotifications";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import { onboardPrivateChannelTracking } from "@/lib/privateChannelTrackingOnboarding";
+import { verifyAndStoreChannelIdentity } from "@/lib/channelTelegramIdentity";
 
 type PendingChannel = RowDataPacket & {
   id: number;
   user_id: number;
   title: string;
   chat_id: string;
+  username: string | null;
   channel_type: "public" | "private";
   telegram_id: string | number | null;
 };
@@ -45,7 +47,7 @@ export async function POST(request: Request) {
     params.push(...selectedIds);
   }
   const [channels] = await pool.query<PendingChannel[]>(
-    `SELECT ch.id,ch.user_id,ch.title,ch.chat_id,ch.channel_type,u.telegram_id
+    `SELECT ch.id,ch.user_id,ch.title,ch.chat_id,ch.username,ch.channel_type,u.telegram_id
      FROM channels ch JOIN users u ON u.id=ch.user_id
      WHERE ch.status='pending' AND ch.is_deleted=FALSE${selectionClause}
      ORDER BY ch.id`,
@@ -55,8 +57,25 @@ export async function POST(request: Request) {
   let approved = 0;
   const notificationFailures: number[] = [];
   const trackingOnboardingFailures: Array<{ channel_id: number; reason: string }> = [];
+  const identityVerificationFailures: Array<{ channel_id: number; reason: string }> = [];
   const privacySchema = await getChannelPrivacySchema();
   for (const channel of channels) {
+    try {
+      const identity = await verifyAndStoreChannelIdentity({
+        channelId: channel.id,
+        chatId: channel.chat_id,
+        username: channel.username,
+        source: "bulk_approve",
+      });
+      channel.chat_id = identity.chatId;
+      channel.username = identity.username;
+    } catch (error) {
+      identityVerificationFailures.push({
+        channel_id: channel.id,
+        reason: error instanceof Error ? error.message : "Telegram identity verification failed",
+      });
+      continue;
+    }
     const tracking = await onboardPrivateChannelTracking({
       channelId: channel.id,
       chatId: channel.chat_id,
@@ -105,5 +124,6 @@ export async function POST(request: Request) {
     skipped: (hasSelection ? selectedIds.length : channels.length) - approved,
     notification_failures: notificationFailures,
     tracking_onboarding_failures: trackingOnboardingFailures,
+    identity_verification_failures: identityVerificationFailures,
   });
 }

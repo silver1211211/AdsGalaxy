@@ -4,6 +4,7 @@ import { POSTING_TIME_OPTIONS } from "@/lib/postingTimes";
 import { createSystemLog, maskEntityId } from "@/lib/systemLogs";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import { onboardPrivateChannelTracking } from "@/lib/privateChannelTrackingOnboarding";
+import { verifyAndStoreChannelIdentity } from "@/lib/channelTelegramIdentity";
 
 export type ChannelStatusType =
   | "pending"
@@ -239,9 +240,58 @@ export async function markChannelHealthSuccess(channelId: number | string, db: D
      WHERE id = ?`,
     [channelId]
   );
+  await db.query(
+    `UPDATE channel_telegram_identities
+     SET bot_can_post=1,verification_state='healthy',consecutive_failure_count=0,
+         first_failure_at=NULL,last_failure_at=NULL,last_success_at=UTC_TIMESTAMP(6),
+         last_verified_at=UTC_TIMESTAMP(6),last_checked_at=UTC_TIMESTAMP(6),
+         next_retry_at=NULL,last_failure_code=NULL,last_failure_reason=NULL
+     WHERE channel_id=?`,
+    [channelId]
+  );
 }
 
 export async function autoPauseChannel(channelId: number | string, health: HealthResult, db: Db = pool) {
+  const [identityRows] = await db.query<RowDataPacket[]>(
+    "SELECT consecutive_failure_count,last_failure_at,last_failure_code FROM channel_telegram_identities WHERE channel_id=? LIMIT 1",
+    [channelId]
+  );
+  const previous = identityRows[0];
+  const independent = !previous?.last_failure_at
+    || Date.now() - new Date(previous.last_failure_at).getTime() >= 30 * 60 * 1000;
+  const sameFailure = previous?.last_failure_code === health.status;
+  const failureCount = independent
+    ? (sameFailure ? Number(previous?.consecutive_failure_count || 0) + 1 : 1)
+    : Number(previous?.consecutive_failure_count || 0);
+  await db.query(
+    `INSERT INTO channel_telegram_identities
+      (channel_id,telegram_chat_id,channel_type,current_username,bot_can_post,verification_state,
+       consecutive_failure_count,first_failure_at,last_failure_at,last_checked_at,next_retry_at,
+       last_failure_code,last_failure_reason,last_check_source)
+     SELECT id,chat_id,IF(channel_type='private','private','public'),username,0,?,?,UTC_TIMESTAMP(6),
+       UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 30 MINUTE),?,?,?
+     FROM channels WHERE id=? AND chat_id IS NOT NULL AND chat_id<>'' AND chat_id<>'0'
+     ON DUPLICATE KEY UPDATE bot_can_post=0,verification_state=VALUES(verification_state),
+       consecutive_failure_count=VALUES(consecutive_failure_count),
+       first_failure_at=IF(VALUES(consecutive_failure_count)=1,UTC_TIMESTAMP(6),first_failure_at),
+       last_failure_at=UTC_TIMESTAMP(6),last_checked_at=UTC_TIMESTAMP(6),
+       next_retry_at=VALUES(next_retry_at),last_failure_code=VALUES(last_failure_code),
+       last_failure_reason=VALUES(last_failure_reason),last_check_source=VALUES(last_check_source)`,
+    [health.status, failureCount, health.status, String(health.reason || health.status).slice(0, 500), "channel_health", channelId]
+  );
+  if (!health.permanent || failureCount < 3) {
+    await db.query(
+      `UPDATE channels SET health_status='warning',health_checked_at=NOW(),
+         last_failure_at=NOW(),failure_reason=? WHERE id=?`,
+      [String(health.reason || "Temporary Telegram verification failure").slice(0, 255), channelId]
+    );
+    channelLifecycleLogHook("channel_health_failure_deferred", {
+      channel_id: channelId,
+      status: health.status,
+      independent_failure_count: failureCount,
+    });
+    return;
+  }
   await db.query(
     `UPDATE channels
      SET status = ?,
@@ -312,6 +362,11 @@ export async function reactivateChannelAfterHealthCheck(channelId: number | stri
     }
     throw new Error(health.reason || "Channel health check failed");
   }
+  await verifyAndStoreChannelIdentity({
+    channelId,
+    chatId,
+    source: "publisher_reactivate",
+  }, db);
 
   const [channelRows] = await db.query<RowDataPacket[]>(
     "SELECT channel_type FROM channels WHERE id = ? LIMIT 1",

@@ -10,10 +10,11 @@ import { refreshChannelViews } from "@/lib/channelAdminViewRefresh";
 import { settleChannelCampaigns } from "@/lib/channelSettlement";
 import { getPublisherQuality } from "@/lib/publisherQuality";
 import { notifyChannelApproved, notifyChannelRejected, notifyChannelRemoved } from "@/lib/publisherNotifications";
+import { verifyAndStoreChannelIdentity } from "@/lib/channelTelegramIdentity";
 
 type ChannelRow = RowDataPacket & {
   id: number; user_id: number; status: string; is_deleted: number;
-  chat_id: string; channel_type: "public" | "private"; publisher_trust_score: number | string;
+  chat_id: string; username: string | null; channel_type: "public" | "private"; publisher_trust_score: number | string;
   trust_score_frozen_until: Date | null; under_review: number;
   settlement_excluded_until: Date | null; publisher_status: string; publisher_is_banned: number;
   title: string; telegram_id: string | number | null;
@@ -81,7 +82,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (REASON_REQUIRED.has(action) && reason.length < 3) return NextResponse.json({ error: "A reason is required" }, { status: 400 });
 
   const [rows] = await pool.query<ChannelRow[]>(
-    `SELECT ch.id,ch.user_id,ch.status,ch.is_deleted,ch.chat_id,ch.channel_type,ch.publisher_trust_score,
+    `SELECT ch.id,ch.user_id,ch.status,ch.is_deleted,ch.chat_id,ch.username,ch.channel_type,ch.publisher_trust_score,
        ch.trust_score_frozen_until,ch.under_review,ch.settlement_excluded_until,ch.title,
        u.status publisher_status,u.is_banned publisher_is_banned,u.telegram_id
      FROM channels ch JOIN users u ON u.id=ch.user_id WHERE ch.id=? LIMIT 1`, [channelId]
@@ -96,6 +97,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     await pool.query("UPDATE channels SET status='paused',paused_reason='Paused by admin control center' WHERE id=?", [channelId]);
     newValue = { status: "paused" };
   } else if (action === "resume") {
+    const identity = await verifyAndStoreChannelIdentity({
+      channelId,
+      chatId: channel.chat_id,
+      username: channel.username,
+      source: "admin_resume",
+    });
+    channel.chat_id = identity.chatId;
+    channel.username = identity.username;
     const tracking = await onboardPrivateChannelTracking({
       channelId,
       chatId: channel.chat_id,

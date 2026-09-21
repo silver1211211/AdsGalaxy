@@ -3,19 +3,25 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   classifyRejectionHistory,
+  classifyTelegramFailure,
+  nextFailureState,
   recoveryDecision,
   retryDelayMs,
+  technicalStatusForHealth,
   usernameUpdateAllowed,
 } from "../scripts/channel-recovery-policy.mjs";
 
-const at = (minute) => `2026-09-02T10:${String(minute).padStart(2, "0")}:00Z`;
+const at = (minute) => "2026-09-02T10:" + String(minute).padStart(2, "0") + ":00Z";
 
 test("username changed but permanent chat ID still valid is safe to update", () => {
   assert.equal(usernameUpdateAllowed({ channelChatId: "-1001", collisionChatId: null }), true);
 });
 
 test("channel_not_found recovers by permanent Telegram ID", () => {
-  assert.deepEqual(recoveryDecision({ currentStatus: "channel_not_found", telegramHealthy: true }), { status: "active", reason: "recovered_by_chat_id" });
+  assert.deepEqual(recoveryDecision({ currentStatus: "channel_not_found", telegramHealthy: true }), {
+    status: "active",
+    reason: "recovered_by_chat_id",
+  });
 });
 
 test("bot removed then re-added recovers", () => {
@@ -41,7 +47,11 @@ test("manual policy rejection cannot auto-reactivate", () => {
 });
 
 test("ambiguous rejection stays in manual review", () => {
-  assert.equal(recoveryDecision({ currentStatus: "rejected", telegramHealthy: true, rejectionKind: "ambiguous_rejection" }).reason, "manual_review_required");
+  assert.equal(recoveryDecision({
+    currentStatus: "rejected",
+    telegramHealthy: true,
+    rejectionKind: "ambiguous_rejection",
+  }).reason, "manual_review_required");
 });
 
 test("healthy active channel remains active", () => {
@@ -71,4 +81,53 @@ test("sync source mutates no financial table", () => {
   const source = readFileSync(new URL("../scripts/sync-channel-identities.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /UPDATE\s+(users|withdrawals|channel_settlement_ledger|ad_settlements|ad_settlements_views)/i);
   assert.doesNotMatch(source, /INSERT\s+INTO\s+(withdrawals|channel_settlement_ledger|ad_settlements|ad_settlements_views)/i);
+});
+
+test("member-list inaccessible is access loss, not channel-not-found", () => {
+  const result = classifyTelegramFailure({ description: "Bad Request: member list is inaccessible" });
+  assert.equal(result.code, "bot_access_lost");
+  assert.equal(technicalStatusForHealth(result.code), "bot_removed");
+});
+
+test("timeouts and rate limits are never permanent", () => {
+  assert.equal(classifyTelegramFailure({ description: "request timed out" }).permanent, false);
+  const limited = classifyTelegramFailure({
+    description: "Too Many Requests: retry after 5874",
+    parameters: { retry_after: 5874 },
+  });
+  assert.equal(limited.permanent, false);
+  assert.equal(limited.retryAfterSeconds, 5874);
+});
+
+test("a single Telegram not-found response cannot demote", () => {
+  const health = classifyTelegramFailure({ description: "Bad Request: chat not found" });
+  const state = nextFailureState({ health, now: new Date("2026-09-21T00:00:00Z") });
+  assert.equal(state.count, 1);
+  assert.equal(state.demote, false);
+});
+
+test("three independent matching permanent failures can demote", () => {
+  const health = classifyTelegramFailure({ description: "Bad Request: chat not found" });
+  const state = nextFailureState({
+    previousCode: "channel_not_found",
+    previousCount: 2,
+    previousFailureAt: new Date("2026-09-21T00:00:00Z"),
+    health,
+    now: new Date("2026-09-21T00:31:00Z"),
+  });
+  assert.equal(state.count, 3);
+  assert.equal(state.demote, true);
+});
+
+test("failures inside the independence window do not increment", () => {
+  const health = classifyTelegramFailure({ description: "Bad Request: chat not found" });
+  const state = nextFailureState({
+    previousCode: "channel_not_found",
+    previousCount: 1,
+    previousFailureAt: new Date("2026-09-21T00:00:00Z"),
+    health,
+    now: new Date("2026-09-21T00:10:00Z"),
+  });
+  assert.equal(state.count, 1);
+  assert.equal(state.demote, false);
 });

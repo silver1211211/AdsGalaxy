@@ -305,7 +305,9 @@ for MIG in \
   "20260910_0138_teaser_orphan_recovery.sql" \
   "20260910_0139_teaser_worker_retry_durability.sql" \
   "20260911_0140_admin_fast_v2_indexes.sql" \
-  "20260911_0141_policy_moderation_rejections.sql"
+  "20260911_0141_policy_moderation_rejections.sql" \
+  "20260921_0144_channel_identity_resilience.sql" \
+  "20260921_0145_channel_identity_nullable_chat.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"
@@ -399,6 +401,7 @@ else
     echo "2 0 * * * $CRON_BASE/referral-sprint >/dev/null 2>&1"
     echo "*/10 * * * * $CRON_BASE/promote-ads-galaxy >/dev/null 2>&1"
     echo "3-59/10 * * * * $APP_DIR/scripts/sync-channel-identities.sh >> $APP_DIR/tmp/channel-identity-sync.log 2>&1"
+    echo "43 3 * * * CHANNEL_IDENTITY_REPAIR_ONLY=1 CHANNEL_IDENTITY_SYNC_LIMIT=500 $APP_DIR/scripts/sync-channel-identities.sh >> $APP_DIR/tmp/channel-identity-repair.log 2>&1"
     echo "$CRON_END"
   } | sed '/^[[:space:]]*$/d' | crontab -
   echo "    Production crons installed without duplicate routes."
