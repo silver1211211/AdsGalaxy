@@ -40,8 +40,10 @@ test("registration uses Telegram canonical identity and preserves verification a
   assert.match(route, /normalizedUsername = telegramUsername/);
   assert.match(route, /normalizeTelegramChannelTitle\(chatData\.result\?\.title\)/);
   assert.match(route, /telegram\(botToken, "getChatMember"/);
-  assert.match(route, /hasRequiredAdminAccess/);
-  assert.match(route, /PERMISSION_REQUIRED/);
+  assert.match(route, /requireChannelBotPermissions/);
+  const onboarding = read("src/lib/channelOnboarding.ts");
+  assert.match(onboarding, /PERMISSION_REQUIRED/);
+  assert.match(route, /requireChannelPublisherAuthority/);
   assert.match(route, /SELECT id, user_id, is_deleted FROM channels WHERE chat_id = \?/);
   assert.match(route, /CHANNEL_ALREADY_EXISTS/);
 });

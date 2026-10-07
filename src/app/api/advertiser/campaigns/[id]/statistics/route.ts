@@ -12,6 +12,7 @@ export const dynamic = "force-dynamic";
 
 type CampaignRow = RowDataPacket & {
   id: number;
+  public_id: number | null;
   type: "views" | "clicks";
   campaign_kind: string;
   channel_spend: string | number;
@@ -47,10 +48,10 @@ export async function GET(
     }
 
     const [campaigns] = await pool.query<CampaignRow[]>(
-      `SELECT id,type,campaign_kind,channel_spend,teaser_mode
+      `SELECT id,public_id,type,campaign_kind,channel_spend,teaser_mode
        FROM campaigns
        WHERE id=? AND user_id=? AND type IN ('views','clicks')
-         AND campaign_kind='channel'
+         AND campaign_kind IN ('channel','channel_growth')
        LIMIT 1`,
       [id, user.id],
     );

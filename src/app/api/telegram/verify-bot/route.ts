@@ -1,47 +1,28 @@
 import { NextResponse } from "next/server";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { randomUUID } from "node:crypto";
+import { authenticatePublisherAsset, PublisherAssetError, publisherAssetErrorResponse, publisherAssetTelemetry } from "@/lib/publisherAssetOnboarding";
+import { verifyPublicBotIdentity } from "@/lib/telegramBotIdentity";
 
 export async function GET(request: Request) {
+  const requestId = randomUUID();
+  let publisherId: number | undefined;
+  publisherAssetTelemetry("miniapp_onboarding", { requestId, stage: "attempt", result: "started" });
   try {
-    const initData = request.headers.get("x-telegram-init-data");
-    await getAuthenticatedUser(initData);
+    const user = await authenticatePublisherAsset(request);
+    publisherId = Number(user.id);
+    publisherAssetTelemetry("miniapp_onboarding", { requestId, publisherId, stage: "auth", result: "success" });
 
     const { searchParams } = new URL(request.url);
-    const username = searchParams.get("username")?.trim();
-    if (!username) {
-      return NextResponse.json({ error: "username is required" }, { status: 400 });
-    }
-
-    const token = process.env.BOT_TOKEN;
-    if (!token) {
-      return NextResponse.json({ error: "Server misconfigured" }, { status: 500 });
-    }
-
-    const chatId = username.startsWith("@") ? username : `@${username}`;
-
-    const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId }),
-    });
-    const data = await res.json();
-
-    if (!data.ok) {
-      return NextResponse.json({ error: "Bot not found" }, { status: 404 });
-    }
-
-    const chat = data.result;
-    return NextResponse.json({
-      id: chat.id,
-      username: chat.username,
-      first_name: chat.first_name,
-    });
-  } catch (error: any) {
-    console.error("Verify bot error:", error);
-    const status = getAuthErrorStatus(error);
-    return NextResponse.json(
-      { error: status === 403 ? "Unauthorized" : "Verification failed" },
-      { status }
-    );
+    const identity = await verifyPublicBotIdentity(searchParams.get("username"), searchParams.get("bot_id"));
+    publisherAssetTelemetry("miniapp_onboarding", { requestId, publisherId, stage: "telegram_identity", result: "success", botUsername: identity.username, telegramBotId: identity.id });
+    const response = NextResponse.json({ id: identity.id, username: identity.username, first_name: identity.firstName, verified: true, matches: true });
+    response.headers.set("X-Request-Id", requestId);
+    return response;
+  } catch (error: unknown) {
+    const code = error instanceof PublisherAssetError ? error.code : "BOT_VERIFICATION_FAILED";
+    publisherAssetTelemetry("miniapp_onboarding", { requestId, publisherId, stage: "telegram_identity", result: "failed", code });
+    const response = error instanceof PublisherAssetError ? publisherAssetErrorResponse(error) : NextResponse.json({ error: "Bot verification is temporarily unavailable.", code: "TELEGRAM_TEMPORARILY_UNAVAILABLE", retryable: true }, { status: 503 });
+    response.headers.set("X-Request-Id", requestId);
+    return response;
   }
 }

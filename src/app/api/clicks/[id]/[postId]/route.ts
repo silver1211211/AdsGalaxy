@@ -6,6 +6,9 @@ import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { debitChannelClick } from "@/lib/channelFastBilling";
 import { parsePositiveIntegerId } from "@/lib/routeIds";
 import { recordChannelTrafficEvent, telemetryCountry } from "@/lib/channelTrafficTelemetry";
+import { safeCampaignDestination } from "@/lib/clickDestination";
+import { decryptPrivateInviteLink } from "@/lib/privateInviteLinkVault";
+import { cachedClickDestination, rememberClickDestination } from "@/lib/clickDestinationCache";
 
 type CampaignPostRow = RowDataPacket & {
   id: number;
@@ -13,20 +16,10 @@ type CampaignPostRow = RowDataPacket & {
   link: string;
   image_url: string | null;
   category: string | null;
+  campaign_kind: string | null;
   post_id: number;
   channel_id: number | null;
 };
-
-async function getCampaignClickColumns() {
-  const [rows] = await pool.query<Array<RowDataPacket & { COLUMN_NAME: string }>>(`
-    SELECT COLUMN_NAME
-    FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_SCHEMA = DATABASE()
-      AND TABLE_NAME = 'campaign_clicks'
-  `);
-
-  return new Set(rows.map((row) => String(row.COLUMN_NAME)));
-}
 
 async function recordLegacyCampaignClick(input: {
   campaignId: number;
@@ -38,53 +31,15 @@ async function recordLegacyCampaignClick(input: {
 }): Promise<{ id: number; isNew: boolean } | null> {
   if (input.isBot) return null;
 
-  const columns = await getCampaignClickColumns();
-  if (!columns.has("campaign_id")) return null;
-
-  if (columns.has("post_id") && columns.has("fingerprint")) {
-    const [existing] = await pool.query<RowDataPacket[]>(
-      "SELECT id FROM campaign_clicks WHERE post_id = ? AND fingerprint = ? AND created_at > NOW() - INTERVAL 1 DAY",
-      [input.postId, input.fingerprint]
-    );
-
-    if (existing.length > 0) return { id: Number(existing[0].id), isNew: false };
-  } else if (columns.has("fingerprint")) {
-    const [existing] = await pool.query<RowDataPacket[]>(
-      "SELECT id FROM campaign_clicks WHERE campaign_id = ? AND fingerprint = ? AND created_at > NOW() - INTERVAL 1 DAY",
-      [input.campaignId, input.fingerprint]
-    );
-
-    if (existing.length > 0) return { id: Number(existing[0].id), isNew: false };
-  }
-
-  const insertColumns = ["campaign_id"];
-  const insertParams: Array<number | string | boolean> = [input.campaignId];
-
-  if (columns.has("post_id")) {
-    insertColumns.push("post_id");
-    insertParams.push(input.postId);
-  }
-  if (columns.has("ip_address")) {
-    insertColumns.push("ip_address");
-    insertParams.push(input.ip);
-  }
-  if (columns.has("user_agent")) {
-    insertColumns.push("user_agent");
-    insertParams.push(input.userAgent);
-  }
-  if (columns.has("fingerprint")) {
-    insertColumns.push("fingerprint");
-    insertParams.push(input.fingerprint);
-  }
-  if (columns.has("is_bot")) {
-    insertColumns.push("is_bot");
-    insertParams.push(input.isBot);
-  }
-
-  const placeholders = insertColumns.map(() => "?").join(", ");
+  // campaign_clicks is a canonical deployed schema. Never perform INFORMATION_SCHEMA discovery on redirects.
+  const [existing] = await pool.query<RowDataPacket[]>(
+    "SELECT id FROM campaign_clicks WHERE post_id = ? AND fingerprint = ? AND created_at > NOW() - INTERVAL 1 DAY",
+    [input.postId, input.fingerprint]
+  );
+  if (existing.length > 0) return { id: Number(existing[0].id), isNew: false };
   const [result] = await pool.query<ResultSetHeader>(
-    `INSERT INTO campaign_clicks (${insertColumns.join(", ")}) VALUES (${placeholders})`,
-    insertParams
+    "INSERT INTO campaign_clicks (campaign_id,post_id,ip_address,user_agent,fingerprint,is_bot) VALUES (?,?,?,?,?,?)",
+    [input.campaignId, input.postId, input.ip, input.userAgent, input.fingerprint, input.isBot]
   );
   return { id: Number(result.insertId), isNew: true };
 }
@@ -112,32 +67,46 @@ export async function GET(
     .update(`${ip}-${userAgent}`)
     .digest("hex");
 
+  const destinationStartedAt = Date.now();
   let campaignPost: CampaignPostRow | null = null;
   let targetUrl: string;
   try {
     const [rows] = await pool.query<CampaignPostRow[]>(
-      `SELECT c.id, c.user_id, c.link, c.image_url, c.category, cp.id as post_id, cp.channel_id
+      `SELECT c.id, c.user_id, c.link, c.image_url, c.category, c.campaign_kind, cp.id as post_id, cp.channel_id
        FROM campaigns c 
        JOIN campaign_posts cp ON cp.campaign_id = c.id
-       WHERE c.id = ? AND cp.id = ?`,
+       WHERE COALESCE(c.public_id,c.id) = ? AND cp.id = ?`,
       [campaignId, postId]
     );
 
     if (rows.length > 0) {
       campaignPost = rows[0];
-      targetUrl = rows[0].link;
-    } else {
-      const [campOnly] = await pool.query<Array<RowDataPacket & { link: string }>>("SELECT link FROM campaigns WHERE id = ?", [campaignId]);
-      if (campOnly.length > 0) {
-        return NextResponse.redirect(campOnly[0].link, 302);
+      targetUrl = safeCampaignDestination(rows[0].link) || fallbackUrl();
+      // Do not cache private invite destinations; cache is server-authoritative normal campaign metadata only.
+      if (campaignPost.campaign_kind !== "channel_growth") rememberClickDestination(campaignId, postId, campaignPost.id, targetUrl);
+      if (campaignPost.campaign_kind === "channel_growth" && req.nextUrl.searchParams.get("growth") === "1") {
+        const [invites] = await pool.query<Array<RowDataPacket & { invite_link_encrypted: string }>>(
+          "SELECT invite_link_encrypted FROM channel_growth_invites WHERE campaign_post_id=? AND campaign_id=? AND status='active' LIMIT 1",
+          [postId, campaignPost.id],
+        );
+        const inviteUrl = decryptPrivateInviteLink(invites[0]?.invite_link_encrypted);
+        if (inviteUrl) targetUrl = inviteUrl;
       }
-      return NextResponse.redirect(process.env.NEXT_PUBLIC_APP_URL || "/", 302);
+    } else {
+      const [campOnly] = await pool.query<Array<RowDataPacket & { link: string }>>("SELECT link FROM campaigns WHERE COALESCE(public_id,id) = ?", [campaignId]);
+      return NextResponse.redirect(safeCampaignDestination(campOnly[0]?.link) || fallbackUrl(), 302);
     }
   } catch (error) {
     console.error("Click destination resolution failed", { campaign_id: campaignId, post_id: postId, error: error instanceof Error ? error.message : "unknown_error" });
+    const cached = cachedClickDestination(campaignId, postId);
+    if (cached) {
+      console.warn("click_redirect_cached_destination", { campaign_id: campaignId, post_id: postId, destination_lookup_ms: Date.now() - destinationStartedAt, failure_class: "destination_db_failure" });
+      return NextResponse.redirect(cached.targetUrl, 302);
+    }
     try {
-      const [campaignRows] = await pool.query<Array<RowDataPacket & { link: string }>>("SELECT link FROM campaigns WHERE id = ?", [campaignId]);
-      if (campaignRows[0]?.link) return NextResponse.redirect(campaignRows[0].link, 302);
+      const [campaignRows] = await pool.query<Array<RowDataPacket & { link: string }>>("SELECT link FROM campaigns WHERE COALESCE(public_id,id) = ?", [campaignId]);
+      const destination = safeCampaignDestination(campaignRows[0]?.link);
+      if (destination) return NextResponse.redirect(destination, 302);
     } catch (fallbackError) {
       console.error("Click destination fallback failed", { campaign_id: campaignId, error: fallbackError instanceof Error ? fallbackError.message : "unknown_error" });
     }
@@ -147,9 +116,9 @@ export async function GET(
   let clickRecorded: { id: number; isNew: boolean } | null = null;
   try {
     const isBot = /bot|spider|crawl|slurp|github-camo|googlebot|bingbot|yandex|baidu/i.test(userAgent);
-    clickRecorded = await recordLegacyCampaignClick({ campaignId, postId, ip, userAgent, fingerprint, isBot });
+    clickRecorded = await recordLegacyCampaignClick({ campaignId:Number(campaignPost?.id||0), postId, ip, userAgent, fingerprint, isBot });
 
-    if (clickRecorded && campaignPost) {
+    if (clickRecorded && campaignPost && campaignPost.campaign_kind !== "channel_growth") {
       await debitChannelClick(Number(postId), clickRecorded.id);
     }
     if (clickRecorded?.isNew && campaignPost) {
@@ -166,7 +135,7 @@ export async function GET(
         userAgent,
         fingerprint,
       });
-      targetUrl = appendClickId(targetUrl, clickId);
+      if (campaignPost.campaign_kind !== "channel_growth") targetUrl = appendClickId(targetUrl, clickId);
     }
   } catch (error) {
     console.error("Click tracking failed; redirect preserved", { campaign_id: campaignId, post_id: postId, error: error instanceof Error ? error.message : "unknown_error" });
@@ -178,7 +147,7 @@ export async function GET(
         eventKey: requestKey,
         eventType: "click",
         channelId: Number(campaignPost.channel_id),
-        campaignId,
+        campaignId:Number(campaignPost.id),
         postId,
         ip,
         userAgent,
@@ -191,10 +160,14 @@ export async function GET(
       console.error("Channel telemetry failed; click flow preserved", { campaign_id: campaignId, post_id: postId, error: error instanceof Error ? error.message : "unknown_error" });
     }
   }
+  console.info("click_redirect", JSON.stringify({ campaign_id: campaignId, post_id: postId, destination_lookup_ms: Date.now() - destinationStartedAt, record_result: clickRecorded ? (clickRecorded.isNew ? "new" : "duplicate") : "unrecorded", redirect_result: "advertiser_destination" }));
   return NextResponse.redirect(targetUrl, 302);
 }
 
+function fallbackUrl() {
+  return safeCampaignDestination(process.env.NEXT_PUBLIC_APP_URL) || "https://app.adsgalaxy.online/";
+}
 function redirectToFallback() {
   // Safe fallback if IDs missing
-  return NextResponse.redirect(process.env.NEXT_PUBLIC_APP_URL || "/", 302);
+  return NextResponse.redirect(fallbackUrl(), 302);
 }

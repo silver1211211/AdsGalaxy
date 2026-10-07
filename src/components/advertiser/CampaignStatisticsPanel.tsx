@@ -9,9 +9,10 @@ import { useTranslations } from "@/i18n/client";
 
 type RangeKey = "today" | "yesterday" | "7d" | "14d" | "30d" | "custom";
 type CampaignType = "views" | "clicks";
-type MetricSummary = { views: number; clicks: number; ctr: number; spend: number };
+type MetricSummary = { views: number; clicks: number; ctr: number; spend: number; conversion_rate?: number; billable_views?: number; effective_cps?: number };
 type CampaignStatistics = {
   campaign_type: CampaignType;
+  billing_model?: "cpm" | "cpc" | "cps";
   primary_metric: "views" | "clicks";
   range: { key: RangeKey | "all"; from: string | null; to: string; bounded_to: number };
   totals: MetricSummary & { subscribers?: number; effective_cpm: number; average_cpc: number };
@@ -80,7 +81,7 @@ function MetricCard({ icon: Icon, label, value, tone = "slate" }: {
 function PerformanceChart({ data, primary, growth = false }: { data: CampaignStatistics["daily_rows"]; primary: "views" | "clicks"; growth?: boolean }) {
   const { t } = useTranslations();
   const secondary = primary === "views" ? "clicks" : "views";
-  const primaryMax = Math.max(1, ...data.map((row) => row[primary]));
+  const primaryMax = Math.max(1, ...data.map((row) => growth ? Number(row.subscribers || 0) : row[primary]));
   const secondaryMax = Math.max(1, ...data.map((row) => row[secondary]));
   return (
     <div className="rounded-2xl border border-slate-100 bg-slate-50/60 p-3.5">
@@ -94,7 +95,7 @@ function PerformanceChart({ data, primary, growth = false }: { data: CampaignSta
           {data.map((row) => (
             <div key={row.date} className="flex h-full min-w-6 flex-1 flex-col justify-end gap-1">
               <div className="flex h-28 items-end justify-center gap-1">
-                <div className="w-2.5 rounded-t bg-sky-500" style={{ height: `${Math.max(row[primary] ? 5 : 1, (row[primary] / primaryMax) * 100)}%` }} />
+                <div className="w-2.5 rounded-t bg-sky-500" style={{ height: `${Math.max((growth ? Number(row.subscribers || 0) : row[primary]) ? 5 : 1, ((growth ? Number(row.subscribers || 0) : row[primary]) / primaryMax) * 100)}%` }} />
                 <div className="w-2.5 rounded-t bg-slate-300" style={{ height: `${Math.max(row[secondary] ? 5 : 1, (row[secondary] / secondaryMax) * 100)}%` }} />
               </div>
               <span className="whitespace-nowrap text-center text-[8px] font-bold text-slate-400">{shortDay(row.date)}</span>
@@ -151,6 +152,14 @@ export default function CampaignStatisticsPanel({ campaignId, campaignType, camp
     return () => document.removeEventListener("pointerdown", close);
   }, [pickerOpen]);
 
+  React.useEffect(() => {
+    if ((campaignKind !== "channel" && campaignKind !== "growth") || data?.teaser_enabled) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") setRetryKey(value => value + 1);
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [campaignKind, data?.teaser_enabled]);
+
   const choosePreset = (key: Exclude<RangeKey, "custom">) => {
     setLoading(true);
     setSelection({ key });
@@ -180,7 +189,7 @@ export default function CampaignStatisticsPanel({ campaignId, campaignType, camp
   const secondary = primary === "views" ? "clicks" : "views";
   const primaryLabel = campaignKind === "growth" ? "SUB" : t(`advertiser.statistics.${primary}` as never);
   const costLabel = campaignKind === "growth" ? t("growth.cps") : campaignType === "views" ? t("advertiser.statistics.effectiveCpm") : t("advertiser.statistics.averageCpc");
-  const costValue = campaignType === "views" ? totals?.effective_cpm : totals?.average_cpc;
+  const costValue = campaignKind === "growth" ? totals?.effective_cps : campaignType === "views" ? totals?.effective_cpm : totals?.average_cpc;
   const latestAllowedEnd = draftFrom && addDays(draftFrom, 29) < todayKey ? addDays(draftFrom, 29) : todayKey;
 
   return (
@@ -233,12 +242,15 @@ export default function CampaignStatisticsPanel({ campaignId, campaignType, camp
         <div className="space-y-4"><SkeletonStatGrid count={5} /><SkeletonChart /></div>
       ) : data ? (
         <div className={cn("space-y-4 transition-opacity", loading && "opacity-60")} aria-busy={loading}>
-          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-5">
+          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-6">
             <MetricCard icon={campaignKind === "growth" ? UserPlus : primary === "views" ? Eye : MousePointer2} label={primaryLabel} value={count(campaignKind === "growth" ? totals?.subscribers : totals?.[primary])} tone="blue" />
             <MetricCard icon={primary === "views" ? MousePointer2 : Eye} label={t(`advertiser.statistics.${secondary}` as never)} value={count(totals?.[secondary])} />
             <MetricCard icon={TrendingUp} label={t("advertiser.statistics.ctr")} value={percent(totals?.ctr)} />
             <MetricCard icon={DollarSign} label={t("advertiser.statistics.spend")} value={money(totals?.spend)} tone="green" />
             <MetricCard icon={TrendingUp} label={costLabel} value={costMoney(costValue)} />
+            {campaignKind === "growth" && <MetricCard icon={TrendingUp} label="CR" value={percent(totals?.conversion_rate)} />}
+            {campaignKind === "growth" && <MetricCard icon={Eye} label={t("advertiser.statistics.views")} value={count(totals?.views)} />}
+            {data.billing_model === "cpm" && <MetricCard icon={Eye} label="Billable Impressions" value={count(totals?.billable_views)} />}
           </div>
 
           {!loading && data.data_available && data.daily_rows.some((row) => row.views > 0 || row.clicks > 0 || row.spend > 0) ? (
@@ -249,7 +261,7 @@ export default function CampaignStatisticsPanel({ campaignId, campaignType, camp
                 <div className="max-h-72 overflow-auto rounded-2xl border border-slate-100">
                   <table className="w-full min-w-[560px] text-left text-[11px]">
                     <thead className="sticky top-0 bg-slate-50 text-slate-400"><tr>
-                      {[t("advertiser.statistics.date"), campaignKind === "growth" ? "SUB" : t("advertiser.statistics.views"), t("advertiser.statistics.clicks"), t("advertiser.statistics.ctr"), t("advertiser.statistics.spend"), costLabel].map((label) => <th key={label} className="px-3 py-2.5 font-black uppercase tracking-wider">{label}</th>)}
+                      {[t("advertiser.statistics.date"), campaignKind === "growth" ? "SUB" : t("advertiser.statistics.views"), t("advertiser.statistics.clicks"), t("advertiser.statistics.ctr"), t("advertiser.statistics.spend"), campaignKind === "growth" ? "CPS" : costLabel, ...(campaignKind === "growth" ? ["CR"] : []), ...(campaignKind === "growth" ? [t("advertiser.statistics.views")] : []), ...(data.billing_model === "cpm" ? ["Billable Impressions"] : [])].map((label) => <th key={label} className="px-3 py-2.5 font-black uppercase tracking-wider">{label}</th>)}
                     </tr></thead>
                     <tbody className="divide-y divide-slate-50">
                       {[...data.daily_rows].reverse().map((row) => (
@@ -260,6 +272,9 @@ export default function CampaignStatisticsPanel({ campaignId, campaignType, camp
                           <td className="px-3 py-2.5 font-bold">{percent(row.ctr)}</td>
                           <td className="px-3 py-2.5 font-bold text-emerald-600">{money(row.spend)}</td>
                           <td className="px-3 py-2.5 font-bold">{costMoney(row.cost_metric)}</td>
+                          {campaignKind === "growth" && <td className="px-3 py-2.5 font-bold">{percent(row.conversion_rate)}</td>}
+                          {campaignKind === "growth" && <td className="px-3 py-2.5 font-bold">{count(row.views)}</td>}
+                          {data.billing_model === "cpm" && <td className="px-3 py-2.5 font-bold">{count(row.billable_views)}</td>}
                         </tr>
                       ))}
                     </tbody>

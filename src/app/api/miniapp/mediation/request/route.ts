@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import type { RowDataPacket } from "mysql2/promise";
+import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { requireMiniappTrackingUser } from "@/lib/publicSdkAuth";
 import { recordMiniappAdOpportunity } from "@/lib/miniappMonetagProtection";
@@ -36,7 +36,7 @@ function normalizeCountry(value: unknown) {
 }
 
 export async function POST(request: Request) {
-  const conn = await pool.getConnection();
+  let conn: PoolConnection | null = null;
 
   try {
     const blocked = await requireAdServingAllowed();
@@ -61,8 +61,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "telegram_user_id does not match authenticated user" }, { status: 403 });
     }
     const [[rateRow]] = await pool.query<Array<RowDataPacket & { count: number }>>(
-      "SELECT COUNT(*) AS count FROM miniapp_mediation_requests WHERE telegram_user_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)",
-      [telegramUserId]
+      "SELECT COUNT(*) AS count FROM miniapp_mediation_requests WHERE miniapp_id = ? AND telegram_user_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)",
+      [miniappId, trackingUser.telegramUserId]
     );
     if (Number(rateRow?.count || 0) >= 30) {
       return NextResponse.json({ error: "Too many ad requests. Try again shortly.", error_code: "RATE_LIMITED" }, { status: 429 });
@@ -81,13 +81,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Mini App is not approved for mediation" }, { status: 403 });
     }
 
+    conn = await pool.getConnection();
     await conn.beginTransaction();
 
-    const monetagProtection = await recordMiniappAdOpportunity(miniappId, telegramUserId, conn);
+    const monetagProtection = await recordMiniappAdOpportunity(miniappId, trackingUser.telegramUserId, conn);
     const decision = await createMediationAttempt({
       conn,
       miniappId,
-      telegramUserId,
+      telegramUserId: trackingUser.telegramUserId,
       country,
       adFormat,
     });
@@ -139,7 +140,7 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     try {
-      await conn.rollback();
+      if (conn) await conn.rollback();
     } catch {
       // Transaction may not have started.
     }
@@ -151,6 +152,6 @@ export async function POST(request: Request) {
     console.error("Mini App mediation request failed", error);
     return NextResponse.json({ error: status === 401 ? "Unable to load this advertisement. Please try again." : "Network temporarily unavailable." }, { status });
   } finally {
-    conn.release();
+    conn?.release();
   }
 }

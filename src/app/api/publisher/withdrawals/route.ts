@@ -2,9 +2,12 @@ import { NextResponse } from "next/server";
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy withdrawal and settings rows are dynamically shaped */
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
-import { escapeTelegramHtml, sendTelegramMessage } from "@/lib/telegram";
+import { escapeTelegramHtml } from "@/lib/telegram";
 import { requireWithdrawalsAllowed } from "@/lib/productionSafety";
-import { ensureWithdrawalSubmissionColumns } from "@/lib/schemaGuards";
+import { withFinancialTransactionRetry } from "@/lib/dbResilience";
+import { enqueuePlatformNotification } from "@/lib/platformNotifications";
+import { hashUserIdempotencyKey, validateWithdrawalDestination, withdrawalRequestFingerprint } from "@/lib/withdrawalNetworks";
+import type { ResultSetHeader } from "mysql2/promise";
 
 export async function GET(request: Request) {
   try {
@@ -49,121 +52,82 @@ export async function GET(request: Request) {
   }
 }
 
-const NETWORK_FEES: Record<string, number> = {
-  "TRC-20": 2,
-  "ERC-20": 1,
-  "BEP-20": 0,
-};
-
 export async function POST(request: Request) {
   try {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
-    const { amount, network, address } = await request.json();
-    const blocked = await requireWithdrawalsAllowed(network);
+    const idempotencyRaw = String(request.headers.get("idempotency-key") || "").trim();
+    if (idempotencyRaw.length < 16 || idempotencyRaw.length > 128) {
+      return NextResponse.json({ error: "A valid Idempotency-Key is required", code: "IDEMPOTENCY_KEY_REQUIRED" }, { status: 400 });
+    }
+    const body = await request.json();
+    const destination = validateWithdrawalDestination(body.network, body.address);
+    if (!destination.ok) return NextResponse.json({ error: destination.message, code: destination.code }, { status: 422 });
+    const blocked = await requireWithdrawalsAllowed(destination.network);
     if (blocked) return blocked;
-
-    // A rejected withdrawal places the publisher under withdrawal review
-    // for 10 days from the rejection time.
-    const [rejectionHoldRows]: any = await pool.query(`
-      SELECT
-        id,
-        updated_at,
-        DATE_ADD(updated_at, INTERVAL 10 DAY) AS hold_until,
-        DATE_FORMAT(DATE_ADD(updated_at, INTERVAL 10 DAY), '%e %b %Y') AS retry_date
-      FROM withdrawals
-      WHERE user_id = ?
-        AND status = 'rejected'
-        AND updated_at > UTC_TIMESTAMP() - INTERVAL 10 DAY
-      ORDER BY updated_at DESC, id DESC
-      LIMIT 1
-    `, [user.id]);
-
-    if (rejectionHoldRows.length > 0) {
-      const hold = rejectionHoldRows[0];
-
-      return NextResponse.json({
-        error: `Withdrawal on hold after a recent rejection. Try again on ${hold.retry_date}.`,
-        code: "WITHDRAWAL_REJECTION_HOLD",
-        hold_until: hold.hold_until,
-      }, { status: 423 });
+    const amountInput = String(body.amount ?? "").trim();
+    if (!/^(?:0|[1-9]\d*)(?:\.\d{1,8})?$/.test(amountInput)) {
+      return NextResponse.json({ error: "Invalid withdrawal amount", code: "INVALID_WITHDRAWAL_AMOUNT" }, { status: 422 });
     }
-
-    if (!amount || !network || !address) {
-      return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+    const withdrawAmount = Number(amountInput);
+    if (!Number.isFinite(withdrawAmount) || withdrawAmount <= 0 || withdrawAmount <= destination.fee) {
+      return NextResponse.json({ error: "Withdrawal amount must exceed the network fee", code: "INVALID_WITHDRAWAL_AMOUNT" }, { status: 422 });
     }
+    const amount = withdrawAmount.toFixed(8);
+    const fee = destination.fee.toFixed(8);
+    const netAmount = (withdrawAmount - destination.fee).toFixed(8);
+    const idempotencyKey = hashUserIdempotencyKey(Number(user.id), idempotencyRaw);
+    const fingerprint = withdrawalRequestFingerprint({ amount, network: destination.network, address: destination.address });
+    const [settingsRows]: any = await pool.query("SELECT `key`, value FROM settings WHERE `key` IN ('min_withdraw', 'max_withdraw')");
+    const settings = settingsRows.reduce((acc: any, row: any) => ({ ...acc, [row.key]: Number(row.value) }), {});
+    if (withdrawAmount < settings.min_withdraw) return NextResponse.json({ error: `Minimum withdrawal is $${settings.min_withdraw}` }, { status: 400 });
+    if (withdrawAmount > settings.max_withdraw) return NextResponse.json({ error: `Maximum withdrawal is $${settings.max_withdraw}` }, { status: 400 });
 
-    const withdrawAmount = parseFloat(amount);
-    const fee = NETWORK_FEES[network] ?? 0;
-    const netAmount = Math.max(0, withdrawAmount - fee);
-
-    // Fetch limits
-    const [settingsRows]: any = await pool.query("SELECT \`key\`, value FROM settings WHERE \`key\` IN ('min_withdraw', 'max_withdraw')");
-    const settings = settingsRows.reduce((acc: any, row: any) => {
-      acc[row.key] = parseFloat(row.value);
-      return acc;
-    }, {});
-
-    if (withdrawAmount < settings.min_withdraw) {
-      return NextResponse.json({ error: `Minimum withdrawal is $${settings.min_withdraw}` }, { status: 400 });
-    }
-    if (withdrawAmount > settings.max_withdraw) {
-      return NextResponse.json({ error: `Maximum withdrawal is $${settings.max_withdraw}` }, { status: 400 });
-    }
-
-    // Process Withdrawal (Transactional)
-    const connection = await pool.getConnection();
-    try {
-      await ensureWithdrawalSubmissionColumns(connection);
-      await connection.beginTransaction();
-
-      const [userRows]: any = await connection.query(
-        "SELECT balance_available, telegram_id FROM users WHERE id = ? FOR UPDATE",
-        [user.id]
+    const result: any = await withFinancialTransactionRetry(async (connection) => {
+      const [[lockedUser]]: any = await connection.query(
+        "SELECT balance_available, telegram_id FROM users WHERE id = ? FOR UPDATE", [user.id]
       );
-      const availableBalance = parseFloat(userRows[0]?.balance_available || "0");
-
-      if (availableBalance < withdrawAmount) {
-        await connection.rollback();
-        return NextResponse.json({ error: "Insufficient available balance" }, { status: 400 });
+      if (!lockedUser) throw new Error("withdrawal_user_missing");
+      const [[existing]]: any = await connection.query(
+        "SELECT id, status, request_fingerprint FROM withdrawals WHERE user_id=? AND idempotency_key=? LIMIT 1", [user.id, idempotencyKey]
+      );
+      if (existing) {
+        if (existing.request_fingerprint !== fingerprint) return { error: "Idempotency key was already used for a different withdrawal", code: "IDEMPOTENCY_KEY_CONFLICT", status: 409 };
+        return { success: true, withdrawal_id: Number(existing.id), withdrawal_status: existing.status, idempotent: true };
       }
-
-      // Deduct from available, add to locked (or just record as pending)
-      const [deductionResult]: any = await connection.query(
-        "UPDATE users SET balance_available = balance_available - ?, balance_locked = balance_locked + ? WHERE id = ? AND balance_available >= ?",
-        [withdrawAmount, withdrawAmount, user.id, withdrawAmount]
+      const [[hold]]: any = await connection.query(
+        `SELECT DATE_ADD(updated_at, INTERVAL 10 DAY) hold_until,
+          DATE_FORMAT(DATE_ADD(updated_at, INTERVAL 10 DAY), '%e %b %Y') retry_date
+         FROM withdrawals WHERE user_id=? AND status='rejected'
+          AND updated_at > UTC_TIMESTAMP() - INTERVAL 10 DAY
+         ORDER BY updated_at DESC,id DESC LIMIT 1`, [user.id]
       );
-
-      if (deductionResult.affectedRows !== 1) {
-        await connection.rollback();
-        return NextResponse.json({ error: "Insufficient available balance" }, { status: 400 });
-      }
-
-      await connection.query(
-        "INSERT INTO withdrawals (user_id, amount, fee, net_amount, network, address, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')",
-        [user.id, withdrawAmount, fee, netAmount, network, address]
+      if (hold) return { error: `Withdrawal on hold after a recent rejection. Try again on ${hold.retry_date}.`, code: "WITHDRAWAL_REJECTION_HOLD", hold_until: hold.hold_until, status: 423 };
+      if (Number(lockedUser.balance_available || 0) < withdrawAmount) return { error: "Insufficient available balance", status: 400 };
+      const [deduction]: any = await connection.query(
+        "UPDATE users SET balance_available=balance_available-?, balance_locked=balance_locked+? WHERE id=? AND balance_available>=?",
+        [amount, amount, user.id, amount]
       );
-
-      await connection.commit();
-
-      const feeNote = fee > 0 ? `\nNetwork Fee: <b>-$${fee.toFixed(2)}</b>\nYou receive: <b>$${netAmount.toFixed(2)}</b>` : "";
-      const message = `🚀 <b>Withdrawal Placed!</b>\n\n` +
-        `Amount: <b>$${withdrawAmount.toFixed(2)}</b>${feeNote}\n` +
-        `Network: <b>${escapeTelegramHtml(network)}</b>\n` +
-        `Address: <code>${escapeTelegramHtml(address)}</code>\n\n` +
-        `Your withdrawal has been placed successfully and will be processed shortly.`;
-      
-      await sendTelegramMessage(userRows[0].telegram_id, message, { parse_mode: "HTML" });
-
-      return NextResponse.json({ success: true });
-    } catch (err) {
-      await connection.rollback();
-      throw err;
-    } finally {
-      connection.release();
-    }
+      if (deduction.affectedRows !== 1) return { error: "Insufficient available balance", status: 400 };
+      const [inserted] = await connection.query<ResultSetHeader>(
+        `INSERT INTO withdrawals (user_id,amount,fee,net_amount,network,address,idempotency_key,request_fingerprint,status)
+         VALUES (?,?,?,?,?,?,?,?,'pending')`,
+        [user.id, amount, fee, netAmount, destination.network, destination.address, idempotencyKey, fingerprint]
+      );
+      const withdrawalId = Number(inserted.insertId);
+      const feeNote = destination.fee > 0 ? `\nNetwork Fee: <b>-$${destination.fee.toFixed(2)}</b>\nYou receive: <b>$${Number(netAmount).toFixed(2)}</b>` : "";
+      await enqueuePlatformNotification(connection, {
+        eventKey: `withdrawal_submitted:${withdrawalId}`, userId: Number(user.id), eventType: "withdrawal_submitted",
+        entityType: "withdrawal", entityId: withdrawalId,
+        messageHtml: `🚀 <b>Withdrawal Placed!</b>\n\nAmount: <b>$${withdrawAmount.toFixed(2)}</b>${feeNote}\nNetwork: <b>${escapeTelegramHtml(destination.network)}</b>\nAddress: <code>${escapeTelegramHtml(destination.address)}</code>\n\nYour withdrawal has been placed successfully and will be processed shortly.`,
+        metadata: { network: destination.network, amount, net_amount: netAmount },
+      });
+      return { success: true, withdrawal_id: withdrawalId, withdrawal_status: "pending", idempotent: false };
+    }, { operation: "publisher_withdrawal_submit" });
+    if (result.error) return NextResponse.json(result, { status: result.status || 400 });
+    return NextResponse.json(result);
   } catch (error: any) {
     console.error("POST Withdrawal Error:", error);
-    return NextResponse.json({ error: error.message || "Failed to place withdrawal" }, { status: getAuthErrorStatus(error) });
+    return NextResponse.json({ error: "Unable to place withdrawal" }, { status: getAuthErrorStatus(error) });
   }
 }

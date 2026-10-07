@@ -3,12 +3,17 @@ import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import pool from "@/lib/db";
-import { createAdminPreviewCookieValue, createAdminSessionCookieValue } from "@/lib/adminAuth";
+import { createAdminPreviewCookieValue, createAdminSessionCookieValue, normalizeAdminRole } from "@/lib/adminAuth";
+import { clearAdminLoginFailures, inspectAdminLoginRateLimit, recordAdminLoginFailure } from "@/lib/adminLoginProtection";
+import { getTrustedClientIp } from "@/lib/requestClientIp";
+
+const INVALID_PASSWORD_HASH = "$2b$12$ws.G8hcWB9cyQmV3vcNvJexJhRPLTb0Xv4D1P.T60HwkrPCKpqeuW";
 
 type AdminRow = RowDataPacket & {
   id: number;
   username: string;
   password_hash: string | null;
+  role: string | null;
 };
 
 function shouldUseSecureCookie(request: Request) {
@@ -41,31 +46,52 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => ({})) as Record<string, unknown>;
     const username = String(body.username || "").trim();
     const password = String(body.password || "");
+    const clientIp = getTrustedClientIp(request);
+    const initialLimit = await inspectAdminLoginRateLimit(username, clientIp);
+    if (!initialLimit.available) {
+      return NextResponse.json({ error: "Login temporarily unavailable" }, { status: 503 });
+    }
+    if (initialLimit.limited) {
+      return NextResponse.json(
+        { error: "Too many login attempts. Try again later." },
+        { status: 429, headers: { "Retry-After": String(Math.max(1, Math.ceil(initialLimit.retryAfterMs / 1000))) } },
+      );
+    }
 
     const [rows] = await pool.query<AdminRow[]>(
-      "SELECT id, username, password_hash FROM admins WHERE username = ? LIMIT 1",
+      "SELECT id, username, password_hash, role FROM admins WHERE username = ? LIMIT 1",
       [username]
     );
 
-    if (rows.length === 0 || !rows[0].password_hash) {
-      return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
-    }
+    const admin = rows[0];
+    const passwordValid = await bcrypt.compare(password, admin?.password_hash || INVALID_PASSWORD_HASH);
+    const role = normalizeAdminRole(admin?.role);
 
-    const passwordValid = await bcrypt.compare(password, rows[0].password_hash);
-    if (!passwordValid) {
+    if (!admin || !admin.password_hash || !passwordValid || !role) {
+      const failedLimit = await recordAdminLoginFailure(username, clientIp);
+      if (!failedLimit.available) {
+        return NextResponse.json({ error: "Login temporarily unavailable" }, { status: 503 });
+      }
+      if (failedLimit.limited) {
+        return NextResponse.json(
+          { error: "Too many login attempts. Try again later." },
+          { status: 429, headers: { "Retry-After": String(Math.max(1, Math.ceil(failedLimit.retryAfterMs / 1000))) } },
+        );
+      }
       return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
     }
+    await clearAdminLoginFailures(username, clientIp);
 
     const maxAge = sessionMaxAgeSeconds();
     let authString: string;
     if (isPreviewAdminRequest(request)) {
-      authString = createAdminPreviewCookieValue(rows[0].id, rows[0].username, Date.now() + maxAge * 1000);
+      authString = createAdminPreviewCookieValue(admin.id, admin.username, Date.now() + maxAge * 1000);
     } else {
       const token = crypto.randomBytes(32).toString("base64url");
       const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
       const [sessionResult] = await pool.query<ResultSetHeader>(
         "INSERT INTO admin_sessions (admin_id, token_hash, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))",
-        [rows[0].id, tokenHash, maxAge]
+        [admin.id, tokenHash, maxAge]
       );
       authString = createAdminSessionCookieValue(Number(sessionResult.insertId), token);
     }

@@ -331,7 +331,7 @@ export default function AdminMiniAppRewardedPage() {
   };
 
   useEffect(() => {
-    if (!syncCampaign || !["running", "paused"].includes(syncState?.sync?.status)) return;
+    if (!syncCampaign || !["running", "paused", "daily_cap_paused", "insufficient_balance_paused"].includes(syncState?.sync?.status)) return;
     const timer = window.setInterval(() => void loadSync(syncCampaign, true), 5000);
     return () => window.clearInterval(timer);
   }, [syncCampaign, syncState?.sync?.status]);
@@ -614,8 +614,9 @@ export default function AdminMiniAppRewardedPage() {
                 </div>
                 {syncState.sync && (
                   <div className="space-y-3 rounded-xl border border-cyan-200 bg-cyan-50 p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-bold capitalize text-cyan-900">{String(syncState.sync.status).replaceAll('_', ' ')}</span><span className="text-sm text-cyan-800">{syncState.sync.progress_percent}% · {numberValue(syncState.sync.time_remaining_seconds)}s remaining</span></div>
-                    <div className="h-2 overflow-hidden rounded-full bg-cyan-100"><div className="h-full bg-cyan-600" style={{ width: `${Math.min(100, syncState.sync.progress_percent)}%` }} /></div>
+                    <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-bold capitalize text-cyan-900">{String(syncState.sync.status).replaceAll('_', ' ')}</span><span className="text-sm text-cyan-800">Delivery {numberValue(syncState.sync.delivery_progress_percent ?? syncState.sync.progress_percent)}% · Time {numberValue(syncState.sync.time_progress_percent)}% · {numberValue(syncState.sync.time_remaining_seconds)}s remaining</span></div>
+                    <div className="h-2 overflow-hidden rounded-full bg-cyan-100"><div className="h-full bg-cyan-600" style={{ width: `${Math.min(100, Number(syncState.sync.delivery_progress_percent ?? syncState.sync.progress_percent ?? 0))}%` }} /></div>
+                    {syncState.sync.stop_reason ? <p className="text-xs text-cyan-800">Reason: {String(syncState.sync.stop_reason).replaceAll('_', ' ')}</p> : null}
                     <div className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
                       <div>Target impressions: <b>{numberValue(syncState.sync.target_impressions)}</b></div><div>Target clicks: <b>{numberValue(syncState.sync.target_clicks)}</b></div>
                       <div>External added: <b>{numberValue(syncState.sync.external_impressions_added)}</b></div><div>Platform during sync: <b>{numberValue(syncState.sync.platform_impressions_during)}</b></div>
@@ -627,7 +628,7 @@ export default function AdminMiniAppRewardedPage() {
                     </div>}
                   </div>
                 )}
-                {!syncState.sync || !["running", "paused"].includes(syncState.sync.status) ? <div className="space-y-4">
+                {!syncState.sync || !["running", "paused", "daily_cap_paused", "insufficient_balance_paused"].includes(syncState.sync.status) ? <div className="space-y-4">
                   <p className="text-sm text-slate-600">Set final cumulative totals. Platform traffic continues to count and automatically reduces the external amount added.</p>
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                     <label className="text-xs font-semibold text-slate-600">Final impressions<input type="number" min={syncState.campaign.current_impressions} value={syncForm.target_impressions} onChange={(e) => setSyncForm({ ...syncForm, target_impressions: e.target.value })} className={inputCls} /></label>

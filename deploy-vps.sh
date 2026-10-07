@@ -307,7 +307,11 @@ for MIG in \
   "20260911_0140_admin_fast_v2_indexes.sql" \
   "20260911_0141_policy_moderation_rejections.sql" \
   "20260921_0144_channel_identity_resilience.sql" \
-  "20260921_0145_channel_identity_nullable_chat.sql"
+  "20260921_0145_channel_identity_nullable_chat.sql" \
+  "20260924_0146_review_first_fraud_incidents.sql" \
+  "20260926_0147_campaign_identity_delivery_fairness.sql" \
+  "20260926_0148_channel_view_waivers_daily_cap.sql" \
+  "20260926_0149_platform_lifecycle_notifications_slots.sql"
 do
   FILE="$APP_DIR/db/migrations/$MIG"
   run_migration "$FILE"
@@ -362,7 +366,7 @@ else
     $0 == begin { managed=1; next }
     $0 == end { managed=0; next }
     !managed
-  ' | grep -Ev '/api/cron/(process-ads|channel-growth|channel-targeting-classification|teaser|process-broadcast|platform-broadcasts|process-miniapp-internal-ads|miniapp-external-delivery-sync|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|process-support-messages|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|retry-telegram-cleanup|verify-bot-users|referral-sprint|promote-ads-galaxy)([[:space:]?]|$)' | grep -v 'scripts/sync-channel-identities\.sh' || true)
+  ' | grep -Ev '/api/cron/(process-ads|channel-growth|channel-targeting-classification|teaser|process-broadcast|platform-broadcasts|process-miniapp-internal-ads|miniapp-external-delivery-sync|notifications|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|process-support-messages|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|retry-telegram-cleanup|verify-bot-users|referral-sprint|promote-ads-galaxy)([[:space:]?]|$)' | grep -v 'scripts/sync-channel-identities\.sh' || true)
 
   {
     printf '%s\n' "$CLEAN_CRONTAB"
@@ -377,6 +381,7 @@ else
     echo "* * * * * sleep 24; $CRON_BASE/platform-broadcasts >/dev/null 2>&1"
     echo "* * * * * sleep 36; $CRON_BASE/process-miniapp-internal-ads >/dev/null 2>&1"
     echo "* * * * * sleep 48; $CRON_BASE/miniapp-external-delivery-sync >/dev/null 2>&1"
+    echo "* * * * * sleep 54; $CRON_BASE/notifications >/dev/null 2>&1"
     echo "*/15 * * * * $CRON_BASE/update-views >/dev/null 2>&1"
     echo "3 * * * * $CRON_BASE/channel-settlement >/dev/null 2>&1"
     echo "8-59/15 * * * * $CRON_BASE/settle-broadcast-publishers >/dev/null 2>&1"

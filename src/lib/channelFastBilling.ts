@@ -9,13 +9,18 @@ import { deleteExhaustedChannelCampaignPosts, type CampaignPostDeletionSummary }
 import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
 import { calculateCurrentCanonicalAllocation, shadowWriteChannelAllocation, unitsToDecimal } from "@/lib/channelAllocationLedger";
 import { claimAdvertiserDirectDebit } from "@/lib/advertiserDirectDebit";
+import { cleanupChannelDailyCapPosts, markChannelDailyCapReached } from "@/lib/channelDailyCap";
+import { waivedViewsForPostSql } from "@/lib/channelViewWaivers";
+import { withFinancialTransactionRetry } from "@/lib/dbResilience";
+import { getChannelDailySpend } from "@/lib/channelDailySpend";
 
 type LockedPost = RowDataPacket & {
+  campaign_kind: string;
   campaign_id: number; channel_id: number; publisher_id: number; advertiser_id: number; campaign_type: string;
   funding_model: "legacy_reserved" | "direct_debit";
   campaign_status: string; post_status: string; budget: string | number; cpm: string | number; cpc: string | number; daily_budget_limit: string | number | null;
   advertiser_discount: string | number;
-  views: string | number; settled_views: string | number; settled_clicks: string | number;
+  views: string | number; settled_views: string | number; settled_clicks: string | number; waived_views: string | number;
 };
 
 async function lockedPost(conn: PoolConnection, postId: number) {
@@ -30,7 +35,8 @@ async function lockedPost(conn: PoolConnection, postId: number) {
   await conn.query("SELECT id FROM campaigns WHERE id=? FOR UPDATE", [identity[0].campaign_id]);
   const [rows] = await conn.query<LockedPost[]>(`
     SELECT cp.campaign_id, cp.channel_id, cp.views, cp.settled_views, cp.settled_clicks,
-      c.type campaign_type, c.status campaign_status, cp.status post_status,
+      ${waivedViewsForPostSql("cp")} waived_views,
+      c.type campaign_type, c.campaign_kind, c.status campaign_status, cp.status post_status,
       c.user_id advertiser_id, c.funding_model,
       c.budget, c.cpm, c.cpc, c.daily_budget_limit,
       CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END advertiser_discount,
@@ -44,24 +50,19 @@ async function lockedPost(conn: PoolConnection, postId: number) {
 
 async function fastDebit(input: { conn: PoolConnection; postId: number; type: "click" | "view"; sourceKey: string; requestedUnits: number }) {
   const [existing] = await input.conn.query<RowDataPacket[]>("SELECT id FROM channel_advertiser_debits WHERE source_key=?", [input.sourceKey]);
-  if (existing.length) return { debited: false, duplicate: true, units: 0, becameExhausted: false, campaignId: null };
+  if (existing.length) return { debited: false, duplicate: true, units: 0, becameExhausted: false, dailyCapped: false, campaignId: null };
   const post = await lockedPost(input.conn, input.postId);
-  if (!post || post.campaign_status !== "active" || post.post_status !== "active" || post.campaign_type !== `${input.type}s`) {
-    return { debited: false, duplicate: false, units: 0, becameExhausted: false, campaignId: null };
+  if (!post || post.campaign_kind === "channel_growth" || post.campaign_status !== "active" || post.post_status !== "active" || post.campaign_type !== `${input.type}s`) {
+    return { debited: false, duplicate: false, units: 0, becameExhausted: false, dailyCapped: false, campaignId: null };
   }
   const unitPrice = getChannelUnitPrice({ type: post.campaign_type, cpm: post.cpm, cpc: post.cpc, discount: post.advertiser_discount });
-  if (!(unitPrice > 0)) return { debited: false, duplicate: false, units: 0, becameExhausted: false, campaignId: post.campaign_id };
-  const [[today]] = await input.conn.query<Array<RowDataPacket & { spend: string | number }>>(
-    `SELECT
-      COALESCE((SELECT SUM(advertiser_debit) FROM channel_advertiser_debits WHERE campaign_id=? AND created_at>=CURDATE()),0)
-      + COALESCE((SELECT SUM(advertiser_debit) FROM channel_settlement_ledger WHERE campaign_id=? AND created_at>=CURDATE()),0) spend`,
-    [post.campaign_id, post.campaign_id]
-  );
+  if (!(unitPrice > 0)) return { debited: false, duplicate: false, units: 0, becameExhausted: false, dailyCapped: false, campaignId: post.campaign_id };
+  const todaySpend = await getChannelDailySpend(input.conn, post.campaign_id);
   const budget = Math.max(0, Number(post.budget || 0));
   const dailyCap = Number(post.daily_budget_limit || 0);
-  const dailyRemaining = dailyCap > 0 ? Math.max(0, dailyCap - Number(today?.spend || 0)) : Number.POSITIVE_INFINITY;
+  const dailyRemaining = dailyCap > 0 ? Math.max(0, dailyCap - todaySpend) : Number.POSITIVE_INFINITY;
   const affordableUnits = Math.max(0, Math.floor((Math.min(budget, dailyRemaining) + 1e-10) / unitPrice));
-  const alreadySettled = input.type === "click" ? Number(post.settled_clicks || 0) : Number(post.settled_views || 0);
+  const alreadySettled = input.type === "click" ? Number(post.settled_clicks || 0) : Number(post.settled_views || 0) + Number(post.waived_views || 0);
   const confirmedUnits = input.type === "click"
     ? Number((await input.conn.query<Array<RowDataPacket & { count: number }>>("SELECT COUNT(*) count FROM campaign_clicks WHERE post_id=?", [input.postId]))[0][0]?.count || 0)
     : Number(post.views || 0);
@@ -69,10 +70,13 @@ async function fastDebit(input: { conn: PoolConnection; postId: number; type: "c
   const units = Math.min(Math.max(0, Math.floor(input.requestedUnits)), unbilledUnits, affordableUnits);
   if (!units) {
     const becameExhausted = budget + 1e-10 < unitPrice;
+    const dailyCapped = dailyCap > 0 && dailyRemaining + 1e-10 < unitPrice;
     if (becameExhausted) {
       await markCampaignBudgetExhausted(post.campaign_id, input.conn);
+    } else if (dailyCapped) {
+      await markChannelDailyCapReached(input.conn, post.campaign_id);
     }
-    return { debited: false, duplicate: false, units: 0, becameExhausted, campaignId: post.campaign_id };
+    return { debited: false, duplicate: false, units: 0, becameExhausted, dailyCapped, campaignId: post.campaign_id };
   }
   const debit = money(units * unitPrice);
   if (post.funding_model === "direct_debit") {
@@ -86,18 +90,18 @@ async function fastDebit(input: { conn: PoolConnection; postId: number; type: "c
       description: `Channel ${input.type} charge ${input.sourceKey}`,
     });
     if (!walletDebit.ok) {
-      if (walletDebit.duplicate) return { debited: false, duplicate: true, units: 0, becameExhausted: false, campaignId: post.campaign_id };
+      if (walletDebit.duplicate) return { debited: false, duplicate: true, units: 0, becameExhausted: false, dailyCapped: false, campaignId: post.campaign_id };
       await input.conn.query(
         "UPDATE campaigns SET status='paused',pause_reason='insufficient_balance' WHERE id=? AND status='active'",
         [post.campaign_id],
       );
-      return { debited: false, duplicate: false, units: 0, becameExhausted: false, campaignId: post.campaign_id, insufficientBalance: true };
+      return { debited: false, duplicate: false, units: 0, becameExhausted: false, dailyCapped: false, campaignId: post.campaign_id, insufficientBalance: true };
     }
   }
   const [campaignUpdate] = await input.conn.query<ResultSetHeader>(`
     UPDATE campaigns SET budget=GREATEST(budget-?,0), channel_spend=channel_spend+?
     WHERE id=? AND status='active' AND budget>=?`, [debit, debit, post.campaign_id, debit]);
-  if (campaignUpdate.affectedRows !== 1) return { debited: false, duplicate: false, units: 0, becameExhausted: false, campaignId: post.campaign_id };
+  if (campaignUpdate.affectedRows !== 1) return { debited: false, duplicate: false, units: 0, becameExhausted: false, dailyCapped: false, campaignId: post.campaign_id };
   await input.conn.query(
     `INSERT INTO channel_advertiser_debits
       (source_key,settlement_type,campaign_id,post_id,channel_id,publisher_id,units,unit_price,advertiser_debit)
@@ -108,10 +112,13 @@ async function fastDebit(input: { conn: PoolConnection; postId: number; type: "c
   await input.conn.query(`UPDATE campaign_posts SET ${settledColumn}=${settledColumn}+?, spend=spend+? WHERE id=?`, [units, debit, input.postId]);
   const remaining = money(budget - debit);
   const becameExhausted = remaining <= 0 || remaining + 1e-10 < unitPrice;
+  const dailyCapped = dailyCap > 0 && dailyRemaining - debit + 1e-10 < unitPrice;
   if (becameExhausted) {
     await markCampaignBudgetExhausted(post.campaign_id, input.conn);
+  } else if (dailyCapped) {
+    await markChannelDailyCapReached(input.conn, post.campaign_id);
   }
-  return { debited: true, duplicate: false, units, becameExhausted, campaignId: post.campaign_id };
+  return { debited: true, duplicate: false, units, becameExhausted, dailyCapped, campaignId: post.campaign_id };
 }
 
 async function cleanupAfterFastDebit(result: Awaited<ReturnType<typeof fastDebit>>) {
@@ -128,68 +135,77 @@ async function cleanupAfterFastDebit(result: Awaited<ReturnType<typeof fastDebit
       });
     }
   }
+  if (result.dailyCapped && result.campaignId !== null) {
+    try {
+      cleanup = await cleanupChannelDailyCapPosts(result.campaignId);
+    } catch (error) {
+      cleanupError = error instanceof Error ? error.message : "channel_daily_cap_cleanup_failed";
+      console.error("Post-commit channel daily-cap cleanup failed", { campaign_id: result.campaignId, error: cleanupError });
+    }
+  }
   return { ...result, cleanup, cleanupError };
 }
 
 export async function debitChannelClick(postId: number, clickId: number) {
+  const startedAt = Date.now();
   await ensureClassicSettlementColumns();
-  const conn = await pool.getConnection();
-  let result: Awaited<ReturnType<typeof fastDebit>>;
-  try {
-    await conn.beginTransaction();
-    result = await fastDebit({ conn, postId, type: "click", sourceKey: `click:${clickId}`, requestedUnits: 1 });
-    await conn.commit();
-  }
-  catch (error) { await conn.rollback(); throw error; } finally { conn.release(); }
+  const result = await withFinancialTransactionRetry(
+    (conn) => fastDebit({ conn, postId, type: "click", sourceKey: `click:${clickId}`, requestedUnits: 1 }),
+    { operation: "channel_click_debit" },
+  );
+  console.info("channel_click_billing", JSON.stringify({ post_id: postId, click_id: clickId, billing_result: result.debited ? "debited" : result.duplicate ? "duplicate" : "not_billable", elapsed_ms: Date.now() - startedAt }));
   return cleanupAfterFastDebit(result);
 }
 
 export async function debitConfirmedChannelViews(postId: number, confirmedViews: number) {
   await ensureClassicSettlementColumns();
-  const conn = await pool.getConnection();
-  let result: Awaited<ReturnType<typeof fastDebit>>;
-  try {
-    await conn.beginTransaction();
-    result = await fastDebit({ conn, postId, type: "view", sourceKey: `view:${postId}:${confirmedViews}`, requestedUnits: confirmedViews });
-    await conn.commit();
-  } catch (error) { await conn.rollback(); throw error; } finally { conn.release(); }
+  const result = await withFinancialTransactionRetry(
+    (conn) => fastDebit({ conn, postId, type: "view", sourceKey: `view:${postId}:${confirmedViews}`, requestedUnits: confirmedViews }),
+    { operation: "channel_view_debit" },
+  );
   return cleanupAfterFastDebit(result);
 }
 
 export async function settlePendingChannelPublisherCredits(options: number | { limit?: number; campaignId?: number } = 50) {
-  const limit = Math.min(100, Math.max(1, typeof options === "number" ? options : (options.limit ?? 50)));
+  const limit = Math.min(5000, Math.max(1, typeof options === "number" ? options : (options.limit ?? 50)));
   const campaignId = typeof options === "number" ? undefined : options.campaignId;
-  const filters = ["publisher_status='pending'"];
-  const params: Array<number> = [];
-  if (campaignId !== undefined) {
-    filters.push("campaign_id=?");
-    params.push(campaignId);
-  }
-  params.push(limit);
-  const [ids] = await pool.query<Array<RowDataPacket & { id: number }>>(
-    `SELECT id FROM channel_advertiser_debits WHERE ${filters.join(" AND ")} ORDER BY id LIMIT ?`,
-    params
-  );
-  let settled = 0; let credited = 0;
-  for (const candidate of ids) {
-    const conn = await pool.getConnection();
+  let settled = 0; let credited = 0; let candidates = 0; let failed = 0; let batches = 0; let lastId = 0;
+  while (candidates < limit) {
+    const batchLimit = Math.min(100, limit - candidates);
+    const filters = ["publisher_status='pending'", "id>?"];
+    const params: Array<number> = [lastId];
+    if (campaignId !== undefined) {
+      filters.push("campaign_id=?");
+      params.push(campaignId);
+    }
+    params.push(batchLimit);
+    const [ids] = await pool.query<Array<RowDataPacket & { id: number }>>(
+      `SELECT id FROM channel_advertiser_debits WHERE ${filters.join(" AND ")} ORDER BY id LIMIT ?`,
+      params,
+    );
+    if (!ids.length) break;
+    batches += 1;
+    candidates += ids.length;
+    lastId = Number(ids[ids.length - 1].id);
+    for (const candidate of ids) {
     try {
-      await conn.beginTransaction();
-      const [rows] = await conn.query<Array<RowDataPacket & Record<string, unknown>>>(
+      const publisherCredit = await withFinancialTransactionRetry(async (conn) => {
+        const [rows] = await conn.query<Array<RowDataPacket & Record<string, unknown>>>(
         `SELECT d.*,c.user_id advertiser_id FROM channel_advertiser_debits d
          JOIN campaigns c ON c.id=d.campaign_id
          WHERE d.id=? AND d.publisher_status='pending' FOR UPDATE SKIP LOCKED`, [candidate.id]);
-      const row = rows[0]; if (!row) { await conn.rollback(); continue; }
-      const [[settings]] = await conn.query<Array<RowDataPacket & { margin: string; reserve: string }>>(
+        const row = rows[0];
+        if (!row) return null;
+        const [[settings]] = await conn.query<Array<RowDataPacket & { margin: string; reserve: string }>>(
         "SELECT MAX(CASE WHEN `key`='platform_margin_percent' THEN value END) margin, MAX(CASE WHEN `key`='safety_reserve_percent' THEN value END) reserve FROM settings WHERE `key` IN ('platform_margin_percent','safety_reserve_percent')");
-      const debit = Number(row.advertiser_debit || 0);
-      const margin = Math.min(100, Math.max(0, Number(settings?.margin || 40))) / 100;
-      const reserve = Math.min(100, Math.max(0, Number(settings?.reserve || 10))) / 100;
-      const quality = await getPublisherQuality(Number(row.channel_id), conn);
-      const publisherCredit = money(debit * (1 - margin) * (1 - reserve) * quality.qualityWeight);
-      const platformRevenue = money(debit * margin);
-      const reserveAmount = money(debit - platformRevenue - publisherCredit);
-      const safety = await recordPayoutSafetyCheck({
+        const debit = Number(row.advertiser_debit || 0);
+        const margin = Math.min(100, Math.max(0, Number(settings?.margin || 40))) / 100;
+        const reserve = Math.min(100, Math.max(0, Number(settings?.reserve || 10))) / 100;
+        const quality = await getPublisherQuality(Number(row.channel_id), conn);
+        const publisherCredit = money(debit * (1 - margin) * (1 - reserve) * quality.qualityWeight);
+        const platformRevenue = money(debit * margin);
+        const reserveAmount = money(debit - platformRevenue - publisherCredit);
+        const safety = await recordPayoutSafetyCheck({
         settlementType: String(row.settlement_type) === "view" ? "view" : "click",
         campaignId: Number(row.campaign_id),
         publisherId: Number(row.publisher_id),
@@ -207,18 +223,16 @@ export async function settlePendingChannelPublisherCredits(options: number | { l
           units: Number(row.units || 0),
           quality_weight: quality.qualityWeight,
         },
-      });
-      if (safety.status !== "passed") throw new Error("payout_safety_check_failed");
-      if (!(await creditUserLockedBalance(conn, Number(row.publisher_id), publisherCredit))) throw new Error("publisher_credit_failed");
-      const table = row.settlement_type === "view" ? "ad_settlements_views" : "ad_settlements";
-      const metric = row.settlement_type === "view" ? "views_count" : "clicks_count";
-      await conn.query(`INSERT INTO ${table} (post_id,campaign_id,advertiser_id,channel_id,publisher_id,${metric},advertiser_paid,publisher_reward,status) VALUES (?,?,?,?,?,?,?,?,'locked')`,
+        }, conn);
+        if (safety.status !== "passed") throw new Error("payout_safety_check_failed");
+        if (!(await creditUserLockedBalance(conn, Number(row.publisher_id), publisherCredit))) throw new Error("publisher_credit_failed");
+        const table = row.settlement_type === "view" ? "ad_settlements_views" : "ad_settlements";
+        const metric = row.settlement_type === "view" ? "views_count" : "clicks_count";
+        await conn.query(`INSERT INTO ${table} (post_id,campaign_id,advertiser_id,channel_id,publisher_id,${metric},advertiser_paid,publisher_reward,status) VALUES (?,?,?,?,?,?,?,?,'locked')`,
         [row.post_id,row.campaign_id,row.advertiser_id,row.channel_id,row.publisher_id,row.units,debit,publisherCredit]);
-      await conn.query("UPDATE campaign_posts SET publisher_earnings=publisher_earnings+?,platform_revenue=platform_revenue+?,reserve_amount=reserve_amount+? WHERE id=?", [publisherCredit,platformRevenue,reserveAmount,row.post_id]);
-      await conn.query("UPDATE campaigns SET channel_publisher_earnings=channel_publisher_earnings+?,channel_platform_revenue=channel_platform_revenue+?,channel_reserve_amount=channel_reserve_amount+? WHERE id=?", [publisherCredit,platformRevenue,reserveAmount,row.campaign_id]);
-      await conn.query("UPDATE channel_advertiser_debits SET publisher_status='settled',publisher_credit=?,publisher_settled_at=NOW() WHERE id=?", [publisherCredit,row.id]);
-      await conn.commit();
-      try {
+        await conn.query("UPDATE campaign_posts SET publisher_earnings=publisher_earnings+?,platform_revenue=platform_revenue+?,reserve_amount=reserve_amount+? WHERE id=?", [publisherCredit,platformRevenue,reserveAmount,row.post_id]);
+        await conn.query("UPDATE campaigns SET channel_publisher_earnings=channel_publisher_earnings+?,channel_platform_revenue=channel_platform_revenue+?,channel_reserve_amount=channel_reserve_amount+? WHERE id=?", [publisherCredit,platformRevenue,reserveAmount,row.campaign_id]);
+        await conn.query("UPDATE channel_advertiser_debits SET publisher_status='settled',publisher_credit=?,publisher_settled_at=NOW() WHERE id=? AND publisher_status='pending'", [publisherCredit,row.id]);
         const canonical = calculateCurrentCanonicalAllocation({
           advertiserDebit: String(row.advertiser_debit), platformMarginPercent: settings?.margin || "40",
           safetyReservePercent: settings?.reserve || "10", qualityWeight: String(quality.qualityWeight),
@@ -233,12 +247,18 @@ export async function settlePendingChannelPublisherCredits(options: number | { l
           reserveAllocation: unitsToDecimal(canonical.reserve), qualityAdjustment: unitsToDecimal(canonical.qualityAdjustment),
           occurredAt: String(row.created_at), settledAt: new Date(),
         });
-      } catch (error) {
-        console.error("Canonical fast allocation calculation failed", { debit_id: Number(row.id), error: error instanceof Error ? error.message : "unknown_error" });
+        return publisherCredit;
+      }, { operation: "channel_pending_publisher_credit" });
+      if (publisherCredit !== null) {
+        settled += 1;
+        credited += publisherCredit;
       }
-      settled++; credited += publisherCredit;
-    } catch (error) { await conn.rollback(); console.error("Pending channel publisher settlement failed", { id: candidate.id, error }); }
-    finally { conn.release(); }
+    } catch (error) {
+      failed += 1;
+      console.error("Pending channel publisher settlement failed", { id: candidate.id, error });
+    }
+    }
+    if (ids.length < batchLimit) break;
   }
-  return { candidates: ids.length, settled, publisherCredited: money(credited) };
+  return { candidates, settled, failed, batches, publisherCredited: money(credited), safetyLimitReached: candidates >= limit };
 }

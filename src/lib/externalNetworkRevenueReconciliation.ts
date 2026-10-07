@@ -26,8 +26,12 @@ type ProviderReportRecord = {
   metadata?: Record<string, unknown>;
 };
 
+export type ExternalReconciliationStatus =
+  | "DISABLED" | "NOT_CONFIGURED" | "NO_CREDENTIALS" | "NOT_SUPPORTED"
+  | "NO_DATA" | "SUCCESS" | "TEMPORARY_FAILURE" | "PERMANENT_CONFIGURATION_ERROR";
+
 type ProviderFetchResult = {
-  status: "success" | "skipped";
+  status: ExternalReconciliationStatus;
   reason?: string;
   records: ProviderReportRecord[];
   metadata?: Record<string, unknown>;
@@ -91,7 +95,7 @@ type RunSummary = {
   provider: string;
   duration_ms: number;
   success: boolean;
-  status: "success" | "failed" | "skipped";
+  status: ExternalReconciliationStatus;
   records_fetched: number;
   records_updated: number;
   records_skipped: number;
@@ -289,7 +293,7 @@ function createUnsupportedProviderAdapter(config: { provider: ProviderName; netw
     support: PROVIDER_CAPABILITIES[config.provider],
     async fetchReports() {
       return {
-        status: "skipped",
+        status: "NOT_SUPPORTED",
         reason: "no_verified_reporting_api",
         records: [],
         metadata: { support: PROVIDER_CAPABILITIES[config.provider] },
@@ -306,7 +310,7 @@ function createAdExiumProviderAdapter(): ProviderAdapter {
     async fetchReports({ sinceDate, untilDate, configs }) {
       const token = envValue("ADEXIUM", ["REPORTING_TOKEN", "API_TOKEN", "API_KEY"]);
       if (!token) {
-        return { status: "skipped", reason: "missing_adexium_api_token", records: [], metadata: { required_env: ["ADEXIUM_REPORTING_TOKEN", "ADEXIUM_API_TOKEN", "ADEXIUM_API_KEY"] } };
+        return { status: "NO_CREDENTIALS", reason: "missing_adexium_api_token", records: [], metadata: { required_env: ["ADEXIUM_REPORTING_TOKEN", "ADEXIUM_API_TOKEN", "ADEXIUM_API_KEY"] } };
       }
 
       const baseUrl = process.env.ADEXIUM_STATS_BASE_URL || "https://api.tg-ads.co/api/v1/widget/stats";
@@ -347,7 +351,7 @@ function createAdExiumProviderAdapter(): ProviderAdapter {
         }
       }
       return {
-        status: "success",
+        status: records.length ? "SUCCESS" : "NO_DATA",
         records,
         metadata: {
           endpoint: new URL(baseUrl).origin,
@@ -815,14 +819,19 @@ async function reconcileProvider(adapter: ProviderAdapter, sinceDate: string, un
   let skipped = 0;
   try {
     const configs = await enabledNetworkConfigs(pool, adapter.networkName);
+    if (configs.length === 0) {
+      const summary: RunSummary = { provider: adapter.provider, duration_ms: Date.now() - started, success: true, status: "NOT_CONFIGURED", records_fetched: 0, records_updated: 0, records_skipped: 0 };
+      await recordProviderRun(summary, { reason: "no_enabled_provider_configuration", report_window: { since_date: sinceDate, until_date: untilDate } });
+      return summary;
+    }
     const result = await adapter.fetchReports({ sinceDate, untilDate, configs });
     fetched = result.records.length;
-    if (result.status === "skipped") {
+    if (result.status !== "SUCCESS" && result.status !== "NO_DATA") {
       const summary: RunSummary = {
         provider: adapter.provider,
         duration_ms: Date.now() - started,
-        success: true,
-        status: "skipped",
+        success: result.status !== "TEMPORARY_FAILURE" && result.status !== "PERMANENT_CONFIGURATION_ERROR",
+        status: result.status,
         records_fetched: 0,
         records_updated: 0,
         records_skipped: 0,
@@ -862,7 +871,7 @@ async function reconcileProvider(adapter: ProviderAdapter, sinceDate: string, un
       provider: adapter.provider,
       duration_ms: Date.now() - started,
       success: true,
-      status: "success",
+      status: fetched > 0 ? "SUCCESS" : "NO_DATA",
       records_fetched: fetched,
       records_updated: updated,
       records_skipped: skipped,
@@ -882,7 +891,7 @@ async function reconcileProvider(adapter: ProviderAdapter, sinceDate: string, un
       provider: adapter.provider,
       duration_ms: Date.now() - started,
       success: false,
-      status: "failed",
+      status: /timeout|aborted|network|fetch/i.test(String(error?.message || "")) ? "TEMPORARY_FAILURE" : "PERMANENT_CONFIGURATION_ERROR",
       records_fetched: fetched,
       records_updated: updated,
       records_skipped: skipped,
@@ -964,7 +973,7 @@ export async function getExternalNetworkReconciliationReport(limit = 20) {
       return {
         provider: row.provider,
         status: row.status,
-        success: row.status !== "failed",
+        success: !["TEMPORARY_FAILURE", "PERMANENT_CONFIGURATION_ERROR"].includes(row.status),
         last_sync: row.started_at,
         last_successful_sync: row.last_successful_finished_at || null,
         last_failed_sync: row.last_failed_finished_at || null,

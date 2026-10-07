@@ -3,14 +3,15 @@ import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
-import { checkChannelHealth, markChannelHealthSuccess, autoPauseChannel } from "@/lib/channelLifecycle";
+import { verifyTelegramChannelAccess } from "@/lib/telegramChannelAccess";
 import { clearPrivateTrackingAssignment, onboardPrivateChannelTracking } from "@/lib/privateChannelTrackingOnboarding";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import { refreshChannelViews } from "@/lib/channelAdminViewRefresh";
 import { settleChannelCampaigns } from "@/lib/channelSettlement";
 import { getPublisherQuality } from "@/lib/publisherQuality";
-import { notifyChannelApproved, notifyChannelRejected, notifyChannelRemoved } from "@/lib/publisherNotifications";
+import { notifyChannelApproved, notifyChannelRejected, notifyChannelRemoved, notifyChannelPaused } from "@/lib/publisherNotifications";
 import { verifyAndStoreChannelIdentity } from "@/lib/channelTelegramIdentity";
+import { mainCampaignScopeSql } from "@/lib/silverCampaignControl";
 
 type ChannelRow = RowDataPacket & {
   id: number; user_id: number; status: string; is_deleted: number;
@@ -37,7 +38,9 @@ async function channelDeletionReadiness(channelId: number, postId?: number) {
          WHEN cp.delivery_failed_at IS NOT NULL THEN 'delivery_failed'
          WHEN cp.message_id IS NULL OR TRIM(cp.message_id) = '' THEN 'missing_message_id'
          WHEN COALESCE(cp.delivery_confirmed_at, cp.created_at) > DATE_SUB(NOW(), INTERVAL 24 HOUR) THEN 'not_expired_24h'
-         WHEN c.type = 'views' AND COALESCE(cp.views,0) > COALESCE(cp.settled_views,0) THEN 'unsettled_views'
+         WHEN c.type = 'views' AND COALESCE(cp.views,0) > COALESCE(cp.settled_views,0)
+           + COALESCE((SELECT SUM(cvw.waived_views) FROM channel_view_waivers cvw WHERE cvw.post_id=cp.id),0)
+           THEN 'unsettled_views'
          WHEN c.type = 'clicks' AND (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) > COALESCE(cp.settled_clicks,0) THEN 'unsettled_clicks'
          WHEN EXISTS (SELECT 1 FROM channel_advertiser_debits cad WHERE cad.post_id = cp.id AND cad.publisher_status <> 'settled') THEN 'pending_publisher_settlement'
          ELSE 'ready'
@@ -45,6 +48,7 @@ async function channelDeletionReadiness(channelId: number, postId?: number) {
      FROM campaign_posts cp
      JOIN campaigns c ON c.id = cp.campaign_id
      WHERE cp.channel_id = ?
+       AND ${mainCampaignScopeSql("c")}
        AND (? IS NULL OR cp.id = ?)
      ORDER BY cp.id DESC
      LIMIT 50`,
@@ -94,17 +98,32 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   let newValue: unknown = oldValue;
 
   if (action === "pause") {
-    await pool.query("UPDATE channels SET status='paused',paused_reason='Paused by admin control center' WHERE id=?", [channelId]);
+    const [update] = await pool.query<ResultSetHeader>(
+      "UPDATE channels SET status='paused',paused_reason='Paused by admin control center',notification_state_version=notification_state_version+1 WHERE id=? AND status<>'paused'", [channelId]);
     newValue = { status: "paused" };
-  } else if (action === "resume") {
-    const identity = await verifyAndStoreChannelIdentity({
-      channelId,
-      chatId: channel.chat_id,
-      username: channel.username,
-      source: "admin_resume",
-    });
-    channel.chat_id = identity.chatId;
-    channel.username = identity.username;
+    if (update.affectedRows > 0) {
+      const [[version]] = await pool.query<Array<RowDataPacket & { notification_state_version: number }>>(
+        "SELECT notification_state_version FROM channels WHERE id=?", [channelId]);
+      await notifyChannelPaused(channel.telegram_id, channelId, channel.title, Number(version?.notification_state_version || 1));
+    }
+    } else if (action === "resume") {
+      let identity;
+      try {
+        identity = await verifyAndStoreChannelIdentity({
+          channelId,
+          chatId: channel.chat_id,
+          username: channel.username,
+          source: "admin_resume",
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Telegram channel verification failed.";
+        return NextResponse.json({
+          error: message,
+          code: "CHANNEL_VERIFICATION_BLOCKED",
+        }, { status: 409 });
+      }
+      channel.chat_id = identity.chatId;
+      channel.username = identity.username;
     const tracking = await onboardPrivateChannelTracking({
       channelId,
       chatId: channel.chat_id,
@@ -126,7 +145,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     );
     newValue = { status: "active" };
     if (update.affectedRows > 0) {
-      await notifyChannelApproved(channel.telegram_id, channelId, channel.title);
+        await notifyChannelApproved(channel.telegram_id, channelId, channel.title).catch((error) => {
+          console.error("Channel approval notification failed", {
+            channelId,
+            error: error instanceof Error ? error.message : "notification_failed",
+          });
+        });
     }
   } else if (action === "reject") {
     const [update] = await pool.query<ResultSetHeader>(
@@ -153,9 +177,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     newValue = { under_review: Boolean(underReview) };
     await pool.query("UPDATE channels SET under_review=? WHERE id=?", [underReview, channelId]);
   } else if (action === "health_check") {
-    const health = await checkChannelHealth({ id: channelId, chat_id: channel.chat_id });
-    if (health.ok) await markChannelHealthSuccess(channelId);
-    else await autoPauseChannel(channelId, health);
+    const health = await verifyTelegramChannelAccess({
+      channelId,
+      chatId: channel.chat_id,
+      username: channel.username,
+      source: "admin_manual_check",
+      persist: true,
+      autoPauseActive: true,
+    });
     oldValue = { health_status: "requested" };
     newValue = health;
     result = { success: true, health };
@@ -206,9 +235,26 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     newValue = { fraud_event_id: eventId || "latest", false_positive: true };
   } else if (action === "reinstate") {
     await pool.query("UPDATE users SET status='active',is_banned=0,banned_at=NULL,ban_reason=NULL,publisher_trust_score=60 WHERE id=?", [channel.user_id]);
-    await pool.query("UPDATE channels SET status='active',is_deleted=FALSE,paused_reason=NULL,under_review=0,publisher_trust_score=60,trust_score_frozen_until=DATE_ADD(NOW(),INTERVAL 24 HOUR),reactivated_at=NOW() WHERE user_id=? AND is_deleted=FALSE", [channel.user_id]);
+    const [restoredChannels] = await pool.query<ResultSetHeader>(
+      `UPDATE channels
+       SET status='active',paused_reason=NULL,under_review=0,publisher_trust_score=60,
+           trust_score_frozen_until=DATE_ADD(NOW(),INTERVAL 24 HOUR),reactivated_at=NOW()
+       WHERE user_id=? AND is_deleted=FALSE AND status='paused'
+         AND paused_reason IN (
+           'Low Trust Score with Withdrawable Balance Threshold Reached',
+           'fraudulent_or_low_quality_traffic'
+         )`,
+      [channel.user_id]
+    );
     oldValue = { publisher_status: channel.publisher_status, publisher_is_banned: Boolean(channel.publisher_is_banned), channel_status: channel.status };
-    newValue = { publisher_status: "active", publisher_is_banned: false, channel_status: "active", publisher_trust_score: 60, trust_enforcement_frozen_hours: 24 };
+    newValue = {
+      publisher_status: "active",
+      publisher_is_banned: false,
+      restored_automation_paused_channels: restoredChannels.affectedRows,
+      preserved_other_channel_states: true,
+      publisher_trust_score: 60,
+      trust_enforcement_frozen_hours: 24,
+    };
   } else if (action === "exclude_settlement") {
     const hours = Math.min(720, Math.max(1, Number(body.duration_hours) || 24));
     oldValue = { excluded_until: channel.settlement_excluded_until };

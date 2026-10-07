@@ -1,6 +1,7 @@
-import type { PoolConnection, RowDataPacket } from "mysql2/promise";
+import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { deleteExhaustedChannelCampaignPosts } from "@/lib/campaignPostDeletion";
+import { enqueueCampaignNotification } from "@/lib/platformNotifications";
 
 const REQUIRED_CAMPAIGN_LIFECYCLE_COLUMNS = [
   "paused_at",
@@ -53,11 +54,26 @@ export async function hasAdminActionAuditsTable() {
   return rows[0]?.count > 0;
 }
 
+function safeAuditMetadata(metadata: Record<string, unknown> | undefined, entityKey: string | null) {
+  const blocked = /token|secret|password|api[_-]?key|session/i;
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata || {})) if (!blocked.test(key)) sanitized[key] = value;
+  if (entityKey) sanitized.entity_key = entityKey;
+  return Object.keys(sanitized).length ? sanitized : null;
+}
+
+export function normalizeAdminAuditEntity(entityId: number | string | null | undefined, metadata?: Record<string, unknown>) {
+  const numeric = typeof entityId === "number" ? entityId : typeof entityId === "string" && /^\d+$/.test(entityId.trim()) ? Number(entityId) : null;
+  const validNumeric = numeric !== null && Number.isSafeInteger(numeric) && numeric > 0 ? numeric : null;
+  const entityKey = validNumeric === null && entityId !== null && entityId !== undefined && String(entityId).trim() ? String(entityId).trim().slice(0, 255) : null;
+  return { entityId: validNumeric, metadata: safeAuditMetadata(metadata, entityKey), safeIdentifier: validNumeric ?? entityKey };
+}
+
 export async function recordAdminActionAudit(input: {
   adminId?: number | null;
   action: string;
   entityType: string;
-  entityId: number | string;
+  entityId?: number | string | null;
   reason?: string;
   metadata?: Record<string, unknown>;
 }) {
@@ -67,6 +83,7 @@ export async function recordAdminActionAudit(input: {
       return;
     }
 
+    const entity = normalizeAdminAuditEntity(input.entityId, input.metadata);
     await pool.query(`
       INSERT INTO admin_action_audits (admin_id, action, entity_type, entity_id, reason, metadata)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -74,17 +91,18 @@ export async function recordAdminActionAudit(input: {
       input.adminId || null,
       input.action,
       input.entityType,
-      input.entityId,
+      entity.entityId,
       input.reason || null,
-      input.metadata ? JSON.stringify(input.metadata) : null,
+      entity.metadata ? JSON.stringify(entity.metadata) : null,
     ]);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Unknown audit logging error";
-    console.warn("Failed to record admin action audit", {
+    const entity = normalizeAdminAuditEntity(input.entityId, input.metadata);
+    console.warn("admin_audit_write_failed", {
+      actor_id: input.adminId || null,
       action: input.action,
       entity_type: input.entityType,
-      entity_id: input.entityId,
-      error: message,
+      entity_identifier: entity.safeIdentifier,
+      error_class: error instanceof Error ? error.name : "UnknownError",
     });
   }
 }
@@ -93,15 +111,23 @@ export async function markCampaignBudgetExhausted(campaignId: number | string, c
   await assertCampaignLifecycleColumns();
   const executor = conn || pool;
 
-  await executor.query(`
+  const [updated] = await executor.query<ResultSetHeader>(`
     UPDATE campaigns
     SET status = 'budget_exhausted',
       budget = 0,
       budget_exhausted_at = NOW(),
       completed_at = NULL,
       pause_reason = 'budget_exhausted'
-    WHERE id = ?
+    WHERE id = ? AND status <> 'budget_exhausted'
   `, [campaignId]);
+
+  if (updated.affectedRows > 0) {
+    const [[campaign]] = await executor.query<Array<RowDataPacket & { user_id: number; name: string }>>(
+      "SELECT user_id,name FROM campaigns WHERE id=?", [campaignId]);
+    if (campaign) await enqueueCampaignNotification(executor, {
+      campaignId: Number(campaignId), userId: Number(campaign.user_id), event: "completed", name: campaign.name,
+    });
+  }
 
   await executor.query(`
     UPDATE campaign_posts cp

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Telegram payload shapes vary by method and are validated by callers */
 export const SAFE_TELEGRAM_PARSE_MODE = undefined;
 
 export function escapeTelegramHtml(value: unknown) {
@@ -80,11 +81,13 @@ export async function deleteTelegramMessage(chatId: string | number, messageId: 
         chat_id: chatId,
         message_id: messageId,
       }),
+      signal: AbortSignal.timeout(Math.min(30_000, Math.max(1_000, Number(options.timeoutMs) || 10_000))),
     });
     
     const data = await res.json();
     return data;
   } catch (error) {
     console.error("Telegram Delete Error:", error);
+    return { ok: false, description: error instanceof Error ? error.message : "Telegram delete network failure" };
   }
 }

@@ -3,7 +3,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
-import { notifyMiniAppApproved, notifyMiniAppRejected, notifyMiniAppRemoved } from "@/lib/publisherNotifications";
+import { notifyMiniAppApproved, notifyMiniAppRejected, notifyMiniAppRemoved, notifyMiniAppPaused } from "@/lib/publisherNotifications";
 
 type MiniAppState = RowDataPacket & {
   id: number;
@@ -113,13 +113,20 @@ export async function POST(
         [id]
       );
     } else {
-      await pool.query("UPDATE miniapps SET status = ? WHERE id = ?", [newStatus, id]);
+      await pool.query(
+        "UPDATE miniapps SET status = ?, notification_state_version=notification_state_version+IF(status<>?,1,0) WHERE id = ?",
+        [newStatus, newStatus, id],
+      );
     }
 
     if (action === "reject" && previousState.status !== "rejected") {
       await notifyMiniAppRejected(previousState.telegram_id, id, previousState.miniapp_name);
     } else if (newStatus === "approved" && previousState.status !== "approved") {
       await notifyMiniAppApproved(previousState.telegram_id, id, previousState.miniapp_name);
+    } else if (newStatus === "paused" && previousState.status !== "paused") {
+      const [[version]] = await pool.query<Array<RowDataPacket & { notification_state_version: number }>>(
+        "SELECT notification_state_version FROM miniapps WHERE id=?", [id]);
+      await notifyMiniAppPaused(previousState.telegram_id, id, previousState.miniapp_name, Number(version?.notification_state_version || 1));
     }
 
     await recordAdminActionAudit({

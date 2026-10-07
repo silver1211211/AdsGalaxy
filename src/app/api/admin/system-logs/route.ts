@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy system log JSON shapes */
 import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
 
@@ -83,12 +84,28 @@ export async function GET(request: Request) {
       GROUP BY log_type, status
     `);
 
-    const logs = rows.map((row: any) => ({
-      ...row,
-      failure_reasons: parseJson(row.failure_reasons),
-      affected_entities: parseJson(row.affected_entities),
-      metadata: parseJson(row.metadata),
-    }));
+    const [silverRows]: any = await pool.query(
+      "SELECT campaign_id FROM campaign_admin_isolation WHERE management_scope='silver'",
+    );
+    const silverCampaignIds = new Set(silverRows.map((row: any) => String(row.campaign_id)));
+    const logs = rows.map((row: any) => {
+      const metadata = parseJson(row.metadata);
+      if (row.log_type === "channel_posting" && metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+        const distribution = (metadata as Record<string, any>).campaign_placement_distribution;
+        if (distribution && typeof distribution === "object" && !Array.isArray(distribution)) {
+          (metadata as Record<string, any>).campaign_placement_distribution = Object.fromEntries(
+            Object.entries(distribution).filter(([campaignId]) => !silverCampaignIds.has(String(campaignId))),
+          );
+        }
+        delete (metadata as Record<string, any>).eligible_campaigns_count;
+      }
+      return {
+        ...row,
+        failure_reasons: parseJson(row.failure_reasons),
+        affected_entities: parseJson(row.affected_entities),
+        metadata,
+      };
+    });
 
     return NextResponse.json({
       logs,

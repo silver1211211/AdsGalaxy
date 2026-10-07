@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthErrorStatus } from "@/lib/auth";
+import { authenticatePublisherAsset, PublisherAssetError, publisherAssetErrorResponse } from "@/lib/publisherAssetOnboarding";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +17,7 @@ function dateRange(request: Request) {
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const user = await getAuthenticatedUser(request.headers.get("x-telegram-init-data"));
+    const user = await authenticatePublisherAsset(request);
     const { id } = await params;
     const [bots] = await pool.query<BotRow[]>(
       "SELECT id FROM bots WHERE id = ? AND user_id = ? AND is_deleted = FALSE LIMIT 1",
@@ -53,6 +54,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     }), { impressions: 0, earnings: 0, spend: 0, successful_deliveries: 0, failed_deliveries: 0 });
     return NextResponse.json({ range_days: range, summary: { ...summary, publisher_cpm: summary.impressions > 0 ? summary.earnings / summary.impressions * 1000 : 0, advertiser_cpm: summary.impressions > 0 ? summary.spend / summary.impressions * 1000 : 0 }, daily_rows }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
   } catch (error) {
+    if (error instanceof PublisherAssetError) return publisherAssetErrorResponse(error);
     const message = error instanceof Error ? error.message : "Failed to load Bot analytics";
     return NextResponse.json({ error: message }, { status: getAuthErrorStatus(error) });
   }

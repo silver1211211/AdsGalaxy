@@ -6,11 +6,23 @@ type QueryExecutor = Pick<PoolConnection, "query">;
 
 type NotificationRow = RowDataPacket & {
   id: number;
+  event_type: string;
   campaign_id: number;
   campaign_name: string;
   telegram_id: string | number | null;
   remaining_budget: string | number;
 };
+
+export async function enqueueMiniAppDailyCapNotification(conn: QueryExecutor, campaignId: number) {
+  await conn.query(
+    `INSERT IGNORE INTO miniapp_campaign_notification_outbox
+       (campaign_id, event_type, exhaustion_cycle, status, next_attempt_at)
+     SELECT id, 'daily_cap_reached', daily_cap_cycle, 'pending', UTC_TIMESTAMP()
+     FROM miniapp_rewarded_campaigns
+     WHERE id = ? AND status = 'daily_cap_reached' AND pause_reason = 'daily_budget_limit'`,
+    [campaignId],
+  );
+}
 
 export async function enqueueMiniAppBudgetExhaustedNotification(
   conn: QueryExecutor,
@@ -46,7 +58,7 @@ export async function markMiniAppCampaignBudgetExhausted(
 export async function dispatchMiniAppCampaignNotifications(limit = 20) {
   const boundedLimit = Math.min(100, Math.max(1, Math.floor(limit)));
   const [candidates] = await pool.query<NotificationRow[]>(
-    `SELECT o.id, o.campaign_id, c.campaign_name, c.remaining_budget, u.telegram_id
+    `SELECT o.id, o.campaign_id, o.event_type, c.campaign_name, c.remaining_budget, u.telegram_id
      FROM miniapp_campaign_notification_outbox o
      JOIN miniapp_rewarded_campaigns c ON c.id = o.campaign_id
      JOIN users u ON u.id = c.advertiser_id
@@ -76,12 +88,17 @@ export async function dispatchMiniAppCampaignNotifications(limit = 20) {
 
     try {
       if (!candidate.telegram_id) throw new Error("Advertiser Telegram ID is missing");
-      const result = await sendTelegramMessage(
-        String(candidate.telegram_id),
-        `âš ï¸ <b>Mini App campaign budget exhausted</b>\n\n` +
+      const message = candidate.event_type === "daily_cap_reached"
+        ? `⏸️ <b>Mini App campaign daily cap reached</b>\n\n` +
+          `Your campaign "<b>${escapeTelegramHtml(candidate.campaign_name)}</b>" reached today's daily cap. Delivery has stopped for the rest of the current UTC billing day.\n\n` +
+          `AdsGalaxy will automatically try to resume delivery on the next billing day if the campaign budget and Ad Balance can fund another impression.`
+        : `⚠️ <b>Mini App campaign budget exhausted</b>\n\n` +
           `Your campaign "<b>${escapeTelegramHtml(candidate.campaign_name)}</b>" can no longer fund another impression and has been paused.\n\n` +
           `Remaining budget: <b>$${Number(candidate.remaining_budget || 0).toFixed(2)}</b>\n\n` +
-          `Add funds, then resume the campaign to continue delivery.`,
+          `Add funds, then resume the campaign to continue delivery.`;
+      const result = await sendTelegramMessage(
+        String(candidate.telegram_id),
+        message,
         { parse_mode: "HTML" },
       );
       if (!result?.ok) throw new Error(String(result?.description || "Telegram delivery failed"));

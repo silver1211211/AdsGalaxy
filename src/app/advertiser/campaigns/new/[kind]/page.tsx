@@ -212,7 +212,8 @@ export default function NewCampaignWizardPage() {
             cpm: defaultCpm,
             cpc: presetType === "clicks" ? recClicks.toString() : "",
             budget: isGrowthCampaign ? "100" : data.min_campaign_budget || "10.0"
-            ,teaser_cpm:data.teaser_recommended_cpm||"0.89"
+            ,teaser_cpm:data.teaser_recommended_cpm||"0.89",
+            cost_per_subscriber:isGrowthCampaign?String(data.channel_growth_cps_recommended):prev.cost_per_subscriber,
           }));
         }
       })
@@ -221,7 +222,7 @@ export default function NewCampaignWizardPage() {
     return () => {
       cancelled = true;
     };
-  }, [isBotCampaign, isEditMode, presetType, setTitle, t]);
+  }, [isBotCampaign, isEditMode, isGrowthCampaign, presetType, setTitle, t]);
 
   useEffect(() => {
     apiFetch("/api/advertiser/rate-discount")
@@ -322,8 +323,9 @@ export default function NewCampaignWizardPage() {
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data.verified) {
         const messages: Record<string, string> = {
-          BOT_NOT_ADMIN: "Add Ads Galaxy Bot as a channel administrator.",
+          BOT_NOT_ADMIN: "Add the Ads Galaxy bot as an admin, then tap Verify Channel again.",
           BOT_INVITE_PERMISSION_REQUIRED: "Enable the bot's invite-users permission.",
+          PRIVATE_INVITE_APPROVAL_REQUIRED: "Turn off Approve New Members, create a new invite link, then verify again.",
           TELEGRAM_UNAVAILABLE: "Telegram verification is temporarily unavailable. Try again.",
           INVALID_DESTINATION_CHANNEL: "We couldn't verify this Telegram channel.",
         };
@@ -475,12 +477,22 @@ export default function NewCampaignWizardPage() {
     submitData.append("direct_inventory_ids", JSON.stringify([]));
 
     try {
+      let idempotencyKey="";
+      const idempotencyStorageKey=`campaign-create:${params.kind}`;
+      if(!isEditMode){
+        const fingerprint=JSON.stringify(Array.from(submitData.entries()).map(([key,value])=>[key,value instanceof File?{name:value.name,size:value.size,type:value.type}:String(value)]));
+        const saved=JSON.parse(sessionStorage.getItem(idempotencyStorageKey)||"null") as {fingerprint?:string;key?:string}|null;
+        idempotencyKey=saved?.fingerprint===fingerprint&&saved.key?saved.key:crypto.randomUUID();
+        sessionStorage.setItem(idempotencyStorageKey,JSON.stringify({fingerprint,key:idempotencyKey}));
+      }
       const res = await apiFetch(isEditMode ? `/api/advertiser/campaigns/${editId}` : "/api/advertiser/campaigns", {
         method: isEditMode ? "PATCH" : "POST",
         body: submitData,
+        headers:isEditMode?undefined:{"Idempotency-Key":idempotencyKey},
       });
       const data = await res.json();
       if (res.ok) {
+        if(!isEditMode)sessionStorage.removeItem(idempotencyStorageKey);
         router.push("/advertiser/campaigns");
       } else {
         const errorCode = String(data?.code || "").trim();

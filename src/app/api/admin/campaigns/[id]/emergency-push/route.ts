@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
+import { randomUUID } from "crypto";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { claimAdvertiserDirectDebit } from "@/lib/advertiserDirectDebit";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { campaignCategoryMatches } from "@/lib/campaignCategories";
 import { channelCampaignMatchesInventory } from "@/lib/channelAudience";
-import { deleteCampaignPosts, type CampaignPostDeletionSummary } from "@/lib/campaignPostDeletion";
+import { deleteCampaignPostsByIds, type CampaignPostDeletionSummary } from "@/lib/campaignPostDeletion";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { settleChannelCampaigns } from "@/lib/channelSettlement";
 import { acquireCronLock, releaseCronLock } from "@/lib/cronSecurity";
@@ -27,11 +28,19 @@ import { campaignExcludesChannel, campaignExcludesIdentifier, loadCampaignExclus
 import { calculateBroadcastPayout, getBroadcastPayoutSettings, type BroadcastPayout, type BroadcastPayoutSettings } from "@/lib/broadcastPublisherCpmEngine";
 import { processBoundedQueue } from "@/lib/concurrency";
 import { effectiveBidPerThousand, getAdvertiserDiscount } from "@/lib/advertiserDiscount";
+import { isCampaignDeliveryAllowed, isChannelAllowedForCampaign, mainCampaignScopeSql, recordSilverAudit, requireSilverAdmin, silverCampaignScopeSql } from "@/lib/silverCampaignControl";
+import { releaseChannelScheduleSlotClaim, reserveChannelPlacement, restoreReplacedChannelScheduleSlotClaim, trackedChannelCtaUrl, trackedGrowthCtaUrl } from "@/lib/channelDelivery";
+import { reconcileChannelDailyCapLifecycle } from "@/lib/channelDailyCap";
+import { resolveCampaignPublicId } from "@/lib/campaignIdentity";
+import { selectEmergencyScheduleSlot } from "@/lib/channelScheduleSlots";
+import { refreshChannelViews } from "@/lib/channelAdminViewRefresh";
+import { requireAdServingAllowed } from "@/lib/productionSafety";
+import { classifyTelegramAccessFailure, verifyTelegramChannelAccess } from "@/lib/telegramChannelAccess";
+import { checkChannelPlacementAffordability } from "@/lib/channelPlacementAffordability";
+import { createGrowthDeliveryInvite } from "@/lib/channelGrowthInvite";
 
 export const dynamic = "force-dynamic";
 
-const MAX_EMERGENCY_CHANNELS = 1000;
-const ACTIVE_POST_STATUSES = ["active", "posted", "sent"];
 const VALID_MODES = new Set(["fill_empty_slots", "replace_everything"]);
 
 type EmergencyMode = "fill_empty_slots" | "replace_everything";
@@ -47,6 +56,8 @@ function parseEmergencyBroadcastLimit(body: Record<string, unknown>) {
 
 type CampaignRow = RowDataPacket & {
   id: number;
+  public_id?: number;
+  channel_delivery_generation?: number;
   user_id: number;
   name: string;
   status: string;
@@ -62,6 +73,13 @@ type CampaignRow = RowDataPacket & {
   image_url: string | null;
   cpm: string | number;
   effective_cpm?: number;
+  campaign_kind?: string;
+  destination_chat_id?: string | number | null;
+  destination_channel_id?: string | number | null;
+  countries?: string | string[] | null;
+  languages?: string | string[] | null;
+  start_at?: string | Date | null;
+  end_at?: string | Date | null;
 };
 
 type ChannelRow = RowDataPacket & {
@@ -75,6 +93,8 @@ type ChannelRow = RowDataPacket & {
   posts_per_day: number;
   posting_times?: string | string[] | null;
   scheduler_slot?: string | null;
+  authoritative_country_code?: string | null;
+  authoritative_language_code?: string | null;
 };
 
 type BotRow = RowDataPacket & {
@@ -122,15 +142,14 @@ type ColumnRow = RowDataPacket & {
   COLUMN_NAME: string | null;
 };
 
-type IdRow = RowDataPacket & {
-  id: number;
-};
-
 type TelegramSendResponse = {
   ok?: boolean;
   description?: string;
   result?: {
     message_id?: number;
+  };
+  parameters?: {
+    retry_after?: number;
   };
 };
 
@@ -161,20 +180,6 @@ function normalizeFailureReason(value?: string) {
   if (text.includes("paused")) return "bot_paused";
   if (text.includes("error")) return "system_error";
   return "unknown_error";
-}
-
-function classifySettlementFailure(reason: string) {
-  const normalized = String(reason || "").trim().toLowerCase();
-  if ([
-    "payout_safety_check_failed",
-    "campaign_budget_exhausted",
-    "campaign_not_active",
-    "daily_budget_limit",
-    "post_not_found",
-    "telegram_post_unavailable",
-    "telegram_post_deleted",
-  ].includes(normalized)) return "safe_rolled_back" as const;
-  return "fatal_financial_integrity" as const;
 }
 
 function campaignMatchesBot(campaign: CampaignRow, bot: BotRow) {
@@ -244,12 +249,6 @@ async function getBroadcastSchema(): Promise<BroadcastSchema> {
   };
 }
 
-function getActiveUndeletedCondition(schema: EmergencySchema, alias = "cp") {
-  return schema.hasPostDeletedAtColumn
-    ? `${alias}.status IN (?) AND ${alias}.deleted_at IS NULL`
-    : `${alias}.status IN (?)`;
-}
-
 async function recordDeliveryEvent(
   enabled: boolean,
   campaignId: number,
@@ -276,134 +275,85 @@ async function recordDeliveryEvent(
   }
 }
 
-async function hasActiveUndeletedPost(channelId: number, schema: EmergencySchema) {
-  const [rows] = await pool.query<IdRow[]>(`
-    SELECT id
-    FROM campaign_posts cp
-    WHERE cp.channel_id = ?
-      AND ${getActiveUndeletedCondition(schema)}
-    LIMIT 1
-  `, [channelId, ACTIVE_POST_STATUSES]);
-
-  return rows.length > 0;
-}
-
-async function hasRecentChannelPost(channelId: number) {
-  const [rows] = await pool.query<IdRow[]>(`
-    SELECT id FROM campaign_posts
-    WHERE channel_id=? AND status IN ('active','posted','sent')
-      AND created_at>DATE_SUB(UTC_TIMESTAMP(),INTERVAL 3 HOUR)
-    LIMIT 1`, [channelId]);
-  return rows.length > 0;
-}
-
-async function hasCampaignPostWithin24Hours(campaignId: number, channelId: number) {
-  const [rows] = await pool.query<IdRow[]>(`
-    SELECT id FROM campaign_posts
-    WHERE campaign_id=? AND channel_id=?
-      AND status IN ('active','posted','sent','replaced','deleted','already_missing')
-      AND created_at>DATE_SUB(UTC_TIMESTAMP(),INTERVAL 24 HOUR)
-    LIMIT 1`, [campaignId, channelId]);
-  return rows.length > 0;
-}
-
-async function hasActiveUndeletedCampaignPost(campaignId: number, channelId: number, schema: EmergencySchema) {
-  const [rows] = await pool.query<IdRow[]>(`
-    SELECT id
-    FROM campaign_posts cp
-    WHERE cp.campaign_id = ?
-      AND cp.channel_id = ?
-      AND ${getActiveUndeletedCondition(schema)}
-    LIMIT 1
-  `, [campaignId, channelId, ACTIVE_POST_STATUSES]);
-
-  return rows.length > 0;
-}
-
-function minutesFromTime(value: string) {
-  const match = value.match(/^(\d{1,2}):(\d{2})/);
-  return match ? Number(match[1]) * 60 + Number(match[2]) : null;
-}
-
-function channelIsWithinThreeHours(channel: ChannelRow, now = new Date()) {
-  const configured = parseJsonArray(channel.posting_times);
-  if (channel.scheduler_slot) configured.push(String(channel.scheduler_slot));
-  if (configured.length === 0) configured.push(...(Number(channel.posts_per_day || 1) <= 1 ? ["12:00"] : Number(channel.posts_per_day) === 2 ? ["12:00", "18:00"] : ["00:00", "12:00", "18:00"]));
-  const current = now.getUTCHours() * 60 + now.getUTCMinutes();
-  return configured.some((time) => {
-    const scheduled = minutesFromTime(time);
-    if (scheduled === null) return false;
-    const distance = Math.abs(current - scheduled);
-    return Math.min(distance, 1440 - distance) <= 180;
-  });
-}
-
-async function getEligibleChannels(campaign: CampaignRow, schema: EmergencySchema, mode: EmergencyMode, followRules: boolean) {
-  const activeCondition = getActiveUndeletedCondition(schema);
-  const emptySlotCondition = mode === "fill_empty_slots" && followRules
-    ? `AND NOT EXISTS (
-        SELECT 1 FROM campaign_posts cp
-        WHERE cp.channel_id = c.id
-          AND ${activeCondition}
-          AND cp.created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 3 HOUR)
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM campaign_posts same_campaign
-        WHERE same_campaign.channel_id = c.id
-          AND same_campaign.campaign_id = ?
-          AND same_campaign.status IN ('active','posted','sent','replaced','deleted','already_missing')
-          AND same_campaign.created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
-      )`
-    : "";
-
-  const [channels] = await pool.query<ChannelRow[]>(`
-    SELECT c.*
-    FROM channels c
-    WHERE c.status = 'active'
-      AND c.is_deleted = FALSE
-      AND c.user_id != ?
-      AND c.chat_id IS NOT NULL
-      AND c.chat_id != ''
-      AND (
+async function getEligibleChannels(campaign: CampaignRow, mode: EmergencyMode, followRules: boolean) {
+  const dailyCapCondition = mode === "fill_empty_slots"
+    ? `AND (
         SELECT COUNT(*) FROM campaign_posts daily_cp
         WHERE daily_cp.channel_id = c.id
           AND daily_cp.created_at >= UTC_DATE()
           AND daily_cp.created_at < DATE_ADD(UTC_DATE(), INTERVAL 1 DAY)
-          AND daily_cp.status NOT IN ('delivery_failed')
-      ) < GREATEST(COALESCE(c.posts_per_day, 1), 1)
-      ${emptySlotCondition}
+          AND daily_cp.status IN ('active','posted','sent','deleted','already_missing')
+          AND daily_cp.delivery_confirmed_at IS NOT NULL
+          AND daily_cp.delivery_failed_at IS NULL
+      ) < GREATEST(COALESCE(c.posts_per_day, 1), 1)`
+    : "";
+  const campaignCooldownCondition = mode === "fill_empty_slots" && followRules
+    ? `AND NOT EXISTS (
+        SELECT 1 FROM campaign_posts same_campaign
+        WHERE same_campaign.channel_id = c.id
+          AND same_campaign.campaign_id = ?
+          AND same_campaign.status IN ('active','posted','sent','replaced','deleted','already_missing')
+          AND same_campaign.delivery_confirmed_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
+          AND same_campaign.delivery_failed_at IS NULL
+      )`
+    : "";
+
+  const [inventoryRows] = await pool.query<Array<RowDataPacket & {
+    active_inventory: number | string;
+    exempt_channels: number | string;
+    inaccessible_channels: number | string;
+  }>>(`
+    SELECT COUNT(*) active_inventory,
+      SUM(EXISTS(SELECT 1 FROM silver_ad_exempt_users seu WHERE seu.user_id=c.user_id AND seu.active=1)) exempt_channels,
+      SUM((c.chat_id IS NULL OR c.chat_id='') AND NOT EXISTS(SELECT 1 FROM silver_ad_exempt_users seu WHERE seu.user_id=c.user_id AND seu.active=1)) inaccessible_channels
+    FROM channels c
+    WHERE c.status='active' AND c.is_deleted=FALSE
+  `);
+
+  const advertiserOwnerCondition = "AND c.user_id != ?";
+  const queryParams: Array<number | string | string[]> = [];
+  queryParams.push(campaign.user_id);
+  queryParams.push(campaign.id);
+  if (mode === "fill_empty_slots" && followRules) queryParams.push(campaign.id);
+
+  const [channels] = await pool.query<ChannelRow[]>(`
+    SELECT c.*,g.authoritative_country_code,g.authoritative_language_code
+    FROM channels c
+    LEFT JOIN channel_geo_classifications g ON g.channel_id=c.id
+    WHERE c.status = 'active'
+      AND c.is_deleted = FALSE
+      ${advertiserOwnerCondition}
+      AND NOT EXISTS (SELECT 1 FROM campaign_admin_isolation cai JOIN silver_ad_exempt_users seu ON seu.user_id=c.user_id AND seu.active=1 WHERE cai.campaign_id=? AND cai.management_scope='silver')
+      AND c.chat_id IS NOT NULL
+      AND c.chat_id != ''
+      ${dailyCapCondition}
+      ${campaignCooldownCondition}
     ORDER BY c.id ASC
-    LIMIT ?
-  `, mode === "fill_empty_slots" && followRules
-    ? [campaign.user_id, ACTIVE_POST_STATUSES, campaign.id, MAX_EMERGENCY_CHANNELS + 1]
-    : [campaign.user_id, MAX_EMERGENCY_CHANNELS + 1]
-  );
+  `, queryParams);
 
   const channelExclusions = await loadCampaignExclusions(pool, "campaign", [Number(campaign.id)], "channel");
-  const eligibleChannels = channels.filter((channel) =>
-    channelCampaignMatchesInventory({
+  const eligibleChannels = channels.filter((channel) => {
+    if (campaignExcludesChannel(channelExclusions, Number(campaign.id), channel)) return false;
+    return channelCampaignMatchesInventory({
       campaignCategory: campaign.category,
       campaignAudience: campaign.continents,
       channelCategories: channel.categories,
       channelAudience: channel.audience_continents,
-    })
-    && !campaignExcludesChannel(channelExclusions, Number(campaign.id), channel)
-    && (!followRules || channelIsWithinThreeHours(channel))
-  );
+      campaignCountries: campaign.countries,
+      campaignLanguages: campaign.languages,
+      channelCountry: channel.authoritative_country_code,
+      channelLanguage: channel.authoritative_language_code,
+    });
+  });
 
   return {
-    eligibleChannels: eligibleChannels.slice(0, MAX_EMERGENCY_CHANNELS),
+    eligibleChannels,
     skippedByExclusion: channels.length - eligibleChannels.length,
-    skippedByLimit: Math.max(0, eligibleChannels.length - MAX_EMERGENCY_CHANNELS),
+    skippedByLimit: 0,
+    activeInventorySnapshot: Number(inventoryRows[0]?.active_inventory || 0),
+    exemptChannels: Number(inventoryRows[0]?.exempt_channels || 0),
+    inaccessibleChannels: Number(inventoryRows[0]?.inaccessible_channels || 0),
   };
-}
-
-function getEmergencySlot() {
-  const now = new Date();
-  const postingSlotDate = now.toISOString().slice(0, 10);
-  const postingSlotTime = now.toTimeString().slice(0, 8);
-
-  return { postingSlotDate, postingSlotTime };
 }
 
 async function postCampaignToChannel(options: {
@@ -411,34 +361,114 @@ async function postCampaignToChannel(options: {
   channel: ChannelRow;
   schema: EmergencySchema;
   requestOrigin: string;
+  mode: EmergencyMode;
+  silverOverride: boolean;
+  scheduleSlot: {
+    slotDate: string; slotTime: string; replacesPostId: number | null;
+    victimCampaignId?: number; victimGeneration?: number;
+    victimClaimType?: "scheduled" | "emergency_fill" | "emergency_replace";
+  };
 }) {
-  const { campaign, channel, schema, requestOrigin } = options;
-  const slot = getEmergencySlot();
-  const insertColumns = ["campaign_id", "channel_id", "channel_username", "status"];
-  const insertParams: Array<number | string | null> = [campaign.id, channel.id, channel.username, "active"];
+  const { campaign, channel, schema, requestOrigin, mode, scheduleSlot, silverOverride } = options;
+  const silverEligibility = await isChannelAllowedForCampaign(Number(campaign.id), Number(channel.id));
+  if (!silverEligibility.allowed) return { ok: false, skipped: true, retryAttempted: false, reason: silverEligibility.reason || "silver_delivery_blocked" };
+  const health = await verifyTelegramChannelAccess({
+    channelId:channel.id,chatId:channel.chat_id,username:channel.username,
+    source:"emergency_push",persist:true,autoPauseActive:true,
+  });
+  if (!health.ok) return { ok:false,skipped:true,retryAttempted:false,reason:`telegram_unhealthy_${health.state}`,autoPaused:health.permanent };
 
-  if (schema.hasPostPostingModeColumn) {
-    insertColumns.push("posting_mode");
-    insertParams.push("emergency");
+  const reservationConnection=await pool.getConnection();
+  let reservation;
+  let generation=1;
+  try {
+    await reservationConnection.beginTransaction();
+    const affordability=await checkChannelPlacementAffordability(reservationConnection,Number(campaign.id));
+    if (!affordability.allowed) {
+      await reservationConnection.rollback();
+      return {ok:false,skipped:true,retryAttempted:false,reason:affordability.reason,stopReason:affordability.reason};
+    }
+    // Emergency attempts use the next generation, but the campaign generation
+    // is finalized only after Telegram confirms at least one delivery.
+    generation=affordability.generation+1;
+    reservation=await reserveChannelPlacement(reservationConnection,{
+      campaignId:Number(campaign.id),channelId:Number(channel.id),channelUsername:channel.username,
+      generation,mode:"emergency",
+      postingSlotDate:schema.hasPostSlotColumns?scheduleSlot.slotDate:undefined,
+      postingSlotTime:schema.hasPostSlotColumns?scheduleSlot.slotTime:undefined,
+      claimType:mode === "fill_empty_slots" ? "emergency_fill" : "emergency_replace",
+      replacesPostId:scheduleSlot.replacesPostId,
+      capacityLimit:mode === "fill_empty_slots"?Math.max(1,Number(channel.posts_per_day||1)):undefined,
+    });
+    if (reservation.claimed) await reservationConnection.commit(); else await reservationConnection.rollback();
+  } catch (error) {
+    await reservationConnection.rollback();
+    throw error;
+  } finally { reservationConnection.release(); }
+
+  if (!reservation.claimed) {
+    return { ok:false,skipped:true,retryAttempted:false,reason:reservation.reason || "delivery_claim_exists",reservationConflict:true };
   }
 
-  if (schema.hasPostSlotColumns) {
-    insertColumns.push("posting_slot_date", "posting_slot_time");
-    insertParams.push(slot.postingSlotDate, slot.postingSlotTime);
+  const postId = reservation.postId;
+  const failReservation=async(reason:string)=>{
+    const conn=await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query("UPDATE campaign_posts SET status='delivery_failed',delivery_failed_at=NOW(),delivery_failure_reason=? WHERE id=? AND delivery_confirmed_at IS NULL",[reason.slice(0,255),postId]);
+      let released=false;
+      if(scheduleSlot.replacesPostId&&reservation.slotClaimTransferred){
+        released=await restoreReplacedChannelScheduleSlotClaim(conn,{
+          claimId:Number(reservation.slotClaimId),replacementPostId:postId,victimPostId:Number(scheduleSlot.replacesPostId),
+          victimCampaignId:Number(scheduleSlot.victimCampaignId),victimGeneration:Number(scheduleSlot.victimGeneration||1),
+          victimClaimType:scheduleSlot.victimClaimType||"scheduled",
+        });
+      }else if(reservation.slotClaimId){
+        released=await releaseChannelScheduleSlotClaim(conn,{claimId:Number(reservation.slotClaimId),postId,channelId:Number(channel.id),slotDate:scheduleSlot.slotDate,slotTime:scheduleSlot.slotTime});
+      }
+      await conn.commit();
+      return released;
+    }catch(error){await conn.rollback();throw error;}finally{conn.release();}
+  };
+
+  let replacementSettlement: {settledPosts:number;advertiserDebited:number;publisherCredited:number}|null=null;
+  if(scheduleSlot.replacesPostId){
+    const [[victim]]=await pool.query<Array<RowDataPacket & {campaign_id:number}>>(
+      "SELECT campaign_id FROM campaign_posts WHERE id=? AND channel_id=? AND status IN ('active','posted','sent') AND deleted_at IS NULL AND delivery_confirmed_at IS NOT NULL FOR UPDATE",
+      [scheduleSlot.replacesPostId,channel.id],
+    );
+    if(!victim){
+      const claimReleased=await failReservation("replacement_victim_changed");
+      return {ok:false,skipped:true,retryAttempted:false,postId,reason:"replacement_victim_changed",claimReleased};
+    }
+    try{
+      await refreshChannelViews(Number(channel.id),50);
+      const settlement=await settleChannelCampaigns({campaignId:Number(victim.campaign_id),skipGlobalMaintenance:true,campaignStatuses:["active","paused"]});
+      if(settlement.failedPosts>0){
+        const claimReleased=await failReservation("replacement_victim_settlement_failed");
+        return {ok:false,skipped:true,retryAttempted:false,postId,reason:"replacement_victim_settlement_failed",claimReleased,settlementFailed:true};
+      }
+      replacementSettlement={settledPosts:settlement.settledPosts,advertiserDebited:settlement.advertiserDebited,publisherCredited:settlement.publisherCredited};
+    }catch(error){
+      const text=error instanceof Error?error.message:String(error);
+      const retryable=/ER_LOCK_DEADLOCK|40001|deadlock/i.test(text);
+      const claimReleased=await failReservation(retryable?"victim_settlement_retryable_failure":"replacement_victim_settlement_failed");
+      return {ok:false,skipped:true,retryAttempted:false,postId,reason:retryable?"victim_settlement_retryable_failure":"replacement_victim_settlement_failed",claimReleased,settlementFailed:true,settlementRetryable:retryable};
+    }
   }
 
-  const insertPlaceholders = insertColumns.map(() => "?").join(", ");
-  const [insertPost] = await pool.query<ResultSetHeader>(
-    `INSERT INTO campaign_posts (${insertColumns.join(", ")}) VALUES (${insertPlaceholders})`,
-    insertParams
-  );
-
-  const postId = insertPost.insertId;
   const domain = process.env.DOMAIN;
   const host = domain ? `https://${domain}` : (process.env.NEXT_PUBLIC_APP_URL || requestOrigin);
-  const buttonUrl = campaign.type === "clicks"
-    ? `${host}/api/clicks/${campaign.id}/${postId}`
-    : campaign.link;
+  let buttonUrl = trackedChannelCtaUrl(host,Number(campaign.public_id||campaign.id),postId);
+  if(campaign.campaign_kind==="channel_growth"){
+    try{
+      await createGrowthDeliveryInvite({campaignId:Number(campaign.id),postId,sourceChannelId:Number(channel.id),sourcePublisherId:Number(channel.user_id),destinationChatId:Number(campaign.destination_chat_id),destinationChannelId:campaign.destination_channel_id?Number(campaign.destination_channel_id):null});
+      buttonUrl=trackedGrowthCtaUrl(host,Number(campaign.public_id||campaign.id),postId);
+    }catch{
+      const claimReleased=await failReservation("growth_invite_unavailable");
+      return {ok:false,skipped:true,retryAttempted:false,postId,reason:"growth_invite_unavailable",claimReleased};
+    }
+  }
   const botUsername = process.env.TELEGRAM_BOT_USERNAME || process.env.NEXT_PUBLIC_BOT_USERNAME || "Ads_Galaxy_bot";
 
   const replyMarkup = {
@@ -448,58 +478,77 @@ async function postCampaignToChannel(options: {
     ],
   };
 
-  const result = await sendTelegramMessage(channel.chat_id, composeCampaignCreativeTelegramHtml(campaign.campaign_title, campaign.message_text), {
-    photo: campaign.image_url,
-    parse_mode: "HTML",
-    reply_markup: replyMarkup,
-  }) as TelegramSendResponse | undefined;
+  const finalEligibility = await isChannelAllowedForCampaign(Number(campaign.id), Number(channel.id));
+  if (!finalEligibility.allowed) {
+    const reason = finalEligibility.reason || "silver_delivery_blocked";
+    const claimReleased=await failReservation(reason);
+    return { ok: false, skipped: true, retryAttempted: false, postId, reason,claimReleased };
+  }
+
+  const send = async ():Promise<TelegramSendResponse|undefined> => {
+    try{
+      return await sendTelegramMessage(channel.chat_id, composeCampaignCreativeTelegramHtml(campaign.campaign_title, campaign.message_text), {
+        photo: campaign.image_url,
+        parse_mode: "HTML",
+        reply_markup: replyMarkup,
+      }) as TelegramSendResponse|undefined;
+    }catch(error){
+      return {ok:false,description:error instanceof Error?error.message:"Telegram send failed"};
+    }
+  };
+  let result = await send();
+  let retryAttempted = false;
+  let failure = result?.ok ? null : classifyTelegramAccessFailure({description:result?.description,retryAfterSeconds:result?.parameters?.retry_after});
+  // Undefined is an ambiguous transport outcome and must not be retried blindly.
+  if (result && !result.ok && failure?.retryable) {
+    const retryAfter = Math.max(0, Number(result.parameters?.retry_after || 0));
+    // Never violate a long Telegram flood wait merely to keep this HTTP request open.
+    if (retryAfter <= 30) {
+      if (retryAfter) await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+      const retryEligibility = await isChannelAllowedForCampaign(Number(campaign.id), Number(channel.id));
+      if (retryEligibility.allowed) {
+        retryAttempted = true;
+        result = await send();
+        failure=result?.ok?null:classifyTelegramAccessFailure({description:result?.description,retryAfterSeconds:result?.parameters?.retry_after});
+      }
+    }
+  }
 
   if (result?.ok && result.result?.message_id) {
-    await pool.query(
+    const [confirmed]=await pool.query<ResultSetHeader>(
       schema.hasDeliveryConfirmedAtColumn
-        ? "UPDATE campaign_posts SET message_id = ?, delivery_confirmed_at = NOW() WHERE id = ?"
-        : "UPDATE campaign_posts SET message_id = ? WHERE id = ?",
+        ? "UPDATE campaign_posts SET status='active', message_id = ?, delivery_confirmed_at = NOW() WHERE id = ? AND status='pending_delivery'"
+        : "UPDATE campaign_posts SET status='active', message_id = ? WHERE id = ?",
       [result.result.message_id, postId]
     );
+    if(confirmed.affectedRows!==1){
+      return {ok:false,skipped:false,retryAttempted,postId,reason:"delivery_confirmation_not_persisted",messageId:result.result.message_id};
+    }
+    await pool.query("UPDATE campaigns SET channel_delivery_generation=GREATEST(channel_delivery_generation,?) WHERE id=?",[generation,campaign.id]);
     await recordDeliveryEvent(schema.hasCampaignDeliveryEvents, campaign.id, channel.id, postId, "emergency_posted", {
       mode: "emergency_push",
     });
-    return { ok: true, postId, messageId: result.result.message_id };
+    let replacementDeletion:CampaignPostDeletionSummary|null=null;
+    let partial=false;
+    let victimAlreadyMissing=false;
+    if(scheduleSlot.replacesPostId){
+      replacementDeletion=await deleteCampaignPostsByIds([scheduleSlot.replacesPostId],silverOverride?{requiredSilverExemptUserId:true}:{});
+      await pool.query("UPDATE campaign_posts SET status='replaced' WHERE id=? AND delivery_confirmed_at IS NOT NULL",[scheduleSlot.replacesPostId]);
+      victimAlreadyMissing=Boolean(replacementDeletion.details.some(detail=>detail.already_deleted));
+      partial=replacementDeletion.deleted!==1;
+    }
+    return {ok:true,retryAttempted,postId,messageId:result.result.message_id,replacementSettlement,replacementDeletion,partial,victimAlreadyMissing};
   }
 
-  const failedUpdates = ["status = 'delivery_failed'"];
-  const failedParams: Array<string | number> = [];
-  if (schema.hasDeliveryFailedAtColumn) failedUpdates.push("delivery_failed_at = NOW()");
-  if (schema.hasDeliveryFailureReasonColumn) {
-    failedUpdates.push("delivery_failure_reason = ?");
-    failedParams.push((result?.description || "Telegram send failed").slice(0, 500));
+  const claimReleased=await failReservation(String(result?.description||"Telegram send failed"));
+  if(failure?.permanent){
+    await verifyTelegramChannelAccess({channelId:channel.id,chatId:channel.chat_id,username:channel.username,source:"telegram_send",persist:true,autoPauseActive:true});
   }
-  failedParams.push(postId);
-  await pool.query(`UPDATE campaign_posts SET ${failedUpdates.join(", ")} WHERE id = ?`, failedParams);
   await recordDeliveryEvent(schema.hasCampaignDeliveryEvents, campaign.id, channel.id, postId, "emergency_send_failed", {
     reason: result?.description || "Telegram send failed",
   });
 
-  return { ok: false, postId, reason: result?.description || "Telegram send failed" };
-}
-
-async function deleteActivePostsForReplacementSafely(campaignId: number, excludedChannelIds: number[]): Promise<CampaignPostDeletionSummary> {
-  try {
-    return await deleteCampaignPosts({ campaignId, successStatus: "replaced", excludedChannelIds });
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Emergency campaign post deletion failed";
-    console.warn("Emergency campaign post deletion failed", { campaign_id: campaignId, error: message });
-    return {
-      checked: 0,
-      total: 0,
-      deleted: 0,
-      failed: 1,
-      retry: 0,
-      skipped: 0,
-      failedIds: [],
-      details: [{ id: 0, status: "error", reason: message }],
-    };
-  }
+  return { ok: false, retryAttempted, postId, reason: failure?.reasonCode || "telegram_send_failed",claimReleased,autoPaused:Boolean(failure?.permanent) };
 }
 
 async function getEligibleBroadcastDispatches(campaign: CampaignRow, schema: BroadcastSchema) {
@@ -834,7 +883,7 @@ async function postBroadcastToBotUser(options: {
   return { ok: false, reason };
 }
 
-async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode, deliveryLimit: number | null, sendAll: boolean) {
+async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode, deliveryLimit: number | null, sendAll: boolean, auditRecorder: typeof recordAdminActionAudit) {
   const schema = await getBroadcastSchema();
   requireBillableBroadcastSchema(schema);
   const payoutSettings = await getBroadcastPayoutSettings();
@@ -879,12 +928,13 @@ async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode
   const failed = failedUsers.length;
   const skipped = Math.max(0, eligible.dispatches.length - dispatches.length) + eligible.skippedByExclusion;
 
-  await recordAdminActionAudit({
+  await auditRecorder({
     action: "emergency_push",
     entityType: "campaign",
     entityId: campaign.id,
     reason: mode,
     metadata: {
+      public_campaign_id: Number(campaign.public_id || campaign.id),
       mode,
       delivery_type: "broadcast",
       send_all: sendAll,
@@ -901,7 +951,8 @@ async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode
   return NextResponse.json({
     success: true,
     mode,
-    campaignId: campaign.id,
+    campaignId: Number(campaign.public_id || campaign.id),
+    internalCampaignId: campaign.id,
     deliveryType: "broadcast",
     sendAll,
     requestedRecipientCount: sendAll ? null : deliveryLimit,
@@ -917,16 +968,33 @@ async function emergencyPushBroadcast(campaign: CampaignRow, mode: EmergencyMode
   });
 }
 
-export async function POST(
+export async function handleCampaignEmergencyPush(
   request: Request,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
+  managementScope: "main" | "silver" = "main"
 ) {
-  const { response } = await requireAdminPermission("dangerous");
+  const operationId=randomUUID();
+  const operationStartedAt=new Date();
+  const { admin, response } = managementScope === "silver" ? await requireSilverAdmin() : await requireAdminPermission("dangerous");
   if (response) return response;
+  let publicCampaignId: number | null = null;
+  const recordScopedAudit = async (input: Parameters<typeof recordAdminActionAudit>[0]) => {
+    input.metadata = { ...(input.metadata as Record<string, unknown> | undefined), public_campaign_id: publicCampaignId };
+    if (managementScope === "silver") {
+      await recordSilverAudit({ adminId: admin?.id, action: input.action, campaignId: Number(input.entityId), metadata: input.metadata as Record<string, unknown> | undefined });
+      return;
+    }
+    await recordAdminActionAudit(input);
+  };
 
-  const { id } = await params;
+  const { id: requestedId } = await params;
+  const identity = managementScope === "main" ? await resolveCampaignPublicId(Number(requestedId)) : { id: Number(requestedId) };
+  if (!identity) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
+  publicCampaignId = managementScope === "main" ? Number(requestedId) : Number(identity.id);
+  const id = String(identity.id);
   const body = await request.json().catch(() => ({})) as Record<string, unknown>;
   const mode = body.mode as EmergencyMode;
+  const silverOverride = managementScope === "silver";
   const followRules = body.ignore_rules !== true;
 
   if (!VALID_MODES.has(mode)) {
@@ -939,25 +1007,42 @@ export async function POST(
 
   let lock: { lockName: string; ownerToken: string } | null = null;
   try {
-    lock = await acquireCronLock(`admin-emergency-push-${id}`, 7200);
+    lock = await acquireCronLock(`campaign-management-${id}`, 7200);
     if (!lock) {
       return NextResponse.json({
         error: "Emergency push is already running for this campaign. Please wait for it to finish.",
       }, { status: 409 });
     }
 
-    const [campaignRows] = await pool.query<CampaignRow[]>("SELECT * FROM campaigns WHERE id = ?", [id]);
+    // Use the same UTC billing-day lifecycle as normal channel delivery before
+    // Emergency Push evaluates campaign eligibility.
+    await reconcileChannelDailyCapLifecycle();
+    const servingBlocked=await requireAdServingAllowed();
+    if(servingBlocked) return servingBlocked;
+
+    const scopePredicate = managementScope === "silver" ? silverCampaignScopeSql("c") : mainCampaignScopeSql("c");
+    const [campaignRows] = await pool.query<CampaignRow[]>(`SELECT c.* FROM campaigns c JOIN users u ON u.id=c.user_id WHERE c.id = ? AND ${scopePredicate} AND COALESCE(u.advertiser_trust_level,'new')!='restricted'`, [id]);
 
     if (campaignRows.length === 0) {
       return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
     }
 
     const campaign = campaignRows[0] as CampaignRow;
+    if (silverOverride) {
+      const delivery = await isCampaignDeliveryAllowed(Number(campaign.id));
+      if (!delivery.allowed) {
+        return NextResponse.json({ error: "Silver delivery is paused", reason: delivery.reason }, { status: 409 });
+      }
+    }
     const advertiserDiscount = await getAdvertiserDiscount(pool, campaign.user_id);
     campaign.effective_cpm = effectiveBidPerThousand(campaign.cpm, advertiserDiscount.cpm_discount);
 
     if (campaign.status !== "active") {
       return NextResponse.json({ error: "Only active campaigns can be emergency pushed" }, { status: 400 });
+    }
+    const now=Date.now();
+    if((campaign.start_at&&new Date(campaign.start_at).getTime()>now)||(campaign.end_at&&new Date(campaign.end_at).getTime()<now)){
+      return NextResponse.json({success:false,status:"BLOCKED",error:"Campaign is outside its delivery dates"},{status:409});
     }
 
     if (parseFloat(String(campaign.budget || "0")) <= 0) {
@@ -971,142 +1056,190 @@ export async function POST(
     if (campaign.type === "broadcast") {
       const selection = parseEmergencyBroadcastLimit(body);
       if (!selection.ok) return NextResponse.json({ error: selection.error }, { status: 400 });
-      return emergencyPushBroadcast(campaign, mode, selection.limit, selection.sendAll);
+      return emergencyPushBroadcast(campaign, mode, selection.limit, selection.sendAll, recordScopedAudit);
     }
 
     const schema = await getEmergencySchema();
-    let settlementSummary = null;
-    let deleteSummary = null;
+    let settlementSummary: Record<string, number> | null = null;
+    let deleteSummary: CampaignPostDeletionSummary | null = null;
+    const {
+      eligibleChannels,
+      skippedByLimit,
+      skippedByExclusion,
+      activeInventorySnapshot,
+      exemptChannels,
+      inaccessibleChannels,
+    } = await getEligibleChannels(campaign, mode, followRules);
 
-    if (mode === "replace_everything") {
-      const settlement = await settleChannelCampaigns({
-        campaignId: campaign.id,
-        skipGlobalMaintenance: true,
-        campaignStatuses: ["active"],
-      });
-      settlementSummary = {
-        settledPosts: settlement.settledPosts,
-        failedPosts: settlement.failedPosts,
-        failedDetails: settlement.failedDetails,
-        advertiserDebited: settlement.advertiserDebited,
-        publisherCredited: settlement.publisherCredited,
-      };
-
-      const settlementFailures = settlement.failedDetails.map((detail) => ({
-        ...detail,
-        classification: classifySettlementFailure(detail.reason),
-      }));
-      const fatalSettlementFailures = settlementFailures.filter((detail) => detail.classification === "fatal_financial_integrity");
-      const safeSettlementWarnings = settlementFailures.filter((detail) => detail.classification === "safe_rolled_back");
-      if (fatalSettlementFailures.length > 0) {
-        return NextResponse.json({
-          success: false,
-          error: "Replace Everything stopped because a settlement failure may have affected financial integrity.",
-          settlement: { ...settlementSummary, failures: settlementFailures },
-        }, { status: 409 });
-      }
-
-      const channelExclusions = await loadCampaignExclusions(pool, "campaign", [Number(campaign.id)], "channel");
-      const [postedChannels] = await pool.query<ChannelRow[]>(
-        `SELECT DISTINCT ch.id, ch.username, ch.invite_link_hash
-         FROM campaign_posts cp
-         JOIN channels ch ON ch.id = cp.channel_id
-         WHERE cp.campaign_id = ?`,
-        [campaign.id]
-      );
-      const excludedChannelIds = postedChannels
-        .filter((channel) => campaignExcludesChannel(channelExclusions, Number(campaign.id), channel))
-        .map((channel) => Number(channel.id));
-
-      deleteSummary = await deleteActivePostsForReplacementSafely(campaign.id, excludedChannelIds);
-      if (safeSettlementWarnings.length > 0) {
-        settlementSummary = { ...settlementSummary, warnings: safeSettlementWarnings };
-      }
-    }
-    const { eligibleChannels, skippedByLimit, skippedByExclusion } = await getEligibleChannels(campaign, schema, mode, followRules);
-    const failedChannels: Array<{ channelId: number; reason: string }> = [];
-    let attempted = 0;
-    let posted = 0;
-    let skipped = skippedByLimit + skippedByExclusion;
-
-    for (const channel of eligibleChannels) {
-      if (followRules && (await hasRecentChannelPost(channel.id) || await hasCampaignPostWithin24Hours(campaign.id, channel.id))) {
-        skipped++;
-        failedChannels.push({ channelId: channel.id, reason: "three_hour_slot_or_campaign_24h_cooldown" });
-        continue;
-      }
-
-      if (mode === "replace_everything" && await hasActiveUndeletedCampaignPost(campaign.id, channel.id, schema)) {
-        skipped++;
-        failedChannels.push({ channelId: channel.id, reason: "active_same_campaign_post_exists" });
-        continue;
-      }
-
-      attempted++;
-
+    const requestedWorkers = silverOverride
+      ? Number.parseInt(process.env.SILVER_EMERGENCY_CHANNEL_WORKERS || "4", 10)
+      : 1;
+    const workerCount = Math.min(10, Math.max(1, Number.isFinite(requestedWorkers) ? requestedWorkers : 4));
+    const results = await processBoundedQueue(eligibleChannels, workerCount, async (channel) => {
       try {
+        const scheduleSlot = await selectEmergencyScheduleSlot(pool, {
+          channel,
+          mode,
+          bypassTiming: !followRules,
+        });
+        if (!scheduleSlot) {
+          return { ok: false as const, skipped: true, retryAttempted: false, channelId: channel.id, reason: "no_eligible_publisher_schedule_slot" };
+        }
+
         const result = await postCampaignToChannel({
           campaign,
           channel,
           schema,
           requestOrigin: new URL(request.url).origin,
+          mode,
+          silverOverride,
+          scheduleSlot,
         });
-
-        if (result.ok) {
-          posted++;
-        } else {
-          failedChannels.push({ channelId: channel.id, reason: result.reason || "Telegram send failed" });
-          console.warn("Emergency push channel send failed", {
-            campaign_id: campaign.id,
-            channel_id: channel.id,
-            reason: result.reason || "Telegram send failed",
-          });
-        }
+        return { ...result, channelId: channel.id, replacementVictim:Boolean(scheduleSlot.replacesPostId) };
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : "Emergency post failed";
-        failedChannels.push({ channelId: channel.id, reason: message });
         console.warn("Emergency push channel processing failed", {
           campaign_id: campaign.id,
           channel_id: channel.id,
           reason: message,
         });
+        return { ok: false as const, skipped: false, retryAttempted: false, channelId: channel.id, reason: message };
       }
+    });
+
+    const attempted = results.filter(result => !result.skipped).length;
+    const posted = results.filter(result => result.ok).length;
+    const retryAttempted = results.filter(result => result.retryAttempted).length;
+    const finalFailed = results.filter(result => !result.ok && !result.skipped).length;
+    const skipped = skippedByLimit + skippedByExclusion + results.filter(result => result.skipped).length;
+    const failed = finalFailed;
+    const partialPlacements=results.filter(result=>result.ok&&"partial" in result&&result.partial).length;
+    const replacementResults = results.filter((result) => result.ok && "replacementSettlement" in result && result.replacementSettlement && result.replacementDeletion);
+    if (replacementResults.length) {
+      settlementSummary = replacementResults.reduce((summary, result) => ({
+        settledPosts: summary.settledPosts + Number("replacementSettlement" in result ? result.replacementSettlement?.settledPosts || 0 : 0),
+        advertiserDebited: summary.advertiserDebited + Number("replacementSettlement" in result ? result.replacementSettlement?.advertiserDebited || 0 : 0),
+        publisherCredited: summary.publisherCredited + Number("replacementSettlement" in result ? result.replacementSettlement?.publisherCredited || 0 : 0),
+      }), { settledPosts: 0, advertiserDebited: 0, publisherCredited: 0 });
+      deleteSummary = replacementResults.reduce((summary, result) => {
+        const deletion = ("replacementDeletion" in result ? result.replacementDeletion : null)!;
+        summary.checked += deletion.checked;
+        summary.total += deletion.total;
+        summary.deleted += deletion.deleted;
+        summary.failed += deletion.failed;
+        summary.retry += deletion.retry;
+        summary.skipped += deletion.skipped;
+        summary.failedIds.push(...deletion.failedIds);
+        summary.details.push(...deletion.details);
+        if (deletion.classifications) {
+          for (const key of Object.keys(summary.classifications) as Array<keyof typeof summary.classifications>) {
+            summary.classifications[key] += deletion.classifications[key];
+          }
+        }
+        return summary;
+      }, {
+        checked: 0, total: 0, deleted: 0, failed: 0, retry: 0, skipped: 0, failedIds: [], details: [],
+        classifications: { attempted: 0, deleted: 0, already_missing: 0, terminal: 0, access_lost: 0, temporary: 0, deferred: 0 },
+      } as CampaignPostDeletionSummary);
     }
+    const failedChannels = results
+      .filter(result => !result.ok)
+      .map(result => ({ channelId: result.channelId, reason: result.reason || "Telegram send failed", result:String(result.reason||"TELEGRAM_SEND_FAILED").toUpperCase() }));
+    const permissionFailures = failedChannels.filter(channel => /forbidden|rights|member|kicked|chat not found/i.test(channel.reason)).length;
+    const claimReleases=results.filter(result=>"claimReleased" in result&&result.claimReleased).length;
+    const reservationConflicts=results.filter(result=>"reservationConflict" in result&&result.reservationConflict).length;
+    const autoPausedChannels=results.filter(result=>"autoPaused" in result&&result.autoPaused).length;
+    const stopResult=results.find(result=>"stopReason" in result&&Boolean(result.stopReason));
+    const stopReason=stopResult&&"stopReason" in stopResult?stopResult.stopReason:null;
+    const operationStatus=posted===0?"NO_DELIVERY":(failed>0||skipped>0||partialPlacements>0?"PARTIAL_SUCCESS":"SUCCESS");
+    const failureReasonCounts=failedChannels.reduce<Record<string,number>>((counts,item)=>{counts[item.reason]=(counts[item.reason]||0)+1;return counts;},{});
 
-    const failed = failedChannels.filter((channel) => !["active_undeleted_post_exists", "active_same_campaign_post_exists"].includes(channel.reason)).length;
-
-    await recordAdminActionAudit({
+    await recordScopedAudit({
       action: "emergency_push",
       entityType: "campaign",
       entityId: campaign.id,
       reason: mode,
       metadata: {
         mode,
+        operation_id:operationId,
         follow_rules: followRules,
         eligible_channels: eligibleChannels.length,
         attempted,
         success: posted,
         failed,
         skipped,
+        active_inventory_snapshot: activeInventorySnapshot,
+        exempt_channels: exemptChannels,
+        inaccessible_no_permission_channels: inaccessibleChannels + permissionFailures,
+        retry_attempted: retryAttempted,
+        final_failed: finalFailed,
         delete_summary: deleteSummary,
         settlement_summary: settlementSummary,
         timestamp: new Date().toISOString(),
+        duration_ms:Date.now()-operationStartedAt.getTime(),
+        operation_status:operationStatus,
+        failure_reason_counts:failureReasonCounts,
+        bypass_timing:true,
+        bypass_spacing:!followRules,
       },
     });
 
+    console.info("emergency push completed",{operation_id:operationId,mode,campaign_id:campaign.id,public_id:campaign.public_id||null,started_at:operationStartedAt.toISOString(),completed_at:new Date().toISOString(),duration_ms:Date.now()-operationStartedAt.getTime(),channels_considered:eligibleChannels.length,successful_placements:posted,failure_reason_counts:failureReasonCounts,bypass_timing:true,bypass_spacing:!followRules});
+
     return NextResponse.json({
-      success: true,
+      success: posted>0,
+      status:operationStatus,
+      message:posted>0?`${posted} placement${posted===1?"":"s"} completed${partialPlacements?`; ${partialPlacements} require cleanup`:""}.`:`No ads were delivered. ${skipped} channels were skipped and ${failed} failed.`,
+      operationId,
       mode,
       followRules,
-      campaignId: campaign.id,
+      campaignId: Number(campaign.public_id || publicCampaignId || campaign.id),
+      internalCampaignId: campaign.id,
       eligibleChannels: eligibleChannels.length,
       attempted,
       posted,
       failed,
       skipped,
+      activeInventorySnapshot,
+      exemptChannels,
+      inaccessibleNoPermissionChannels: inaccessibleChannels + permissionFailures,
+      retryAttempted,
+      finalFailed,
       deleteSummary,
       settlementSummary,
       failedChannels,
+      stoppedReason:stopReason,
+      counters:{
+        channels_considered:eligibleChannels.length+skippedByExclusion,
+        globally_eligible:eligibleChannels.length+skippedByExclusion,
+        targeting_eligible:eligibleChannels.length,
+        health_eligible:results.filter(result=>!String(result.reason||"").startsWith("telegram_unhealthy_")).length,
+        capacity_eligible:results.filter(result=>result.reason!=="channel_capacity_exhausted").length,
+        frequency_eligible:eligibleChannels.length,
+        affordability_eligible:results.filter(result=>!["campaign_unaffordable","daily_cap_reached","advertiser_balance_insufficient"].includes(String(result.reason||""))).length,
+        reservation_attempts:results.filter(result=>"postId" in result).length,
+        reservation_conflicts:reservationConflicts,
+        telegram_attempts:attempted,
+        telegram_success:posted,
+        telegram_failed:failed,
+        claims_released:claimReleases,
+        auto_paused_channels:autoPausedChannels,
+        successful_placements:posted,
+        partial_success:partialPlacements,
+        victims_considered:results.filter(result=>"replacementVictim" in result&&result.replacementVictim).length,
+        victims_locked:results.filter(result=>"replacementVictim" in result&&result.replacementVictim&&"postId" in result).length,
+        victims_settled:results.filter(result=>"replacementSettlement" in result&&result.replacementSettlement).length,
+        settlement_failed:results.filter(result=>"settlementFailed" in result&&result.settlementFailed).length,
+        settlement_retryable:results.filter(result=>"settlementRetryable" in result&&result.settlementRetryable).length,
+        replacement_send_attempts:results.filter(result=>"replacementVictim" in result&&result.replacementVictim&&!result.skipped).length,
+        replacement_send_success:results.filter(result=>"replacementVictim" in result&&result.replacementVictim&&result.ok).length,
+        victim_delete_attempts:deleteSummary?.checked||0,
+        victim_delete_success:deleteSummary?.deleted||0,
+        victim_already_missing:results.filter(result=>"victimAlreadyMissing" in result&&result.victimAlreadyMissing).length,
+        victim_delete_failed:deleteSummary?.failed||0,
+        replacement_claims_released:results.filter(result=>"replacementVictim" in result&&result.replacementVictim&&"claimReleased" in result&&result.claimReleased).length,
+        full_success:results.filter(result=>result.ok&&!("partial" in result&&result.partial)).length,
+      },
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Internal Server Error";
@@ -1119,4 +1252,8 @@ export async function POST(
   } finally {
     await releaseCronLock(lock);
   }
+}
+
+export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
+  return handleCampaignEmergencyPush(request, context, "main");
 }

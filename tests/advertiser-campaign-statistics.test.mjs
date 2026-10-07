@@ -91,8 +91,9 @@ test("selected period controls summary, trend, and daily rows", () => {
   assert.doesNotMatch(panel, /todayPerformance|todaySpend|todayViews|todayClicks|todayCtr/);
 });
 
-test("Average CPC uses selected spend divided by selected actual clicks and renders three decimals", () => {
-  assert.match(report, /campaignAverageCpc\(totalSpend, totalClicks\)/);
+test("Average CPC remains billable-only while recovered clicks affect engagement CTR", () => {
+  assert.match(report, /billableClicks/);
+  assert.match(report, /actualClicks: totalClicks/);
   assert.match(panel, /toFixed\(3\)/);
 });
 

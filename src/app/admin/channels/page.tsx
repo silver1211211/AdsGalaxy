@@ -85,6 +85,13 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 function telegramState(channel: any) {
+  const access = String(channel.telegram_access_state || channel.telegram_verification_state || "unchecked");
+  if (access === "healthy") return { label: "Telegram healthy", tone: "border-emerald-200 bg-emerald-50 text-emerald-700" };
+  if (access === "permission_missing") return { label: "Bot permission missing", tone: "border-red-200 bg-red-50 text-red-700" };
+  if (access === "bot_removed") return { label: "Bot removed", tone: "border-red-200 bg-red-50 text-red-700" };
+  if (access === "channel_not_found" || access === "identity_mismatch") return { label: "Channel not found", tone: "border-red-200 bg-red-50 text-red-700" };
+  if (access === "restricted") return { label: "Telegram restricted", tone: "border-red-200 bg-red-50 text-red-700" };
+  if (access === "temporarily_unavailable") return { label: "Temporary check failure", tone: "border-amber-200 bg-amber-50 text-amber-800" };
   const reason = String(channel.telegram_recovery_reason || "");
   const failure = String(channel.telegram_failure_code || "");
   if (channel.under_review || reason === "manual_review_required" || failure.includes("collision")) return { label: "Manual review", tone: "border-amber-200 bg-amber-50 text-amber-800" };
@@ -97,7 +104,6 @@ function telegramState(channel: any) {
   if (failure === "bot_removed" || channel.status === "bot_removed") return { label: "Bot removed", tone: "border-red-200 bg-red-50 text-red-700" };
   if (failure === "permission_missing" || channel.status === "permission_missing") return { label: "Permission missing", tone: "border-red-200 bg-red-50 text-red-700" };
   if (failure) return { label: "Check incomplete", tone: "border-amber-200 bg-amber-50 text-amber-800" };
-  if (channel.telegram_last_verified_at) return { label: "Telegram healthy", tone: "border-emerald-200 bg-emerald-50 text-emerald-700" };
   return { label: "Not checked", tone: "border-slate-200 bg-slate-50 text-slate-600" };
 }
 
@@ -333,9 +339,50 @@ export default function AdminChannelsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(selectedPendingIds.length > 0 ? { channel_ids: selectedPendingIds } : {}),
       });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error || "Unable to approve pending channels");
-      await fetchChannels(page, statusFilter, search);
+        const result = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          throw new Error(
+            getApiErrorMessage(result, "Unable to approve pending channels")
+          );
+        }
+
+        const approved = Number(result.approved || 0);
+        const rejected = Array.isArray(result.rejected) ? result.rejected : [];
+        const missingPermission = Array.isArray(result.missing_permission) ? result.missing_permission : [];
+        const deferred = Array.isArray(result.deferred) ? result.deferred : [];
+        const unresolved = Array.isArray(result.unresolved) ? result.unresolved : [];
+        const skipped = Number(result.skipped || 0);
+
+        const failures = [
+          ...(Array.isArray(result.identity_verification_failures)
+            ? result.identity_verification_failures
+            : []),
+          ...(Array.isArray(result.tracking_onboarding_failures)
+            ? result.tracking_onboarding_failures
+            : []),
+          ...rejected,
+          ...missingPermission,
+          ...deferred,
+          ...unresolved,
+          ...(Array.isArray(result.approval_failures) ? result.approval_failures : []),
+          ...(Array.isArray(result.approval_failures)
+            ? result.approval_failures
+            : []),
+        ];
+
+        const reasons = failures
+          .slice(0, 10)
+          .map((failure: any) => `#${failure.channel_id}: ${failure.reason}`)
+          .join("\n");
+
+        window.alert(
+          `${approved} approved; ${rejected.length} rejected (Rule 4); ${missingPermission.length} rejected (Rule 5); ${deferred.length} deferred by Telegram cooldown; ${unresolved.length} left pending for review; ${skipped} total not approved.`
+          + (reasons ? `\n\n${reasons}` : "")
+        );
+
+        setSelectedPendingIds([]);
+        await fetchChannels(page, statusFilter, search);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -451,7 +498,7 @@ export default function AdminChannelsPage() {
                   <div className="flex flex-wrap items-center gap-2">
                     <TelegramStateBadge channel={selectedChannel} />
                     <span className="text-xs text-slate-500">
-                      Last check: {selectedChannel.telegram_last_verified_at ? new Date(selectedChannel.telegram_last_verified_at).toLocaleString() : "Never"}
+                      Last check: {selectedChannel.telegram_access_checked_at ? new Date(selectedChannel.telegram_access_checked_at).toLocaleString() : "Never"}
                     </span>
                   </div>
                   <div className="mt-3 grid gap-2 sm:grid-cols-2">

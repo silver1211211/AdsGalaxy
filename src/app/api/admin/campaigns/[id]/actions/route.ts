@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { mainCampaignScopeSql, recordSilverAudit, requireSilverAdmin, silverCampaignScopeSql } from "@/lib/silverCampaignControl";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { deleteActiveCampaignPosts, retryCampaignPostCleanup } from "@/lib/campaignPostDeletion";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
@@ -8,7 +9,9 @@ import { forceRefreshCampaignStatistics, forceSettleCampaignDeltas, refreshAndSe
 import { settleCampaignEngagementBeforeDeletion, type CampaignSettlementBeforeDeletionResult } from "@/lib/channelSettlement";
 import { acquireCronLock, releaseCronLock } from "@/lib/cronSecurity";
 import { CAMPAIGN_LIFECYCLE_ACTION_SPECS, isCampaignLifecycleAction, type CampaignLifecycleAction } from "@/lib/campaignLifecycleActions";
-import { effectiveBidPerThousand, getAdvertiserDiscount } from "@/lib/advertiserDiscount";
+import { getAdvertiserDiscount } from "@/lib/advertiserDiscount";
+import { getChannelUnitPrice } from "@/lib/channelBilling";
+import { resolveCampaignPublicId } from "@/lib/campaignIdentity";
 
 const LIFECYCLE_COLUMNS = [
   "paused_at",
@@ -121,8 +124,12 @@ async function resumeCampaign(campaign: CampaignActionRow, campaignId: string, c
   if (parseFloat(String(campaign.budget || "0")) <= 0) {
     const discount = await getAdvertiserDiscount(pool, campaign.user_id);
     const isClickCampaign = campaign.type === "clicks";
-    const grossRate = isClickCampaign ? campaign.cpc : campaign.cpm;
-    const unitPrice = effectiveBidPerThousand(grossRate, isClickCampaign ? discount.cpc_discount : discount.cpm_discount) / 1000;
+    const unitPrice = getChannelUnitPrice({
+      type: campaign.type,
+      cpm: campaign.cpm,
+      cpc: campaign.cpc,
+      discount: isClickCampaign ? discount.cpc_discount : discount.cpm_discount,
+    });
     const [balanceRows] = await pool.query<RowDataPacket[]>(
       "SELECT ad_balance FROM users WHERE id = ?",
       [campaign.user_id]
@@ -142,16 +149,30 @@ async function resumeCampaign(campaign: CampaignActionRow, campaignId: string, c
   return null;
 }
 
-export async function POST(
+export async function handleCampaignAction(
   request: Request,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
+  managementScope: "main" | "silver" = "main"
 ) {
-  const { admin, response } = await requireAdminPermission("operate");
+  const { admin, response } = managementScope === "silver" ? await requireSilverAdmin() : await requireAdminPermission("operate");
   if (response) return response;
+  let publicCampaignId: number | null = null;
+  const recordScopedAudit = async (input: Parameters<typeof recordAdminActionAudit>[0]) => {
+    input.metadata = { ...(input.metadata as Record<string, unknown> | undefined), public_campaign_id: publicCampaignId };
+    if (managementScope === "silver") {
+      await recordSilverAudit({ adminId: admin?.id, action: input.action, campaignId: Number(input.entityId), metadata: input.metadata as Record<string, unknown> | undefined });
+      return;
+    }
+    await recordAdminActionAudit(input);
+  };
 
   let lock: { lockName: string; ownerToken: string } | null = null;
   try {
-    const { id } = await params;
+    const { id: requestedId } = await params;
+    const identity = managementScope === "main" ? await resolveCampaignPublicId(Number(requestedId)) : { id: Number(requestedId) };
+    if (!identity) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
+    publicCampaignId = managementScope === "main" ? Number(requestedId) : Number(identity.id);
+    const id = String(identity.id);
     const { action } = await request.json();
 
     if (!isCampaignLifecycleAction(action)) {
@@ -160,14 +181,15 @@ export async function POST(
     const lifecycleAction: CampaignLifecycleAction = action;
     const spec = CAMPAIGN_LIFECYCLE_ACTION_SPECS[lifecycleAction];
 
-    lock = await acquireCronLock(`admin-campaign-action-${id}`, 600);
+    lock = await acquireCronLock(`campaign-management-${id}`, 600);
     if (!lock) {
       return NextResponse.json({
         error: "This campaign is already being updated. Please wait for the current cleanup to finish and retry.",
       }, { status: 409 });
     }
 
-    const [rows] = await pool.query<CampaignActionRow[]>("SELECT id, status, pause_reason, budget, cpm, cpc, type, user_id FROM campaigns WHERE id = ?", [id]);
+    const scopePredicate = managementScope === "silver" ? silverCampaignScopeSql("c") : mainCampaignScopeSql("c");
+    const [rows] = await pool.query<CampaignActionRow[]>(`SELECT c.id,c.status,c.pause_reason,c.budget,c.cpm,c.cpc,c.type,c.user_id FROM campaigns c WHERE c.id = ? AND ${scopePredicate}`, [id]);
     if (rows.length === 0) {
       return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
     }
@@ -182,7 +204,7 @@ export async function POST(
 
     if (lifecycleAction === "force_refresh_stats") {
       operationResult = await forceRefreshCampaignStatistics(Number(id));
-      await recordAdminActionAudit({
+      await recordScopedAudit({
         adminId: admin?.id,
         action: "campaign_force_refresh_stats",
         entityType: "campaign",
@@ -195,7 +217,7 @@ export async function POST(
 
     if (lifecycleAction === "force_settlement") {
       operationResult = await forceSettleCampaignDeltas(Number(id));
-      await recordAdminActionAudit({
+      await recordScopedAudit({
         adminId: admin?.id,
         action: "campaign_force_settlement",
         entityType: "campaign",
@@ -208,7 +230,7 @@ export async function POST(
 
     if (lifecycleAction === "refresh_and_settle") {
       operationResult = await refreshAndSettleCampaign(Number(id));
-      await recordAdminActionAudit({
+      await recordScopedAudit({
         adminId: admin?.id,
         action: "campaign_refresh_and_settle",
         entityType: "campaign",
@@ -221,7 +243,9 @@ export async function POST(
 
     if (spec.stopsDelivery) {
       const pauseReason = lifecycleAction === "pause_only"
-        ? "admin_pause_only"
+        ? oldStatus === "daily_cap_reached"
+          ? "admin_manual_pause"
+          : "admin_pause_only"
         : lifecycleAction === "delete"
           ? "admin_delete_pending_finalization"
           : "admin_pause_finalizing";
@@ -284,7 +308,7 @@ export async function POST(
       newStatus = "deleted";
     }
 
-    await recordAdminActionAudit({
+    await recordScopedAudit({
       adminId: admin?.id,
       action: `campaign_${lifecycleAction}`,
       entityType: "campaign",
@@ -317,4 +341,8 @@ export async function POST(
   } finally {
     await releaseCronLock(lock);
   }
+}
+
+export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
+  return handleCampaignAction(request, context, "main");
 }

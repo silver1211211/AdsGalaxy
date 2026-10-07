@@ -1,7 +1,9 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy revenue report rows are dynamically shaped */
 import { NextResponse } from "next/server";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
+import { mainCampaignScopeSql } from "@/lib/silverCampaignControl";
 import {
   applyRevenueProtectionOverride,
   recordRevenueProtectionAudit,
@@ -210,6 +212,7 @@ export async function GET() {
             SUM(publisher_distribution) as publisher_earnings, SUM(reserve_amount) as reserve_revenue
           FROM channel_settlement_ledger GROUP BY campaign_id
         ) sp ON sp.campaign_id = c.id
+        WHERE ${mainCampaignScopeSql("c")}
         ORDER BY net_profit DESC
         LIMIT 10
       `),
@@ -220,6 +223,7 @@ export async function GET() {
           SUM(x.platform_revenue) as net_profit
         FROM channel_settlement_ledger x
         JOIN campaigns c ON c.id = x.campaign_id
+        WHERE ${mainCampaignScopeSql("c")}
         GROUP BY COALESCE(c.category, 'Uncategorized')
         ORDER BY net_profit DESC
         LIMIT 10

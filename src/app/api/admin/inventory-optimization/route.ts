@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy optimization row shapes */
 import pool from "@/lib/db";
 import { getAuthenticatedAdmin, requireAdminPermission } from "@/lib/adminAuth";
 import {
@@ -6,6 +7,7 @@ import {
   publicInventoryQuality,
   refreshAllInventoryOptimization
 } from "@/lib/inventoryOptimization";
+import { mainCampaignScopeSql } from "@/lib/silverCampaignControl";
 
 const SETTINGS = new Set([
   "delivery_optimization_mode",
@@ -42,8 +44,8 @@ async function leaderboard(entityType: "miniapp" | "channel" | "bot") {
       SELECT
         c.id, c.title as name, c.inventory_score, c.inventory_rank, c.traffic_quality_score, c.traffic_risk_level,
         c.inventory_override, c.inventory_priority_multiplier,
-        COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.channel_id = c.id AND cp.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)), 0) as impressions_7d,
-        COALESCE((SELECT SUM(asett.publisher_reward) FROM ad_settlements asett JOIN campaign_posts cp ON cp.id = asett.post_id WHERE cp.channel_id = c.id AND asett.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)), 0) as revenue_7d
+        COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp JOIN campaigns mc ON mc.id=cp.campaign_id WHERE cp.channel_id = c.id AND ${mainCampaignScopeSql("mc")} AND cp.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)), 0) as impressions_7d,
+        COALESCE((SELECT SUM(asett.publisher_reward) FROM ad_settlements asett JOIN campaign_posts cp ON cp.id = asett.post_id JOIN campaigns mc ON mc.id=cp.campaign_id WHERE cp.channel_id = c.id AND ${mainCampaignScopeSql("mc")} AND asett.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)), 0) as revenue_7d
       FROM channels c
       WHERE c.is_deleted = FALSE
       ORDER BY c.inventory_score DESC, revenue_7d DESC

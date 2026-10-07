@@ -1,6 +1,5 @@
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { createSystemLog } from "@/lib/systemLogs";
 import { hasActiveUserEnforcementExemption } from "@/lib/userEnforcementExemptions";
 
@@ -17,17 +16,11 @@ type PublisherRow = RowDataPacket & {
   status: string;
   is_banned: number | boolean;
 };
-type ChannelRow = RowDataPacket & {
-  id: number;
-  publisher_trust_score: number | string;
-  channel_fraud_risk_score: number | string;
-};
-
 export type PublisherTrustEnforcementDetail = {
   publisher_id: number;
   trust_score: number;
   available_balance: number;
-  decision: "monitoring" | "banned";
+  decision: "monitoring" | "review";
   channels_paused: number;
 };
 
@@ -47,8 +40,7 @@ function numberValue(value: unknown) {
 }
 
 function enforcementBucket(now = new Date()) {
-  const bucket = new Date(Math.floor(now.getTime() / 900_000) * 900_000);
-  return bucket.toISOString().slice(0, 19).replace("T", " ");
+  return now.toISOString().slice(0, 10) + " 00:00:00";
 }
 
 export async function enforcePublisherTrust(limit = 500): Promise<PublisherTrustEnforcementResult> {
@@ -106,13 +98,13 @@ export async function enforcePublisherTrust(limit = 500): Promise<PublisherTrust
         continue;
       }
 
-      const shouldBan = availableBalance >= PUBLISHER_AVAILABLE_BALANCE_THRESHOLD;
+      const shouldReview = availableBalance >= PUBLISHER_AVAILABLE_BALANCE_THRESHOLD;
       const [event] = await connection.query<ResultSetHeader>(
         `INSERT IGNORE INTO publisher_trust_enforcement_events
           (publisher_id,evaluation_bucket,trust_score,available_balance,balance_threshold,decision,reason)
          VALUES (?,?,?,?,?,?,?)`,
         [publisher.id, bucket, trustScore, availableBalance, PUBLISHER_AVAILABLE_BALANCE_THRESHOLD,
-          shouldBan ? "banned" : "monitoring", shouldBan ? PUBLISHER_TRUST_BAN_REASON : "balance_below_auto_ban_threshold"]
+          "monitoring", shouldReview ? "admin_review_required" : "balance_below_review_threshold"]
       );
       if (event.affectedRows !== 1) {
         await connection.rollback();
@@ -120,57 +112,31 @@ export async function enforcePublisherTrust(limit = 500): Promise<PublisherTrust
         continue;
       }
 
-      let channelsPaused = 0;
-      if (shouldBan) {
-        const [channels] = await connection.query<ChannelRow[]>(
-          `SELECT id,publisher_trust_score,channel_fraud_risk_score
-           FROM channels WHERE user_id=? AND is_deleted=FALSE FOR UPDATE`,
+      if (shouldReview) {
+        const [openCases] = await connection.query<RowDataPacket[]>(
+          `SELECT id FROM publisher_review_queue
+           WHERE publisher_id=? AND status='open' AND reason='low_trust_manual_review'
+           LIMIT 1 FOR UPDATE`,
           [publisher.id]
         );
-        const [userUpdate] = await connection.query<ResultSetHeader>(
-          `UPDATE users SET status='banned',is_banned=1,banned_at=NOW(),ban_reason=?
-           WHERE id=? AND COALESCE(is_banned,0)=0 AND COALESCE(status,'active')<>'banned'`,
-          [PUBLISHER_TRUST_BAN_REASON, publisher.id]
-        );
-        if (userUpdate.affectedRows !== 1) throw new Error("publisher_ban_transition_failed");
-        const [channelUpdate] = await connection.query<ResultSetHeader>(
-          `UPDATE channels SET status='paused',paused_reason=?,auto_paused_at=NOW()
-           WHERE user_id=? AND is_deleted=FALSE AND status<>'deleted'`,
-          [PUBLISHER_TRUST_BAN_REASON, publisher.id]
-        );
-        channelsPaused = channelUpdate.affectedRows;
-
-        for (const channel of channels) {
-          const channelTrust = numberValue(channel.publisher_trust_score);
-          const channelRisk = numberValue(channel.channel_fraud_risk_score);
-          const [evaluation] = await connection.query<ResultSetHeader>(
-            `INSERT INTO channel_fraud_evaluations
-              (channel_id,publisher_id,evaluation_bucket,signal_count,highest_severity,
-               old_trust_score,new_trust_score,old_risk_score,new_risk_score,completed_at)
-             VALUES (?,?,?,1,'critical',?,?,?,?,NOW())
-             ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),signal_count=signal_count+1,
-               highest_severity='critical',completed_at=NOW()`,
-            [channel.id, publisher.id, bucket, channelTrust, channelTrust, channelRisk, channelRisk]
-          );
+        if (!openCases[0]) {
           await connection.query(
-            `INSERT INTO channel_fraud_events
-              (evaluation_id,channel_id,publisher_id,fraud_type,severity,old_trust_score,new_trust_score,
-               old_risk_score,new_risk_score,reason,metadata)
-             VALUES (?, ?, ?, 'publisher_trust_auto_ban', 'critical', ?, ?, ?, ?, ?, ?)`,
-            [evaluation.insertId, channel.id, publisher.id, channelTrust, channelTrust, channelRisk, channelRisk,
-              PUBLISHER_TRUST_BAN_REASON, JSON.stringify({ available_balance: availableBalance, balance_threshold: PUBLISHER_AVAILABLE_BALANCE_THRESHOLD, trust_threshold: PUBLISHER_TRUST_BAN_THRESHOLD })]
+            `INSERT INTO publisher_review_queue
+              (publisher_id,inventory_type,inventory_id,risk_level,reason,status,metadata)
+             VALUES (?,'publisher',NULL,'high','low_trust_manual_review','open',?)`,
+            [publisher.id, JSON.stringify({
+              trust_score: trustScore,
+              available_balance: availableBalance,
+              review_threshold: PUBLISHER_AVAILABLE_BALANCE_THRESHOLD,
+              source: "publisher_trust_enforcement",
+            })]
           );
         }
       }
 
       await connection.commit();
-      result.details.push({ publisher_id: publisher.id, trust_score: trustScore, available_balance: availableBalance, decision: shouldBan ? "banned" : "monitoring", channels_paused: channelsPaused });
-      if (shouldBan) {
-        result.banned++;
-        await recordAdminActionAudit({ action: "publisher_trust_auto_ban", entityType: "user", entityId: publisher.id, reason: PUBLISHER_TRUST_BAN_REASON, metadata: { trust_score: trustScore, available_balance: availableBalance, channels_paused: channelsPaused } });
-      } else {
-        result.monitored++;
-      }
+      result.details.push({ publisher_id: publisher.id, trust_score: trustScore, available_balance: availableBalance, decision: shouldReview ? "review" : "monitoring", channels_paused: 0 });
+      result.monitored++;
     } catch (error) {
       await connection.rollback().catch(() => undefined);
       result.failed++;
@@ -182,11 +148,11 @@ export async function enforcePublisherTrust(limit = 500): Promise<PublisherTrust
 
   await createSystemLog({
     logType: "publisher_trust_enforcement", status: result.failed ? (result.banned || result.monitored ? "partial_failure" : "failed") : "success",
-    title: "Publisher trust enforcement", summary: `${result.banned} publishers banned; ${result.monitored} monitored at or below the trust threshold`,
-    periodStart: bucket, attemptedCount: result.candidates, successCount: result.banned + result.monitored,
+    title: "Publisher trust review", summary: `${result.monitored} publishers monitored; automated banning is disabled`,
+    periodStart: bucket, attemptedCount: result.candidates, successCount: result.monitored,
     failedCount: result.failed, skippedCount: result.skipped, autoPausedCount: result.details.reduce((sum, item) => sum + item.channels_paused, 0),
-    affectedEntities: result.details.filter((item) => item.decision === "banned").map((item) => ({ publisher_id: item.publisher_id, channels_paused: item.channels_paused })),
-    metadata: { trust_threshold: PUBLISHER_TRUST_BAN_THRESHOLD, available_balance_threshold: PUBLISHER_AVAILABLE_BALANCE_THRESHOLD },
+    affectedEntities: result.details.filter((item) => item.decision === "review").map((item) => ({ publisher_id: item.publisher_id, review_required: true })),
+    metadata: { trust_threshold: PUBLISHER_TRUST_BAN_THRESHOLD, available_balance_threshold: PUBLISHER_AVAILABLE_BALANCE_THRESHOLD, enforcement_mode: "review_only" },
   });
   return result;
 }

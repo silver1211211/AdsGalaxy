@@ -2,10 +2,15 @@
   "name": "adsfusion",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20.9.0 <25"
+  },
   "scripts": {
     "predev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ensure-mysql.ps1",
     "dev": "next dev",
+    "prebuild": "node scripts/node-preflight.mjs",
     "build": "next build",
+    "preflight:node": "node scripts/node-preflight.mjs",
     "start": "next start -p 3006",
     "lint": "eslint",
     "test": "node --test tests/*.test.mjs"

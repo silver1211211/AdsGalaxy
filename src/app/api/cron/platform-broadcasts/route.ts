@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 import { deleteTelegramMessage, sendTelegramMessage } from "@/lib/telegram";
+import { classifyTelegramCleanupResult, mapWithBoundedConcurrency, telegramCleanupRetryDelaySeconds } from "@/lib/telegramCleanupPolicy";
 import { audit, classifyTelegramFailure, discoverRecipients, PLATFORM_BROADCAST_MAX_ATTEMPTS, PLATFORM_BROADCAST_QUIET_SCANS, PLATFORM_BROADCAST_QUIET_SECONDS, syncBroadcastCounts } from "@/lib/platformBroadcast";
 
 export const dynamic = "force-dynamic";
@@ -35,32 +36,39 @@ async function processRecallBatch(limit = 100) {
      WHERE deletion_status='delete_pending' AND telegram_message_id IS NOT NULL
        AND (deletion_next_retry_at IS NULL OR deletion_next_retry_at<=NOW())
      ORDER BY id LIMIT ?`, [limit]);
-  let deleted = 0;
+  const summary = { attempted: rows.length, deleted: 0, already_missing: 0, terminal: 0, access_lost: 0, temporary: 0, deferred: 0 };
   for (let offset = 0; offset < rows.length; offset += SENDS_PER_SECOND) {
     const started = Date.now();
-    await Promise.all(rows.slice(offset, offset + SENDS_PER_SECOND).map(async (row: any) => {
+    await mapWithBoundedConcurrency(rows.slice(offset, offset + SENDS_PER_SECOND), SENDS_PER_SECOND, async (row: any) => {
       const attempts = Number(row.deletion_attempts || 0) + 1;
       const result = await deleteTelegramMessage(row.telegram_id, Number(row.telegram_message_id));
-      if (result?.ok) {
-        deleted++;
-        await pool.query("UPDATE platform_broadcast_recipients SET deletion_status='deleted',deletion_attempts=?,deleted_at=NOW(),deletion_error=NULL WHERE id=? AND deletion_status='delete_pending'", [attempts, row.id]);
+      const classification = classifyTelegramCleanupResult({
+        ok: Boolean(result?.ok), description: result?.description, errorCode: result?.error_code,
+        retryAfterSeconds: result?.parameters?.retry_after,
+      });
+      if (classification.localSuccess) {
+        if (classification.category === "ALREADY_MISSING") summary.already_missing++;
+        else summary.deleted++;
+        await pool.query("UPDATE platform_broadcast_recipients SET deletion_status=?,deletion_attempts=?,deleted_at=NOW(),deletion_error=NULL,deletion_next_retry_at=NULL WHERE id=? AND deletion_status='delete_pending'", [classification.category === "ALREADY_MISSING" ? "not_found" : "deleted", attempts, row.id]);
         return;
       }
-      const description = String(result?.description || "Telegram delete request failed").slice(0, 500);
-      const unavailable = /message to delete not found|message can't be deleted/i.test(description);
-      const failure = classifyTelegramFailure(result);
-      const retry = !unavailable && failure.retry && attempts < 3;
+      const retry = classification.retryable && attempts < 3;
+      if (classification.category === "TEMPORARY") summary.temporary++;
+      else if (classification.category === "CHANNEL_ACCESS_LOST") summary.access_lost++;
+      else summary.terminal++;
+      if (retry) summary.deferred++;
+      const nextStatus = retry ? "delete_pending" : "delete_failed";
+      const delay = telegramCleanupRetryDelaySeconds(attempts, classification.retryAfterSeconds);
       await pool.query(
         `UPDATE platform_broadcast_recipients SET deletion_status=?,deletion_attempts=?,deletion_error=?,
            deletion_next_retry_at=IF(?='delete_pending',DATE_ADD(NOW(),INTERVAL ? SECOND),NULL)
          WHERE id=? AND deletion_status='delete_pending'`,
-        [retry ? "delete_pending" : unavailable ? "not_found" : "delete_failed", attempts, description,
-          retry ? "delete_pending" : unavailable ? "not_found" : "delete_failed", failure.delay, row.id]);
-    }));
+        [nextStatus, attempts, classification.safeReason.slice(0, 500), nextStatus, delay, row.id]);
+    });
     const elapsed = Date.now() - started;
     if (elapsed < 1_000 && offset + SENDS_PER_SECOND < rows.length) await wait(1_000 - elapsed);
   }
-  return { attempted: rows.length, deleted };
+  return summary;
 }
 
 export async function GET(request: Request) {

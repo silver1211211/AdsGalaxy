@@ -1,16 +1,21 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy Mini App payloads are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthErrorStatus } from "@/lib/auth";
 import { MiniAppSubmissionValidationError, validateMiniAppSubmission } from "@/lib/miniappSubmissionValidation";
+import { authenticatePublisherAsset, PublisherAssetError, publisherAssetErrorResponse } from "@/lib/publisherAssetOnboarding";
+import { verifyPublicBotIdentity } from "@/lib/telegramBotIdentity";
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
 
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await authenticatePublisherAsset(request);
     const { id } = await params;
     const body = await request.json();
 
@@ -48,6 +53,13 @@ export async function PATCH(
     }
 
     const input = validateMiniAppSubmission(body);
+    const identity = await verifyPublicBotIdentity(input.miniapp_username, input.bot_id);
+    if (identity.id !== input.telegram_bot_id || identity.username.toLowerCase() !== input.miniapp_username.toLowerCase()) {
+      throw new PublisherAssetError("BOT_ID_MISMATCH", "The Bot Username and Bot ID do not identify the same Telegram bot.");
+    }
+    input.miniapp_username = identity.username;
+    input.bot_id = identity.id;
+    input.telegram_bot_id = identity.id;
 
     const [existing]: any = await pool.query(
       "SELECT id FROM miniapps WHERE user_id = ? AND miniapp_username = ? AND id <> ? AND is_deleted = FALSE",
@@ -71,12 +83,13 @@ export async function PATCH(
     }
 
     return NextResponse.json({ success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Publisher Mini Apps PATCH Error:", error);
+    if (error instanceof PublisherAssetError) return publisherAssetErrorResponse(error);
     const status = error instanceof MiniAppSubmissionValidationError
         ? 400
         : getAuthErrorStatus(error);
-    return NextResponse.json({ error: error.message || "Failed to update Mini App" }, { status });
+    return NextResponse.json({ error: errorMessage(error, "Failed to update Mini App") }, { status });
   }
 }
 
@@ -85,8 +98,7 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await authenticatePublisherAsset(request);
     const { id } = await params;
 
     const [rows]: any = await pool.query(
@@ -99,9 +111,10 @@ export async function DELETE(
     }
 
     return NextResponse.json({ error: "Mini Apps submitted for integration can only be removed by an admin." }, { status: 403 });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    if (error instanceof PublisherAssetError) return publisherAssetErrorResponse(error);
     console.error("Publisher Mini Apps DELETE Error:", error);
     const status = getAuthErrorStatus(error);
-    return NextResponse.json({ error: error.message || "Failed to process Mini App delete request" }, { status });
+    return NextResponse.json({ error: errorMessage(error, "Failed to process Mini App delete request") }, { status });
   }
 }

@@ -1,5 +1,6 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { withFinancialTransactionRetry } from "@/lib/dbResilience";
 
 export type ChannelFraudBillingState = "clean" | "low_quality" | "suspicious" | "confirmed_fraud" | "critical_fraud";
 
@@ -103,35 +104,54 @@ export async function applyChannelFraudBillingPolicy() {
   let excludedUnits = 0;
 
   for (const post of posts) {
-    const connection = await pool.getConnection();
     try {
-      await connection.beginTransaction();
-      const [ledgers] = await connection.query<LedgerRow[]>(
+      const result = await withFinancialTransactionRetry(async (connection) => {
+        // Canonical lock order: campaign -> post -> account ids -> ledgers.
+        await connection.query("SELECT id FROM campaigns WHERE id=? FOR UPDATE", [post.campaign_id]);
+        const [[currentPost]] = await connection.query<Array<RowDataPacket & {
+          views: number; settled_views: number; settled_clicks: number;
+          fraud_excluded_views: number; fraud_excluded_clicks: number;
+        }>>(
+          `SELECT views,settled_views,settled_clicks,fraud_excluded_views,fraud_excluded_clicks
+           FROM campaign_posts WHERE id=? FOR UPDATE`,
+          [post.post_id],
+        );
+        if (!currentPost) return { adjusted: 0, credits: 0, excluded: 0 };
+        await connection.query(
+          "SELECT id FROM users WHERE id IN (?,?) ORDER BY id FOR UPDATE",
+          [post.advertiser_id, post.publisher_id],
+        );
+        const [ledgers] = await connection.query<LedgerRow[]>(
         `SELECT l.id,l.settlement_type,l.new_units,l.advertiser_debit,l.publisher_credit,l.platform_revenue,l.reserve_amount
          FROM channel_settlement_ledger l
          LEFT JOIN channel_fraud_billing_adjustments a ON a.settlement_ledger_id=l.id
          WHERE l.post_id=? AND a.id IS NULL FOR UPDATE`, [post.post_id]
       );
-      for (const ledger of ledgers) {
+        let adjusted = 0;
+        let credits = 0;
+        for (const ledger of ledgers) {
         if (await reverseSettlement(connection, post, ledger)) {
-          adjustedSettlements += 1;
-          advertiserCredits = money(advertiserCredits + money(ledger.advertiser_debit));
+            adjusted += 1;
+            credits = money(credits + money(ledger.advertiser_debit));
+          }
         }
-      }
-      const isClick = post.campaign_type === "clicks";
-      const settlementTable = isClick ? "ad_settlements" : "ad_settlements_views";
-      await connection.query(`UPDATE ${settlementTable} SET fraud_adjusted_at=COALESCE(fraud_adjusted_at,NOW()) WHERE post_id=?`, [post.post_id]);
-      const observed = Number(isClick ? post.clicks : post.views);
-      const previousExcluded = Number(isClick ? post.fraud_excluded_clicks : post.fraud_excluded_views);
-      excludedUnits += Math.max(0, observed - previousExcluded);
-      const settledColumn = isClick ? "settled_clicks" : "settled_views";
-      const excludedColumn = isClick ? "fraud_excluded_clicks" : "fraud_excluded_views";
-      await connection.query(`UPDATE campaign_posts SET ${settledColumn}=GREATEST(${settledColumn},?), ${excludedColumn}=GREATEST(${excludedColumn},?) WHERE id=?`, [observed, observed, post.post_id]);
-      await connection.commit();
+        const isClick = post.campaign_type === "clicks";
+        const settlementTable = isClick ? "ad_settlements" : "ad_settlements_views";
+        await connection.query(`UPDATE ${settlementTable} SET fraud_adjusted_at=COALESCE(fraud_adjusted_at,NOW()) WHERE post_id=?`, [post.post_id]);
+        const observed = Number(isClick ? post.clicks : currentPost.views);
+        const previousExcluded = Number(isClick ? currentPost.fraud_excluded_clicks : currentPost.fraud_excluded_views);
+        const newlyExcluded = Math.max(0, observed - previousExcluded);
+        const settledColumn = isClick ? "settled_clicks" : "settled_views";
+        const excludedColumn = isClick ? "fraud_excluded_clicks" : "fraud_excluded_views";
+        await connection.query(`UPDATE campaign_posts SET ${settledColumn}=GREATEST(${settledColumn},?), ${excludedColumn}=GREATEST(${excludedColumn},?) WHERE id=?`, [observed, observed, post.post_id]);
+        return { adjusted, credits, excluded: newlyExcluded };
+      }, { operation: "channel_fraud_billing_adjustment" });
+      adjustedSettlements += result.adjusted;
+      advertiserCredits = money(advertiserCredits + result.credits);
+      excludedUnits += result.excluded;
     } catch (error) {
-      await connection.rollback().catch(() => undefined);
       console.error("Channel fraud billing adjustment failed", { post_id: post.post_id, error: error instanceof Error ? error.message : "unknown_error" });
-    } finally { connection.release(); }
+    }
   }
   return { fraudPosts: posts.length, excludedUnits, adjustedSettlements, advertiserCredits };
 }

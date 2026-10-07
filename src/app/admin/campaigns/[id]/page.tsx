@@ -14,6 +14,20 @@ function formatValue(value: unknown) {
   return String(value);
 }
 
+function campaignStatusLabel(status: string) {
+  if (status === "daily_cap_reached") return "Daily Cap Reached";
+  if (status === "paused") return "Paused";
+  if (status === "budget_exhausted") return "Budget Exhausted";
+  return status.replaceAll("_", " ");
+}
+
+function campaignStatusBadgeClass(status: string) {
+  if (status === "daily_cap_reached") return "border-blue-200 bg-blue-50 text-blue-700";
+  if (status === "paused") return "border-slate-300 bg-slate-100 text-slate-700";
+  if (status === "active") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  return "border-slate-200 bg-slate-100 text-slate-700";
+}
+
 function renderContinents(value: string) {
   try {
     const parsed = JSON.parse(value || "[]");
@@ -47,6 +61,8 @@ type EmergencyPushSummary = {
 
 type CampaignDetailsCampaign = {
   id: number;
+  public_id?: number | null;
+  display_id?: number | null;
   user_id: number;
   name: string;
   campaign_title?: string | null;
@@ -56,11 +72,15 @@ type CampaignDetailsCampaign = {
   parse_mode?: string | null;
   image_url?: string | null;
   type: string;
+  campaign_kind?: string | null;
   category: string;
   continents: string;
   budget: string | number;
   cpm: string | number;
   cpc?: string | number | null;
+  cost_per_subscriber?: string | number | null;
+  funding_model?: string | null;
+  advertiser_balance?: string | number | null;
   status: string;
   created_at?: string | null;
   updated_at?: string | null;
@@ -99,6 +119,7 @@ type EditCampaignData = {
   category?: string;
   cpm?: string | number;
   cpc?: string | number;
+  cost_per_subscriber?: string | number;
   teaser_creatives?: string[];
 };
 
@@ -189,8 +210,9 @@ type SettlementSummary = Record<string, string | number | null | unknown[]>;
 type DeliveryStatus = Record<string, string | number | boolean | null | string[]>;
 type CleanupErrorRow = Record<string, string | number | boolean | null>;
 
-export default function AdminCampaignDetailsPage() {
+export default function AdminCampaignDetailsPage({ silverMode = false }: { silverMode?: boolean } = {}) {
   const params = useParams<{ id: string }>();
+  const apiBase = silverMode ? "/api/check/silver/campaigns" : "/api/admin/campaigns";
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState("");
   const [error, setError] = useState("");
@@ -213,7 +235,7 @@ export default function AdminCampaignDetailsPage() {
   const fetchDetails = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/campaigns/${params.id}`);
+      const res = await fetch(`${apiBase}/${params.id}`);
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || "Failed to load campaign");
       setData(body as CampaignDetailsData);
@@ -224,9 +246,9 @@ export default function AdminCampaignDetailsPage() {
         return;
       }
       const [settlementRes, deliveryRes, cleanupRes] = await Promise.all([
-        fetch(`/api/admin/campaigns/${params.id}/settlement-summary`),
-        fetch(`/api/admin/campaigns/${params.id}/delivery-status`),
-        fetch(`/api/admin/campaigns/${params.id}/cleanup-errors`),
+        fetch(`${apiBase}/${params.id}/settlement-summary`),
+        fetch(`${apiBase}/${params.id}/delivery-status`),
+        fetch(`${apiBase}/${params.id}/cleanup-errors`),
       ]);
       if (settlementRes.ok) {
         const settlementBody = await settlementRes.json();
@@ -245,7 +267,7 @@ export default function AdminCampaignDetailsPage() {
     } finally {
       setLoading(false);
     }
-  }, [params.id]);
+  }, [apiBase, params.id]);
 
   useEffect(() => {
     void Promise.resolve().then(fetchDetails);
@@ -254,7 +276,7 @@ export default function AdminCampaignDetailsPage() {
   const runAction = async (action: ConfirmAction) => {
     setActionLoading(action);
     try {
-      const res = await fetch(`/api/admin/campaigns/${params.id}/actions`, {
+      const res = await fetch(`${apiBase}/${params.id}/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action }),
@@ -271,13 +293,13 @@ export default function AdminCampaignDetailsPage() {
   };
 
   const runEmergencyPush = async (mode: "fill_empty_slots" | "replace_everything") => {
-    const label = mode === "fill_empty_slots" ? "Fill Empty Slots" : "Replace Everything";
+    const label = mode === "fill_empty_slots" ? "Fill Empty Slots" : "Replace in Every Channel";
     const actionKey = mode === "fill_empty_slots" ? "emergency-fill" : "emergency-replace";
     const confirmation = mode === "replace_everything" ? typedConfirmation : undefined;
 
     setActionLoading(actionKey);
     try {
-      const res = await fetch(`/api/admin/campaigns/${params.id}/emergency-push`, {
+      const res = await fetch(`${apiBase}/${params.id}/emergency-push`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -308,8 +330,8 @@ export default function AdminCampaignDetailsPage() {
   const openActionConfirm = (action: ConfirmAction) => {
     const labels: Record<ConfirmAction, string> = {
       pause_only: "Pause Campaign",
-      pause: "Pause + Finalize",
-      pause_finalize: "Pause + Finalize",
+      pause: "Pause + Remove From All Channels",
+      pause_finalize: "Pause + Remove From All Channels",
       resume: "Resume Campaign",
       delete: "Delete Campaign",
       retry_cleanup: "Retry Failed Cleanup",
@@ -318,9 +340,11 @@ export default function AdminCampaignDetailsPage() {
       refresh_and_settle: "Refresh + Settle",
     };
     const messages: Record<ConfirmAction, string> = {
-      pause_only: "Pause this campaign? Future deliveries stop immediately. No settlement, Telegram stats refresh, or post cleanup will run.",
-      pause: "Pause and finalize this campaign? Future deliveries stop immediately, Telegram stats refresh once, outstanding deltas settle, and Telegram cleanup is attempted after settlement.",
-      pause_finalize: "Pause and finalize this campaign? Future deliveries stop immediately, Telegram stats refresh once, outstanding deltas settle, and Telegram cleanup is attempted after settlement.",
+      pause_only: campaign?.status === "daily_cap_reached"
+        ? `Pause “${campaign.name}” manually? It has reached today’s daily cap and would normally resume automatically on the next billing day. It will remain paused until an admin resumes it.`
+        : `Pause “${campaign?.name || "this campaign"}”? Future deliveries stop immediately. It will remain paused until an admin resumes it. No settlement, Telegram stats refresh, or post cleanup will run.`,
+      pause: "Pause delivery and remove this campaign’s active Telegram ads after safe settlement? This does not delete the campaign or its reporting history.",
+      pause_finalize: "Pause delivery and remove this campaign’s active Telegram ads after safe settlement? This does not delete the campaign or its reporting history.",
       resume: "Resume this campaign? Delivery can continue. No settlement or cleanup will run.",
       delete: "Delete this campaign? It will be paused, finalized, archived, then marked deleted. Settlement must complete before deletion.",
       retry_cleanup: "Retry failed Telegram cleanup for this campaign? No settlement or financial changes will run.",
@@ -355,7 +379,7 @@ export default function AdminCampaignDetailsPage() {
     if (!campaign) return;
     setActionLoading("priority");
     try {
-      const res = await fetch(`/api/admin/campaigns/${params.id}`, {
+      const res = await fetch(`${apiBase}/${params.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ is_prioritized: !Boolean(campaign.is_prioritized) }),
@@ -393,8 +417,9 @@ export default function AdminCampaignDetailsPage() {
       link: campaign.link || "",
       button_text: campaign.button_text || "",
       category: campaign.category || "",
-      cpm: campaign.cpm || "",
-      ...(campaign.cpc !== undefined ? { cpc: campaign.cpc || "" } : {}),
+      ...(campaign.campaign_kind === "channel_growth" ? { cost_per_subscriber: campaign.cost_per_subscriber || "" }
+        : campaign.type === "clicks" && String(campaign.teaser_mode || "none") === "none" ? { cpc: campaign.cpc || "" }
+        : { cpm: campaign.cpm || "", ...(campaign.cpc !== undefined && String(campaign.teaser_mode || "none") !== "none" ? { cpc: campaign.cpc || "" } : {}) }),
     });
     setEditMode(true);
   };
@@ -402,7 +427,7 @@ export default function AdminCampaignDetailsPage() {
   const submitEdit = async () => {
     setEditLoading(true);
     try {
-      const res = await fetch(`/api/admin/campaigns/${params.id}`, {
+      const res = await fetch(`${apiBase}/${params.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(editData),
@@ -417,6 +442,21 @@ export default function AdminCampaignDetailsPage() {
     } finally {
       setEditLoading(false);
     }
+  };
+
+  const changeSilverBudget = async (action: "add_budget" | "set_budget_cap") => {
+    if (!campaign || !silverMode) return;
+    const label = action === "add_budget" ? "budget allowance to add (does not credit advertiser funds)" : "new total budget cap";
+    const amount = window.prompt(`Enter the ${label}. Advertiser funds will be debited only as delivery is settled.`);
+    if (!amount) return;
+    setActionLoading(action);
+    try {
+      const response = await fetch(`${apiBase}/${params.id}/budget`, { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({ action, amount }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Budget update failed");
+      await fetchDetails();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Budget update failed"); }
+    finally { setActionLoading(""); }
   };
 
   return (
@@ -472,13 +512,13 @@ export default function AdminCampaignDetailsPage() {
         isOpen={!!pendingEmergency}
         onClose={() => { setPendingEmergency(null); setTypedConfirmation(""); }}
         onConfirm={confirmEmergency}
-        title={campaign?.type === "broadcast" ? "Emergency Broadcast Push" : pendingEmergency === "replace_everything" ? "Emergency Push: Replace Everything" : "Emergency Push: Fill Empty Slots"}
+        title={campaign?.type === "broadcast" ? "Emergency Broadcast Push" : pendingEmergency === "replace_everything" ? "Emergency Push: Replace in Every Channel" : "Emergency Push: Fill Empty Slots"}
         message={campaign?.type === "broadcast"
           ? "Send this bot campaign immediately to active eligible bot users. This bypasses the normal broadcast posting interval."
           : pendingEmergency === "replace_everything"
           ? "Danger: This will delete all currently active ads from Telegram channels, then immediately push this campaign to eligible channels. This may affect all advertisers. Type CONFIRM to continue."
           : "You are about to immediately push this campaign to all eligible empty channels. Normal posting schedules will be bypassed for this emergency action only. Continue?"}
-        confirmBtnText={pendingEmergency === "replace_everything" ? "Replace Everything" : "Push Now"}
+        confirmBtnText={pendingEmergency === "replace_everything" ? "Replace in Every Channel" : "Fill Empty Slots"}
         confirmBtnVariant={pendingEmergency === "replace_everything" ? "danger" : "primary"}
         isLoading={!!actionLoading}
         typedConfirmation={pendingEmergency === "replace_everything" ? {
@@ -492,12 +532,12 @@ export default function AdminCampaignDetailsPage() {
             <label className="flex items-center gap-2 text-sm font-semibold text-slate-800">
               <input type="checkbox" checked={ignoreEmergencyRules} onChange={(event) => setIgnoreEmergencyRules(event.target.checked)} />
               Bypass timing and spacing rules
-              <span title="Pushes immediately without the 3-hour schedule window, recent-post spacing, or same-campaign 24-hour cooldown.">
+              <span title="Pushes immediately without the 3-hour schedule window, recent-post spacing, daily post cap, or same-campaign 24-hour cooldown.">
                 <CircleHelp size={14} className="text-blue-600" />
               </span>
             </label>
             <p className="text-xs text-slate-600">
-              Daily channel post caps and campaign/channel exclusions are always enforced. Leave unchecked to follow all normal placement rules.
+              Bypass affects timing and spacing only. Publisher daily post limits, financial caps, targeting, permissions, exclusions, and idempotency remain enforced. Fill Empty Slots never deletes an existing ad.
             </p>
           </div>
         )}
@@ -656,7 +696,7 @@ export default function AdminCampaignDetailsPage() {
             />
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
+            {editData.cpm !== undefined && <div>
               <label className="text-xs font-semibold text-slate-700 uppercase tracking-wide">CPM ($)</label>
               <input
                 type="number"
@@ -666,8 +706,14 @@ export default function AdminCampaignDetailsPage() {
                 onChange={(e) => setEditData({ ...editData, cpm: e.target.value ? parseFloat(e.target.value) : "" })}
                 className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-md text-sm"
               />
-            </div>
-            {campaign?.cpc !== undefined && (
+            </div>}
+            {editData.cost_per_subscriber !== undefined && <div>
+              <label className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Cost per Subscriber / CPS ($)</label>
+              <input type="number" step="0.01" min="0.00000001" value={editData.cost_per_subscriber || ""}
+                onChange={e => setEditData({ ...editData, cost_per_subscriber: e.target.value ? Number(e.target.value) : "" })}
+                className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-md text-sm" />
+            </div>}
+            {editData.cpc !== undefined && (
               <div>
                 <label className="text-xs font-semibold text-slate-700 uppercase tracking-wide">CPC ($)</label>
                 <input
@@ -702,7 +748,7 @@ export default function AdminCampaignDetailsPage() {
 
       <div className="space-y-4 w-full max-w-full min-w-0 overflow-x-hidden">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4">
-          <Link href="/admin/campaigns" className="inline-flex items-center gap-2 text-xs font-semibold text-slate-500 hover:text-blue-600 whitespace-nowrap">
+          <Link href={silverMode ? "/check/silver" : "/admin/campaigns"} className="inline-flex items-center gap-2 text-xs font-semibold text-slate-500 hover:text-blue-600 whitespace-nowrap">
             <ArrowLeft size={16} /> Back to Campaigns
           </Link>
 
@@ -711,6 +757,7 @@ export default function AdminCampaignDetailsPage() {
               <button onClick={openEditModal} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-purple-50 text-purple-700 border border-purple-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                 Edit Details
               </button>
+              {silverMode && <><button onClick={()=>void changeSilverBudget("add_budget")} disabled={!!actionLoading} className="shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">Add Budget</button><button onClick={()=>void changeSilverBudget("set_budget_cap")} disabled={!!actionLoading} className="shrink-0 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700">Edit Budget</button></>}
               {campaign.type !== "broadcast" && (
                 <button onClick={togglePriority} disabled={!!actionLoading} className={`shrink-0 px-3 py-1.5 rounded-md text-xs font-medium inline-flex items-center gap-1 border ${campaign.is_prioritized ? "bg-amber-100 text-amber-800 border-amber-300" : "bg-slate-50 text-slate-700 border-slate-200"}`} title="Prioritized campaigns exclusively share all eligible scheduled channel slots, balanced by total delivery count; older campaigns win ties.">
                   {actionLoading === "priority" ? <Loader2 size={14} className="animate-spin" /> : <Star size={14} fill={campaign.is_prioritized ? "currentColor" : "none"} className={campaign.is_prioritized ? "text-amber-500" : undefined} />} {campaign.is_prioritized ? "Prioritized" : "Prioritize"}
@@ -726,18 +773,18 @@ export default function AdminCampaignDetailsPage() {
                     {actionLoading === "emergency-fill" ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />} Emergency Push: Fill Empty Slots
                   </button>
                   <button onClick={() => openEmergencyConfirm("replace_everything")} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-red-50 text-red-700 border border-red-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
-                    {actionLoading === "emergency-replace" ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />} Emergency Push: Replace Everything
+                    {actionLoading === "emergency-replace" ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />} Emergency Push: Replace in Every Channel
                   </button>
                 </>
               )}
-              {campaign.status === "active" && (
+              {(campaign.status === "active" || campaign.status === "daily_cap_reached") && (
                 <button onClick={() => openActionConfirm("pause_only")} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-amber-50 text-amber-700 border border-amber-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
                   {actionLoading === "pause_only" ? <Loader2 size={14} className="animate-spin" /> : <Pause size={14} />} Pause
                 </button>
               )}
               {campaign.status !== "deleted" && campaign.type !== "broadcast" && (
                 <button onClick={() => openActionConfirm("pause_finalize")} disabled={!!actionLoading} className="shrink-0 px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-md text-xs font-medium inline-flex items-center gap-1">
-                  {actionLoading === "pause_finalize" ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />} Pause + Finalize
+                  {actionLoading === "pause_finalize" ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />} Pause + Remove
                 </button>
               )}
               {campaign.status !== "deleted" && campaign.type !== "broadcast" && (
@@ -774,7 +821,7 @@ export default function AdminCampaignDetailsPage() {
           )}
         </div>
 
-        {campaign?.teaser_mode === "teaser_only" && <AdminTeaserEmergencyPanel campaignId={campaign.id} />}
+        {!silverMode && campaign?.teaser_mode === "teaser_only" && <AdminTeaserEmergencyPanel campaignId={campaign.display_id ?? campaign.public_id ?? campaign.id} />}
 
         {loading ? (
           <div className="p-8 text-center bg-white rounded-lg border border-slate-200">
@@ -784,8 +831,8 @@ export default function AdminCampaignDetailsPage() {
           <>
             <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
               <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-slate-900">Campaign Details (#{campaign.id})</h2>
-                <span className="px-2 py-0.5 rounded text-xs font-medium capitalize bg-slate-100 text-slate-700 border border-slate-200">{campaign.status}</span>
+                <h2 className="text-sm font-semibold text-slate-900">Campaign Details (#{campaign.display_id ?? campaign.public_id ?? campaign.id})</h2>
+                <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize border ${campaignStatusBadgeClass(campaign.status)}`}>{campaignStatusLabel(campaign.status)}</span>
               </div>
               <div className="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-sm">
                 {[
@@ -795,11 +842,21 @@ export default function AdminCampaignDetailsPage() {
                   ["Category", campaign.category],
                   ["Continents", renderContinents(campaign.continents)],
                   ["Budget Remaining", `$${campaign.budget}`],
-                  ["Lifetime Spend", `$${campaign.spend || 0}`],
-                  [campaign.type === "clicks" ? "CPC" : "CPM", `$${campaign.type === "clicks" ? (campaign.cpc || campaign.cpm) : campaign.cpm}`],
-                  ["Impressions", metrics.total_views || 0],
+                  ["Advertiser Balance", `$${campaign.advertiser_balance || 0}`],
+                  ["Funding Model", campaign.funding_model || "N/A"],
+                  ["Lifetime Spend", `$${Number(campaign.campaign_kind === "channel_growth" ? metrics.subscriber_spend || 0 : campaign.spend || 0).toFixed(2)}`],
+                  [campaign.campaign_kind === "channel_growth" ? "CPS" : campaign.type === "clicks" ? "CPC" : "CPM", `$${campaign.campaign_kind === "channel_growth" ? campaign.cost_per_subscriber : campaign.type === "clicks" ? (campaign.cpc || campaign.cpm) : campaign.cpm}`],
+                  [campaign.campaign_kind === "channel_growth" ? "Verified Subscribers" : "Impressions", campaign.campaign_kind === "channel_growth" ? metrics.verified_subscribers || 0 : metrics.total_views || 0],
+                  ...(campaign.campaign_kind !== "channel_growth" && campaign.type === "views" && String(campaign.teaser_mode || "none") === "none" ? [["Billable Impressions", metrics.billable_views || 0]] : []),
+                  ...(campaign.campaign_kind === "channel_growth" ? [
+                    ["Growth Impressions", metrics.total_views || 0],
+                    ["Effective CPS", `$${metrics.effective_cps || 0}`],
+                    ["Conversion Rate", `${Number(metrics.conversion_rate || 0).toFixed(2)}%`],
+                  ] : []),
                   ...(campaign.type === "broadcast" ? [] : [
-                    ["Clicks", metrics.total_clicks || 0],
+                    ["Displayed Clicks", metrics.total_clicks || 0],
+                    ["Actual Tracked Clicks", metrics.actual_tracked_clicks || 0],
+                    ["Historical Recovery", metrics.historical_click_recovery_adjustment || 0],
                     ["Approved Count", campaign.approved_count || 0],
                     ["Rejected Count", campaign.rejected_count || 0],
                   ]),
@@ -866,7 +923,9 @@ export default function AdminCampaignDetailsPage() {
                   ["Deleted Posts", metrics.deleted_posts],
                   ["Delete Failed", metrics.delete_failed_posts],
                   ["Total Views", metrics.total_views],
-                  ["Total Clicks", metrics.total_clicks],
+                  ["Displayed Clicks", metrics.total_clicks],
+                  ["Actual Tracked Clicks", metrics.actual_tracked_clicks || 0],
+                  ["Historical Recovery", metrics.historical_click_recovery_adjustment || 0],
                   ["CTR", `${(Number(metrics.ctr || 0) * 100).toFixed(2)}%`],
                   ["Channels Posted", metrics.channels_posted_to],
                   ["Last Posted", metrics.last_posted_at],

@@ -45,8 +45,8 @@ test("reward events are request-id idempotent and Developer application is optio
   assert.match(internal, /if \(binding && productionRewardCallbacksEnabled\(\)\)/);
 });
 
-test("direct callback enqueue is flag gated and transaction scoped", () => {
-  assert.match(direct, /process\.env\.MINIAPP_DIRECT_REWARD_CALLBACKS_ENABLED === "true"/);
+test("direct callback enqueue defaults enabled, supports an explicit kill switch, and is transaction scoped", () => {
+  assert.match(direct, /value !== "false" && value !== "0" && value !== "off"/);
   assert.match(direct, /db: PoolConnection/);
   assert.match(internal, /await enqueueDirectMiniappRewardCallback\(\{/);
   assert.match(internal, /await conn\.commit\(\)/);
@@ -100,8 +100,19 @@ test("API and UI distinguish configured, platform, and effective callback status
   assert.match(route, /configured_status/);
   assert.match(route, /platform_enabled/);
   assert.match(route, /effective_status/);
-  assert.match(panel, /Saved — callback delivery is not currently enabled by the platform/);
+  assert.match(route, /failed_attention/);
+  assert.match(route, /CALLBACK_CONTRACT/);
+  assert.match(panel, /FAILED \/ ATTENTION/);
+  assert.match(panel, /Latest callback attempt/);
   assert.doesNotMatch(route, /MINIAPP_DIRECT_REWARD_CALLBACKS_ENABLED/);
+});
+
+test("public SDK auth failures log only safe request classifications", () => {
+  const requestRoute = read("src/app/api/sdk/miniapp/request/route.ts");
+  assert.match(requestRoute, /miniapp_id: diagnosticMiniappId/);
+  assert.match(requestRoute, /signature_present/);
+  assert.match(requestRoute, /auth_age_seconds/);
+  assert.doesNotMatch(requestRoute, /console\.error\("Public SDK Mini App request failed", error\)/);
 });
 
 test("migration is additive and outbox supports either destination", () => {

@@ -6,6 +6,7 @@ import { ADVERTISER_TRUST_LEVELS, normalizeAdvertiserTrustLevel } from "@/lib/ad
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { setUserEnforcementExemption } from "@/lib/userEnforcementExemptions";
 import { parseAdminPagination } from "@/lib/adminPagination";
+import { mainCampaignScopeSql } from "@/lib/silverCampaignControl";
 
 type ColumnRow = RowDataPacket & {
   COLUMN_NAME: string;
@@ -107,7 +108,7 @@ export async function GET(request: Request) {
           `SELECT user_id, COUNT(*) AS total,
              SUM(status IN ('active','completed','budget_exhausted')) AS approved,
              SUM(status = 'rejected') AS rejected
-           FROM campaigns WHERE user_id IN (?) GROUP BY user_id`,
+           FROM campaigns c WHERE c.user_id IN (?) AND ${mainCampaignScopeSql("c")} GROUP BY c.user_id`,
           [userIds]
         ),
         pool.query<RowDataPacket[]>(

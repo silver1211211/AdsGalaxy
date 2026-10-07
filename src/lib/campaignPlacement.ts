@@ -4,6 +4,7 @@ export interface PlacementCampaign {
   id: number;
   budget: string | number;
   cpm?: string | number;
+  cpc?: string | number;
   quality_score?: string | number;
   advertiser_trust_level?: string;
   campaign_priority_score?: string | number;
@@ -17,6 +18,7 @@ export interface CampaignScoreContext {
   trustMultipliers?: Record<string, number>;
   randomization?: number;
   inventoryScore?: number;
+  normalizedAllocationBid?: number;
 }
 
 export function calculateCampaignScore(campaign: PlacementCampaign, context: CampaignScoreContext) {
@@ -29,14 +31,15 @@ export function calculateCampaignScore(campaign: PlacementCampaign, context: Cam
   const trustMultiplier = context.trustMultipliers?.[trustLevel] ?? 1;
   const quality = Math.max(0, Math.min(100, Number(campaign.quality_score ?? 50) || 50));
   const qualityBoost = 0.7 + (quality / 100) * 0.6;
-  const cpmBoost = Math.min(1.5, Math.max(0.75, (Number(campaign.cpm || 0) || 0) / 2));
+  const normalizedAllocationBid = Math.max(0, Math.min(1, Number(context.normalizedAllocationBid || 0)));
+  const allocationBidBoost = 0.75 + (normalizedAllocationBid * 0.75);
   const campaignPriority = Math.max(0, Math.min(100, Number(campaign.campaign_priority_score ?? quality) || quality));
   const inventoryScore = Math.max(0, Math.min(100, Number(context.inventoryScore ?? 50) || 50));
   const qualityMatch = 1 - Math.abs(campaignPriority - inventoryScore) / 100;
   const randomization = context.randomization ?? Math.random();
   const priorityBoost = 0.7 + (campaignPriority / 100) * 0.6;
   const matchBoost = 0.8 + qualityMatch * 0.4;
-  const baseScore = (remainingBudgetWeight * 0.48) + (underDeliveryScore * 0.22) + (cpmBoost * 0.10) + (qualityMatch * 0.12) + (randomization * 0.08);
+  const baseScore = (remainingBudgetWeight * 0.48) + (underDeliveryScore * 0.22) + (allocationBidBoost * 0.10) + (qualityMatch * 0.12) + (randomization * 0.08);
 
   return {
     score: baseScore * trustMultiplier * qualityBoost * priorityBoost * matchBoost,
@@ -48,7 +51,8 @@ export function calculateCampaignScore(campaign: PlacementCampaign, context: Cam
     randomization,
     trustMultiplier,
     qualityBoost,
-    cpmBoost,
+    allocationBidBoost,
+    normalizedAllocationBid,
     campaignPriority,
     inventoryScore,
     qualityMatch,

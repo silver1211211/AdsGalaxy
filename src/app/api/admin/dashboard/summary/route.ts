@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
 import { CACHE_TTL_SECONDS, cacheGetOrSet, cacheSet, redisKeys } from "@/lib/redisCache";
+import { mainCampaignScopeSql } from "@/lib/silverCampaignControl";
 
 export async function GET(request: Request) {
   const forceFresh = new URL(request.url).searchParams.get("fresh") === "1";
@@ -19,7 +20,7 @@ export async function GET(request: Request) {
         SUM(created_at >= CURDATE()) AS today,
         SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)) AS week,
         SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)) AS month FROM users`),
-      pool.query("SELECT status, COUNT(*) AS count FROM campaigns GROUP BY status"),
+      pool.query(`SELECT c.status, COUNT(*) AS count FROM campaigns c WHERE ${mainCampaignScopeSql("c")} GROUP BY c.status`),
       pool.query("SELECT status, COUNT(*) AS count FROM withdrawals GROUP BY status"),
       pool.query("SELECT status, COUNT(*) AS count FROM deposits GROUP BY status"),
     ]);

@@ -23,7 +23,7 @@ test("available Telegram identity avoids parallel session bootstrap failures", (
 
 test("campaign feed limits rows before loading metrics", () => {
   const feed = read("src/app/api/advertiser/campaign-feed/route.ts");
-  assert.match(feed, /const PAGE_SIZE = 5/);
+  assert.match(feed, /const PAGE_SIZE = 15/);
   assert.match(feed, /rows\.slice\(0, PAGE_SIZE\)/);
   assert.match(feed, /getRegularCampaignMetricsByIds\(regularRows\.map/);
   assert.doesNotMatch(feed, /SELECT COUNT\(\*\) FROM campaign_clicks cc WHERE cc\.campaign_id=c\.id/);

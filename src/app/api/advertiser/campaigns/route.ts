@@ -1,6 +1,8 @@
+import { validateMultipartRequest } from "@/lib/requestBodyValidation";
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy campaign payloads are not schema-generated */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
+import { isStandardChannelReport, getChannelReportingMetrics, channelMetricPayload } from "@/lib/channelReporting";
 import { getAuthenticatedUser, getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 import { serializeCampaignCategories } from "@/lib/campaignCategories";
 import { serializeExplicitCampaignAudience } from "@/lib/channelAudience";
@@ -30,11 +32,18 @@ import { getGrowthSettings, validateGrowthBudgets, validateGrowthMessageText, ve
 import { getAdvertiserDiscount } from "@/lib/advertiserDiscount";
 import { getChannelUnitPrice } from "@/lib/channelBilling";
 import { normalizeTeaserVariants,validateTeaserCpm,validateTeaserCta } from "@/lib/teaser";
+import { allocateCampaignPublicId } from "@/lib/campaignIdentity";
+import { displayedClicksSql } from "@/lib/campaignAnalyticsAdjustments";
+import { campaignFormDataFingerprint, completeCampaignCreate, failCampaignCreate, reserveCampaignCreate } from "@/lib/campaignCreateIdempotency";
 
 function campaignCreateErrorResponse(error: any) {
   const authStatus = getAuthErrorStatus(error);
   if (authStatus !== 500) {
     return NextResponse.json({ error: String(error?.message || "Authentication failed") }, { status: authStatus });
+  }
+  const explicitStatus=Number(error?.status||0);
+  if(explicitStatus>=400&&explicitStatus<500){
+    return NextResponse.json({error:String(error?.message||"Campaign request is invalid"),code:String(error?.code||"INVALID_REQUEST")},{status:explicitStatus});
   }
   const failure = classifyCampaignCreateFailure(error);
   return NextResponse.json(failure.body, { status: failure.status });
@@ -46,6 +55,7 @@ function safeCampaignCreateDiagnosticCode(error: any) {
 }
 
 export async function POST(request: Request) {
+  let createReservationId:number|null=null;
   try {
     const blocked = await requireUserWritesAllowed();
     if (blocked) return blocked;
@@ -53,6 +63,8 @@ export async function POST(request: Request) {
     const initData = request.headers.get("x-telegram-init-data");
     const user = await getAuthenticatedUser(initData);
 
+    const invalidBody = validateMultipartRequest(request, 12 * 1024 * 1024);
+    if (invalidBody) return invalidBody;
     const formData = await request.formData();
     
     const name = String(formData.get("name") || "").trim();
@@ -184,12 +196,22 @@ export async function POST(request: Request) {
     }
     conn.release();
 
+    const reservation=await reserveCampaignCreate({
+      advertiserId:Number(user.id),operation:"campaign",
+      rawKey:String(request.headers.get("idempotency-key")||""),
+      fingerprint:await campaignFormDataFingerprint(formData),
+    });
+    if(reservation.outcome==="replay")return NextResponse.json(reservation.response);
+    if(reservation.outcome==="conflict")return NextResponse.json({error:"This Idempotency-Key was already used for different campaign details."},{status:409});
+    if(reservation.outcome==="in_progress")return NextResponse.json({error:"This campaign creation request is still processing. Retry with the same Idempotency-Key."},{status:409,headers:{"Retry-After":"2"}});
+    createReservationId=reservation.id;
+
     // 2. Optional image upload. If selected, the image is part of the creative:
     // never silently create a text-only campaign when storage fails.
     let imageUrl = null;
     if (imageFile) {
       if (imageFile.size > 1024 * 1024) {
-        return NextResponse.json({ error: "Image size cannot exceed 1MB" }, { status: 400 });
+        throw new CampaignCreatePublicError("IMAGE_TOO_LARGE","Image size cannot exceed 1MB");
       }
 
       const imgApiFormData = new FormData();
@@ -206,11 +228,11 @@ export async function POST(request: Request) {
           imageUrl = imgData.data.url;
         } else {
           console.error("Campaign image upload was rejected by the provider");
-          return NextResponse.json({ error: "Image upload failed. No campaign was created." }, { status: 502 });
+          throw new CampaignCreatePublicError("IMAGE_UPLOAD_FAILED","Image upload failed. No campaign was created.",502);
         }
       } catch {
         console.error("Campaign image upload provider was unavailable");
-        return NextResponse.json({ error: "Image upload is temporarily unavailable. No campaign was created." }, { status: 503 });
+        throw new CampaignCreatePublicError("IMAGE_UPLOAD_UNAVAILABLE","Image upload is temporarily unavailable. No campaign was created.",503);
       }
     }
 
@@ -337,6 +359,8 @@ export async function POST(request: Request) {
           }, conn);
 
           await safeQueueAdvertiserOnboarding(user.id, conn);
+          await allocateCampaignPublicId(conn, Number(result.insertId));
+          await completeCampaignCreate(conn,{reservationId:createReservationId!,campaignId:Number(result.insertId),response:{success:true,id:Number(result.insertId)}});
           return Number(result.insertId);
         },
       });
@@ -348,6 +372,7 @@ export async function POST(request: Request) {
     }
 
   } catch (error: any) {
+    if(createReservationId!==null)await failCampaignCreate(createReservationId,error).catch(()=>undefined);
     if (error instanceof CampaignSchemaNotReadyError) {
       console.error("Campaign schema readiness check failed", { missingCount: error.missing.length });
     } else if (!(error instanceof CampaignCreatePublicError) && !publicCampaignValidationError(error)) {
@@ -383,23 +408,40 @@ export async function GET(request: Request) {
     const campaignPostYesterdayImpressionsExpr = hasCampaignPostViews
       ? "COALESCE((SELECT SUM(cp.views) FROM campaign_posts cp WHERE cp.campaign_id = c.id AND cp.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND cp.created_at < CURDATE()), 0)"
       : "COALESCE((SELECT COUNT(*) FROM campaign_posts cp WHERE cp.campaign_id = c.id AND cp.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND cp.created_at < CURDATE()), 0)";
+    const channelBillableViewsExpr = `(COALESCE((SELECT SUM(d.units) FROM channel_advertiser_debits d WHERE d.campaign_id=c.id AND d.settlement_type='view'),0)
+      + COALESCE((SELECT SUM(l.new_units) FROM channel_settlement_ledger l LEFT JOIN channel_fraud_billing_adjustments a ON a.settlement_ledger_id=l.id WHERE l.campaign_id=c.id AND l.settlement_type='view' AND a.id IS NULL),0)
+      + COALESCE((SELECT SUM(ts.impression_delta) FROM teaser_settlements ts JOIN teaser_placements tp ON tp.id=ts.placement_id WHERE tp.campaign_id=c.id),0))`;
+    const channelBillableViewsTodayExpr = `(COALESCE((SELECT SUM(d.units) FROM channel_advertiser_debits d WHERE d.campaign_id=c.id AND d.settlement_type='view' AND d.created_at>=CURDATE()),0)
+      + COALESCE((SELECT SUM(l.new_units) FROM channel_settlement_ledger l LEFT JOIN channel_fraud_billing_adjustments a ON a.settlement_ledger_id=l.id WHERE l.campaign_id=c.id AND l.settlement_type='view' AND a.id IS NULL AND l.created_at>=CURDATE()),0)
+      + COALESCE((SELECT SUM(ts.impression_delta) FROM teaser_settlements ts JOIN teaser_placements tp ON tp.id=ts.placement_id WHERE tp.campaign_id=c.id AND ts.created_at>=CURDATE()),0))`;
+    const channelBillableViewsYesterdayExpr = `(COALESCE((SELECT SUM(d.units) FROM channel_advertiser_debits d WHERE d.campaign_id=c.id AND d.settlement_type='view' AND d.created_at>=DATE_SUB(CURDATE(),INTERVAL 1 DAY) AND d.created_at<CURDATE()),0)
+      + COALESCE((SELECT SUM(l.new_units) FROM channel_settlement_ledger l LEFT JOIN channel_fraud_billing_adjustments a ON a.settlement_ledger_id=l.id WHERE l.campaign_id=c.id AND l.settlement_type='view' AND a.id IS NULL AND l.created_at>=DATE_SUB(CURDATE(),INTERVAL 1 DAY) AND l.created_at<CURDATE()),0)
+      + COALESCE((SELECT SUM(ts.impression_delta) FROM teaser_settlements ts JOIN teaser_placements tp ON tp.id=ts.placement_id WHERE tp.campaign_id=c.id AND ts.created_at>=DATE_SUB(CURDATE(),INTERVAL 1 DAY) AND ts.created_at<CURDATE()),0))`;
+    const channelBillableClicksExpr = `(COALESCE((SELECT SUM(d.units) FROM channel_advertiser_debits d WHERE d.campaign_id=c.id AND d.settlement_type='click'),0)
+      + COALESCE((SELECT SUM(l.new_units) FROM channel_settlement_ledger l LEFT JOIN channel_fraud_billing_adjustments a ON a.settlement_ledger_id=l.id WHERE l.campaign_id=c.id AND l.settlement_type='click' AND a.id IS NULL),0))`;
+    const channelSettledSpendExpr = `(COALESCE((SELECT SUM(d.advertiser_debit) FROM channel_advertiser_debits d WHERE d.campaign_id=c.id),0)
+      + COALESCE((SELECT SUM(l.advertiser_debit) FROM channel_settlement_ledger l LEFT JOIN channel_fraud_billing_adjustments a ON a.settlement_ledger_id=l.id WHERE l.campaign_id=c.id AND a.id IS NULL),0)
+      + COALESCE((SELECT SUM(ts.gross_amount) FROM teaser_settlements ts JOIN teaser_placements tp ON tp.id=ts.placement_id WHERE tp.campaign_id=c.id),0))`;
+    const advertiserVisibleImpressionsExpr = `(CASE WHEN c.type='views' THEN ${channelBillableViewsExpr} ELSE ${campaignPostImpressionsExpr} END)`;
     const broadcastSpendExpr = hasBroadcastDeliveryCost
       ? "COALESCE((SELECT SUM(bd.cost) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)"
       : "0";
     const broadcastTodaySpendExpr = hasBroadcastDeliveryCost
       ? "COALESCE((SELECT SUM(bd.cost) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= CURDATE()), 0)"
       : "0";
-    const channelTodaySpendExpr = `(COALESCE((SELECT SUM(l.advertiser_debit) FROM channel_settlement_ledger l WHERE l.campaign_id=c.id AND l.created_at>=CURDATE()),0)
-      + COALESCE((SELECT SUM(d.advertiser_debit) FROM channel_advertiser_debits d WHERE d.campaign_id=c.id AND d.created_at>=CURDATE()),0))`;
+    const channelTodaySpendExpr = `(COALESCE((SELECT SUM(l.advertiser_debit) FROM channel_settlement_ledger l LEFT JOIN channel_fraud_billing_adjustments a ON a.settlement_ledger_id=l.id WHERE l.campaign_id=c.id AND a.id IS NULL AND l.created_at>=CURDATE()),0)
+      + COALESCE((SELECT SUM(d.advertiser_debit) FROM channel_advertiser_debits d WHERE d.campaign_id=c.id AND d.created_at>=CURDATE()),0)
+      + COALESCE((SELECT SUM(ts.gross_amount) FROM teaser_settlements ts JOIN teaser_placements tp ON tp.id=ts.placement_id WHERE tp.campaign_id=c.id AND ts.created_at>=CURDATE()),0))`;
     const campaignUpdatedAtExpr = hasCampaignUpdatedAt ? "c.updated_at" : "c.created_at";
+    const displayedChannelClicksExpr = displayedClicksSql("c");
     const broadcastEffectiveCpmExpr = `GREATEST(COALESCE(c.cpm, 0) - COALESCE((
       SELECT CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN ard.cpm_discount ELSE 0 END
       FROM advertiser_rate_discounts ard WHERE ard.user_id = c.user_id LIMIT 1
     ), 0), 0.01)`;
 
     const [campaignRows]: any = await pool.query(
-          `SELECT id, name, campaign_title, parse_mode, message_text, image_url, link, button_text, rejection_reason,
-         type,
+          `SELECT id, public_id, COALESCE(public_id,id) AS display_id, name, campaign_title, parse_mode, message_text, image_url, link, button_text, rejection_reason,
+         type, campaign_kind, teaser_mode, cost_per_subscriber,
          CASE WHEN type = 'broadcast' THEN GREATEST(COALESCE(budget, 0), 0) ELSE budget END AS budget,
          total_budget, cpm, cpc, category, continents, countries, languages, vpn_policy,
          device_policy, os_policy, start_at, end_at, daily_budget_limit,
@@ -418,23 +460,23 @@ export async function GET(request: Request) {
          CASE WHEN type = 'broadcast' THEN GREATEST(COALESCE(budget, 0), 0) ELSE budget END as remaining_budget,
          CASE
            WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
-           ELSE ${campaignPostImpressionsExpr}
+           ELSE ${advertiserVisibleImpressionsExpr}
          END as impressions,
          CASE
            WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= CURDATE()), 0)
-           ELSE ${campaignPostTodayImpressionsExpr}
+           ELSE CASE WHEN c.type='views' THEN ${channelBillableViewsTodayExpr} ELSE ${campaignPostTodayImpressionsExpr} END
          END as today_impressions,
          CASE
            WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent' AND bd.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND bd.created_at < CURDATE()), 0)
-           ELSE ${campaignPostYesterdayImpressionsExpr}
+           ELSE CASE WHEN c.type='views' THEN ${channelBillableViewsYesterdayExpr} ELSE ${campaignPostYesterdayImpressionsExpr} END
          END as yesterday_impressions,
          CASE
            WHEN type = 'broadcast' THEN 0
-           ELSE COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0)
+           ELSE ${displayedChannelClicksExpr}
          END as clicks,
          CASE
            WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
-           ELSE COALESCE(c.channel_spend, 0)
+           ELSE ${channelSettledSpendExpr}
          END as spend,
          CASE
            WHEN type = 'broadcast' THEN ${broadcastTodaySpendExpr}
@@ -470,7 +512,7 @@ export async function GET(request: Request) {
            ) > 0
            THEN (
              CASE WHEN type = 'broadcast' THEN 0
-             ELSE COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0) END
+             ELSE ${displayedChannelClicksExpr} END
            ) / (
              CASE WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
              ELSE ${campaignPostImpressionsExpr} END
@@ -480,34 +522,34 @@ export async function GET(request: Request) {
          CASE
            WHEN (
              CASE WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 0)
-             ELSE ${campaignPostImpressionsExpr} END
+             ELSE ${advertiserVisibleImpressionsExpr} END
            ) > 0
            THEN (
              CASE WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
-             ELSE COALESCE(c.channel_spend, 0) END
+             ELSE ${channelSettledSpendExpr} END
            ) / (
              CASE WHEN type = 'broadcast' THEN COALESCE((SELECT COUNT(*) FROM broadcast_deliveries bd WHERE bd.campaign_id = c.id AND bd.status = 'sent'), 1)
-             ELSE ${campaignPostImpressionsExpr} END
+             ELSE ${advertiserVisibleImpressionsExpr} END
            ) * 1000
            ELSE 0
          END as average_cpm,
          CASE
-           WHEN type != 'broadcast' AND COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 0) > 0
-           THEN COALESCE(c.channel_spend, 0) / COALESCE((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.campaign_id = c.id), 1)
+           WHEN type = 'clicks' AND ${channelBillableClicksExpr} > 0
+           THEN ${channelSettledSpendExpr} / ${channelBillableClicksExpr}
            ELSE 0
          END as average_cpc,
          CASE
            WHEN (
              CASE WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
-             ELSE COALESCE(c.channel_spend, 0) END
+             ELSE ${channelSettledSpendExpr} END
              + COALESCE(c.budget, 0)
            ) > 0
            THEN (
              CASE WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
-             ELSE COALESCE(c.channel_spend, 0) END
+             ELSE ${channelSettledSpendExpr} END
            ) / (
              CASE WHEN type = 'broadcast' THEN ${broadcastSpendExpr}
-             ELSE COALESCE(c.channel_spend, 0) END
+             ELSE ${channelSettledSpendExpr} END
              + COALESCE(c.budget, 0)
            ) * 100
            ELSE 0
@@ -519,7 +561,12 @@ export async function GET(request: Request) {
       },
     );
 
-    return NextResponse.json(rows, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
+    const channelMetrics = await getChannelReportingMetrics(pool, rows.filter(isStandardChannelReport).map((r: any) => Number(r.id)));
+    const reportedRows = rows.map((row: any) => {
+      const metrics = channelMetrics.get(Number(row.id));
+      return isStandardChannelReport(row) && metrics ? { ...row, ...channelMetricPayload(metrics, row.campaign_kind === "channel_growth") } : row;
+    });
+    return NextResponse.json(reportedRows, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
   } catch (error: any) {
     console.error("Fetch Campaigns Error:", error);
     return NextResponse.json({ error: "Unable to load campaigns right now" }, { status: getAuthErrorStatus(error) });

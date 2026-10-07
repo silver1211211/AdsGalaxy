@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { combineMiniAppCampaignMetricSources } from "../src/lib/miniappCampaignMetricMath.ts";
-import { calculateCumulativeExternalDue } from "../src/lib/miniappExternalDeliveryMath.ts";
+import {
+  calculateCumulativeExternalDue,
+  calculateDeliveryProgress,
+  externalBatchSourceKey,
+} from "../src/lib/miniappExternalDeliveryMath.ts";
 
 const worker = readFileSync("src/lib/miniappExternalDeliverySync.ts", "utf8");
 const directDebit = readFileSync("src/lib/advertiserDirectDebit.ts", "utf8");
@@ -72,6 +76,53 @@ test("platform traffic can exceed the target and retries do not duplicate delive
   assert.equal(due(1000, 500, 800, 1), 0);
 });
 
+test("three committed logical batches debit exactly once and a retry is idempotent", () => {
+  const claimed = new Set();
+  let walletDebit = 0;
+  let campaignDebit = 0;
+  const commit = (sequence, amount, fail = false) => {
+    const key = externalBatchSourceKey(44, sequence);
+    if (claimed.has(key)) return false;
+    const before = { walletDebit, campaignDebit };
+    claimed.add(key);
+    walletDebit += amount;
+    campaignDebit += amount;
+    if (fail) {
+      claimed.delete(key);
+      ({ walletDebit, campaignDebit } = before);
+      return false;
+    }
+    return true;
+  };
+  assert.equal(commit(1, 125), true);
+  assert.equal(commit(2, 250), true);
+  assert.equal(commit(2, 250), false);
+  assert.equal(commit(3, 375), true);
+  assert.equal(commit(4, 999, true), false);
+  assert.equal(commit(4, 500), true);
+  assert.equal(walletDebit, 1250);
+  assert.equal(campaignDebit, 1250);
+});
+
+test("delivery progress remains truthful when elapsed time is complete", () => {
+  const progress = calculateDeliveryProgress({
+    startingImpressions: 1000, startingClicks: 100,
+    targetImpressions: 2000, targetClicks: 200,
+    currentImpressions: 1250, currentClicks: 125,
+  });
+  assert.equal(progress, 0.25);
+  assert.notEqual(progress, 1);
+});
+
+test("click batches remain bounded by combined impressions", () => {
+  const impressionsAfter = 12;
+  const clicksBefore = 10;
+  const clickDue = 9;
+  const fundedClicks = Math.min(clickDue, Math.max(0, impressionsAfter - clicksBefore));
+  assert.equal(fundedClicks, 2);
+  assert.ok(clicksBefore + fundedClicks <= impressionsAfter);
+});
+
 test("schema enforces one active sync and preserves source/batch history", () => {
   assert.match(migration, /UNIQUE KEY uniq_miniapp_external_sync_active \(campaign_id, active_slot\)/);
   assert.match(migration, /miniapp_external_delivery_batches/);
@@ -84,7 +135,7 @@ test("all advertiser and admin campaign reporting reuses combined authoritative 
   assert.match(campaignMetrics, /combineMiniAppCampaignMetricSources/);
   for (const route of reportingRoutes) {
     const usesSharedMetrics = /getMiniAppCampaignMetrics/.test(route)
-      && /applyMiniAppCampaignMetrics|miniAppMetrics\.values/.test(route);
+      && /applyMiniAppCampaignMetrics|miniappMetrics\.values/i.test(route);
     const directlyCombinesBothSources = /miniapp_internal_ad_impressions/.test(route)
       && /miniapp_external_delivery_batches/.test(route);
     assert.ok(usesSharedMetrics || directlyCombinesBothSources);

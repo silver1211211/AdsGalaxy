@@ -34,6 +34,8 @@ export default function AdminBotsPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [bulkApproving, setBulkApproving] = useState(false);
+  const pendingBotCount = Number(summary?.pending_bots || 0);
   const [error, setError] = useState("");
 
   const [viewModalOpen, setViewModalOpen] = useState(false);
@@ -83,6 +85,97 @@ export default function AdminBotsPage() {
       setError(err.message);
     } finally {
       setActionLoading(null);
+    }
+  };
+
+  const handleApproveAll = async () => {
+    if (bulkApproving || loading || pendingBotCount === 0) return;
+
+    const confirmed = window.confirm(
+      "Approve all pending bots? Bots that fail the normal Telegram health check will remain pending."
+    );
+    if (!confirmed) return;
+
+    setBulkApproving(true);
+
+    try {
+      const pendingBots: any[] = [];
+      let pendingPage = 1;
+      let pendingTotalPages = 1;
+
+      do {
+        const listRes = await fetch(`/api/admin/bots?status=pending&page=${pendingPage}&limit=100`);
+        const listData = await listRes.json().catch(() => ({}));
+
+        if (!listRes.ok) {
+          throw new Error(getApiErrorMessage(listData, "Failed to load pending bots"));
+        }
+
+        pendingBots.push(...(Array.isArray(listData.bots) ? listData.bots : []));
+        pendingTotalPages = Math.max(1, Number(listData.totalPages || 1));
+        pendingPage += 1;
+      } while (pendingPage <= pendingTotalPages);
+
+      if (pendingBots.length === 0) {
+        window.alert("There are no pending bots to approve.");
+        return;
+      }
+
+      let approved = 0;
+      const rejectedInvalid: string[] = [];
+      const temporarilyUnverified: string[] = [];
+      const failed: string[] = [];
+
+      for (const bot of pendingBots) {
+        try {
+          const res = await fetch(`/api/admin/bots/${bot.id}/actions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "activate" }),
+          });
+
+          const data = await res.json().catch(() => ({}));
+
+          const label = `#${bot.id}${bot.bot_username ? ` @${bot.bot_username}` : ""}`;
+          if (data.approval_result === "rejected_invalid_integration") {
+            rejectedInvalid.push(label);
+            continue;
+          }
+          if (data.approval_result === "temporarily_unverified" || data.code === "TEMPORARILY_UNVERIFIED") {
+            temporarilyUnverified.push(`${label}: ${data.retry_at ? `retry after ${new Date(data.retry_at).toLocaleString()}` : "retry later"}`);
+            continue;
+          }
+          if (!res.ok) {
+            failed.push(`${label}: ${getApiErrorMessage(data, "Approval failed")}`);
+            continue;
+          }
+
+          approved += 1;
+        } catch (err: any) {
+          failed.push(`#${bot.id}${bot.bot_username ? ` @${bot.bot_username}` : ""}: ${err?.message || "Approval failed"}`);
+        }
+      }
+
+      await fetchBots(page, statusFilter, search);
+
+      const summary = [
+        `${approved} bot${approved === 1 ? "" : "s"} approved.`,
+        `${rejectedInvalid.length} rejected — invalid integration (Rule #4).`,
+        `${temporarilyUnverified.length} temporarily unverified and left pending.`,
+        `${failed.length} failed.`,
+        rejectedInvalid.length ? "\nRejected invalid integration:" : null,
+        ...rejectedInvalid.slice(0, 10),
+        temporarilyUnverified.length ? "\nTemporarily unverified:" : null,
+        ...temporarilyUnverified.slice(0, 10),
+        failed.length ? "\nFailed:" : null,
+        ...failed.slice(0, 10),
+      ].filter(Boolean).join("\n");
+
+      window.alert(summary);
+    } catch (err: any) {
+      setError(err?.message || "Bulk approval failed");
+    } finally {
+      setBulkApproving(false);
     }
   };
 
@@ -421,6 +514,17 @@ export default function AdminBotsPage() {
         {/* Toolbar */}
         <div className="flex flex-col gap-4 border-b border-slate-200 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-sm font-semibold text-slate-900">All Bots</h2>
+            <button
+              type="button"
+              onClick={handleApproveAll}
+              disabled={loading || bulkApproving || pendingBotCount === 0}
+              aria-disabled={loading || bulkApproving || pendingBotCount === 0}
+              title={pendingBotCount === 0 ? "No pending bots to approve" : undefined}
+              className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 transition-colors hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {bulkApproving ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />}
+              {bulkApproving ? "Approving..." : "Approve All"}
+            </button>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />

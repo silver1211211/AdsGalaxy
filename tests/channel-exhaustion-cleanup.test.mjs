@@ -66,8 +66,8 @@ test("multiple cleanup failures remain independent and retryable", () => {
 test("stale process-ads placement rechecks active status under lock before insertion", () => {
   const lock = processAds.indexOf("const [[lockedCampaign]]");
   const statusCheck = processAds.indexOf('lockedCampaign?.status !== "active"', lock);
-  const insert = processAds.indexOf("INSERT INTO campaign_posts", statusCheck);
-  assert.ok(lock >= 0 && statusCheck > lock && insert > statusCheck);
+  const reservation = processAds.indexOf("reserveChannelPlacement", statusCheck);
+  assert.ok(lock >= 0 && statusCheck > lock && reservation > statusCheck);
 });
 
 test("pause cleanup remains distinct from exhaustion cleanup", () => {

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthErrorStatus } from "@/lib/auth";
+import { authenticateChannelPublisher, channelTelegram, requireChannelPublisherAuthority, requireStableChannelId, throwIfPrivateVerificationUnavailable, ChannelOnboardingError, onboardingErrorResponse } from "@/lib/channelOnboarding";
 import {
   normalizePrivateInviteLink,
   normalizePublicChannelUsername,
@@ -8,19 +9,7 @@ import { resolvePrivateInviteLink } from "@/lib/telegramMtproto";
 import { createPrivateChannelVerificationToken } from "@/lib/privateChannelVerificationToken";
 import { logPrivateChannelDiagnostic } from "@/lib/privateChannelDiagnostics";
 
-async function telegram(token: string, method: string, body: Record<string, unknown>) {
-  try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    return response.json();
-  } catch (error) {
-    console.error(`Telegram ${method} request failed:`, error);
-    return { ok: false, description: "Unable to reach Telegram. Please try again." };
-  }
-}
+const telegram = channelTelegram;
 
 type PermissionSnapshot = {
   is_admin?: boolean;
@@ -65,8 +54,7 @@ type ChatInfoInput = {
 
 async function verifyChatInfo(request: Request, input: ChatInfoInput) {
   try {
-    const initData = request.headers.get("x-telegram-init-data");
-    await getAuthenticatedUser(initData);
+    const user = await authenticateChannelPublisher(request);
 
     const { username, inviteLink } = input;
     const hasInviteInput = Boolean(String(inviteLink || "").trim());
@@ -107,6 +95,7 @@ async function verifyChatInfo(request: Request, input: ChatInfoInput) {
     if (normalizedInviteLink) {
       const resolved = await resolvePrivateInviteLink(normalizedInviteLink);
       if (!resolved.ok) {
+        throwIfPrivateVerificationUnavailable(resolved.code);
         logPrivateChannelDiagnostic("chat_info_rejected", {
           token_received: false,
           token_valid: false,
@@ -144,6 +133,7 @@ async function verifyChatInfo(request: Request, input: ChatInfoInput) {
     }
 
     const chat = data.result;
+    const stableChatId = requireStableChannelId(chat.id);
 
     // Check permissions
     const meData = await telegram(token, "getMe", {});
@@ -193,14 +183,15 @@ async function verifyChatInfo(request: Request, input: ChatInfoInput) {
     if (chat.type !== "channel") {
       return NextResponse.json({ error: "Only channels are allowed." }, { status: 400 });
     }
+    await requireChannelPublisherAuthority(token, String(chat.id), String(user.telegram_id));
 
-    const countData = await telegram(token, "getChatMemberCount", { chat_id: chat.id });
+    const countData = await telegram<number>(token, "getChatMemberCount", { chat_id: stableChatId });
     const subscriberCount = countData.ok
       ? Number(countData.result || 0)
       : privateInviteMeta?.participantsCount ?? null;
 
     const verificationToken = normalizedInviteLink
-      ? createPrivateChannelVerificationToken(chat.id, normalizedInviteLink)
+      ? createPrivateChannelVerificationToken(stableChatId, normalizedInviteLink)
       : null;
 
     if (channelType === "private") {
@@ -227,9 +218,9 @@ async function verifyChatInfo(request: Request, input: ChatInfoInput) {
       verification_token: verificationToken,
     });
   } catch (error: unknown) {
-    console.error("Telegram API Error:", error);
-    const message = error instanceof Error ? error.message : "Internal server error";
-    return NextResponse.json({ error: message }, { status: getAuthErrorStatus(error) === 403 ? 403 : 401 });
+    if (error instanceof ChannelOnboardingError) return onboardingErrorResponse(error);
+    const status = getAuthErrorStatus(error);
+    return NextResponse.json({ error: status === 401 || status === 403 ? "Please reopen AdsGalaxy to verify your session." : "Channel verification is temporarily unavailable." }, { status });
   }
 }
 

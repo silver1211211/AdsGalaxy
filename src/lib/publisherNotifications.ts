@@ -1,49 +1,29 @@
 import pool from "@/lib/db";
-import { escapeTelegramHtml, sendTelegramMessage } from "@/lib/telegram";
+import { escapeTelegramHtml } from "@/lib/telegram";
+import { dispatchPlatformNotifications, enqueuePlatformNotification } from "@/lib/platformNotifications";
 
 type EntityType = "withdrawal" | "channel" | "miniapp" | "bot";
 
-// All notifications here are best-effort: a delivery failure (blocked bot,
-// deleted account, Telegram outage, etc.) must never block or roll back the
-// admin/publisher action that triggered it. Duplicate-send prevention is
-// enforced by callers (conditional UPDATE ... WHERE status <> target, gated
-// on affectedRows) before this function is ever invoked — this function only
-// records the outcome of the single attempt it was asked to make.
+// Durable, idempotent and best-effort. Business actions never roll back when
+// Telegram is unavailable; the notification worker safely retries the event.
 async function notify(
   telegramId: unknown,
   message: string,
   event: { entityType: EntityType; entityId: number | string; eventType: string }
 ) {
-  if (!telegramId) return;
-
   try {
-    const result = await sendTelegramMessage(String(telegramId), message, { parse_mode: "HTML" });
-    if (result && result.ok === false) {
-      await logNotification(event, "failed", String(result.description || "send failed"), telegramId);
-      console.error(`Notification delivery failed (${event.eventType}):`, result.description);
-      return;
-    }
-    await logNotification(event, "sent", null, telegramId);
+    if (!telegramId) return;
+    const [[user]] = await pool.query<Array<import("mysql2/promise").RowDataPacket & { id: number }>>(
+      "SELECT id FROM users WHERE telegram_id=? LIMIT 1", [String(telegramId)]);
+    if (!user) return;
+    await enqueuePlatformNotification(pool, {
+      eventKey: `${event.eventType}:${event.entityType}:${event.entityId}`,
+      userId: Number(user.id), eventType: event.eventType, entityType: event.entityType,
+      entityId: event.entityId, messageHtml: message,
+    });
+    void dispatchPlatformNotifications(10).catch((error) => console.error("Notification dispatch failed", error));
   } catch (error) {
-    const reason = error instanceof Error ? error.message : "Unknown error";
-    await logNotification(event, "failed", reason, telegramId);
-    console.error(`Notification threw (${event.eventType}):`, reason);
-  }
-}
-
-async function logNotification(
-  event: { entityType: EntityType; entityId: number | string; eventType: string },
-  status: "sent" | "failed",
-  failureReason: string | null,
-  telegramId: unknown
-) {
-  try {
-    await pool.query(
-      "INSERT INTO notification_log (entity_type, entity_id, event_type, telegram_id, status, failure_reason) VALUES (?, ?, ?, ?, ?, ?)",
-      [event.entityType, event.entityId, event.eventType, String(telegramId), status, failureReason ? failureReason.slice(0, 255) : null]
-    );
-  } catch (error) {
-    console.error("Failed to write notification_log row:", error instanceof Error ? error.message : error);
+    console.error(`Notification enqueue failed (${event.eventType}):`, error instanceof Error ? error.message : error);
   }
 }
 
@@ -111,6 +91,11 @@ export async function notifyChannelRemoved(telegramId: unknown, channelId: numbe
   );
 }
 
+export async function notifyChannelPaused(telegramId: unknown, channelId: number | string, title?: string, version: number | string = 1) {
+  await notify(telegramId, `<b>Channel paused</b>\n\n“${escapeTelegramHtml(title)}” is not earning right now. Activate it again to continue monetizing.`,
+    { entityType: "channel", entityId: `${channelId}:${version}`, eventType: "channel_paused" });
+}
+
 // ── Mini Apps ─────────────────────────────────────────────────────────────
 
 export async function notifyMiniAppSubmitted(telegramId: unknown, miniAppId: number | string, name?: string) {
@@ -145,6 +130,11 @@ export async function notifyMiniAppRemoved(telegramId: unknown, miniAppId: numbe
   );
 }
 
+export async function notifyMiniAppPaused(telegramId: unknown, miniAppId: number | string, name?: string, version: number | string = 1) {
+  await notify(telegramId, `<b>Mini App paused</b>\n\n“${escapeTelegramHtml(name)}” is not earning right now. Activate it again to continue monetizing.`,
+    { entityType: "miniapp", entityId: `${miniAppId}:${version}`, eventType: "miniapp_paused" });
+}
+
 // ── Bots ──────────────────────────────────────────────────────────────────
 
 export async function notifyBotSubmitted(telegramId: unknown, botId: number | string, botUsername?: string) {
@@ -177,4 +167,9 @@ export async function notifyBotRemoved(telegramId: unknown, botId: number | stri
     `🗑️ <b>Bot Removed</b>\n\nYour bot @${escapeTelegramHtml(botUsername)} has been removed from AdsGalaxy and will no longer serve ads.\n\nAdd it again anytime if you'd like to resume monetization.`,
     { entityType: "bot", entityId: botId, eventType: "bot_removed" }
   );
+}
+
+export async function notifyBotPaused(telegramId: unknown, botId: number | string, botUsername?: string, version: number | string = 1) {
+  await notify(telegramId, `<b>Bot paused</b>\n\n@${escapeTelegramHtml(botUsername)} is not earning right now. Activate it again to continue monetizing.`,
+    { entityType: "bot", entityId: `${botId}:${version}`, eventType: "bot_paused" });
 }

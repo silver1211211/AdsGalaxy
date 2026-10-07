@@ -4,10 +4,12 @@ import pool from "@/lib/db";
 import {
   affordableExternalImpressions,
   calculateCumulativeExternalDue,
+  calculateDeliveryProgress,
   calculateSyncProgress,
   decimalToMoneyUnits,
   miniAppImpressionCostUnits,
   moneyUnitsToDecimal,
+  externalBatchSourceKey,
   wholeNonNegative,
 } from "@/lib/miniappExternalDeliveryMath";
 import {
@@ -16,6 +18,8 @@ import {
   markMiniAppCampaignBudgetExhausted,
 } from "@/lib/miniappCampaignNotifications";
 import { getMiniAppCampaignMetricsByIds } from "@/lib/miniappCampaignMetrics";
+import { getMiniAppDailyAdvertiserSpend, markMiniAppDailyCapReached, reconcileMiniAppDailyCaps } from "@/lib/miniappDailyCap";
+import { isActiveMiniAppExternalDeliverySyncStatus, requireMiniAppExternalDeliverySyncStatus, type MiniAppExternalDeliverySyncStatus } from "@/lib/miniappExternalDeliveryStatus";
 
 type Db = Pick<PoolConnection, "query" | "execute">;
 
@@ -60,6 +64,7 @@ type SyncRow = RowDataPacket & {
   completed_at: Date | string | null;
   cancelled_at: Date | string | null;
   stop_reason: string | null;
+  next_batch_sequence: string | number;
   created_at: Date | string;
   updated_at: Date | string;
 };
@@ -107,7 +112,7 @@ function serializeSync(sync: SyncRow | null, totals: Awaited<ReturnType<typeof g
       pausedAtMs: sync.paused_at ? timestamp(sync.paused_at) : null,
     })
     : 0;
-  const isActive = ["running", "paused"].includes(sync.status);
+  const isActive = isActiveMiniAppExternalDeliverySyncStatus(sync.status);
   const platformImpressionsDuring = isActive
     ? Math.max(0, totals.platformImpressions - count(sync.starting_platform_impressions))
     : count(sync.platform_impressions_during);
@@ -115,6 +120,14 @@ function serializeSync(sync: SyncRow | null, totals: Awaited<ReturnType<typeof g
     ? Math.max(0, totals.platformClicks - count(sync.starting_platform_clicks))
     : count(sync.platform_clicks_during);
   const referenceMs = sync.paused_at ? timestamp(sync.paused_at) : nowMs;
+  const deliveryProgress = calculateDeliveryProgress({
+    startingImpressions: count(sync.starting_combined_impressions),
+    startingClicks: count(sync.starting_combined_clicks),
+    targetImpressions: count(sync.target_impressions),
+    targetClicks: count(sync.target_clicks),
+    currentImpressions: totals.combinedImpressions,
+    currentClicks: totals.combinedClicks,
+  });
   return {
     ...sync,
     starting_platform_impressions: count(sync.starting_platform_impressions),
@@ -129,7 +142,9 @@ function serializeSync(sync: SyncRow | null, totals: Awaited<ReturnType<typeof g
     platform_clicks_during: platformClicksDuring,
     external_impressions_added: count(sync.external_impressions_added),
     external_clicks_added: count(sync.external_clicks_added),
-    progress_percent: Number((progress * 100).toFixed(2)),
+    time_progress_percent: Number((progress * 100).toFixed(2)),
+    delivery_progress_percent: Number((deliveryProgress * 100).toFixed(2)),
+    progress_percent: Number((deliveryProgress * 100).toFixed(2)),
     time_remaining_seconds: Math.max(0, Math.ceil((timestamp(sync.ends_at) - referenceMs) / 1000)),
     remaining_external_impressions: Math.max(0, count(sync.target_impressions) - totals.combinedImpressions),
     remaining_external_clicks: Math.max(0, count(sync.target_clicks) - totals.combinedClicks),
@@ -200,8 +215,8 @@ export async function createMiniAppExternalDeliverySync(input: {
       [input.campaignId],
     );
     if (campaigns.length === 0) throw new MiniAppExternalSyncError("Campaign not found", 404);
-    if (!["approved", "active", "paused", "completed"].includes(campaigns[0].status)) {
-      throw new MiniAppExternalSyncError("Campaign must be approved before external delivery can be synchronized", 409);
+    if (!["approved", "active"].includes(campaigns[0].status)) {
+      throw new MiniAppExternalSyncError("Only a currently deliverable campaign can start external delivery synchronization", 409);
     }
     const [active] = await conn.query<SyncRow[]>(
       `SELECT * FROM miniapp_external_delivery_syncs
@@ -226,7 +241,7 @@ export async function createMiniAppExternalDeliverySync(input: {
         target_impressions, target_clicks,
         required_external_impressions, required_external_clicks,
         duration_seconds, started_at, ends_at)
-       VALUES (?, ?, 'running', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), DATE_ADD(NOW(), INTERVAL ? SECOND))`,
+       VALUES (?, ?, 'running', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND))`,
       [
         input.campaignId,
         input.adminId,
@@ -272,7 +287,7 @@ export async function controlMiniAppExternalDeliverySync(input: {
     if (input.action === "pause") {
       if (job.status !== "running") throw new MiniAppExternalSyncError("Only a running sync can be paused", 409);
       await conn.query(
-        "UPDATE miniapp_external_delivery_syncs SET status = 'paused', paused_at = NOW() WHERE id = ?",
+        "UPDATE miniapp_external_delivery_syncs SET status = 'paused', paused_at = UTC_TIMESTAMP(), stop_reason = 'admin_paused' WHERE id = ?",
         [job.id],
       );
     } else if (input.action === "resume") {
@@ -280,16 +295,16 @@ export async function controlMiniAppExternalDeliverySync(input: {
       await conn.query(
         `UPDATE miniapp_external_delivery_syncs
          SET status = 'running',
-             total_paused_seconds = total_paused_seconds + GREATEST(TIMESTAMPDIFF(SECOND, paused_at, NOW()), 0),
-             ends_at = DATE_ADD(ends_at, INTERVAL GREATEST(TIMESTAMPDIFF(SECOND, paused_at, NOW()), 0) SECOND),
-             paused_at = NULL
+             total_paused_seconds = total_paused_seconds + GREATEST(TIMESTAMPDIFF(SECOND, paused_at, UTC_TIMESTAMP()), 0),
+             ends_at = DATE_ADD(ends_at, INTERVAL GREATEST(TIMESTAMPDIFF(SECOND, paused_at, UTC_TIMESTAMP()), 0) SECOND),
+             paused_at = NULL, stop_reason = NULL
          WHERE id = ?`,
         [job.id],
       );
     } else {
       await conn.query(
         `UPDATE miniapp_external_delivery_syncs
-         SET status = 'cancelled', active_slot = NULL, cancelled_at = NOW(),
+         SET status = 'cancelled', active_slot = NULL, cancelled_at = UTC_TIMESTAMP(),
              paused_at = NULL, stop_reason = 'admin_cancelled'
          WHERE id = ?`,
         [job.id],
@@ -368,13 +383,7 @@ async function processOneSync(syncId: number) {
     const dailyLimit = campaign.daily_budget_limit ? decimalToMoneyUnits(campaign.daily_budget_limit) : null;
     let dailyAvailable: bigint | null = null;
     if (dailyLimit !== null && dailyLimit > BigInt(0)) {
-      const [dailyRows] = await conn.query<Array<RowDataPacket & { spend: string }>>(
-        `SELECT
-          COALESCE((SELECT SUM(advertiser_debit) FROM miniapp_internal_ad_impressions WHERE campaign_id = ? AND created_at >= CURDATE()), 0)
-          + COALESCE((SELECT SUM(advertiser_debit) FROM miniapp_external_delivery_batches WHERE campaign_id = ? AND created_at >= CURDATE()), 0) AS spend`,
-        [campaignId, campaignId],
-      );
-      dailyAvailable = dailyLimit - decimalToMoneyUnits(dailyRows[0]?.spend || 0);
+      dailyAvailable = dailyLimit - decimalToMoneyUnits(await getMiniAppDailyAdvertiserSpend(conn, campaignId));
     }
 
     let fundedImpressions = impressionDue;
@@ -395,7 +404,7 @@ async function processOneSync(syncId: number) {
     if (fundedImpressions > 0) {
       const cost = moneyUnitsToDecimal(batchCost);
       const walletDebit = await claimAdvertiserDirectDebit(conn, {
-        sourceKey: `miniapp:external:${job.id}:${campaignId}`,
+        sourceKey: externalBatchSourceKey(job.id, count(job.next_batch_sequence)),
         advertiserId: Number(campaign.advertiser_id),
         campaignId,
         campaignTable: "miniapp_rewarded_campaigns",
@@ -408,7 +417,7 @@ async function processOneSync(syncId: number) {
         `UPDATE miniapp_rewarded_campaigns
          SET remaining_budget = GREATEST(remaining_budget - ?, 0),
              total_spend = total_spend + ?, impressions = impressions + ?
-         WHERE id = ? AND status IN ('approved', 'active', 'paused', 'completed') AND remaining_budget >= ?`,
+         WHERE id = ? AND status IN ('approved', 'active') AND remaining_budget >= ?`,
         [cost, cost, fundedImpressions, campaignId, cost],
       );
       if (campaignUpdate.affectedRows !== 1) throw new Error("Campaign budget changed during external delivery sync");
@@ -417,12 +426,13 @@ async function processOneSync(syncId: number) {
     if (fundedImpressions > 0 || fundedClicks > 0) {
       await conn.query(
         `INSERT INTO miniapp_external_delivery_batches
-         (sync_id, campaign_id, progress_ratio, platform_impressions_snapshot,
+         (sync_id, campaign_id, batch_sequence, progress_ratio, platform_impressions_snapshot,
           platform_clicks_snapshot, external_impressions_added, external_clicks_added, advertiser_debit)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           job.id,
           campaignId,
+          count(job.next_batch_sequence),
           progress.toFixed(10),
           totals.platformImpressions,
           totals.platformClicks,
@@ -446,19 +456,19 @@ async function processOneSync(syncId: number) {
       : remainingImpressions > 0;
     const dailyBlocked = dailyAvailable !== null && dailyAvailable - batchCost < unitCost;
     const reachedTargets = remainingImpressions === 0 && remainingClicks === 0;
-    let nextStatus = reachedTargets ? "completed" : "running";
+    let nextStatus: MiniAppExternalDeliverySyncStatus = reachedTargets ? "completed" : "running";
     let stopReason: string | null = reachedTargets ? "targets_reached" : null;
 
     if (!reachedTargets && impressionDue > fundedImpressions && !dailyBlocked) {
-      nextStatus = "budget_exhausted";
+      nextStatus = "funding_paused";
       stopReason = remainingBudgetAfter < unitCost || unitCost <= BigInt(0)
         ? "campaign_budget_exhausted"
         : "insufficient_advertiser_balance";
     } else if (!reachedTargets && progress >= 1 && (dailyBlocked || cannotFundNext)) {
-      nextStatus = "budget_exhausted";
+      nextStatus = dailyBlocked ? "daily_cap_paused" : "funding_paused";
       stopReason = dailyBlocked ? "daily_budget_limit" : "campaign_budget_exhausted";
     } else if (!reachedTargets && progress >= 1) {
-      nextStatus = "budget_exhausted";
+      nextStatus = "incomplete";
       stopReason = "target_reconciliation_incomplete";
     }
 
@@ -475,18 +485,26 @@ async function processOneSync(syncId: number) {
         [campaignId],
       );
       if (!reachedTargets) {
-        nextStatus = "budget_exhausted";
+        nextStatus = "insufficient_balance_paused";
         stopReason = "insufficient_advertiser_balance";
       }
+    } else if (!reachedTargets && dailyBlocked) {
+      await markMiniAppDailyCapReached(conn, campaignId);
+      nextStatus = "daily_cap_paused";
+      stopReason = "daily_budget_limit";
     }
 
+    requireMiniAppExternalDeliverySyncStatus(nextStatus);
     await conn.query(
       `UPDATE miniapp_external_delivery_syncs
        SET platform_impressions_during = ?, platform_clicks_during = ?,
            external_impressions_added = ?, external_clicks_added = ?,
-           external_spend = external_spend + ?, last_processed_at = NOW(),
-           status = ?, active_slot = CASE WHEN ? = 'running' THEN 1 ELSE NULL END,
-           completed_at = CASE WHEN ? = 'completed' THEN NOW() ELSE completed_at END,
+           external_spend = external_spend + ?,
+           next_batch_sequence = next_batch_sequence + CASE WHEN ? > 0 OR ? > 0 THEN 1 ELSE 0 END,
+           last_processed_at = UTC_TIMESTAMP(), status = ?,
+           active_slot = CASE WHEN ? IN ('running','paused','daily_cap_paused','insufficient_balance_paused') THEN 1 ELSE NULL END,
+           paused_at = CASE WHEN ? IN ('daily_cap_paused','insufficient_balance_paused') AND paused_at IS NULL THEN UTC_TIMESTAMP() ELSE paused_at END,
+           completed_at = CASE WHEN ? = 'completed' THEN UTC_TIMESTAMP() ELSE completed_at END,
            stop_reason = ?
        WHERE id = ?`,
       [
@@ -495,6 +513,9 @@ async function processOneSync(syncId: number) {
         externalImpressionsAfter,
         externalClicksAfter,
         moneyUnitsToDecimal(batchCost),
+        fundedImpressions,
+        fundedClicks,
+        nextStatus,
         nextStatus,
         nextStatus,
         nextStatus,
@@ -522,6 +543,7 @@ async function processOneSync(syncId: number) {
 }
 
 export async function processMiniAppExternalDeliverySyncs(limit = 50) {
+  const dailyCapLifecycle = await reconcileMiniAppDailyCaps(limit);
   const [jobs] = await pool.query<Array<RowDataPacket & { id: number }>>(
     `SELECT id FROM miniapp_external_delivery_syncs
      WHERE status = 'running' ORDER BY id ASC LIMIT ?`,
@@ -540,7 +562,7 @@ export async function processMiniAppExternalDeliverySyncs(limit = 50) {
     }
   }
   const notifications = await dispatchMiniAppCampaignNotifications(20);
-  return { checked: jobs.length, results, notifications };
+  return { checked: jobs.length, results, notifications, daily_cap_lifecycle: dailyCapLifecycle };
 }
 
 export async function reconcileMiniAppBudgetExhaustion() {

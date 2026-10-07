@@ -3,6 +3,7 @@ import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
 import type { RowDataPacket } from "mysql2/promise";
 import { parseAdminPagination } from "@/lib/adminPagination";
+import { mainCampaignScopeSql } from "@/lib/silverCampaignControl";
 
 type DeliveryRow = RowDataPacket & Record<string, unknown>;
 type CountRow = RowDataPacket & { total: number };
@@ -17,11 +18,11 @@ export async function GET(request: Request) {
   const search = searchParams.get("search") || "";
 
   try {
-    let whereClause = "";
+    let whereClause = `WHERE ${mainCampaignScopeSql("c")}`;
     const params: unknown[] = [];
 
     if (search) {
-      whereClause = "WHERE c.name LIKE ? OR b.bot_name LIKE ? OR bd.chat_id LIKE ?";
+      whereClause += " AND (c.name LIKE ? OR b.bot_name LIKE ? OR bd.chat_id LIKE ?)";
       const searchVal = `%${search}%`;
       params.push(searchVal, searchVal, searchVal);
     }

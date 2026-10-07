@@ -39,6 +39,7 @@ test("Teaser ingestion and permission checks resolve channels by numeric chat_id
   assert.match(ingestion, /WHERE chat_id=\? AND teaser_enabled=1/);
   assert.match(ingestion, /WHERE ch\.chat_id=\?/);
   assert.doesNotMatch(ingestion, /WHERE ch\.channel_id=\?/);
+  assert.doesNotMatch(ingestion, /UPDATE channels[\s\S]{0,300}WHERE channel_id\s*=/);
   assert.match(settings, /SELECT chat_id FROM channels/);
   assert.match(settings, /rows\[0\]\.chat_id/);
 });

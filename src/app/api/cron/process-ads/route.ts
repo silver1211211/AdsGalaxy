@@ -1,17 +1,18 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- scheduler queries combine legacy campaign schemas */
 import { NextRequest, NextResponse } from "next/server";
+import { channelDailySpendSql } from "@/lib/channelDailySpend";
+import { randomUUID } from "crypto";
 import pool from "@/lib/db";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { getCurrentPostingSlot } from "@/lib/postingTimes";
 import {
   autoPauseChannel,
-  checkChannelHealth,
   classifyTelegramSendFailure,
   ensureDefaultChannelDistribution,
   recordChannelPostFailure,
   recordChannelPostSuccess,
-  markChannelHealthSuccess,
 } from "@/lib/channelLifecycle";
+import { verifyTelegramChannelAccess } from "@/lib/telegramChannelAccess";
 import { channelCampaignMatchesInventory } from "@/lib/channelAudience";
 import { calculateCampaignScore, getWindowDominanceCap } from "@/lib/campaignPlacement";
 import { getAdvertiserTrustMultipliers } from "@/lib/advertiserTrust";
@@ -27,14 +28,35 @@ import { requireAdServingAllowed, upsertAdminAlert } from "@/lib/productionSafet
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 import { campaignExcludesChannel, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { composeCampaignCreativeTelegramHtml } from "@/lib/campaignCreative";
-import { getChannelUnitPrice } from "@/lib/channelBilling";
+import { getChannelUnitPrice, channelUnitPriceSql } from "@/lib/channelBilling";
 import { createGrowthDeliveryInvite } from "@/lib/channelGrowthInvite";
 import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
+import { isChannelAllowedForCampaign, silverCampaignDeliverySql } from "@/lib/silverCampaignControl";
+import {
+  getChannelScheduleSlotOccupancies,
+  releaseChannelScheduleSlotClaim,
+  reserveChannelPlacement,
+  trackedChannelCtaUrl,
+  trackedGrowthCtaUrl,
+} from "@/lib/channelDelivery";
+import { channelSchedulerGraceMinutes, evaluateChannelPostingSlot } from "@/lib/channelScheduleSlots";
+import { reconcileChannelDailyCapLifecycle } from "@/lib/channelDailyCap";
+import { outstandingViewsSql } from "@/lib/channelViewWaivers";
+import { checkChannelPlacementAffordability } from "@/lib/channelPlacementAffordability";
+import {
+  buildAllocationBidMaxima,
+  deterministicAllocationTieBreaker,
+  normalizedCampaignAllocationBid,
+  rankEligibleCampaigns,
+  successfulChannelPlacementSql,
+  zeroDeliveryReason,
+} from "@/lib/channelCampaignAllocator";
 
 export const dynamic = 'force-dynamic';
 
 interface CampaignRow {
   id: number;
+  public_id?: number;
   user_id: number;
   name: string;
   budget: string | number;
@@ -68,7 +90,7 @@ interface CampaignRow {
   created_at?: string | Date;
 }
 
-interface ChannelRow {
+interface ChannelRow extends Record<string, unknown> {
   id: number;
   user_id: number;
   chat_id: string;
@@ -85,8 +107,17 @@ interface ChannelRow {
   inventory_priority_multiplier?: string | number;
   created_at?: string | Date;
   scheduler_slot?: string | null;
+  posting_times?: unknown;
+  posts_per_day?: number | string | null;
   paused_reason?: string | null;
   suggested_fix?: string | null;
+}
+
+interface DueChannelRow extends ChannelRow {
+  postingSlotDate: string;
+  postingSlotTime: string;
+  scheduledFor: Date;
+  windowExpiresAt: Date;
 }
 
 interface RecentPostRow {
@@ -95,6 +126,8 @@ interface RecentPostRow {
   created_at: string | Date;
   status: string;
   deleted_at?: string | Date | null;
+  delivery_confirmed_at?: string | Date | null;
+  delivery_failed_at?: string | Date | null;
 }
 
 async function getPostingSchedulerSchema() {
@@ -130,7 +163,11 @@ function sleep(ms: number) {
 async function sendTelegramMessageWithRetries(chatId: string | number, text: string, options: any) {
   let lastResult: any = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    lastResult = await sendTelegramMessage(chatId, text, options);
+    try {
+      lastResult = await sendTelegramMessage(chatId, text, options);
+    } catch (error: any) {
+      lastResult = { ok: false, description: String(error?.message || "Telegram send threw an error") };
+    }
     if (lastResult?.ok) {
       return { ok: true, result: lastResult, attempts: attempt };
     }
@@ -148,13 +185,14 @@ async function sendTelegramMessageWithRetries(chatId: string | number, text: str
   return { ok: false, result: lastResult, attempts: 3, permanent: null };
 }
 
-function buildPostMaps(posts: RecentPostRow[], hasDeletedAtColumn: boolean) {
+function buildPostMaps(posts: RecentPostRow[]) {
   const recent24h = new Set<string>();
   const cutoff = Date.now() - (24 * 60 * 60 * 1000);
 
   for (const post of posts) {
+    if (!post.delivery_confirmed_at || post.delivery_failed_at) continue;
     const key = `${post.campaign_id}:${post.channel_id}`;
-    const createdAt = new Date(post.created_at).getTime();
+    const createdAt = new Date(post.delivery_confirmed_at as string | Date).getTime();
 
     if (createdAt > cutoff) {
       recent24h.add(key);
@@ -164,19 +202,155 @@ function buildPostMaps(posts: RecentPostRow[], hasDeletedAtColumn: boolean) {
   return { recent24h };
 }
 
-function postingSlotHistory(postingSlotDate: string, postingSlotTime: string) {
-  const recoverySlots = Math.min(12, Math.max(1, Number.parseInt(process.env.CHANNEL_SCHEDULER_RECOVERY_SLOTS || "4", 10) || 4));
-  const slots: string[] = [];
-  const cursor = new Date(`${postingSlotDate}T${postingSlotTime}:00`);
+async function loadActiveCampaignRows(input: { now: Date; pageSize: number; maxScan: number }) {
+  const [[maximum]]: any = await pool.query(
+    "SELECT COALESCE(MAX(id),0) max_id FROM campaigns WHERE status='active' AND budget>0 AND type!='broadcast'",
+  );
+  const maxId = Math.max(0, Number(maximum?.max_id || 0));
+  if (!maxId) return { rows: [] as CampaignRow[], scanned: 0 };
 
-  for (let i = 0; i < recoverySlots; i += 1) {
-    const hours = String(cursor.getHours()).padStart(2, "0");
-    const minutes = String(cursor.getMinutes()).padStart(2, "0");
-    slots.push(`${hours}:${minutes}`);
-    cursor.setMinutes(cursor.getMinutes() - 30);
+  const minuteBucket = Math.floor(input.now.getTime() / 60_000) >>> 0;
+  const startAfter = (Math.imul(minuteBucket, 0x85ebca6b) >>> 0) % (maxId + 1);
+  const rows: CampaignRow[] = [];
+  let scanned = 0;
+  const scanRange = async (initialCursor: number, upperBound: number | null) => {
+    let cursor = initialCursor;
+    while (scanned < input.maxScan) {
+      const limit = Math.min(input.pageSize, input.maxScan - scanned);
+      const upperSql = upperBound === null ? "" : "AND c.id<=?";
+      const params = upperBound === null ? [cursor, limit] : [cursor, upperBound, limit];
+      const [page]: any = await pool.query(`
+        SELECT c.*, u.ad_balance advertiser_ad_balance, COALESCE(u.advertiser_trust_level, 'new') advertiser_trust_level,
+          CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END advertiser_discount
+        FROM campaigns c
+        JOIN users u ON c.user_id=u.id
+        LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
+        WHERE c.status='active' AND c.budget>0 AND c.type!='broadcast' AND c.id>? ${upperSql}
+          AND ${silverCampaignDeliverySql("c")}
+          AND (c.start_at IS NULL OR c.start_at<=NOW())
+          AND (c.end_at IS NULL OR c.end_at>=NOW())
+          AND (
+            c.daily_budget_limit IS NULL OR c.daily_budget_limit<=0 OR
+            ${channelDailySpendSql()} < c.daily_budget_limit
+          )
+          AND COALESCE(u.advertiser_trust_level,'new')!='restricted'
+        ORDER BY c.id ASC LIMIT ?
+      `, params);
+      if (!page.length) break;
+      rows.push(...page);
+      scanned += page.length;
+      cursor = Number(page[page.length - 1].id);
+      if (page.length < limit || (upperBound !== null && cursor >= upperBound)) break;
+    }
+  };
+
+  await scanRange(startAfter, null);
+  if (scanned < input.maxScan && startAfter > 0) await scanRange(0, startAfter);
+  return { rows, scanned };
+}
+
+function schedulerFairnessKey(channelId: number, now: Date) {
+  let value = (Number(channelId) ^ Math.floor(now.getTime() / 60_000)) >>> 0;
+  value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
+  value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
+  return (value ^ (value >>> 16)) >>> 0;
+}
+
+async function loadDueChannelSlots(input: {
+  now: Date;
+  graceMinutes: number;
+  pageSize: number;
+  maxScan: number;
+}) {
+  const [[maximum]]: any = await pool.query(
+    "SELECT COALESCE(MAX(id),0) max_id FROM channels WHERE status='active' AND is_deleted=FALSE",
+  );
+  const maxId = Math.max(0, Number(maximum?.max_id || 0));
+  if (!maxId) return { due: [] as DueChannelRow[], scanned: 0, expired: 0, expiredSamples: [] as Array<Record<string, unknown>> };
+
+  const minuteBucket = Math.floor(input.now.getTime() / 60_000) >>> 0;
+  const startAfter = (Math.imul(minuteBucket, 0x9e3779b1) >>> 0) % (maxId + 1);
+  const due: DueChannelRow[] = [];
+  const expiredSamples: Array<Record<string, unknown>> = [];
+  let scanned = 0;
+  let expired = 0;
+
+  const scanRange = async (initialCursor: number, upperBound: number | null) => {
+    let cursor = initialCursor;
+    while (scanned < input.maxScan) {
+      const remaining = input.maxScan - scanned;
+      const limit = Math.min(input.pageSize, remaining);
+      const upperSql = upperBound === null ? "" : "AND c.id<=?";
+      const params = upperBound === null ? [cursor, limit] : [cursor, upperBound, limit];
+      const [rows]: any = await pool.query(`
+        SELECT c.*,g.authoritative_country_code,g.authoritative_language_code
+        FROM channels c LEFT JOIN channel_geo_classifications g ON g.channel_id=c.id
+        WHERE c.status='active' AND c.is_deleted=FALSE AND c.id>? ${upperSql}
+        ORDER BY c.id ASC LIMIT ?
+      `, params);
+      if (!rows.length) break;
+      scanned += rows.length;
+      cursor = Number(rows[rows.length - 1].id);
+      for (const row of rows as ChannelRow[]) {
+        const slot = evaluateChannelPostingSlot(row, input.now, input.graceMinutes);
+        if (slot.due && slot.slotDate && slot.slotTime && slot.scheduledFor && slot.windowExpiresAt) {
+          due.push({
+            ...row,
+            postingSlotDate: slot.slotDate,
+            postingSlotTime: slot.slotTime,
+            scheduledFor: slot.scheduledFor,
+            windowExpiresAt: slot.windowExpiresAt,
+          });
+        } else if (slot.missed) {
+          expired += 1;
+          if (expiredSamples.length < 20) {
+            expiredSamples.push({
+              channel_id: row.id,
+              scheduled_slot: slot.slotDate && slot.slotTime ? `${slot.slotDate} ${slot.slotTime}` : null,
+              scheduler_time: input.now.toISOString(),
+              reason: "missed_schedule_slot",
+            });
+          }
+        }
+      }
+      if (rows.length < limit || (upperBound !== null && cursor >= upperBound)) break;
+    }
+  };
+
+  await scanRange(startAfter, null);
+  if (scanned < input.maxScan && startAfter > 0) await scanRange(0, startAfter);
+  due.sort((left, right) => schedulerFairnessKey(left.id, input.now) - schedulerFairnessKey(right.id, input.now));
+  return { due, scanned, expired, expiredSamples };
+}
+
+async function markScheduledPlacementFailed(input: {
+  postId: number;
+  claimId: number;
+  channelId: number;
+  slotDate: string;
+  slotTime: string;
+  reason: string;
+}) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [failed] = await conn.query<any>(
+      "UPDATE campaign_posts SET status='delivery_failed',delivery_failed_at=NOW(),delivery_failure_reason=? WHERE id=? AND status='pending_delivery'",
+      [input.reason.slice(0, 255), input.postId],
+    );
+    if (Number(failed?.affectedRows || 0) !== 1) {
+      await conn.rollback();
+      return false;
+    }
+    const released = await releaseChannelScheduleSlotClaim(conn, input);
+    await conn.commit();
+    return released;
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
   }
-
-  return Array.from(new Set(slots));
 }
 
 async function recordDeliveryEvent(
@@ -205,6 +379,8 @@ async function recordDeliveryEvent(
 }
 
 export async function GET(req: NextRequest) {
+  const runId = randomUUID();
+  const runStartedAt = new Date();
   const unauthorized = requireCronSecret(req);
   if (unauthorized) return unauthorized;
 
@@ -215,12 +391,16 @@ export async function GET(req: NextRequest) {
 
   try {
     await ensureClassicSettlementColumns();
+    const dailyCapLifecycle = await reconcileChannelDailyCapLifecycle();
     const blocked = await requireAdServingAllowed();
     if (blocked) return blocked;
 
     const isDev = process.env.MODE === "DEV";
     const now = Date.now();
-    const intervalMinutes = parseInt(process.env.CRON_POSTS_INTERVAL || "10");
+    // Normal channel scheduling is intentionally evaluated every minute. The
+    // legacy CRON_POSTS_INTERVAL (9/10 minutes in production) caused due slots
+    // to drift and is no longer authoritative for this route.
+    const intervalMinutes = Math.min(5, Math.max(1, Number.parseInt(process.env.CHANNEL_SCHEDULER_INTERVAL_MINUTES || "1", 10) || 1));
     const intervalMs = intervalMinutes * 60 * 1000;
 
     const [throttleResult]: any = await pool.query(
@@ -240,12 +420,14 @@ export async function GET(req: NextRequest) {
     }
 
     const schedulerSchema = await getPostingSchedulerSchema();
+    const schedulerNow = new Date();
+    const schedulerGraceMinutes = channelSchedulerGraceMinutes();
     const currentSlot = getCurrentPostingSlot();
     const currentSlotTimeForDb = `${currentSlot.postingSlotTime}:00`;
-    const currentSlotStart = `${currentSlot.postingSlotDate} ${currentSlotTimeForDb}`;
-    const recoverablePostingSlots = postingSlotHistory(currentSlot.postingSlotDate, currentSlot.postingSlotTime);
     const channelSlotLimit = Math.max(1, parseInt(process.env.CRON_CHANNEL_SLOT_LIMIT || "200"));
-    const campaignLimit = Math.max(1, parseInt(process.env.CRON_CAMPAIGN_LIMIT || "200"));
+    const channelScanLimit = Math.max(channelSlotLimit, parseInt(process.env.CRON_CHANNEL_SCAN_LIMIT || "2000"));
+    const campaignPageSize = Math.max(1, parseInt(process.env.CRON_CAMPAIGN_LIMIT || "200"));
+    const campaignScanLimit = Math.max(campaignPageSize, parseInt(process.env.CRON_CAMPAIGN_SCAN_LIMIT || "2000"));
     const distribution = schedulerSchema.hasChannelSchedulerSlot
       ? await ensureDefaultChannelDistribution()
       : null;
@@ -256,29 +438,18 @@ export async function GET(req: NextRequest) {
 
     const trustMultipliers = await getAdvertiserTrustMultipliers();
     const deliverySettings = await getDeliveryOptimizationSettings();
-    const [campaignRows]: any = await pool.query(`
-      SELECT c.*, u.ad_balance advertiser_ad_balance, COALESCE(u.advertiser_trust_level, 'new') as advertiser_trust_level,
-        CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END advertiser_discount
-      FROM campaigns c
-      JOIN users u ON c.user_id = u.id
-      LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
-      WHERE c.status = 'active' AND c.budget > 0 AND c.type != 'broadcast'
-        AND (c.start_at IS NULL OR c.start_at <= NOW())
-        AND (c.end_at IS NULL OR c.end_at >= NOW())
-        AND (
-          c.daily_budget_limit IS NULL OR c.daily_budget_limit <= 0 OR
-          (COALESCE((SELECT SUM(l.advertiser_debit) FROM channel_settlement_ledger l
-            WHERE l.campaign_id = c.id AND l.created_at >= CURDATE()), 0)
-          + COALESCE((SELECT SUM(d.advertiser_debit) FROM channel_advertiser_debits d
-            WHERE d.campaign_id = c.id AND d.created_at >= CURDATE()), 0)) < c.daily_budget_limit
-        )
-        AND COALESCE(u.advertiser_trust_level, 'new') != 'restricted'
-      ORDER BY COALESCE(c.is_prioritized, 0) DESC, budget DESC
-      LIMIT ?
-    `, [campaignLimit]);
-    let campaigns = campaignRows as CampaignRow[];
-    const prioritizedCampaigns = campaigns.filter((campaign) => Boolean(campaign.is_prioritized));
-    if (prioritizedCampaigns.length > 0) campaigns = prioritizedCampaigns;
+    const campaignScan = await loadActiveCampaignRows({
+      now: schedulerNow,
+      pageSize: campaignPageSize,
+      maxScan: campaignScanLimit,
+    });
+    let campaigns = campaignScan.rows;
+    const [silverExemptionRows]: any = campaigns.length ? await pool.query(
+      `SELECT cai.campaign_id,seu.user_id FROM campaign_admin_isolation cai JOIN silver_ad_exempt_users seu ON seu.active=1 WHERE cai.management_scope='silver' AND cai.campaign_id IN (?)`,
+      [campaigns.map((campaign) => campaign.id)]
+    ) : [[]];
+    const silverExemptPairs = new Set((silverExemptionRows as Array<{campaign_id:number;user_id:number}>).map((row) => `${Number(row.campaign_id)}:${Number(row.user_id)}`));
+    const prioritizedCampaignCount = campaigns.filter((campaign) => Boolean(campaign.is_prioritized)).length;
 
     if (campaigns.length > 0) {
       const activePostDeleteFilter = schedulerSchema.hasPostDeletedAtColumn ? "AND cp.deleted_at IS NULL" : "";
@@ -287,32 +458,21 @@ export async function GET(req: NextRequest) {
           c.id AS campaign_id,
           COALESCE(SUM(
             CASE
-              WHEN c.type = 'views' THEN GREATEST(COALESCE(cp.views, 0) - COALESCE(cp.settled_views, 0), 0)
+              WHEN c.type = 'views' THEN ${outstandingViewsSql("cp")}
               WHEN c.type = 'clicks' THEN GREATEST((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) - COALESCE(cp.settled_clicks, 0), 0)
               ELSE 0
-            END * (GREATEST(
-              CASE WHEN c.type = 'clicks' THEN COALESCE(c.cpc, 0) ELSE COALESCE(c.cpm, 0) END
-              - CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END,
-              0.01
-            ) / 1000)
+            END * (${channelUnitPriceSql("c", "CASE WHEN ard.expires_at>UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END", false)})
           ), 0) AS unsettled_liability,
           COALESCE(SUM(
             CASE
-              WHEN cp.status IN ('active','posted','sent','pending_delivery')
+              WHEN (cp.status='pending_delivery' OR (c.type='views' AND cp.status IN ('active','posted','sent')))
                 AND cp.delivery_failed_at IS NULL
                 ${activePostDeleteFilter}
-              THEN GREATEST(
-                CASE WHEN c.type = 'clicks' THEN COALESCE(c.cpc, 0) ELSE COALESCE(c.cpm, 0) END
-                - CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END,
-                0.01
-              ) / 1000
+              THEN (${channelUnitPriceSql("c", "CASE WHEN ard.expires_at>UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END", false)})
               ELSE 0
             END
           ), 0) AS active_post_buffer,
-          (COALESCE((SELECT SUM(l.advertiser_debit) FROM channel_settlement_ledger l
-            WHERE l.campaign_id = c.id AND l.created_at >= CURDATE()), 0)
-          + COALESCE((SELECT SUM(d.advertiser_debit) FROM channel_advertiser_debits d
-            WHERE d.campaign_id = c.id AND d.created_at >= CURDATE()), 0)) AS today_spend
+          ${channelDailySpendSql()} AS today_spend
         FROM campaigns c
         LEFT JOIN campaign_posts cp ON cp.campaign_id = c.id
         LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
@@ -354,7 +514,7 @@ export async function GET(req: NextRequest) {
         .filter((campaign) => {
           const unitPrice = campaign.campaign_kind === "channel_growth" ? Number(campaign.cost_per_subscriber || 0) : getChannelUnitPrice({ type: campaign.type, cpm: campaign.cpm, cpc: campaign.cpc, discount: campaign.advertiser_discount });
           const walletCanPay = campaign.funding_model !== "direct_debit"
-            || Number(campaign.advertiser_ad_balance || 0) + 1e-10 >= unitPrice;
+            || Number(campaign.advertiser_ad_balance || 0) - Number(campaign.pending_liability || 0) + 1e-10 >= unitPrice;
           return Number.isFinite(unitPrice) && unitPrice > 0 && walletCanPay
             && Number(campaign.available_budget_for_placement || 0) >= unitPrice;
         });
@@ -371,7 +531,9 @@ export async function GET(req: NextRequest) {
       const campaignPriority = calculateCampaignPriorityScore({
         advertiserTrustMultiplier: trustMultiplier,
         campaignQuality: campaign.quality_score,
-        cpmBid: campaign.cpm,
+        cpmBid: campaign.campaign_kind === "channel_growth"
+          ? campaign.cost_per_subscriber
+          : campaign.type === "clicks" ? campaign.cpc : campaign.cpm,
         historicalPerformance: 50,
         advertiserPerformance,
       });
@@ -379,90 +541,68 @@ export async function GET(req: NextRequest) {
       campaign.campaign_priority_score = campaignPriority;
     }
 
-    const timingConditions = schedulerSchema.hasChannelSchedulerSlot
-      ? `
-      AND c.scheduler_slot IN (?)
-      AND NOT EXISTS (
-        SELECT 1 FROM campaign_posts cp
-        WHERE cp.channel_id = c.id
-        ${schedulerSchema.hasPostPostingModeColumn ? "AND cp.posting_mode = 'scheduled'" : ""}
-        ${schedulerSchema.hasPostSlotColumns
-          ? "AND cp.posting_slot_date = ? AND cp.posting_slot_time = ?"
-          : "AND cp.created_at >= ? AND cp.created_at < DATE_ADD(?, INTERVAL 30 MINUTE)"
-        }
-      )`
-      : schedulerSchema.hasChannelPostingTimes
-      ? `
-      AND (
-        (JSON_VALID(c.posting_times) AND JSON_CONTAINS(c.posting_times, JSON_QUOTE(?)))
-        OR (
-          c.posting_times IS NULL
-          AND (
-            (COALESCE(c.posts_per_day, 1) <= 1 AND ? = '12:00')
-            OR (c.posts_per_day = 2 AND ? IN ('12:00', '18:00'))
-            OR (c.posts_per_day >= 3 AND ? IN ('12:00', '18:00', '00:00'))
-          )
-        )
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM campaign_posts cp
-        WHERE cp.channel_id = c.id
-        ${schedulerSchema.hasPostPostingModeColumn ? "AND cp.posting_mode = 'scheduled'" : ""}
-        ${schedulerSchema.hasPostSlotColumns
-          ? "AND cp.posting_slot_date = ? AND cp.posting_slot_time = ?"
-          : "AND cp.created_at >= ? AND cp.created_at < DATE_ADD(?, INTERVAL 30 MINUTE)"
-        }
-      )`
-      : `
-      AND NOT EXISTS (
-        SELECT 1 FROM campaign_posts cp
-        WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 6 HOUR
-      )`;
+    const dueScan = await loadDueChannelSlots({
+      now: schedulerNow,
+      graceMinutes: schedulerGraceMinutes,
+      pageSize: channelSlotLimit,
+      maxScan: channelScanLimit,
+    });
+    if (dueScan.expiredSamples.length) {
+      console.info("process-ads missed schedule slots", {
+        run_id: runId,
+        due_slots_expired: dueScan.expired,
+        samples: dueScan.expiredSamples,
+      });
+    }
 
-    const timingParams = schedulerSchema.hasChannelSchedulerSlot
-      ? [
-          recoverablePostingSlots,
-          ...(schedulerSchema.hasPostSlotColumns
-            ? [currentSlot.postingSlotDate, currentSlotTimeForDb]
-            : [currentSlotStart, currentSlotStart])
-        ]
-      : schedulerSchema.hasChannelPostingTimes
-      ? [
-          currentSlot.postingSlotTime,
-          currentSlot.postingSlotTime,
-          currentSlot.postingSlotTime,
-          currentSlot.postingSlotTime,
-          ...(schedulerSchema.hasPostSlotColumns
-            ? [currentSlot.postingSlotDate, currentSlotTimeForDb]
-            : [currentSlotStart, currentSlotStart])
-        ]
-      : [];
-
-    const [channelRows]: any = await pool.query(`
-      SELECT c.*,g.authoritative_country_code,g.authoritative_language_code
-      FROM channels c LEFT JOIN channel_geo_classifications g ON g.channel_id=c.id
-      WHERE c.status = 'active' AND c.is_deleted = FALSE
-      AND (
-        SELECT COUNT(*) FROM campaign_posts cp
-        WHERE cp.channel_id = c.id AND cp.created_at > NOW() - INTERVAL 1 DAY
-          AND cp.status != 'delivery_failed'
-      ) < c.posts_per_day
-      ${timingConditions}
-      ORDER BY c.id ASC
-      LIMIT ?
-    `, [...timingParams, channelSlotLimit]);
+    const dueChannelIds = dueScan.due.map((channel) => channel.id);
+    const [dailyUsageRows]: any = dueChannelIds.length ? await pool.query(`
+      SELECT cp.channel_id,COUNT(*) successful_count
+      FROM campaign_posts cp
+      WHERE cp.channel_id IN (?)
+        AND cp.created_at>=UTC_DATE() AND cp.created_at<DATE_ADD(UTC_DATE(),INTERVAL 1 DAY)
+        AND cp.status IN ('active','posted','sent','replaced','deleted','already_missing')
+        AND cp.status<>'replaced'
+        AND cp.delivery_confirmed_at IS NOT NULL
+        AND cp.delivery_failed_at IS NULL
+      GROUP BY cp.channel_id
+    `, [dueChannelIds]) : [[]];
+    const successfulDailyUsage = new Map<number, number>(
+      (dailyUsageRows as Array<{ channel_id: number; successful_count: number }>).map((row) => [Number(row.channel_id), Number(row.successful_count)]),
+    );
+    const capacityEligible = dueScan.due.filter((channel) => (
+      (successfulDailyUsage.get(channel.id) || 0) < Math.max(1, Number(channel.posts_per_day || 1))
+    ));
+    const occupancy = await getChannelScheduleSlotOccupancies(pool, capacityEligible.map((channel) => ({
+      channelId: channel.id,
+      slotDate: channel.postingSlotDate,
+      slotTime: `${channel.postingSlotTime}:00`,
+    })));
+    const channelRows = capacityEligible.filter((channel) => {
+      const key = `${channel.id}:${channel.postingSlotDate}:${channel.postingSlotTime}`;
+      return (occupancy.get(key) || "available") === "available";
+    }).slice(0, channelSlotLimit);
     const assignedChannelsCount = channelRows.length;
     const averageCampaignPriority = campaigns.length > 0
       ? campaigns.reduce((sum: number, campaign: CampaignRow) => sum + Number(campaign.campaign_priority_score || 50), 0) / campaigns.length
       : 50;
     const channels = rankInventoryForDelivery(
-      channelRows as Array<ChannelRow & Record<string, unknown>>,
+      channelRows,
       deliverySettings,
       averageCampaignPriority
-    ) as ChannelRow[];
+    );
 
     if (campaigns.length === 0 || channels.length === 0) {
       console.info("process-ads allocation skipped", {
+        run_id: runId,
+        started_at: runStartedAt.toISOString(),
+        completed_at: new Date().toISOString(),
+        duration_ms: Date.now() - runStartedAt.getTime(),
+        scheduler_grace_minutes: schedulerGraceMinutes,
+        due_slots_found: dueScan.due.length,
+        due_slots_processed: 0,
+        due_slots_expired: dueScan.expired,
+        channels_scanned: dueScan.scanned,
         eligible_campaigns_count: campaigns.length,
         eligible_channels_count: channels.length
       });
@@ -480,6 +620,12 @@ export async function GET(req: NextRequest) {
         skippedCount: 0,
         failureReasons: {},
         metadata: {
+          run_id: runId,
+          scheduler_grace_minutes: schedulerGraceMinutes,
+          due_slots_found: dueScan.due.length,
+          due_slots_processed: 0,
+          due_slots_expired: dueScan.expired,
+          channels_scanned: dueScan.scanned,
           eligible_campaigns_count: campaigns.length,
           eligible_channels_count: channels.length,
           skipped: campaigns.length === 0 ? "no_active_campaigns" : "no_due_channel_slots",
@@ -492,7 +638,16 @@ export async function GET(req: NextRequest) {
         processed_campaigns: 0,
         posts_created: 0,
         details: [],
-        skipped: campaigns.length === 0 ? "no_active_campaigns" : "no_due_channel_slots"
+        skipped: campaigns.length === 0 ? "no_active_campaigns" : "no_due_channel_slots",
+        allocation: {
+          run_id: runId,
+          duration_ms: Date.now() - runStartedAt.getTime(),
+          scheduler_grace_minutes: schedulerGraceMinutes,
+          due_slots_found: dueScan.due.length,
+          due_slots_processed: 0,
+          due_slots_expired: dueScan.expired,
+          channels_scanned: dueScan.scanned,
+        },
       });
     }
 
@@ -503,7 +658,9 @@ export async function GET(req: NextRequest) {
     const [dailyRows]: any = await pool.query(`
       SELECT campaign_id, COUNT(*) as count
       FROM campaign_posts
-      WHERE campaign_id IN (?) AND created_at > NOW() - INTERVAL 1 DAY
+      WHERE campaign_id IN (?)
+        AND delivery_confirmed_at>=UTC_DATE() AND delivery_confirmed_at<DATE_ADD(UTC_DATE(),INTERVAL 1 DAY)
+        AND ${successfulChannelPlacementSql("campaign_posts")}
       GROUP BY campaign_id
     `, [campaignIds]);
 
@@ -512,24 +669,31 @@ export async function GET(req: NextRequest) {
     );
 
     const [lifetimeRows]: any = await pool.query(`
-      SELECT campaign_id, COUNT(*) count
+      SELECT campaign_id, COUNT(*) count, MAX(delivery_confirmed_at) last_successful_placement_at
       FROM campaign_posts
-      WHERE campaign_id IN (?) AND status IN ('active','posted','sent','replaced','deleted','already_missing')
+      WHERE campaign_id IN (?) AND ${successfulChannelPlacementSql("campaign_posts")}
       GROUP BY campaign_id
     `, [campaignIds]);
     const lifetimeCounts = new Map<number, number>(
       lifetimeRows.map((row: any) => [Number(row.campaign_id), Number(row.count)])
     );
+    const lastSuccessfulPlacementAt = new Map<number, string | Date | null>(
+      lifetimeRows.map((row: any) => [Number(row.campaign_id), row.last_successful_placement_at || null])
+    );
 
     const [recentPosts]: any = await pool.query(`
-      SELECT campaign_id, channel_id, created_at, status${schedulerSchema.hasPostDeletedAtColumn ? ", deleted_at" : ""}
+      SELECT campaign_id, channel_id, created_at, status, delivery_confirmed_at, delivery_failed_at${schedulerSchema.hasPostDeletedAtColumn ? ", deleted_at" : ""}
       FROM campaign_posts
       WHERE campaign_id IN (?) AND channel_id IN (?)
-      AND created_at > NOW() - INTERVAL 24 HOUR
+        AND delivery_confirmed_at > NOW() - INTERVAL 24 HOUR
+        AND ${successfulChannelPlacementSql("campaign_posts")}
     `, [campaignIds, channelIds]);
 
-    const postMaps = buildPostMaps(recentPosts, schedulerSchema.hasPostDeletedAtColumn);
+    const postMaps = buildPostMaps(recentPosts);
     const placementCounts = new Map<number, number>();
+    const compatibleChannelCounts = new Map<number, number>();
+    const frequencyEligibleChannelCounts = new Map<number, number>();
+    const candidateAttemptCounts = new Map<number, number>();
     const campaignResults = new Map<number, any>();
     const skippedReasons: Record<string, number> = {};
     const results = [];
@@ -538,6 +702,22 @@ export async function GET(req: NextRequest) {
     let attemptedPosts = 0;
     let failedPosts = 0;
     let autoPausedChannels = 0;
+    let dueSlotsProcessed = 0;
+    let slotClaimsCreated = 0;
+    let slotClaimsReused = 0;
+    let slotClaimsReleasedOnFailure = 0;
+    let slotClaimConflicts = 0;
+    let telegramAttempts = 0;
+    let telegramSuccesses = 0;
+    let telegramFailures = 0;
+    let fairnessFloorSelections = 0;
+    let preSendCandidateFallbacks = 0;
+    let preSendCandidateFailures = 0;
+    let candidatePairsEvaluated = 0;
+    let targetingCompatiblePairs = 0;
+    let frequencyEligiblePairs = 0;
+    const allocationBidMaxima = buildAllocationBidMaxima(campaigns);
+    const allocationSeed = `${schedulerNow.toISOString().slice(0, 16)}:${runId}`;
     const initialTotalPlacementsToday = Array.from(dailyCounts.values()).reduce((sum, count) => sum + count, 0);
 
     for (const campaign of campaigns as CampaignRow[]) {
@@ -554,29 +734,37 @@ export async function GET(req: NextRequest) {
       skippedReasons[reason] = (skippedReasons[reason] || 0) + 1;
     };
 
-    for (const channel of channels as ChannelRow[]) {
-      const health = await checkChannelHealth({ id: channel.id, chat_id: channel.chat_id });
+    for (const channel of channels as DueChannelRow[]) {
+      dueSlotsProcessed++;
+      const health = await verifyTelegramChannelAccess({
+        channelId: channel.id,
+        chatId: channel.chat_id,
+        username: channel.username,
+        source: "process_ads",
+        persist: true,
+        autoPauseActive: true,
+      });
       if (!health.ok) {
         failedPosts++;
-        incrementSkip(`health_${health.status}`);
-        if (health.permanent) {
-          autoPausedChannels++;
-          await autoPauseChannel(channel.id, health);
-        } else {
-          await recordChannelPostFailure(channel.id, health.reason || "Temporary channel health failure");
-        }
+        incrementSkip(`health_${health.state}`);
+        if (health.permanent) autoPausedChannels++;
         continue;
       }
-      await markChannelHealthSuccess(channel.id);
 
-      const eligibleCampaigns = (campaigns as CampaignRow[]).filter((campaign) => {
+      const eligibleCampaigns: CampaignRow[] = [];
+      for (const campaign of campaigns as CampaignRow[]) {
+        candidatePairsEvaluated++;
+        if (silverExemptPairs.has(`${campaign.id}:${channel.user_id}`)) {
+          incrementSkip("silver_exempt_publisher");
+          continue;
+        }
         if (campaignExcludesChannel(channelExclusions, campaign.id, channel)) {
           incrementSkip("advertiser_excluded_channel");
-          return false;
+          continue;
         }
         if (campaign.user_id === channel.user_id) {
           incrementSkip("same_owner");
-          return false;
+          continue;
         }
 
         if (!channelCampaignMatchesInventory({
@@ -590,17 +778,21 @@ export async function GET(req: NextRequest) {
           channelLanguage: channel.authoritative_language_code,
         })) {
           incrementSkip("targeting_mismatch");
-          return false;
+          continue;
         }
+
+        targetingCompatiblePairs++;
+        compatibleChannelCounts.set(campaign.id, (compatibleChannelCounts.get(campaign.id) || 0) + 1);
 
         const key = `${campaign.id}:${channel.id}`;
         if (postMaps.recent24h.has(key)) {
           incrementSkip("same_campaign_channel_24h");
-          return false;
+          continue;
         }
-
-        return true;
-      });
+        frequencyEligiblePairs++;
+        frequencyEligibleChannelCounts.set(campaign.id, (frequencyEligibleChannelCounts.get(campaign.id) || 0) + 1);
+        eligibleCampaigns.push(campaign);
+      }
 
       if (eligibleCampaigns.length === 0) {
         incrementSkip("no_campaign_for_channel");
@@ -616,125 +808,126 @@ export async function GET(req: NextRequest) {
       });
       const maxUnderDelivery = Math.max(0, ...underDeliveries);
 
-      const scoredCampaigns = eligibleCampaigns
-        .map((campaign) => ({
-          campaign,
-          score: calculateCampaignScore(campaign, {
+      const scoredCampaigns = eligibleCampaigns.map((campaign) => {
+        const scoreDetail = calculateCampaignScore(campaign, {
             totalEligibleBudget,
             totalSuccessfulPlacementsToday: totalPlacementsToday,
             actualPlacementsToday: (dailyCounts.get(campaign.id) || 0) + (placementCounts.get(campaign.id) || 0),
             maxUnderDelivery,
             trustMultipliers,
-            inventoryScore: Number(channel.inventory_score || 50)
-          })
-        }))
-        .sort((a, b) => {
-          if (prioritizedCampaigns.length > 0) {
-            const aDelivered = (lifetimeCounts.get(a.campaign.id) || 0) + (placementCounts.get(a.campaign.id) || 0);
-            const bDelivered = (lifetimeCounts.get(b.campaign.id) || 0) + (placementCounts.get(b.campaign.id) || 0);
-            if (aDelivered !== bDelivered) return aDelivered - bDelivered;
-            const createdDifference = new Date(a.campaign.created_at || 0).getTime() - new Date(b.campaign.created_at || 0).getTime();
-            if (createdDifference !== 0) return createdDifference;
-            return a.campaign.id - b.campaign.id;
-          }
-          return b.score.score - a.score.score;
+            inventoryScore: Number(channel.inventory_score || 50),
+            normalizedAllocationBid: normalizedCampaignAllocationBid(campaign, allocationBidMaxima),
+            randomization: deterministicAllocationTieBreaker(allocationSeed, channel.id, campaign.id),
         });
+        return {
+          campaign,
+          score: scoreDetail.score,
+          scoreDetail,
+          successfulThisRun: placementCounts.get(campaign.id) || 0,
+          lifetimeSuccessful: lifetimeCounts.get(campaign.id) || 0,
+          lastSuccessfulPlacementAt: lastSuccessfulPlacementAt.get(campaign.id) || null,
+        };
+      });
+      const ranking = rankEligibleCampaigns({
+        candidates: scoredCampaigns,
+        dominanceCap,
+        channelId: channel.id,
+        seed: allocationSeed,
+      });
+      if (ranking.fairnessFloorApplied) fairnessFloorSelections++;
 
-      const dominanceEligible = prioritizedCampaigns.length > 0
-        ? scoredCampaigns
-        : eligibleCampaigns.length > 1
-        ? scoredCampaigns.filter(({ campaign }) => (placementCounts.get(campaign.id) || 0) < dominanceCap)
-        : scoredCampaigns;
-
-      if (dominanceEligible.length === 0) {
+      if (ranking.ranked.length === 0) {
         incrementSkip("dominance_cap");
         continue;
       }
 
-      const selected = dominanceEligible[0];
-      const campaign = selected.campaign;
-
-      const insertColumns = ["campaign_id", "channel_id", "channel_username", "status", "delivery_attempted_at"];
-      const insertParams = [campaign.id, channel.id, channel.username, "pending_delivery", new Date()];
-
-      if (schedulerSchema.hasPostPostingModeColumn) {
-        insertColumns.push("posting_mode");
-        insertParams.push("scheduled");
-      }
-
-      if (schedulerSchema.hasPostSlotColumns) {
-        insertColumns.push("posting_slot_date", "posting_slot_time");
-        insertParams.push(currentSlot.postingSlotDate, currentSlotTimeForDb);
-      }
-
-      const insertPlaceholders = insertColumns.map(() => "?").join(", ");
-      const conn = await pool.getConnection();
+      let selected: (typeof ranking.ranked)[number] | null = null;
+      let campaign: CampaignRow | null = null;
       let postId = 0;
-      try {
-        await conn.beginTransaction();
-        const [[lockedCampaign]]: any = await conn.query(
-          `SELECT c.status,c.budget,c.cpm,c.cpc,c.type,c.daily_budget_limit,
-             CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END advertiser_discount
-           FROM campaigns c LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
-           WHERE c.id = ? FOR UPDATE`,
-          [campaign.id]
-        );
-        const unitLiability = campaign.campaign_kind === "channel_growth" ? Number(campaign.cost_per_subscriber || 0) : getChannelUnitPrice({ type: lockedCampaign?.type || campaign.type, cpm: lockedCampaign?.cpm, cpc: lockedCampaign?.cpc, discount: lockedCampaign?.advertiser_discount });
-        const [[lockedLiability]]: any = await conn.query(`
-          SELECT
-            COALESCE(SUM(CASE
-              WHEN ? = 'views' THEN GREATEST(COALESCE(cp.views, 0) - COALESCE(cp.settled_views, 0), 0)
-              ELSE GREATEST((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) - COALESCE(cp.settled_clicks, 0), 0)
-            END * ?), 0) +
-            COALESCE(SUM(CASE WHEN cp.status IN ('active','posted','sent','pending_delivery')
-              AND cp.delivery_failed_at IS NULL ${schedulerSchema.hasPostDeletedAtColumn ? "AND cp.deleted_at IS NULL" : ""}
-              THEN ? ELSE 0 END), 0) pending_liability,
-            (COALESCE((SELECT SUM(l.advertiser_debit) FROM channel_settlement_ledger l
-              WHERE l.campaign_id = ? AND l.created_at >= CURDATE()), 0)
-            + COALESCE((SELECT SUM(d.advertiser_debit) FROM channel_advertiser_debits d
-              WHERE d.campaign_id = ? AND d.created_at >= CURDATE()), 0)) today_spend
-          FROM campaign_posts cp WHERE cp.campaign_id = ?`,
-          [campaign.type, unitLiability, unitLiability, campaign.id, campaign.id, campaign.id]
-        );
-        const pendingLiability = campaign.campaign_kind === "channel_growth"
-          ? 0
-          : Number(lockedLiability?.pending_liability || 0);
-        const remaining = Number(lockedCampaign?.budget || 0) - pendingLiability;
-        const dailyCap = Number(lockedCampaign?.daily_budget_limit || 0);
-        const dailyRemaining = dailyCap > 0
-          ? dailyCap - Number(lockedLiability?.today_spend || 0) - pendingLiability
-          : Number.POSITIVE_INFINITY;
-        if (lockedCampaign?.status !== "active" || unitLiability <= 0
-          || remaining + 1e-10 < unitLiability || dailyRemaining + 1e-10 < unitLiability) {
-          await conn.rollback();
-          conn.release();
-          incrementSkip(dailyRemaining + 1e-10 < unitLiability ? "daily_budget_limit" : "budget_liability_limit");
+      let slotClaimId = 0;
+      for (const candidate of ranking.ranked) {
+        campaign = candidate.campaign;
+        candidateAttemptCounts.set(campaign.id, (candidateAttemptCounts.get(campaign.id) || 0) + 1);
+        let finalSilverEligibility: Awaited<ReturnType<typeof isChannelAllowedForCampaign>>;
+        try {
+          finalSilverEligibility = await isChannelAllowedForCampaign(Number(campaign.id), Number(channel.id));
+        } catch {
+          incrementSkip("pre_send_eligibility_check_failed");
+          preSendCandidateFailures++;
+          preSendCandidateFallbacks++;
           continue;
         }
-        const [insertPost]: any = await conn.query(
-          `INSERT INTO campaign_posts (${insertColumns.join(", ")}) VALUES (${insertPlaceholders})`,
-          insertParams
-        );
-        postId = Number(insertPost.insertId);
-        await conn.commit();
-      } catch (error) {
-        await conn.rollback();
-        conn.release();
+        if (!finalSilverEligibility.allowed) {
+          incrementSkip(finalSilverEligibility.reason || "silver_delivery_blocked");
+          preSendCandidateFallbacks++;
+          continue;
+        }
+
+        const conn = await pool.getConnection();
+        try {
+          await conn.beginTransaction();
+          const affordability = await checkChannelPlacementAffordability(conn, Number(campaign.id));
+          if (!affordability.allowed) {
+            await conn.rollback();
+            incrementSkip(affordability.reason === "daily_cap_reached" ? "daily_budget_limit" : "budget_liability_limit");
+            preSendCandidateFallbacks++;
+            continue;
+          }
+          const generation = affordability.generation;
+          const reservation = await reserveChannelPlacement(conn, {
+            campaignId:Number(campaign.id),channelId:Number(channel.id),channelUsername:channel.username,
+            generation,mode:"scheduled",
+            postingSlotDate:schedulerSchema.hasPostSlotColumns?channel.postingSlotDate:undefined,
+            postingSlotTime:schedulerSchema.hasPostSlotColumns?`${channel.postingSlotTime}:00`:undefined,
+            capacityLimit:Math.max(1,Number(channel.posts_per_day || 1)),
+          });
+          if (!reservation.claimed) {
+            await conn.rollback();
+            incrementSkip(reservation.reason || "delivery_claim_exists");
+            if (reservation.reason === "schedule_slot_claim_exists") {
+              slotClaimConflicts++;
+              break;
+            }
+            preSendCandidateFallbacks++;
+            continue;
+          }
+          postId = reservation.postId;
+          slotClaimId = Number(reservation.slotClaimId || 0);
+          if (reservation.slotClaimCreated) slotClaimsCreated++;
+          if (reservation.slotClaimReused) slotClaimsReused++;
+          await conn.commit();
+          selected = candidate;
+          break;
+        } catch {
+          await conn.rollback().catch(() => undefined);
+          incrementSkip("post_insert_failed");
+          preSendCandidateFailures++;
+          preSendCandidateFallbacks++;
+        } finally {
+          conn.release();
+        }
+      }
+      if (!selected || !campaign) {
         failedPosts++;
-        incrementSkip("post_insert_failed");
         continue;
       }
-      conn.release();
 
       const domain = process.env.DOMAIN;
       const host = domain ? `https://${domain}` : (process.env.NEXT_PUBLIC_APP_URL || req.nextUrl.origin);
-      let buttonUrl = campaign.type === "clicks" ? `${host}/api/clicks/${campaign.id}/${postId}` : campaign.link;
+      let buttonUrl = trackedChannelCtaUrl(host,Number(campaign.public_id||campaign.id),postId);
       if (campaign.campaign_kind === "channel_growth") {
         try {
-          const trackedInvite = await createGrowthDeliveryInvite({ campaignId: Number(campaign.id), postId, sourceChannelId: Number(channel.id), sourcePublisherId: Number(channel.user_id), destinationChatId: Number(campaign.destination_chat_id), destinationChannelId: campaign.destination_channel_id ? Number(campaign.destination_channel_id) : null });
-          buttonUrl = trackedInvite.url;
+          await createGrowthDeliveryInvite({ campaignId: Number(campaign.id), postId, sourceChannelId: Number(channel.id), sourcePublisherId: Number(channel.user_id), destinationChatId: Number(campaign.destination_chat_id), destinationChannelId: campaign.destination_channel_id ? Number(campaign.destination_channel_id) : null });
+          buttonUrl = trackedGrowthCtaUrl(host, Number(campaign.public_id || campaign.id), postId);
         } catch {
-          await pool.query("UPDATE campaign_posts SET status='delivery_failed',delivery_failed_at=NOW(),delivery_failure_reason='growth_invite_unavailable' WHERE id=?",[postId]);
+          if (slotClaimId) {
+            const released = await markScheduledPlacementFailed({
+              postId, claimId: slotClaimId, channelId: channel.id,
+              slotDate: channel.postingSlotDate, slotTime: `${channel.postingSlotTime}:00`,
+              reason: "growth_invite_unavailable",
+            });
+            if (released) slotClaimsReleasedOnFailure++;
+          }
           failedPosts++; incrementSkip("growth_invite_unavailable"); continue;
         }
       }
@@ -748,6 +941,7 @@ export async function GET(req: NextRequest) {
       };
 
       attemptedPosts++;
+      telegramAttempts++;
       const result = await sendTelegramMessageWithRetries(channel.chat_id, composeCampaignCreativeTelegramHtml(campaign.campaign_title, campaign.message_text), {
         photo: campaign.image_url,
         parse_mode: "HTML",
@@ -755,16 +949,32 @@ export async function GET(req: NextRequest) {
       });
 
       if (result.ok) {
+        telegramSuccesses++;
         const messageId = result.result.result.message_id;
 
-        await pool.query(
+        const [confirmed]: any = await pool.query(
           "UPDATE campaign_posts SET status = 'active', message_id = ?, delivery_confirmed_at = NOW(), delivery_failure_reason = NULL WHERE id = ? AND status = 'pending_delivery'",
           [messageId, postId]
         );
+        if (Number(confirmed?.affectedRows || 0) !== 1) {
+          failedPosts++;
+          incrementSkip("delivery_confirmation_not_persisted");
+          continue;
+        }
         await recordChannelPostSuccess(channel.id);
+        console.info("process-ads scheduled placement delivered", {
+          run_id: runId,
+          channel_id: channel.id,
+          campaign_id: campaign.id,
+          configured_slot: `${channel.postingSlotDate} ${channel.postingSlotTime}`,
+          actual_delivery_time: new Date().toISOString(),
+          delivery_delay_seconds: Math.max(0, Math.floor((Date.now() - channel.scheduledFor.getTime()) / 1000)),
+        });
 
         selectedPlacements++;
         placementCounts.set(campaign.id, (placementCounts.get(campaign.id) || 0) + 1);
+        postMaps.recent24h.add(`${campaign.id}:${channel.id}`);
+        lastSuccessfulPlacementAt.set(campaign.id, new Date());
         const campaignInfo = campaignResults.get(campaign.id);
         campaignInfo.posts_created++;
         await recordDeliveryEvent(
@@ -772,14 +982,20 @@ export async function GET(req: NextRequest) {
           campaign.id,
           channel.id,
           "selected",
-          selected.score.score,
+          selected.score,
           `smart_allocation:${publicInventoryQuality(channel.inventory_score || 50)}`
         );
       } else {
-        await pool.query(
-          "UPDATE campaign_posts SET status = 'delivery_failed', delivery_failed_at = NOW(), delivery_failure_reason = ? WHERE id = ? AND status = 'pending_delivery'",
-          [String(result.result?.description || "Telegram send failed").slice(0, 255), postId]
-        );
+        telegramFailures++;
+        const failureReason = String(result.result?.description || "Telegram send failed").slice(0, 255);
+        if (slotClaimId) {
+          const released = await markScheduledPlacementFailed({
+            postId, claimId: slotClaimId, channelId: channel.id,
+            slotDate: channel.postingSlotDate, slotTime: `${channel.postingSlotTime}:00`,
+            reason: failureReason,
+          });
+          if (released) slotClaimsReleasedOnFailure++;
+        }
         failedPosts++;
         if (result.permanent) {
           autoPausedChannels++;
@@ -791,7 +1007,7 @@ export async function GET(req: NextRequest) {
             permanent: true,
           });
         } else {
-          await recordChannelPostFailure(channel.id, result.result?.description || "Telegram send failed");
+          await recordChannelPostFailure(channel.id, failureReason);
         }
         incrementSkip("telegram_send_failed");
         await recordDeliveryEvent(
@@ -799,8 +1015,8 @@ export async function GET(req: NextRequest) {
           campaign.id,
           channel.id,
           "send_failed",
-          selected.score.score,
-          result.result?.description || "Telegram send failed"
+          selected.score,
+          failureReason
         );
       }
     }
@@ -811,15 +1027,76 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    const campaignAllocationDiagnostics = campaigns.slice(0, 100).map((campaign) => {
+      const successfulThisRun = placementCounts.get(campaign.id) || 0;
+      const compatibleChannels = compatibleChannelCounts.get(campaign.id) || 0;
+      const frequencyEligibleChannels = frequencyEligibleChannelCounts.get(campaign.id) || 0;
+      const candidateAttempts = candidateAttemptCounts.get(campaign.id) || 0;
+      return {
+        campaign_id: campaign.id,
+        public_id: campaign.public_id || null,
+        pricing_bucket: campaign.campaign_kind === "channel_growth" ? "cps" : campaign.type === "clicks" ? "cpc" : "cpm",
+        prioritized: Boolean(campaign.is_prioritized),
+        global_eligible: true,
+        compatible_channels: compatibleChannels,
+        frequency_eligible_channels: frequencyEligibleChannels,
+        successful_this_run: successfulThisRun,
+        lifetime_successful: lifetimeCounts.get(campaign.id) || 0,
+        last_successful_placement_at: lastSuccessfulPlacementAt.get(campaign.id) || null,
+        candidate_attempts: candidateAttempts,
+        zero_delivery_reason: zeroDeliveryReason({
+          successfulThisRun,
+          compatibleChannels,
+          frequencyEligibleChannels,
+          candidateAttempts,
+        }),
+      };
+    });
+    const allocationFunnel = {
+      global_eligible_campaigns: campaigns.length,
+      prioritized_campaigns: prioritizedCampaignCount,
+      campaign_pairs_evaluated: candidatePairsEvaluated,
+      targeting_compatible_pairs: targetingCompatiblePairs,
+      frequency_eligible_pairs: frequencyEligiblePairs,
+      fairness_floor_selections: fairnessFloorSelections,
+      pre_send_candidate_failures: preSendCandidateFailures,
+      pre_send_candidate_fallbacks: preSendCandidateFallbacks,
+      successful_placements: selectedPlacements,
+    };
+
     console.info("process-ads allocation summary", {
+      run_id: runId,
+      started_at: runStartedAt.toISOString(),
+      completed_at: new Date().toISOString(),
+      duration_ms: Date.now() - runStartedAt.getTime(),
+      due_slots_found: dueScan.due.length,
+      due_slots_processed: dueSlotsProcessed,
+      due_slots_success: selectedPlacements,
+      due_slots_failed: failedPosts,
+      due_slots_claim_conflict: slotClaimConflicts,
+      due_slots_expired: dueScan.expired,
+      due_slots_skipped_health: Object.entries(skippedReasons).filter(([key]) => key.startsWith("health_")).reduce((sum, [, value]) => sum + value, 0),
+      due_slots_skipped_no_campaign: skippedReasons.no_campaign_for_channel || 0,
+      slot_claims_created: slotClaimsCreated,
+      slot_claims_reused: slotClaimsReused,
+      slot_claims_released_on_failure: slotClaimsReleasedOnFailure,
+      telegram_attempts: telegramAttempts,
+      telegram_successes: telegramSuccesses,
+      telegram_failures: telegramFailures,
+      channels_scanned: dueScan.scanned,
       eligible_channels_count: channels.length,
       eligible_campaigns_count: campaigns.length,
+      campaigns_scanned: campaignScan.scanned,
       selected_placements_count: selectedPlacements,
       skipped_reason_counts: skippedReasons,
       campaign_placement_distribution: Object.fromEntries(placementCounts),
       dominance_cap_per_campaign: dominanceCap,
       channel_slot_limit: channelSlotLimit,
-      campaign_limit: campaignLimit,
+      campaign_page_size: campaignPageSize,
+      campaign_scan_limit: campaignScanLimit,
+      campaign_diagnostics_truncated: campaigns.length > campaignAllocationDiagnostics.length,
+      allocation_funnel: allocationFunnel,
+      campaign_allocation_diagnostics: campaignAllocationDiagnostics,
       attempted_posts: attemptedPosts,
       failed_posts: failedPosts,
       auto_paused_channels: autoPausedChannels,
@@ -838,7 +1115,21 @@ export async function GET(req: NextRequest) {
         selectedPlacements,
         failedPosts,
         autoPausedChannels,
-        JSON.stringify({ distribution, skipped_reason_counts: skippedReasons }),
+        JSON.stringify({
+          run_id: runId,
+          distribution,
+          skipped_reason_counts: skippedReasons,
+          scheduler_grace_minutes: schedulerGraceMinutes,
+          due_slots_found: dueScan.due.length,
+          due_slots_processed: dueSlotsProcessed,
+          due_slots_expired: dueScan.expired,
+          slot_claims_created: slotClaimsCreated,
+          slot_claims_reused: slotClaimsReused,
+          slot_claims_released_on_failure: slotClaimsReleasedOnFailure,
+          telegram_attempts: telegramAttempts,
+          telegram_successes: telegramSuccesses,
+          telegram_failures: telegramFailures,
+        }),
       ]
     ).catch(() => undefined);
 
@@ -857,10 +1148,25 @@ export async function GET(req: NextRequest) {
       autoPausedCount: autoPausedChannels,
       failureReasons: skippedReasons,
       metadata: {
+        run_id: runId,
+        scheduler_grace_minutes: schedulerGraceMinutes,
+        due_slots_found: dueScan.due.length,
+        due_slots_processed: dueSlotsProcessed,
+        due_slots_expired: dueScan.expired,
+        slot_claims_created: slotClaimsCreated,
+        slot_claims_reused: slotClaimsReused,
+        slot_claims_released_on_failure: slotClaimsReleasedOnFailure,
+        telegram_attempts: telegramAttempts,
+        telegram_successes: telegramSuccesses,
+        telegram_failures: telegramFailures,
         assigned_channels_count: assignedChannelsCount,
         eligible_channels_count: channels.length,
         eligible_campaigns_count: campaigns.length,
+        campaigns_scanned: campaignScan.scanned,
         campaign_placement_distribution: Object.fromEntries(placementCounts),
+        allocation_funnel: allocationFunnel,
+        campaign_allocation_diagnostics: campaignAllocationDiagnostics,
+        campaign_diagnostics_truncated: campaigns.length > campaignAllocationDiagnostics.length,
         dominance_cap_per_campaign: dominanceCap,
         delivery_mode: deliverySettings.mode,
         distribution,
@@ -873,11 +1179,27 @@ export async function GET(req: NextRequest) {
       posts_created: selectedPlacements,
       details: results,
       allocation: {
+        run_id: runId,
+        duration_ms: Date.now() - runStartedAt.getTime(),
+        scheduler_grace_minutes: schedulerGraceMinutes,
+        due_slots_found: dueScan.due.length,
+        due_slots_processed: dueSlotsProcessed,
+        due_slots_expired: dueScan.expired,
+        slot_claims_created: slotClaimsCreated,
+        slot_claims_reused: slotClaimsReused,
+        slot_claims_released_on_failure: slotClaimsReleasedOnFailure,
+        telegram_attempts: telegramAttempts,
+        telegram_successes: telegramSuccesses,
+        telegram_failures: telegramFailures,
         eligible_channels_count: channels.length,
         eligible_campaigns_count: campaigns.length,
+        campaigns_scanned: campaignScan.scanned,
         selected_placements_count: selectedPlacements,
         skipped_reason_counts: skippedReasons,
         campaign_placement_distribution: Object.fromEntries(placementCounts),
+        allocation_funnel: allocationFunnel,
+        campaign_allocation_diagnostics: campaignAllocationDiagnostics,
+        campaign_diagnostics_truncated: campaigns.length > campaignAllocationDiagnostics.length,
         dominance_cap_per_campaign: dominanceCap
         ,
         delivery_mode: deliverySettings.mode,
@@ -886,6 +1208,7 @@ export async function GET(req: NextRequest) {
         attempted_posts: attemptedPosts,
         failed_posts: failedPosts,
         auto_paused_channels: autoPausedChannels,
+        daily_cap_lifecycle: dailyCapLifecycle,
         distribution
       }
     });

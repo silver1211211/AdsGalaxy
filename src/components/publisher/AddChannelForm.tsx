@@ -44,7 +44,7 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
     setIsLoading(true);
     setError("");
     try {
-      const res = await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(username)}`);
+      const res = await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(username)}`, { timeoutMs: 60000 });
       const data: unknown = await res.json();
       if (!res.ok) throw new Error(getApiErrorMessage(data, "Failed to fetch channel info"));
       const details = data as TelegramChannelInfo;
@@ -66,6 +66,7 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
   };
 
   const handleSubmit = async () => {
+    if (isLoading) return;
     if (!channelInfo) {
       setError("Fetch the channel information before registering it.");
       return;
@@ -85,6 +86,7 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
     try {
       const res = await apiFetch("/api/publisher/channels", {
         method: "POST",
+        timeoutMs: 60000,
         body: JSON.stringify({
           chat_id: channelInfo.id,
           username: channelInfo.username,

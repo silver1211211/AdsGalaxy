@@ -6,26 +6,25 @@ const route = readFileSync("src/app/api/admin/campaigns/[id]/emergency-push/rout
 const scheduler = readFileSync("src/app/api/cron/process-ads/route.ts", "utf8");
 const exclusions = readFileSync("src/lib/campaignInventoryExclusions.ts", "utf8");
 
-test("emergency channel push enforces campaign channel exclusions before posting", () => {
+test("Main and Silver emergency push both enforce advertiser exclusions", () => {
   assert.match(route, /campaignExcludesChannel, campaignExcludesIdentifier, loadCampaignExclusions/);
   assert.match(route, /loadCampaignExclusions\(pool, "campaign", \[Number\(campaign\.id\)\], "channel"\)/);
-  assert.match(route, /channels\.filter\(\(channel\) =>[\s\S]*?&& !campaignExcludesChannel\(channelExclusions, Number\(campaign\.id\), channel\)/);
+  assert.match(route, /campaignExcludesChannel\(channelExclusions, Number\(campaign\.id\), channel\)/);
   assert.match(route, /skippedByExclusion: channels\.length - eligibleChannels\.length/);
-  assert.match(route, /let skipped = skippedByLimit \+ skippedByExclusion/);
+  assert.match(route, /const skipped = skippedByLimit \+ skippedByExclusion/);
 });
 
-test("Replace Everything continues only after safe rolled-back settlement failures", () => {
-  assert.match(route, /function classifySettlementFailure/);
-  assert.match(route, /"payout_safety_check_failed"/);
-  assert.match(route, /fatalSettlementFailures\.length > 0/);
-  assert.match(route, /deleteSummary = await deleteActivePostsForReplacementSafely/);
-  assert.match(route, /warnings: safeSettlementWarnings/);
+test("Replace in Every Channel settles and removes only the selected victim", () => {
+  assert.match(route, /settleChannelCampaigns\(\{/);
+  assert.match(route, /campaignId:Number\(victim\.campaign_id\)/);
+  assert.match(route, /replacement_victim_settlement_failed/);
+  assert.match(route, /deleteCampaignPostsByIds\(\[scheduleSlot\.replacesPostId\]/);
+  assert.ok(route.indexOf("let result = await send()") < route.indexOf("deleteCampaignPostsByIds([scheduleSlot.replacesPostId]"));
 });
 
-test("Replace Everything protects excluded campaign channels from cleanup and reposting", () => {
-  assert.match(route, /SELECT DISTINCT ch\.id, ch\.username, ch\.invite_link_hash/);
-  assert.match(route, /\.filter\(\(channel\) => campaignExcludesChannel\(channelExclusions, Number\(campaign\.id\), channel\)\)/);
-  assert.match(route, /deleteActivePostsForReplacementSafely\(campaign\.id, excludedChannelIds\)/);
+test("Replacement applies exclusions before per-channel victim selection", () => {
+  assert.match(route, /campaignExcludesChannel\(channelExclusions, Number\(campaign\.id\), channel\)/);
+  assert.ok(route.indexOf("getEligibleChannels(campaign") < route.indexOf("selectEmergencyScheduleSlot(pool"));
 });
 
 test("public and private channel identifiers are excluded before scheduler or emergency delivery", () => {
@@ -42,7 +41,7 @@ test("emergency broadcast push enforces campaign bot exclusions before posting",
   assert.match(route, /eligible\.skippedByExclusion/);
 });
 
-test("emergency exclusions do not change lifecycle settlement billing moderation or UI routes", () => {
+test("emergency exclusions preserve canonical settlement and do not touch moderation or UI routes", () => {
   assert.doesNotMatch(route, /campaignLifecycleActions|channelSettlementLedger|publisher_revenue|advertiser_debit|creative_review_status|\/edit/);
-  assert.match(route, /settleChannelCampaigns\(\{\s*campaignId: campaign\.id,\s*skipGlobalMaintenance: true,\s*campaignStatuses: \["active"\],\s*\}\)/);
+  assert.match(route, /settleChannelCampaigns\(\{campaignId:Number\(victim\.campaign_id\),skipGlobalMaintenance:true,campaignStatuses:\["active","paused"\]\}/);
 });

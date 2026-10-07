@@ -1,5 +1,7 @@
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { isStandardChannelReport, getChannelReportingMetrics, channelMetricPayload } from "@/lib/channelReporting";
+import { getChannelDailySpend } from "@/lib/channelDailySpend";
 import { refreshCampaignViews } from "@/lib/channelAdminViewRefresh";
 import { retryCampaignPostCleanup } from "@/lib/campaignPostDeletion";
 import { settlePendingChannelPublisherCredits } from "@/lib/channelFastBilling";
@@ -120,14 +122,21 @@ export async function retryFailedCampaignCleanup(campaignId: number) {
 
 export async function getCampaignSettlementSummary(campaignId: number) {
   const [[row]] = await pool.query<Array<RowDataPacket & Record<string, unknown>>>(
-    `SELECT
+    `SELECT c.type,c.campaign_kind,c.teaser_mode,
        COUNT(cp.id) AS total_posts,
        SUM(CASE WHEN cp.status IN ('active','posted','sent','pending_delivery') THEN 1 ELSE 0 END) AS active_posts,
        SUM(CASE WHEN cp.status = 'deleted' OR cp.deleted_at IS NOT NULL THEN 1 ELSE 0 END) AS deleted_posts,
        SUM(CASE WHEN cp.status = 'delete_failed' OR cp.delete_failed_reason IS NOT NULL OR cp.cleanup_status IN ('failed','retry') THEN 1 ELSE 0 END) AS failed_cleanup_posts,
        COALESCE(SUM(cp.views), 0) AS total_views,
+       COALESCE(SUM(cp.fraud_excluded_views),0) AS fraud_excluded_views,
        COALESCE(SUM(cp.settled_views), 0) AS settled_views,
-       COALESCE(SUM(GREATEST(COALESCE(cp.views, 0) - COALESCE(cp.settled_views, 0), 0)), 0) AS unsettled_views,
+       COALESCE((SELECT SUM(waived_views) FROM channel_view_waivers WHERE campaign_id=c.id),0) AS waived_views,
+       COALESCE(SUM(GREATEST(COALESCE(cp.views, 0) - COALESCE(cp.settled_views, 0)
+         - COALESCE((SELECT SUM(cvw.waived_views) FROM channel_view_waivers cvw WHERE cvw.post_id=cp.id),0), 0)), 0) AS unsettled_views,
+       COALESCE((SELECT SUM(units) FROM channel_advertiser_debits WHERE campaign_id=c.id AND settlement_type='view'),0)
+         + COALESCE((SELECT SUM(l.new_units) FROM channel_settlement_ledger l
+           LEFT JOIN channel_fraud_billing_adjustments a ON a.settlement_ledger_id=l.id
+           WHERE l.campaign_id=c.id AND l.settlement_type='view' AND a.id IS NULL),0) AS billable_views,
        COALESCE(SUM((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id)), 0) AS total_clicks,
        COALESCE(SUM(cp.settled_clicks), 0) AS settled_clicks,
        COALESCE(SUM(GREATEST((SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) - COALESCE(cp.settled_clicks, 0), 0)), 0) AS unsettled_clicks,
@@ -144,18 +153,23 @@ export async function getCampaignSettlementSummary(campaignId: number) {
     [campaignId]
   );
 
+  const canonical = row && isStandardChannelReport(row) ? (await getChannelReportingMetrics(pool, [campaignId])).get(campaignId) : undefined;
+  const metrics = canonical ? channelMetricPayload(canonical, row?.campaign_kind === "channel_growth") : undefined;
   return {
     totalPosts: numberValue(row?.total_posts),
     activePosts: numberValue(row?.active_posts),
     deletedPosts: numberValue(row?.deleted_posts),
     failedCleanupPosts: numberValue(row?.failed_cleanup_posts),
-    totalViews: numberValue(row?.total_views),
+    totalViews: metrics?.views ?? numberValue(row?.total_views),
+    fraudExcludedViews: numberValue(row?.fraud_excluded_views),
+    waivedViews: numberValue(row?.waived_views),
+    billableViews: metrics?.billable_views ?? numberValue(row?.billable_views),
     settledViews: numberValue(row?.settled_views),
     unsettledViews: numberValue(row?.unsettled_views),
-    totalClicks: numberValue(row?.total_clicks),
+    totalClicks: metrics?.clicks ?? numberValue(row?.total_clicks),
     settledClicks: numberValue(row?.settled_clicks),
     unsettledClicks: numberValue(row?.unsettled_clicks),
-    totalSpend: numberValue(row?.total_spend),
+    totalSpend: metrics?.spend ?? numberValue(row?.total_spend),
     publisherEarnings: numberValue(row?.publisher_earnings),
     platformRevenue: numberValue(row?.platform_revenue),
     reserve: numberValue(row?.reserve),
@@ -189,17 +203,12 @@ export async function getCampaignDeliveryStatus(campaignId: number) {
        AND is_deleted = FALSE`,
     []
   );
-  const [[dailySpend]] = await pool.query<Array<RowDataPacket & { spend: number | string }>>(
-    `SELECT
-       COALESCE((SELECT SUM(advertiser_debit) FROM channel_settlement_ledger WHERE campaign_id = ? AND created_at >= CURDATE()), 0)
-       + COALESCE((SELECT SUM(advertiser_debit) FROM channel_advertiser_debits WHERE campaign_id = ? AND created_at >= CURDATE()), 0) AS spend`,
-    [campaignId, campaignId]
-  );
+  const dailySpend = await getChannelDailySpend(pool, campaignId);
 
   const status = String(campaign?.status || "missing");
   const budget = numberValue(campaign?.budget);
   const dailyLimit = numberValue(campaign?.daily_budget_limit);
-  const dailyRemaining = dailyLimit > 0 ? Math.max(0, dailyLimit - numberValue(dailySpend?.spend)) : null;
+  const dailyRemaining = dailyLimit > 0 ? Math.max(0, dailyLimit - dailySpend) : null;
   const eligibleChannels = numberValue(channels?.eligible_channels);
   const skippedReasons: string[] = [];
   if (status !== "active") skippedReasons.push(`campaign_status_${status}`);

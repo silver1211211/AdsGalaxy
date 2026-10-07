@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { writeFile } from "fs/promises";
 import path from "path";
 import { requireAdminPermission } from "@/lib/adminAuth";
+import { validateMultipartRequest } from "@/lib/requestBodyValidation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,6 +14,8 @@ export async function POST(request: Request) {
   if (response) return response;
 
   try {
+    const invalid = validateMultipartRequest(request, MAX_LOGO_BYTES + 64 * 1024);
+    if (invalid) return invalid;
     const formData = await request.formData();
     const file = formData.get("logo");
 

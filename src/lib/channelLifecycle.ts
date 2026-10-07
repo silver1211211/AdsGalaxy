@@ -1,10 +1,15 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { POSTING_TIME_OPTIONS } from "@/lib/postingTimes";
-import { createSystemLog, maskEntityId } from "@/lib/systemLogs";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import { onboardPrivateChannelTracking } from "@/lib/privateChannelTrackingOnboarding";
-import { verifyAndStoreChannelIdentity } from "@/lib/channelTelegramIdentity";
+import {
+  classifyTelegramAccessFailure,
+  persistTelegramChannelAccess,
+  verifyTelegramChannelAccess,
+  type TelegramAccessResult,
+  type TelegramAccessState,
+} from "@/lib/telegramChannelAccess";
 
 export type ChannelStatusType =
   | "pending"
@@ -14,7 +19,8 @@ export type ChannelStatusType =
   | "bot_removed"
   | "channel_not_found"
   | "deleted"
-  | "permission_missing";
+  | "permission_missing"
+  | "restricted";
 
 type Db = typeof pool | PoolConnection;
 
@@ -27,13 +33,14 @@ type ChannelHealthInput = {
   chat_id: string | number;
 };
 
-type HealthResult = {
+export type HealthResult = {
   ok: boolean;
   status: ChannelStatusType;
   reason: string | null;
   suggestedFix: string | null;
   permanent: boolean;
   retryAfterMs?: number;
+  retryable?: boolean;
 };
 
 function deterministicWeight(id: number) {
@@ -44,65 +51,28 @@ function deterministicWeight(id: number) {
   return value >>> 0;
 }
 
-function permanentFailure(description: string) {
-  const normalized = description.toLowerCase();
-  if (normalized.includes("chat not found") || normalized.includes("channel_invalid")) {
-    return {
-      status: "channel_not_found" as const,
-      reason: "Channel not found or deleted.",
-      suggestedFix: "Confirm the channel exists, add AdsGalaxy bot again, then reactivate.",
-    };
-  }
-  if (normalized.includes("bot was kicked") || normalized.includes("bot is not a member") || normalized.includes("user not found")) {
-    return {
-      status: "bot_removed" as const,
-      reason: "AdsGalaxy bot was removed from the channel.",
-      suggestedFix: "Re-add AdsGalaxy bot as administrator and reactivate.",
-    };
-  }
-  if (normalized.includes("not enough rights") || normalized.includes("not an administrator") || normalized.includes("need administrator")) {
-    return {
-      status: "permission_missing" as const,
-      reason: "AdsGalaxy bot does not have posting permission.",
-      suggestedFix: "Grant AdsGalaxy bot administrator posting permission and reactivate.",
-    };
-  }
-  return null;
+function suggestedFix(state: TelegramAccessState) {
+  if (state === "bot_removed") return "Re-add Ads Galaxy bot as administrator and resume manually.";
+  if (state === "channel_not_found") return "Confirm the stored Telegram channel identity, then verify again.";
+  if (state === "restricted") return "Resolve the Telegram restriction, then verify and resume manually.";
+  if (state === "permission_missing") return "Grant Ads Galaxy bot administrator posting permission, then resume manually.";
+  return "Retry the Telegram access check later.";
 }
 
-async function telegram(method: string, payload: Record<string, unknown>) {
-  const token = process.env.BOT_TOKEN;
-  if (!token) throw new Error("BOT_TOKEN is missing");
-  const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  return response.json();
-}
-
-let botIdPromise: Promise<number> | null = null;
-
-async function getBotId() {
-  if (!botIdPromise) {
-    botIdPromise = telegram("getMe", {}).then((result) => {
-      if (!result.ok || !result.result?.id) throw new Error(result.description || "Unable to verify AdsGalaxy bot.");
-      return Number(result.result.id);
-    }).catch((error) => {
-      botIdPromise = null;
-      throw error;
-    });
-  }
-  return botIdPromise;
-}
-
-function telegramRetryAfterMs(result: { parameters?: { retry_after?: unknown } } | null | undefined) {
-  const seconds = Number(result?.parameters?.retry_after || 0);
-  return seconds > 0 ? (seconds + 1) * 1000 : 0;
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function legacyHealth(result: TelegramAccessResult): HealthResult {
+  let status: ChannelStatusType = "paused";
+  if (result.ok) status = "active";
+  else if (result.state === "bot_removed" || result.state === "permission_missing"
+    || result.state === "channel_not_found" || result.state === "restricted") status = result.state;
+  return {
+    ok: result.ok,
+    status,
+    reason: result.reason,
+    suggestedFix: result.ok ? null : suggestedFix(result.state),
+    permanent: result.permanent,
+    retryable: result.retryable,
+    retryAfterMs: result.retryAfterSeconds ? result.retryAfterSeconds * 1000 : undefined,
+  };
 }
 
 export function channelLifecycleLogHook(_event: string, _payload: Record<string, unknown>) {
@@ -161,171 +131,33 @@ export async function ensureDefaultChannelDistribution(db: Db = pool) {
 }
 
 export async function checkChannelHealth(channel: ChannelHealthInput): Promise<HealthResult> {
-  let lastResult: HealthResult | null = null;
-
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const result = await checkChannelHealthOnce(channel);
-    if (result.ok) return result;
-
-    lastResult = result;
-    if (attempt < 3) {
-      await sleep(Math.max(lastResult.retryAfterMs || 0, 500 * attempt));
-    }
-  }
-
-  return lastResult || {
-    ok: false,
-    status: "paused",
-    reason: "Unable to verify channel.",
-    suggestedFix: "Try again later or verify channel access.",
-    permanent: false,
-  };
-}
-
-async function checkChannelHealthOnce(channel: ChannelHealthInput): Promise<HealthResult> {
-  try {
-    const chat = await telegram("getChat", { chat_id: channel.chat_id });
-    if (!chat.ok) {
-      const retryAfterMs = telegramRetryAfterMs(chat);
-      if (retryAfterMs) return { ok: false, status: "paused", reason: chat.description || "Telegram rate limit.", suggestedFix: "Retry after Telegram's requested delay.", permanent: false, retryAfterMs };
-      const permanent = permanentFailure(chat.description || "");
-      if (permanent) return { ok: false, permanent: true, ...permanent };
-      return { ok: false, status: "paused", reason: chat.description || "Unable to verify channel.", suggestedFix: "Try again later or verify channel access.", permanent: false };
-    }
-
-    const botId = await getBotId();
-    const member = await telegram("getChatMember", { chat_id: channel.chat_id, user_id: botId });
-    if (!member.ok) {
-      const retryAfterMs = telegramRetryAfterMs(member);
-      if (retryAfterMs) return { ok: false, status: "paused", reason: member.description || "Telegram rate limit.", suggestedFix: "Retry after Telegram's requested delay.", permanent: false, retryAfterMs };
-      const permanent = permanentFailure(member.description || "");
-      if (permanent) return { ok: false, permanent: true, ...permanent };
-      return { ok: false, status: "paused", reason: member.description || "Unable to verify bot permissions.", suggestedFix: "Try again later.", permanent: false };
-    }
-
-    const status = member.result?.status;
-    const canPost = status === "creator" || (status === "administrator" && member.result?.can_post_messages !== false);
-    if (!canPost) {
-      return {
-        ok: false,
-        status: status === "left" || status === "kicked" ? "bot_removed" : "permission_missing",
-        reason: status === "left" || status === "kicked"
-          ? "AdsGalaxy bot was removed from the channel."
-          : "AdsGalaxy bot is not an administrator with posting permission.",
-        suggestedFix: status === "left" || status === "kicked"
-          ? "Re-add AdsGalaxy bot as administrator and reactivate."
-          : "Grant AdsGalaxy bot posting permission and reactivate.",
-        permanent: true,
-      };
-    }
-
-    return { ok: true, status: "active", reason: null, suggestedFix: null, permanent: false };
-  } catch (error: unknown) {
-    return {
-      ok: false,
-      status: "paused",
-      reason: error instanceof Error ? error.message : "Temporary Telegram verification failure.",
-      suggestedFix: "Try again later.",
-      permanent: false,
-    };
-  }
+  return legacyHealth(await verifyTelegramChannelAccess({
+    channelId: channel.id,
+    chatId: channel.chat_id,
+    source: "legacy_health_check",
+    persist: false,
+  }));
 }
 
 export async function markChannelHealthSuccess(channelId: number | string, db: Db = pool) {
-  await db.query(
-    `UPDATE channels
-     SET health_status = 'healthy',
-         health_checked_at = NOW(),
-         failure_reason = NULL
-     WHERE id = ?`,
-    [channelId]
-  );
-  await db.query(
-    `UPDATE channel_telegram_identities
-     SET bot_can_post=1,verification_state='healthy',consecutive_failure_count=0,
-         first_failure_at=NULL,last_failure_at=NULL,last_success_at=UTC_TIMESTAMP(6),
-         last_verified_at=UTC_TIMESTAMP(6),last_checked_at=UTC_TIMESTAMP(6),
-         next_retry_at=NULL,last_failure_code=NULL,last_failure_reason=NULL
-     WHERE channel_id=?`,
-    [channelId]
-  );
+  await persistTelegramChannelAccess({ channelId, source: "legacy_health_success" }, {
+    ok: true, state: "healthy", reason: null, reasonCode: null, checkedAt: new Date(),
+    telegramChatId: null, username: null, title: null, channelType: null, botRole: null,
+    canPostMessages: true, permanent: false, retryable: false, retryAfterSeconds: null,
+  }, db);
 }
 
 export async function autoPauseChannel(channelId: number | string, health: HealthResult, db: Db = pool) {
-  const [identityRows] = await db.query<RowDataPacket[]>(
-    "SELECT consecutive_failure_count,last_failure_at,last_failure_code FROM channel_telegram_identities WHERE channel_id=? LIMIT 1",
-    [channelId]
-  );
-  const previous = identityRows[0];
-  const independent = !previous?.last_failure_at
-    || Date.now() - new Date(previous.last_failure_at).getTime() >= 30 * 60 * 1000;
-  const sameFailure = previous?.last_failure_code === health.status;
-  const failureCount = independent
-    ? (sameFailure ? Number(previous?.consecutive_failure_count || 0) + 1 : 1)
-    : Number(previous?.consecutive_failure_count || 0);
-  await db.query(
-    `INSERT INTO channel_telegram_identities
-      (channel_id,telegram_chat_id,channel_type,current_username,bot_can_post,verification_state,
-       consecutive_failure_count,first_failure_at,last_failure_at,last_checked_at,next_retry_at,
-       last_failure_code,last_failure_reason,last_check_source)
-     SELECT id,chat_id,IF(channel_type='private','private','public'),username,0,?,?,UTC_TIMESTAMP(6),
-       UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 30 MINUTE),?,?,?
-     FROM channels WHERE id=? AND chat_id IS NOT NULL AND chat_id<>'' AND chat_id<>'0'
-     ON DUPLICATE KEY UPDATE bot_can_post=0,verification_state=VALUES(verification_state),
-       consecutive_failure_count=VALUES(consecutive_failure_count),
-       first_failure_at=IF(VALUES(consecutive_failure_count)=1,UTC_TIMESTAMP(6),first_failure_at),
-       last_failure_at=UTC_TIMESTAMP(6),last_checked_at=UTC_TIMESTAMP(6),
-       next_retry_at=VALUES(next_retry_at),last_failure_code=VALUES(last_failure_code),
-       last_failure_reason=VALUES(last_failure_reason),last_check_source=VALUES(last_check_source)`,
-    [health.status, failureCount, health.status, String(health.reason || health.status).slice(0, 500), "channel_health", channelId]
-  );
-  if (!health.permanent || failureCount < 3) {
-    await db.query(
-      `UPDATE channels SET health_status='warning',health_checked_at=NOW(),
-         last_failure_at=NOW(),failure_reason=? WHERE id=?`,
-      [String(health.reason || "Temporary Telegram verification failure").slice(0, 255), channelId]
-    );
-    channelLifecycleLogHook("channel_health_failure_deferred", {
-      channel_id: channelId,
-      status: health.status,
-      independent_failure_count: failureCount,
-    });
-    return;
-  }
-  await db.query(
-    `UPDATE channels
-     SET status = ?,
-         paused_reason = ?,
-         suggested_fix = ?,
-         failure_reason = ?,
-         last_failure_at = NOW(),
-         health_checked_at = NOW(),
-         health_status = 'critical',
-         auto_paused_at = NOW()
-     WHERE id = ?`,
-    [health.status, health.reason, health.suggestedFix, health.reason, channelId]
-  );
-
-  await createSystemLog({
-    logType: "channel_health",
-    status: "failed",
-    title: "Channel auto-paused",
-    summary: `Channel auto-paused because ${health.reason || "channel health failed"}`,
-    autoPausedCount: 1,
-    failedCount: 1,
-    failureReasons: { [health.status]: 1 },
-    affectedEntities: { channels: [maskEntityId("channel", channelId)] },
-    metadata: {
-      health_status: health.status,
-      suggested_fix: health.suggestedFix,
-    },
+  const state: TelegramAccessState = health.status === "bot_removed" || health.status === "permission_missing"
+    || health.status === "channel_not_found" || health.status === "restricted"
+    ? health.status
+    : "temporarily_unavailable";
+  await persistTelegramChannelAccess({ channelId, source: "legacy_auto_pause", autoPauseActive: true }, {
+    ok: false, state, reason: health.reason, reasonCode: state, checkedAt: new Date(),
+    telegramChatId: null, username: null, title: null, channelType: null, botRole: null,
+    canPostMessages: false, permanent: health.permanent, retryable: !health.permanent,
+    retryAfterSeconds: health.retryAfterMs ? Math.ceil(health.retryAfterMs / 1000) : null,
   }, db);
-
-  channelLifecycleLogHook("channel_auto_paused", {
-    channel_id: channelId,
-    status: health.status,
-    reason: health.reason,
-  });
 }
 
 export async function recordChannelPostSuccess(channelId: number | string, db: Db = pool) {
@@ -353,20 +185,11 @@ export async function recordChannelPostFailure(channelId: number | string, reaso
 }
 
 export async function reactivateChannelAfterHealthCheck(channelId: number | string, chatId: string | number, db: Db = pool) {
-  const health = await checkChannelHealth({ id: channelId, chat_id: chatId });
-  if (!health.ok) {
-    if (health.permanent) {
-      await autoPauseChannel(channelId, health, db);
-    } else {
-      await recordChannelPostFailure(channelId, health.reason || "Temporary health check failure", db);
-    }
-    throw new Error(health.reason || "Channel health check failed");
-  }
-  await verifyAndStoreChannelIdentity({
-    channelId,
-    chatId,
-    source: "publisher_reactivate",
+  const access = await verifyTelegramChannelAccess({
+    channelId, chatId, source: "publisher_reactivate", persist: true, autoPauseActive: false,
   }, db);
+  const health = legacyHealth(access);
+  if (!access.ok) throw new Error(access.reason || "Channel health check failed");
 
   const [channelRows] = await db.query<RowDataPacket[]>(
     "SELECT channel_type FROM channels WHERE id = ? LIMIT 1",
@@ -401,6 +224,19 @@ export async function reactivateChannelAfterHealthCheck(channelId: number | stri
   return health;
 }
 
-export function classifyTelegramSendFailure(description?: string) {
-  return permanentFailure(description || "");
+export function classifyTelegramSendFailure(description?: string): {
+  status: ChannelStatusType;
+  reason: string | null;
+  suggestedFix: string;
+} | null {
+  const failure = classifyTelegramAccessFailure({ description });
+  if (!failure.permanent) return null;
+  let status: ChannelStatusType = "paused";
+  if (failure.state === "bot_removed" || failure.state === "permission_missing"
+    || failure.state === "channel_not_found" || failure.state === "restricted") status = failure.state;
+  return {
+    status,
+    reason: failure.reason,
+    suggestedFix: suggestedFix(failure.state),
+  };
 }

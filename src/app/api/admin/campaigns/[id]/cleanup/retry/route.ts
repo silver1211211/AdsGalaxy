@@ -3,6 +3,7 @@ import { requireAdminPermission } from "@/lib/adminAuth";
 import { retryCampaignPostCleanup } from "@/lib/campaignPostDeletion";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { acquireCronLock, releaseCronLock } from "@/lib/cronSecurity";
+import { campaignBelongsToScope } from "@/lib/silverCampaignControl";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +15,7 @@ export async function POST(
   if (response) return response;
 
   const { id } = await params;
+  if (!(await campaignBelongsToScope(Number(id), "main"))) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
   let lock: { lockName: string; ownerToken: string } | null = null;
 
   try {

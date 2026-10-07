@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
-import { verifyGrowthDestination } from "@/lib/channelGrowth";
+import { GrowthDestinationVerificationError, verifyGrowthDestination } from "@/lib/channelGrowth";
 
 export async function POST(request: Request) {
   try {
@@ -17,8 +17,11 @@ export async function POST(request: Request) {
       can_invite_users: true,
     });
   } catch (error) {
+    if(error instanceof GrowthDestinationVerificationError){
+      return NextResponse.json({code:error.code},{status:error.code==="TELEGRAM_UNAVAILABLE"?503:400});
+    }
     const message = error instanceof Error ? error.message : "INVALID_DESTINATION_CHANNEL";
-    const code = /invite/i.test(message) ? "BOT_INVITE_PERMISSION_REQUIRED" : /admin/i.test(message) ? "BOT_NOT_ADMIN" : /telegram|timeout|fetch/i.test(message) ? "TELEGRAM_UNAVAILABLE" : "INVALID_DESTINATION_CHANNEL";
+    const code = /admin/i.test(message) ? "BOT_NOT_ADMIN" : /invite/i.test(message) ? "BOT_INVITE_PERMISSION_REQUIRED" : /telegram|timeout|fetch/i.test(message) ? "TELEGRAM_UNAVAILABLE" : "INVALID_DESTINATION_CHANNEL";
     return NextResponse.json({ code }, { status: getAuthErrorStatus(error) === 403 ? 403 : 400 });
   }
 }

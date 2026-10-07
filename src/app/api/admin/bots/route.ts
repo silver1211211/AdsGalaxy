@@ -11,6 +11,7 @@ type AdminBotRow = RowDataPacket & Record<string, unknown>;
 type CountRow = RowDataPacket & { total: number };
 type BotSummaryRow = RowDataPacket & {
   monetized_bots: number | string | null;
+  pending_bots: number | string | null;
   delivery_eligible_bots: number | string | null;
   paused_bots: number | string | null;
   failed_bots: number | string | null;
@@ -195,6 +196,7 @@ export async function GET(request: Request) {
     const [summaryRows] = await pool.query<BotSummaryRow[]>(`
       SELECT
         SUM(CASE WHEN b.status = 'active' AND ${isDeletedExpr} = FALSE THEN 1 ELSE 0 END) as monetized_bots,
+        SUM(CASE WHEN b.status = 'pending' AND ${isDeletedExpr} = FALSE THEN 1 ELSE 0 END) as pending_bots,
         SUM(CASE WHEN ${botOperationalCondition("b")} THEN 1 ELSE 0 END) as delivery_eligible_bots,
         SUM(CASE WHEN b.status IN ('paused', 'token_invalid', 'bot_deleted', 'unreachable') AND ${isDeletedExpr} = FALSE THEN 1 ELSE 0 END) as paused_bots,
         SUM(CASE WHEN b.status IN ('token_invalid', 'bot_deleted', 'unreachable') AND ${isDeletedExpr} = FALSE THEN 1 ELSE 0 END) as failed_bots,
@@ -214,6 +216,7 @@ export async function GET(request: Request) {
       totalPages: Math.ceil(countRow.total / limit),
       summary: {
         monetized_bots: Number(summary?.monetized_bots || 0),
+        pending_bots: Number(summary?.pending_bots || 0),
         delivery_eligible_bots: Number(summary?.delivery_eligible_bots || 0),
         paused_bots: Number(summary?.paused_bots || 0),
         failed_bots: Number(summary?.failed_bots || 0),

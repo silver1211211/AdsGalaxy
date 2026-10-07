@@ -115,7 +115,7 @@ export async function GET(
     const deposit = rows[0];
 
     // If already finalized, just return
-    if (deposit.status === "paid" || deposit.status === "expired" || deposit.status === "canceled") {
+    if (deposit.status === "paid" || deposit.status === "expired") {
       return NextResponse.json(deposit);
     }
 
@@ -185,7 +185,7 @@ export async function PATCH(
 
     if (action === "cancel") {
       await pool.query(
-        "UPDATE deposits SET status = 'canceled' WHERE track_id = ? AND user_id = ? AND status IN ('pending', 'waiting')",
+        "UPDATE deposits SET local_canceled_at=NOW() WHERE track_id=? AND user_id=? AND status IN ('pending','waiting','paying')",
         [track_id, user.id]
       );
       return NextResponse.json({ success: true });

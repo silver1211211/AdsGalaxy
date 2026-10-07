@@ -31,12 +31,14 @@ function normalizeCountry(value: unknown) {
 }
 
 export async function POST(request: Request) {
+  let diagnosticMiniappId: number | null = null;
   try {
     const blocked = await requireAdServingAllowed();
     if (blocked) return blocked;
 
     const body = await request.json().catch(() => ({}));
     const miniappId = Number(body.miniapp_id);
+    diagnosticMiniappId = Number.isInteger(miniappId) && miniappId > 0 ? miniappId : null;
     const suppliedUserId = clean(body.telegram_user_id);
     const sdkUser = await requirePublicSdkUser(request, miniappId, suppliedUserId);
     const telegramUserId = sdkUser.telegramUserId;
@@ -44,8 +46,8 @@ export async function POST(request: Request) {
     const country = trustedMiniAppCountry(request.headers, normalizeCountry(body.country)).country;
 
     const [[rateRow]]: any = await pool.query(
-      "SELECT COUNT(*) AS count FROM miniapp_mediation_requests WHERE telegram_user_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)",
-      [telegramUserId]
+      "SELECT COUNT(*) AS count FROM miniapp_mediation_requests WHERE miniapp_id = ? AND telegram_user_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)",
+      [miniappId, telegramUserId]
     );
     if (Number(rateRow?.count || 0) >= 30) {
       return NextResponse.json({ success: false, error_code: "RATE_LIMITED", message: "Too many ad requests. Try again shortly." }, { status: 429 });
@@ -89,7 +91,19 @@ export async function POST(request: Request) {
 
     return NextResponse.json(toPublicMediationDecision(result.decision));
   } catch (error: any) {
-    console.error("Public SDK Mini App request failed", error);
+    const initData = request.headers.get("x-telegram-init-data") || "";
+    const initParams = new URLSearchParams(initData);
+    const authDate = Number(initParams.get("auth_date"));
+    console.error("Public SDK Mini App request failed", {
+      code: String(error?.code || "REQUEST_FAILED"),
+      status: Number(error?.status || 400),
+      miniapp_id: diagnosticMiniappId,
+      init_data_present: Boolean(initData),
+      signature_present: Boolean(initParams.get("signature")),
+      hash_present: Boolean(initParams.get("hash")),
+      auth_date_present: Number.isInteger(authDate) && authDate > 0,
+      auth_age_seconds: Number.isInteger(authDate) && authDate > 0 ? Math.max(0, Math.floor(Date.now() / 1000) - authDate) : null,
+    });
     return NextResponse.json(
       { ...publicSdkErrorResponse(error), message: "Unable to load this advertisement. Please try again." },
       { status: Number(error?.status || 400) }

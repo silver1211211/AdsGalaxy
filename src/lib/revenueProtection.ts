@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy protection query payloads are not schema-generated */
 import pool from "@/lib/db";
+import type { PoolConnection } from "mysql2/promise";
 import { getPaidReferralEarnings } from "@/lib/paidReferralEarnings";
 import { sendTelegramMessage } from "@/lib/telegram";
 
@@ -255,7 +256,7 @@ export async function recordPayoutSafetyCheck(input: {
   expectedPlatformShare: number;
   expectedReserveShare: number;
   metadata?: Record<string, unknown>;
-}) {
+}, connection?: PoolConnection) {
   const delta =
     Math.abs(input.publisherShare - input.expectedPublisherShare)
     + Math.abs((input.platformShare || 0) - input.expectedPlatformShare)
@@ -266,7 +267,8 @@ export async function recordPayoutSafetyCheck(input: {
   const status = delta > 0.000001 ? "blocked" : "passed";
   const reason = status === "blocked" ? "Settlement split does not match configured revenue protection rules" : null;
 
-  await pool.query(
+  const db = connection || pool;
+  await db.query(
     `INSERT INTO payout_safety_checks
       (settlement_type, settlement_id, campaign_id, publisher_id, advertiser_paid, publisher_share,
        platform_share, reserve_share, expected_publisher_share, expected_platform_share, expected_reserve_share,
@@ -290,7 +292,9 @@ export async function recordPayoutSafetyCheck(input: {
     ]
   );
 
-  if (status === "blocked") {
+  // Financial transactions must not open a second database path or send a
+  // Telegram notification while holding money-row locks.
+  if (status === "blocked" && !connection) {
     await createRevenueProtectionAlert({
       entityType: "settlement",
       entityId: input.settlementId || null,
@@ -351,7 +355,7 @@ async function updatePublisherRiskScores(settings: SettingMap) {
     let paidReferralEarnings: string;
     try {
       paidReferralEarnings = await getPaidReferralEarnings(pool, Number(row.id));
-    } catch (error) {
+    } catch {
       console.error("Publisher risk referral aggregate unavailable", { user_id: Number(row.id), error_code: "REFERRAL_AGGREGATE_FAILED" });
       continue; // Incomplete canonical inputs must not produce a financial/security decision.
     }

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy traffic-quality rows are dynamically shaped */
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedAdmin } from "@/lib/adminAuth";
@@ -5,6 +6,7 @@ import { calculateTrafficQuality, maybeQueueTrafficReview, persistTrafficQuality
 import { isTrafficEntityType } from "@/lib/trafficQualityRefresh";
 import { calculateInventoryMetrics, maybeQueueInventoryAttention, persistInventoryMetrics } from "@/lib/inventoryOptimization";
 import { getInternalAdCompletionAnalytics } from "@/lib/internalAdCompletionQuality";
+import { mainCampaignScopeSql } from "@/lib/silverCampaignControl";
 
 function parseJsonObject(value: unknown) {
   if (!value) return {};
@@ -101,14 +103,14 @@ async function getChannelDetails(entityId: number) {
       SELECT DATE_FORMAT(cp.created_at, '%Y-%m-%d') as label, COALESCE(SUM(cp.views), 0) as impressions
       FROM campaign_posts cp
       JOIN campaigns c ON c.id = cp.campaign_id
-      WHERE cp.channel_id = ? AND c.type = 'views' AND cp.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+      WHERE cp.channel_id = ? AND c.type = 'views' AND ${mainCampaignScopeSql("c")} AND cp.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
       GROUP BY DATE_FORMAT(cp.created_at, '%Y-%m-%d')
       UNION ALL
       SELECT DATE_FORMAT(cc.created_at, '%Y-%m-%d') as label, COUNT(*) as impressions
       FROM campaign_clicks cc
       JOIN campaign_posts cp ON cp.id = cc.post_id
       JOIN campaigns c ON c.id = cp.campaign_id
-      WHERE cp.channel_id = ? AND c.type = 'clicks' AND cc.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+      WHERE cp.channel_id = ? AND c.type = 'clicks' AND ${mainCampaignScopeSql("c")} AND cc.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
       GROUP BY DATE_FORMAT(cc.created_at, '%Y-%m-%d')
     ) daily
     GROUP BY label

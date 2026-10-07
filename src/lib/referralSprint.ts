@@ -4,7 +4,7 @@ import pool from "@/lib/db";
 import { getPaidReferralEarnings, rebuildReferralEarningsCache, settleInsertedReferralReward } from "@/lib/paidReferralEarnings";
 import { sendLocalizedTelegramMessage } from "@/lib/userLocale";
 import type { TranslationKey, TranslationValues } from "@/i18n";
-import { blockReferralIfSelfDevice, ensureReferralSecuritySchema } from "@/lib/referralSecurity";
+import { blockReferralIfSelfDevice } from "@/lib/referralSecurity";
 import {
   PAYOUT_CAPS, REFERRAL_REWARDS, SPRINT_ELIGIBILITY_SQL, SPRINT_PRIZES,
   TEAM_SPRINT_POOLS, decimalToUnits, minimumUnits, referralIdempotencyKey, unitsToDecimal,
@@ -60,39 +60,7 @@ function getSetting(settings: Map<string, string>, key: string, fallback: string
   return settings.get(key) || fallback;
 }
 
-async function columnExists(db: Db, table: string, column: string): Promise<boolean> {
-  const [[row]]: any = await db.query(
-    "SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
-    [table, column]
-  );
-  return Number(row?.cnt || 0) > 0;
-}
-
-async function ensureReferralGrowthSchema(db: Db = pool) {
-  const cols: Array<{ name: string; def: string }> = [
-    { name: "status",              def: "VARCHAR(30) NOT NULL DEFAULT 'pending' AFTER invited_by" },
-    { name: "verification_status", def: "VARCHAR(30) NOT NULL DEFAULT 'pending' AFTER status" },
-    { name: "reward_status",       def: "VARCHAR(30) NOT NULL DEFAULT 'pending' AFTER verification_status" },
-    { name: "reward_amount",       def: "DECIMAL(18,8) NOT NULL DEFAULT 0 AFTER reward_status" },
-    { name: "required_channel",    def: "VARCHAR(255) NULL AFTER reward_amount" },
-    { name: "verified_at",         def: "DATETIME NULL AFTER required_channel" },
-    { name: "reward_paid_at",      def: "DATETIME NULL AFTER verified_at" },
-    { name: "rejection_reason",    def: "VARCHAR(255) NULL AFTER reward_paid_at" },
-    { name: "abuse_risk_level",    def: "VARCHAR(20) NOT NULL DEFAULT 'low' AFTER rejection_reason" },
-    { name: "abuse_flags",         def: "LONGTEXT NULL AFTER abuse_risk_level" },
-    { name: "sprint_id",           def: "BIGINT UNSIGNED NULL AFTER abuse_flags" },
-    { name: "created_at",          def: "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP" },
-    { name: "updated_at",          def: "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP" },
-  ];
-  for (const { name, def } of cols) {
-    if (!(await columnExists(db, "referrals", name))) {
-      await db.query(`ALTER TABLE referrals ADD COLUMN \`${name}\` ${def}`);
-    }
-  }
-}
-
-export async function ensureReferralGrowthSettingDefaults(db: Db = pool, repairSchema = true) {
-  if (repairSchema) await ensureReferralGrowthSchema(db);
+export async function ensureReferralGrowthSettingDefaults(db: Db = pool) {
   await db.query(
     `INSERT INTO referral_growth_settings (\`key\`, value, description) VALUES
       ('referral_sprint_enabled', '1', 'Enable Referral Sprint, Team League, Team Rewards, popup, and growth UI'),
@@ -575,7 +543,6 @@ async function awardFirstReferralBonus(conn: PoolConnection, userId: number, set
 export async function processReferralJoinReward(referralId: number) {
   const conn = await pool.getConnection();
   try {
-    await ensureReferralSecuritySchema(conn);
     await conn.beginTransaction();
     const [rows]: any = await conn.query(
       `SELECT r.*, u.telegram_id as referrer_telegram_id,ru.telegram_id as referred_telegram_id,
@@ -1069,7 +1036,6 @@ async function detectReferralAbuse(referral: any, conn: PoolConnection) {
 export async function processVerifiedReferralForUser(userId: number) {
   const conn = await pool.getConnection();
   try {
-    await ensureReferralSecuritySchema(conn);
     await conn.beginTransaction();
     const [rows]: any = await conn.query(
       `SELECT r.*, u.telegram_id as referrer_telegram_id,ru.telegram_id as referred_telegram_id,

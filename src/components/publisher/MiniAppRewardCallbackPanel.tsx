@@ -4,10 +4,25 @@ import { useEffect, useState } from "react";
 import { waitForTelegramInitData } from "@/lib/telegramWebApp";
 import { getApiErrorCode, getApiErrorMessage } from "@/lib/apiErrorMessage";
 
+type CallbackDiagnostics = {
+  delivery_summary?: { total: number; delivered: number; pending: number; failed: number };
+  latest_attempt?: {
+    event_id?: string; status?: string; attempts?: number; attempted_at?: string;
+    http_status?: number | null; safe_response?: string | null; last_error?: string | null;
+  } | null;
+  contract?: {
+    event_type?: string;
+    payload_format?: Record<string, string>;
+    signature?: { canonical_form?: string; algorithm?: string; headers?: string[] };
+  };
+};
+
 export default function MiniAppRewardCallbackPanel({ miniappId }: { miniappId: number }) {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState("disabled");
   const [effectiveStatus, setEffectiveStatus] = useState("disabled_by_publisher");
+  const [statusReason, setStatusReason] = useState("");
+  const [diagnostics, setDiagnostics] = useState<CallbackDiagnostics>({});
   const [secret, setSecret] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -28,6 +43,8 @@ export default function MiniAppRewardCallbackPanel({ miniappId }: { miniappId: n
         setUrl(data.callback_url || "");
         setStatus(data.configured_status || data.status || "disabled");
         setEffectiveStatus(data.effective_status || "disabled_by_publisher");
+        setStatusReason(data.status_reason || "");
+        setDiagnostics({ delivery_summary: data.delivery_summary, latest_attempt: data.latest_attempt, contract: data.contract });
       }
     }).catch((error) => { if (!cancelled) setMessage(error.message); });
     return () => { cancelled = true; };
@@ -49,6 +66,7 @@ export default function MiniAppRewardCallbackPanel({ miniappId }: { miniappId: n
       }
       setStatus(data.status || status);
       if (data.effective_status) setEffectiveStatus(data.effective_status);
+      if (data.status_reason) setStatusReason(data.status_reason);
       if (data.callback_url) setUrl(data.callback_url);
       if (data.signing_secret) setSecret(data.signing_secret);
       setMessage(data.signing_secret ? "Copy this signing secret now. It will not be shown again." : "Reward callback updated.");
@@ -73,13 +91,31 @@ export default function MiniAppRewardCallbackPanel({ miniappId }: { miniappId: n
     </div>
     <p className="mt-2 text-[11px] font-bold text-slate-500">Status: {
       effectiveStatus === "active"
-        ? "Active — callback delivery is enabled."
+        ? "ACTIVE"
         : effectiveStatus === "saved_platform_disabled"
-          ? "Saved — callback delivery is not currently enabled by the platform."
+          ? "SAVED / DISABLED"
           : effectiveStatus === "schema_unavailable"
-            ? "Unavailable — callback database setup is pending."
-            : "Disabled by publisher."
+            ? "UNAVAILABLE"
+            : effectiveStatus === "failed_attention"
+              ? "FAILED / ATTENTION"
+              : "SAVED / DISABLED"
     }</p>
+    <p className="mt-1 text-[11px] font-medium text-slate-500">{effectiveStatus === "schema_unavailable" ? "Unavailable — callback database setup is pending." : statusReason}</p>
+    {diagnostics.contract && <div className="mt-3 rounded-xl bg-slate-50 p-3 text-[11px] leading-5 text-slate-600">
+      <p><span className="font-black text-slate-800">Event:</span> {diagnostics.contract.event_type}</p>
+      <p><span className="font-black text-slate-800">Payload:</span> {Object.keys(diagnostics.contract.payload_format || {}).join(", ")}</p>
+      <p><span className="font-black text-slate-800">Signature:</span> {diagnostics.contract.signature?.algorithm} over {diagnostics.contract.signature?.canonical_form}</p>
+      <p className="break-words"><span className="font-black text-slate-800">Headers:</span> {(diagnostics.contract.signature?.headers || []).join(", ")}</p>
+    </div>}
+    {diagnostics.delivery_summary && <p className="mt-2 text-[11px] font-medium text-slate-500">Deliveries: {diagnostics.delivery_summary.delivered} delivered · {diagnostics.delivery_summary.pending} pending · {diagnostics.delivery_summary.failed} failed</p>}
+    {diagnostics.latest_attempt && <div className="mt-2 rounded-xl border border-slate-200 p-3 text-[11px] leading-5 text-slate-600">
+      <p className="font-black text-slate-800">Latest callback attempt</p>
+      <p>Event ID: {diagnostics.latest_attempt.event_id || "—"}</p>
+      <p>Status: {diagnostics.latest_attempt.status || "—"} · HTTP {diagnostics.latest_attempt.http_status ?? "—"} · Attempts {diagnostics.latest_attempt.attempts ?? 0}</p>
+      <p>Attempted: {diagnostics.latest_attempt.attempted_at ? new Date(diagnostics.latest_attempt.attempted_at).toLocaleString() : "Not yet"}</p>
+      {diagnostics.latest_attempt.last_error && <p>Last error: {diagnostics.latest_attempt.last_error}</p>}
+      {diagnostics.latest_attempt.safe_response && <p className="break-all">Safe response: {diagnostics.latest_attempt.safe_response}</p>}
+    </div>}
     {secret && <div className="mt-3 rounded-xl bg-amber-50 p-3"><code className="break-all text-xs text-amber-900">{secret}</code><button onClick={copySecret} className="mt-2 block text-xs font-black text-amber-700">Copy newly generated secret</button></div>}
     {message && <p className="mt-2 text-[11px] font-semibold text-slate-600">{message}</p>}
   </div>;

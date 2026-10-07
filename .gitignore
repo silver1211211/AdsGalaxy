@@ -58,6 +58,13 @@ scripts/*
 !scripts/generate-mt-session.js
 !scripts/test-private-views.js
 !scripts/verify-miniapp-ed25519.ts
+!scripts/run-cron-job.sh
+!scripts/cron-audit.sh
+!scripts/build-validator.sh
+!scripts/predeploy-check.sh
+!scripts/production-status.sh
+!scripts/build-release.sh
+!scripts/promote-release.sh
 scratch/
 .telegram-mt-session*
 tsconfig.tsbuildinfo

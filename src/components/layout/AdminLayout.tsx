@@ -63,6 +63,7 @@ const menuSections = [
   {
     label: "TRUST & SAFETY",
     items: [
+      { href: "/admin/check", icon: ShieldAlert, label: "Check" },
       { href: "/admin/traffic-quality", icon: Radar, label: "Traffic Quality" },
       { href: "/admin/revenue-protection", icon: ShieldAlert, label: "Revenue Protection" },
       { href: "/admin/automation", icon: ShieldCheck, label: "Moderation Rules" },
@@ -115,6 +116,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [checkCount, setCheckCount] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -150,6 +152,16 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       window.fetch = originalFetch;
     };
   }, [pathname, router]);
+
+  useEffect(() => {
+    if (pathname === "/admin/login") return;
+    let cancelled = false;
+    fetch("/api/admin/check?count=1", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => { if (!cancelled) setCheckCount(Number(data?.unresolved || 0)); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [pathname]);
 
   const handleLogout = async () => {
     await fetch("/api/admin/logout", { method: "POST" }).catch(() => undefined);
@@ -240,6 +252,11 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                     >
                       <item.icon size={16} />
                       {item.label}
+                      {item.href === "/admin/check" && checkCount > 0 && (
+                        <span className="ml-auto min-w-5 rounded-full bg-red-600 px-1.5 py-0.5 text-center text-[10px] font-black text-white">
+                          {checkCount > 99 ? "99+" : checkCount}
+                        </span>
+                      )}
                     </Link>
                   );
                 })}

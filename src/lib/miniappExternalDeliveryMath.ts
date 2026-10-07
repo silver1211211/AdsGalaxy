@@ -42,6 +42,28 @@ export function calculateCumulativeExternalDue(input: {
   return Math.max(0, desiredExternalCumulative - alreadyAdded);
 }
 
+export function calculateDeliveryProgress(input: {
+  startingImpressions: number;
+  startingClicks: number;
+  targetImpressions: number;
+  targetClicks: number;
+  currentImpressions: number;
+  currentClicks: number;
+}) {
+  const required = Math.max(0, input.targetImpressions - input.startingImpressions)
+    + Math.max(0, input.targetClicks - input.startingClicks);
+  if (required === 0) return 1;
+  const delivered = Math.max(0, input.currentImpressions - input.startingImpressions)
+    + Math.max(0, input.currentClicks - input.startingClicks);
+  return clampRatio(delivered / required);
+}
+
+export function externalBatchSourceKey(syncId: number, batchSequence: number) {
+  if (!Number.isSafeInteger(syncId) || syncId <= 0) throw new Error("Invalid sync ID");
+  if (!Number.isSafeInteger(batchSequence) || batchSequence <= 0) throw new Error("Invalid batch sequence");
+  return `miniapp:external:${syncId}:batch:${batchSequence}`;
+}
+
 export function decimalToMoneyUnits(value: unknown) {
   const raw = String(value ?? "0").trim();
   const match = raw.match(/^(-?)(\d+)(?:\.(\d+))?$/);

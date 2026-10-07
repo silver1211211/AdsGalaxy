@@ -233,12 +233,19 @@ export default function DepositPage() {
     if (!amount || parseFloat(amount) < minDeposit || isCreating) return;
     setIsCreating(true);
     try {
+      const fingerprint = `${amount}|${network}`;
+      const stored = sessionStorage.getItem("deposit-create-request");
+      const parsed = stored ? JSON.parse(stored) : null;
+      const requestKey = parsed?.fingerprint === fingerprint ? parsed.key : crypto.randomUUID();
+      sessionStorage.setItem("deposit-create-request", JSON.stringify({ fingerprint, key: requestKey }));
       const res = await apiFetch("/api/advertiser/deposits", {
         method: "POST",
+        headers: { "Idempotency-Key": requestKey },
         body: JSON.stringify({ amount, network })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to create deposit");
+      sessionStorage.removeItem("deposit-create-request");
 
       setViewingDeposit(data);
       setIsPaying(true);

@@ -1,5 +1,6 @@
 import type { PoolConnection } from "mysql2/promise";
 import pool from "@/lib/db";
+import { markBotReadyState, refreshBotDeliveryReadinessForUser } from "@/lib/botDeliveryReadyPool";
 import { createSystemLog, maskEntityId } from "@/lib/systemLogs";
 import { ensureBotIntegration } from "@/lib/botIntegration";
 
@@ -13,7 +14,15 @@ export type TelegramFailure = {
   reason: string;
   suggestedFix: string;
   permanent: boolean;
+  retryAfterSeconds?: number;
 };
+
+export class BotActivationHealthError extends Error {
+  constructor(public health: TelegramFailure) {
+    super(health.reason || "Bot health check failed");
+    this.name = "BotActivationHealthError";
+  }
+}
 
 function normalize(value: unknown) {
   return String(value || "").toLowerCase();
@@ -70,13 +79,20 @@ export async function checkBotHealth(bot: { id: number | string; bot_token: stri
       });
       const data = await response.json().catch(() => ({}));
       if (!data.ok) {
+        const retryAfterSeconds = Math.max(0, Number(data?.parameters?.retry_after || 0));
         lastFailure = classifyBotTokenFailure(data.description || `HTTP ${response.status}`) || {
           status: "unreachable" as const,
-          reason: data.description || "Bot is unreachable.",
-          suggestedFix: "Check bot token and Telegram connectivity, then reactivate.",
+          reason: response.status === 429
+            ? "Telegram temporarily rate limited bot verification."
+            : data.description || "Bot is unreachable.",
+          suggestedFix: response.status === 429
+            ? "Verification will be retried after Telegram's cooldown."
+            : "Check bot token and Telegram connectivity, then reactivate.",
           permanent: response.status === 401 || response.status === 404,
+          retryAfterSeconds: retryAfterSeconds || undefined,
         };
 
+        if (response.status === 429 || retryAfterSeconds > 0 || response.status >= 500) break;
         if (attempt < 3) await sleep(500 * attempt);
         continue;
       }
@@ -86,10 +102,10 @@ export async function checkBotHealth(bot: { id: number | string; bot_token: stri
         [bot.id]
       );
       return { ok: true, status: "active" as const, reason: null, suggestedFix: null, permanent: false };
-    } catch (error: any) {
+    } catch (error: unknown) {
       lastFailure = {
         status: "unreachable" as const,
-        reason: error?.message || "Bot health check failed.",
+        reason: error instanceof Error ? error.message : "Bot health check failed.",
         suggestedFix: "Try again later.",
         permanent: false,
       };
@@ -135,6 +151,7 @@ export async function autoPauseBot(botId: number | string, failure: TelegramFail
       suggested_fix: failure.suggestedFix,
     },
   }, db);
+  await markBotReadyState(botId, false, db);
   botHealthLogHook("bot_auto_paused", { bot_id: botId, status: failure.status, reason: failure.reason });
 }
 
@@ -150,6 +167,7 @@ export async function recordBotBroadcastSuccess(botId: number | string, db: Db =
     "UPDATE bots SET last_successful_broadcast_at = NOW(), health_status = 'active', health_checked_at = NOW(), failure_reason = NULL WHERE id = ?",
     [botId]
   );
+  await markBotReadyState(botId, true, db);
 }
 
 export async function markBotUserInactive(userId: number | string, failure: TelegramFailure, db: Db = pool) {
@@ -165,6 +183,7 @@ export async function markBotUserInactive(userId: number | string, failure: Tele
      WHERE id = ?`,
     [status, failure.reason, userId]
   );
+  await refreshBotDeliveryReadinessForUser(userId, db);
   botHealthLogHook("bot_user_inactive", { bot_user_id: userId, status, reason: failure.reason });
 }
 
@@ -173,6 +192,7 @@ export async function markBotUserDeliverySuccess(userId: number | string, db: Db
     "UPDATE bot_users SET is_active = TRUE, status = 'active', inactive_reason = NULL, last_successful_delivery_at = NOW() WHERE id = ?",
     [userId]
   );
+  await refreshBotDeliveryReadinessForUser(userId, db);
 }
 
 export async function reactivateBotAfterHealthCheck(
@@ -184,7 +204,13 @@ export async function reactivateBotAfterHealthCheck(
   const integrationUrl = await ensureBotIntegration(db, origin, botId);
   const health = await checkBotHealth({ id: botId, bot_token: token }, db);
   if (!health.ok) {
-    throw new Error(health.reason || "Bot health check failed");
+    throw new BotActivationHealthError({
+      status: health.status,
+      reason: health.reason || "Bot health check failed",
+      suggestedFix: health.suggestedFix || "Try again later.",
+      permanent: health.permanent,
+      retryAfterSeconds: "retryAfterSeconds" in health ? health.retryAfterSeconds : undefined,
+    });
   }
   await db.query(
     `UPDATE bots
@@ -202,8 +228,15 @@ export async function reactivateBotAfterHealthCheck(
   return { ...health, integrationUrl };
 }
 
-export async function sendWithRetries(send: () => Promise<any>) {
-  let last: any = null;
+type TelegramSendResult = {
+  ok?: boolean;
+  description?: string;
+  error_code?: number;
+  parameters?: { retry_after?: number };
+};
+
+export async function sendWithRetries(send: () => Promise<TelegramSendResult | undefined>) {
+  let last: TelegramSendResult | null | undefined = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     last = await send();
     if (last?.ok) return { ok: true, result: last, attempts: attempt };

@@ -1,6 +1,6 @@
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { checkChannelHealth } from "@/lib/channelLifecycle";
+import { TELEGRAM_ACCESS_STALE_HOURS, verifyTelegramChannelAccess } from "@/lib/telegramChannelAccess";
 import { createSystemLog } from "@/lib/systemLogs";
 
 export type OperationalHealthStatus = "healthy" | "warning" | "critical" | "disabled";
@@ -62,12 +62,15 @@ export async function runChannelHealthMonitor(limit = 200) {
        (SELECT SUM(cva.status='invalid') FROM campaign_views_audit cva WHERE cva.channel_id=ch.id AND cva.check_time>=DATE_SUB(NOW(),INTERVAL 30 DAY)) invalid_audits,
        (SELECT COUNT(*) FROM campaign_views_audit cva WHERE cva.channel_id=ch.id AND cva.check_time>=DATE_SUB(NOW(),INTERVAL 30 DAY)) total_audits
      FROM channels ch JOIN users u ON u.id=ch.user_id
-     WHERE ch.is_deleted=FALSE AND ch.status NOT IN ('pending','rejected','deleted')
+     LEFT JOIN channel_telegram_identities ti ON ti.channel_id=ch.id
+     WHERE ch.is_deleted=FALSE AND ch.status NOT IN ('rejected','deleted')
+       AND (ti.last_checked_at IS NULL OR ti.last_checked_at<=DATE_SUB(UTC_TIMESTAMP(6),INTERVAL ${TELEGRAM_ACCESS_STALE_HOURS} HOUR))
      ORDER BY (ch.id>${cursor}) DESC,ch.id ASC LIMIT ${boundedLimit}`
   );
   const results: ChannelHealthResult[] = [];
   for (const channel of channels) {
     const issues: HealthIssue[] = [];
+    let telegramAutoPaused = false;
     const scores = { posting: 20, views: 20, settlement: 20, quality: 20, access: 20 };
     const disabled = Boolean(channel.is_deleted) || ["deleted", "rejected"].includes(channel.status);
     if (!channel.chat_id) { scores.access -= 20; add(issues, "access", "critical", "missing_chat_id", "Channel chat ID is missing.", "Reconnect the channel and save a valid Telegram chat ID."); }
@@ -75,10 +78,18 @@ export async function runChannelHealthMonitor(limit = 200) {
     if (channel.channel_type === "private" && !["member", "already_member"].includes(String(channel.tracking_account_member_status || ""))) { scores.access -= 15; add(issues, "access", "critical", "private_tracking_not_member", "Assigned MTProto tracking account membership is not verified.", "Add the assigned MTProto account to the private channel and complete tracking onboarding."); }
 
     if (!disabled && channel.chat_id) {
-      const telegramHealth = await checkChannelHealth({ id: channel.id, chat_id: channel.chat_id });
+      const telegramHealth = await verifyTelegramChannelAccess({
+        channelId: channel.id,
+        chatId: channel.chat_id,
+        username: channel.username,
+        source: "periodic_health",
+        persist: true,
+        autoPauseActive: true,
+      });
       if (!telegramHealth.ok) {
+        telegramAutoPaused = channel.status === "active" && telegramHealth.permanent;
         scores.access -= telegramHealth.permanent ? 20 : 8;
-        add(issues, "access", telegramHealth.permanent ? "critical" : "warning", telegramHealth.status, telegramHealth.reason || "Telegram access check failed.", telegramHealth.suggestedFix || "Verify channel access and retry.");
+        add(issues, "access", telegramHealth.permanent ? "critical" : "warning", telegramHealth.state, telegramHealth.reason || "Telegram access check failed.", "Verify channel access and retry.");
       }
     }
     if (count(channel.send_failures) >= 3) { scores.posting -= 20; add(issues, "posting", "critical", "repeated_send_failures", "Repeated Telegram post delivery failures in 24 hours.", "Verify bot admin and posting permissions, then run a health check."); }
@@ -108,9 +119,7 @@ export async function runChannelHealthMonitor(limit = 200) {
     const score = disabled ? 0 : Object.values(scores).reduce((sum, value) => sum + value, 0);
     const critical = issues.some((issue) => issue.severity === "critical");
     const status: OperationalHealthStatus = disabled ? "disabled" : critical || score < 60 ? "critical" : score < 85 ? "warning" : "healthy";
-    // The monitor is diagnostic only. It records health and recommended action,
-    // but channel status changes require an explicit operational workflow.
-    const autoPaused = false;
+    const autoPaused = telegramAutoPaused;
     const primary = issues[0];
     await pool.query(
       `UPDATE channels SET health_status=?,health_score=?,health_checked_at=NOW(),health_failure_reason=?,
@@ -138,5 +147,5 @@ export async function runChannelHealthMonitor(limit = 200) {
   const summary = { checked: results.length, healthy: results.filter((r) => r.status === "healthy").length, warning: results.filter((r) => r.status === "warning").length, critical: results.filter((r) => r.status === "critical").length, disabled: results.filter((r) => r.status === "disabled").length, auto_paused: results.filter((r) => r.auto_paused).length, global_ledger_duplicate_status: globalLedgerHasDuplicates ? "duplicates_detected" : "clean", failed_checks: results.reduce((total, result) => total + result.issues.length, 0), runtime_ms: Date.now() - startedAt };
   console.info("Channel health monitor summary", { channels_checked: summary.checked, global_ledger_duplicate_status: summary.global_ledger_duplicate_status, failed_checks: summary.failed_checks, runtime_ms: summary.runtime_ms });
   await createSystemLog({ logType: "channel_health", status: summary.critical ? "partial_failure" : "success", title: "Hourly channel health monitor", attemptedCount: summary.checked, successCount: summary.healthy + summary.warning, failedCount: summary.critical, skippedCount: summary.disabled, autoPausedCount: summary.auto_paused, metadata: summary });
-  return { ...summary, auto_pause_critical: false, status_mutation_enabled: false, channels: results };
+  return { ...summary, auto_pause_critical: true, status_mutation_enabled: true, channels: results };
 }

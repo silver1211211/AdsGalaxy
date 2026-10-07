@@ -1,5 +1,6 @@
 import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { getChannelDailySpend } from "@/lib/channelDailySpend";
 import { aggregateChannelStatistics } from "@/lib/channelStatistics";
 import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
 import { deleteExhaustedChannelCampaignPosts, type CampaignPostDeletionSummary } from "@/lib/campaignPostDeletion";
@@ -7,7 +8,7 @@ import { creditUserLockedBalance } from "@/lib/earnings";
 import { recordPayoutSafetyCheck } from "@/lib/revenueProtection";
 import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
 import { sendTelegramMessage } from "@/lib/telegram";
-import { getPublisherQuality, type PublisherQualityMetrics } from "@/lib/publisherQuality";
+import { getPublisherQuality } from "@/lib/publisherQuality";
 import { runChannelFraudDetection, type ChannelFraudDetectionResult } from "@/lib/channelFraudDetection";
 import { enforcePublisherTrust, type PublisherTrustEnforcementResult } from "@/lib/publisherTrustEnforcement";
 import { applyChannelFraudBillingPolicy } from "@/lib/channelFraudBilling";
@@ -17,6 +18,9 @@ import { settlePendingChannelPublisherCredits } from "@/lib/channelFastBilling";
 import { getChannelUnitPrice, money } from "@/lib/channelBilling";
 import { calculateCurrentCanonicalAllocation, shadowWriteChannelAllocation, unitsToDecimal } from "@/lib/channelAllocationLedger";
 import { claimAdvertiserDirectDebit } from "@/lib/advertiserDirectDebit";
+import { cleanupChannelDailyCapPosts, markChannelDailyCapReached } from "@/lib/channelDailyCap";
+import { outstandingViewsSql, waivedViewsForPostSql } from "@/lib/channelViewWaivers";
+import { withFinancialTransactionRetry } from "@/lib/dbResilience";
 
 type SettlementKind = "view" | "click";
 type ChannelPayoutPolicy = {
@@ -51,6 +55,7 @@ type LockedPost = RowDataPacket & {
   advertiser_discount: string | number;
   views: string | number;
   settled_views: string | number;
+  waived_views: string | number;
   current_clicks: string | number;
   settled_clicks: string | number;
   channel_status: string;
@@ -139,8 +144,16 @@ export function calculateChannelPayoutSplit(advertiserDebit: number, policy: Cha
 }
 
 async function lockedPost(connection: PoolConnection, postId: number) {
+  const [identity] = await connection.query<Array<RowDataPacket & { campaign_id: number }>>(
+    "SELECT campaign_id FROM campaign_posts WHERE id=? LIMIT 1",
+    [postId],
+  );
+  if (!identity[0]) return null;
+  // All channel money paths acquire campaign before post/account rows.
+  await connection.query("SELECT id FROM campaigns WHERE id=? FOR UPDATE", [identity[0].campaign_id]);
   const [rows] = await connection.query<LockedPost[]>(
     `SELECT cp.id AS post_id, cp.campaign_id, cp.channel_id, cp.views, cp.settled_views, cp.settled_clicks,
+       ${waivedViewsForPostSql("cp")} AS waived_views,
        c.type AS campaign_type, c.name AS campaign_name, c.user_id AS advertiser_id, c.funding_model,
        c.status AS campaign_status, c.budget, c.daily_budget_limit, c.cpm, c.cpc,
        CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN IF(c.type='clicks',ard.cpc_discount,ard.cpm_discount) ELSE 0 END AS advertiser_discount,
@@ -171,7 +184,7 @@ async function countOutstandingCampaignEngagement(campaignId: number) {
        AND cp.delivery_confirmed_at IS NOT NULL
        AND cp.delivery_failed_at IS NULL
        AND cp.deleted_at IS NULL
-       AND ((c.type = 'views' AND COALESCE(cp.views, 0) > COALESCE(cp.settled_views, 0))
+       AND ((c.type = 'views' AND ${outstandingViewsSql("cp")} > 0)
          OR (c.type = 'clicks' AND (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) > COALESCE(cp.settled_clicks, 0)))`,
     [campaignId]
   );
@@ -217,7 +230,7 @@ export async function settleChannelCampaigns(options: {
   const details: ChannelSettlementDetail[] = [];
   const failedDetails: ChannelSettlementResult["failedDetails"] = [];
   const exhausted = new Map<number, { name: string; telegramId: string | number }>();
-  const qualityByChannel = new Map<number, PublisherQualityMetrics>();
+  const dailyCapped = new Set<number>();
   let failedPosts = 0;
   let totalCandidates = 0;
   let batchCount = 0;
@@ -242,7 +255,7 @@ export async function settleChannelCampaigns(options: {
        AND cp.id > ?
        AND (? IS NULL OR cp.channel_id = ?)
        AND (? IS NULL OR cp.campaign_id = ?)
-       AND ((c.type = 'views' AND COALESCE(cp.views, 0) > COALESCE(cp.settled_views, 0))
+       AND ((c.type = 'views' AND ${outstandingViewsSql("cp")} > 0)
          OR (c.type = 'clicks' AND (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) > COALESCE(cp.settled_clicks, 0)))
      ORDER BY cp.id ASC LIMIT ${MAX_POSTS_PER_RUN}`,
     [
@@ -263,46 +276,41 @@ export async function settleChannelCampaigns(options: {
     lastCandidatePostId = Number(candidates[candidates.length - 1].post_id || lastCandidatePostId);
 
     for (const candidate of candidates) {
-      const connection = await pool.getConnection();
       try {
-        await connection.beginTransaction();
+        const outcome = await withFinancialTransactionRetry(async (connection) => {
+        // Re-read and lock authoritative campaign/post counters on every retry.
         const post = await lockedPost(connection, candidate.post_id);
         if (!post || !campaignStatuses.includes(post.campaign_status as "active" | "paused") || post.channel_status !== "active"
           || Number(post.publisher_is_banned) === 1 || post.publisher_status === "banned"
           || (post.settlement_excluded_until && new Date(post.settlement_excluded_until).getTime() > Date.now())) {
-          await connection.rollback();
-          continue;
+          return { status: "skipped" as const };
         }
 
         const kind: SettlementKind = post.campaign_type === "clicks" ? "click" : "view";
         const oldViews = Number(post.settled_views || 0);
+        const waivedViews = Number(post.waived_views || 0);
         const totalViews = Number(post.views || 0);
         const oldClicks = Number(post.settled_clicks || 0);
         const totalClicks = Number(post.current_clicks || 0);
-        const dueUnits = kind === "view" ? totalViews - oldViews : totalClicks - oldClicks;
+        const dueUnits = kind === "view" ? totalViews - oldViews - waivedViews : totalClicks - oldClicks;
         const unitPrice = getChannelUnitPrice({ type: post.campaign_type, cpm: post.cpm, cpc: post.cpc, discount: post.advertiser_discount });
         const currentBudget = Number(post.budget || 0);
 
         if (dueUnits <= 0) {
-          await connection.rollback();
-          continue;
+          return { status: "skipped" as const };
         }
         if (!Number.isFinite(unitPrice) || unitPrice <= 0 || currentBudget <= 0) {
           if (currentBudget <= 0) await markCampaignBudgetExhausted(post.campaign_id, connection);
           else await connection.query("UPDATE campaigns SET status='paused', pause_reason='invalid_unit_price' WHERE id=?", [post.campaign_id]);
-          await connection.commit();
-          if (currentBudget <= 0) exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
-          continue;
+          return currentBudget <= 0
+            ? { status: "exhausted" as const, campaignId: post.campaign_id, name: post.campaign_name, telegramId: post.advertiser_telegram_id }
+            : { status: "skipped" as const };
         }
 
-        const [[todaySpendRow]] = await connection.query<Array<RowDataPacket & { spend: string | number }>>(
-          `SELECT COALESCE((SELECT SUM(advertiser_debit) FROM channel_settlement_ledger WHERE campaign_id=? AND created_at>=CURDATE()),0)
-            + COALESCE((SELECT SUM(advertiser_debit) FROM channel_advertiser_debits WHERE campaign_id=? AND created_at>=CURDATE()),0) spend`,
-          [post.campaign_id, post.campaign_id]
-        );
+        const todaySpend = await getChannelDailySpend(connection, post.campaign_id);
         const dailyBudget = Number(post.daily_budget_limit || 0);
         const dailyRemaining = dailyBudget > 0
-          ? Math.max(0, dailyBudget - Number(todaySpendRow?.spend || 0))
+          ? Math.max(0, dailyBudget - todaySpend)
           : Number.POSITIVE_INFINITY;
         const allowedBudget = Math.min(currentBudget, dailyRemaining);
         const affordableUnits = Math.max(0, Math.floor((allowedBudget + 1e-10) / unitPrice));
@@ -310,21 +318,20 @@ export async function settleChannelCampaigns(options: {
         if (settledUnits <= 0) {
           if (currentBudget + 1e-10 < unitPrice) {
             await markCampaignBudgetExhausted(post.campaign_id, connection);
-            await connection.commit();
-            exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
+            return { status: "exhausted" as const, campaignId: post.campaign_id, name: post.campaign_name, telegramId: post.advertiser_telegram_id };
           } else {
-            await connection.rollback();
+            if (dailyBudget > 0 && dailyRemaining + 1e-10 < unitPrice) {
+              await markChannelDailyCapReached(connection, post.campaign_id);
+              return { status: "daily_capped" as const, campaignId: post.campaign_id };
+            } else {
+              return { status: "skipped" as const };
+            }
           }
-          continue;
         }
 
         const debit = amount(settledUnits * unitPrice);
         const split = calculateChannelPayoutSplit(debit, payoutPolicy);
-        let quality = qualityByChannel.get(post.channel_id);
-        if (!quality) {
-          quality = await getPublisherQuality(post.channel_id, connection);
-          qualityByChannel.set(post.channel_id, quality);
-        }
+        const quality = await getPublisherQuality(post.channel_id, connection);
         const publisherCredit = amount(split.publisherCredit * quality.qualityWeight);
         const qualityHoldback = amount(split.publisherCredit - publisherCredit);
         const reserve = amount(debit - split.platformRevenue - publisherCredit);
@@ -334,6 +341,7 @@ export async function settleChannelCampaigns(options: {
         const settledThrough = (kind === "view" ? oldViews : oldClicks) + settledUnits;
         const remaining = amount(currentBudget - debit);
         const isExhausted = remaining < unitPrice || remaining <= 0;
+        const isDailyCapped = dailyBudget > 0 && dailyRemaining - debit + 1e-10 < unitPrice;
 
         const safety = await recordPayoutSafetyCheck({
           settlementType: kind,
@@ -354,12 +362,9 @@ export async function settleChannelCampaigns(options: {
             amount(debit * (1 - payoutPolicy.platformMarginPercent / 100)
               * (1 - payoutPolicy.safetyReservePercent / 100) * quality.qualityWeight)),
           metadata: { post_id: post.post_id, units: settledUnits, settled_through: settledThrough },
-        });
+        }, connection);
         if (safety.status !== "passed") {
-          await connection.rollback();
-          failedPosts += 1;
-          failedDetails.push({ postId: post.post_id, reason: "payout_safety_check_failed" });
-          continue;
+          throw new Error("payout_safety_check_failed");
         }
 
         if (post.funding_model === "direct_debit") {
@@ -378,11 +383,8 @@ export async function settleChannelCampaigns(options: {
                 "UPDATE campaigns SET status='paused',pause_reason='insufficient_balance' WHERE id=? AND status IN ('active','paused')",
                 [post.campaign_id],
               );
-              await connection.commit();
-            } else {
-              await connection.rollback();
             }
-            continue;
+            return { status: "skipped" as const };
           }
         }
 
@@ -438,9 +440,10 @@ export async function settleChannelCampaigns(options: {
 
         if (isExhausted && post.campaign_status === "active") {
           await markCampaignBudgetExhausted(post.campaign_id, connection);
-          exhausted.set(post.campaign_id, { name: post.campaign_name, telegramId: post.advertiser_telegram_id });
         }
-        await connection.commit();
+        if (!isExhausted && isDailyCapped) {
+          await markChannelDailyCapReached(connection, post.campaign_id);
+        }
 
         try {
           const canonical = calculateCurrentCanonicalAllocation({
@@ -477,18 +480,36 @@ export async function settleChannelCampaigns(options: {
           effective_publisher_cpc: effectivePublisherCpc,
           remaining_budget: isExhausted ? 0 : remaining, exhausted: isExhausted,
         };
-        details.push(detail);
-        console.info("Channel campaign settlement", detail);
+        return {
+          status: "settled" as const,
+          detail,
+          campaignId: post.campaign_id,
+          campaignName: post.campaign_name,
+          advertiserTelegramId: post.advertiser_telegram_id,
+          exhausted: isExhausted,
+          dailyCapped: !isExhausted && isDailyCapped,
+        };
+        }, { operation: "channel_campaign_settlement" });
+        if (outcome.status === "exhausted") {
+          exhausted.set(outcome.campaignId, { name: outcome.name, telegramId: outcome.telegramId });
+        } else if (outcome.status === "daily_capped") {
+          dailyCapped.add(outcome.campaignId);
+        } else if (outcome.status === "settled") {
+          if (outcome.exhausted) {
+            exhausted.set(outcome.campaignId, { name: outcome.campaignName, telegramId: outcome.advertiserTelegramId });
+          } else if (outcome.dailyCapped) {
+            dailyCapped.add(outcome.campaignId);
+          }
+          details.push(outcome.detail);
+          console.info("Channel campaign settlement", outcome.detail);
+        }
       } catch (error) {
-        await connection.rollback().catch(() => undefined);
         failedPosts += 1;
         failedDetails.push({ postId: Number(candidate.post_id), reason: error instanceof Error ? error.message : "unknown_error" });
         console.error("Channel campaign settlement failed", {
           post_id: candidate.post_id,
           error: error instanceof Error ? error.message : "unknown_error",
         });
-      } finally {
-        connection.release();
       }
     }
   }
@@ -503,6 +524,14 @@ export async function settleChannelCampaigns(options: {
         campaign_id: campaignId,
         error: error instanceof Error ? error.message : "channel_exhaustion_cleanup_failed",
       });
+    }
+  }
+  for (const campaignId of dailyCapped) {
+    if (exhausted.has(campaignId)) continue;
+    try {
+      deletions[campaignId] = await cleanupChannelDailyCapPosts(campaignId);
+    } catch (error) {
+      console.error("Daily-cap channel post cleanup failed", { campaign_id: campaignId, error });
     }
   }
 

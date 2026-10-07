@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy admin campaign payloads are not schema-generated */
 import pool from "@/lib/db";
+import { isStandardChannelReport, getChannelReportingMetrics, channelMetricPayload } from "@/lib/channelReporting";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { adminResumeCampaign, recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { recordAutomationAudit } from "@/lib/approvalAutomation";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByIds } from "@/lib/miniappCampaignMetrics";
 import { parseAdminPagination } from "@/lib/adminPagination";
+import { mainCampaignDisplayNumberSql, mainCampaignScopeSql } from "@/lib/silverCampaignControl";
+import { enqueueCampaignNotification } from "@/lib/platformNotifications";
+import type { ResultSetHeader } from "mysql2/promise";
 
 async function safeNotify(telegramId: unknown, message: string) {
   if (!telegramId) return;
@@ -31,7 +35,7 @@ export async function GET(request: Request) {
   try {
     const innerQuery = `
       SELECT
-        c.id, 'campaign' AS campaign_kind, c.campaign_kind AS source_campaign_kind, c.teaser_mode, c.teaser_enabled, c.user_id, c.name, c.type,
+        c.id, ${mainCampaignDisplayNumberSql("c")} AS main_display_number, 'campaign' AS campaign_kind, c.campaign_kind AS source_campaign_kind, c.teaser_mode, c.teaser_enabled, c.user_id, c.name, c.type,
         c.status, c.budget, c.total_budget, c.daily_budget_limit, c.cpm, c.quality_score, c.quality_tier,
         c.link, c.message_text, c.image_url, c.button_text, c.category,
         c.continents, c.countries, c.languages, c.vpn_policy, c.device_policy, c.os_policy,
@@ -50,10 +54,10 @@ export async function GET(request: Request) {
         0 AS clicks,
         0 AS average_cpc,
         0 AS requires_re_moderation
-      FROM campaigns c LEFT JOIN users u ON c.user_id = u.id
+      FROM campaigns c LEFT JOIN users u ON c.user_id = u.id WHERE ${mainCampaignScopeSql("c")}
       UNION ALL
       SELECT
-        m.id, 'miniapp' AS campaign_kind, NULL AS source_campaign_kind, NULL AS teaser_mode, 0 AS teaser_enabled, m.advertiser_id AS user_id, m.campaign_name AS name, 'miniapp_rewarded' AS type,
+        m.id, m.id AS main_display_number, 'miniapp' AS campaign_kind, NULL AS source_campaign_kind, NULL AS teaser_mode, 0 AS teaser_enabled, m.advertiser_id AS user_id, m.campaign_name AS name, 'miniapp_rewarded' AS type,
         CASE WHEN m.status = 'approved' THEN 'active' ELSE m.status END AS status,
         m.budget, m.budget AS total_budget, m.daily_budget_limit, m.advertiser_cpm_bid AS cpm, m.quality_score, m.quality_tier,
         m.landing_url AS link, m.description AS message_text, m.image_url, m.cta_text AS button_text, m.categories AS category,
@@ -101,7 +105,7 @@ export async function GET(request: Request) {
     const countInnerQuery = `
       SELECT c.status,c.name,c.message_text,u.first_name,u.last_name,u.username,u.telegram_id,
         COALESCE(u.advertiser_trust_level,'new') advertiser_trust_level
-      FROM campaigns c LEFT JOIN users u ON u.id=c.user_id
+      FROM campaigns c LEFT JOIN users u ON u.id=c.user_id WHERE ${mainCampaignScopeSql("c")}
       UNION ALL
       SELECT CASE WHEN m.status='approved' THEN 'active' ELSE m.status END status,
         m.campaign_name name,m.description message_text,u.first_name,u.last_name,u.username,u.telegram_id,
@@ -118,7 +122,7 @@ export async function GET(request: Request) {
     const advertiserIds = [...new Set(rows.map((row: any) => Number(row.user_id)))];
     const standardIds = rows.filter((row: any) => row.campaign_kind === "campaign").map((row: any) => Number(row.id));
     const miniAppIds = rows.filter((row: any) => row.campaign_kind === "miniapp").map((row: any) => Number(row.id));
-    const [historyRows, deliveryRows, postRows, clickRows, miniAppMetrics]: any = await Promise.all([
+    const [historyRows, deliveryRows, postRows, clickRows, billingRows, miniAppMetrics]: any = await Promise.all([
       advertiserIds.length ? pool.query(
         `SELECT user_id,
            SUM(status IN ('active','completed','budget_exhausted')) approved,
@@ -130,11 +134,27 @@ export async function GET(request: Request) {
          FROM broadcast_deliveries WHERE status='sent' AND campaign_id IN (?) GROUP BY campaign_id`, [standardIds]
       ).then(([result]) => result) : [],
       standardIds.length ? pool.query(
-        `SELECT campaign_id,COALESCE(SUM(views),0) impressions
+        `SELECT campaign_id,COALESCE(SUM(views),0) impressions,
+           COALESCE(SUM(CASE WHEN delivery_confirmed_at IS NOT NULL AND delivery_failed_at IS NULL THEN views ELSE 0 END),0) growth_impressions
          FROM campaign_posts WHERE campaign_id IN (?) GROUP BY campaign_id`, [standardIds]
       ).then(([result]) => result) : [],
       standardIds.length ? pool.query(
-        `SELECT campaign_id,COUNT(*) clicks FROM campaign_clicks WHERE campaign_id IN (?) GROUP BY campaign_id`, [standardIds]
+        `SELECT c.id campaign_id,COUNT(DISTINCT cc.id) actual_clicks,
+           COALESCE(MAX(CASE WHEN caa.active=1 AND caa.metric='clicks' AND caa.adjustment_mode='baseline' THEN caa.quantity ELSE 0 END),0) recovery_clicks,
+           GREATEST(COUNT(DISTINCT cc.id),COALESCE(MAX(CASE WHEN caa.active=1 AND caa.metric='clicks' AND caa.adjustment_mode='baseline' THEN caa.quantity ELSE 0 END),0)) clicks
+         FROM campaigns c LEFT JOIN campaign_clicks cc ON cc.campaign_id=c.id
+         LEFT JOIN campaign_analytics_adjustments caa ON caa.campaign_id=c.id
+         WHERE c.id IN (?) GROUP BY c.id`, [standardIds]
+      ).then(([result]) => result) : [],
+      standardIds.length ? pool.query(
+        `SELECT campaign_id,SUM(billable_views) billable_views FROM (
+           SELECT campaign_id,SUM(units) billable_views FROM channel_advertiser_debits
+           WHERE settlement_type='view' AND campaign_id IN (?) GROUP BY campaign_id
+           UNION ALL
+           SELECT l.campaign_id,SUM(l.new_units) FROM channel_settlement_ledger l
+           LEFT JOIN channel_fraud_billing_adjustments a ON a.settlement_ledger_id=l.id
+           WHERE l.settlement_type='view' AND a.id IS NULL AND l.campaign_id IN (?) GROUP BY l.campaign_id
+         ) charged GROUP BY campaign_id`, [standardIds,standardIds]
       ).then(([result]) => result) : [],
       getMiniAppCampaignMetricsByIds(miniAppIds),
     ]);
@@ -143,6 +163,13 @@ export async function GET(request: Request) {
     const deliveryByCampaign = indexed(deliveryRows, "campaign_id");
     const postsByCampaign = indexed(postRows, "campaign_id");
     const clicksByCampaign = indexed(clickRows, "campaign_id");
+    const billingByCampaign = indexed(billingRows, "campaign_id");
+    const growthIds = rows.filter((row: any) => row.source_campaign_kind === "channel_growth").map((row: any) => Number(row.id));
+    const [growthRows]: any = growthIds.length ? await pool.query(
+      `SELECT campaign_id,COUNT(*) subscribers,COALESCE(SUM(advertiser_debit),0) spend
+       FROM channel_growth_conversions WHERE campaign_id IN (?) AND status='billed' AND fraud_status='clear'
+       GROUP BY campaign_id`, [growthIds]) : [[]];
+    const growthByCampaign = indexed(growthRows, "campaign_id");
     const normalizedRows = rows.map((row: any) => {
       const history = historyByUser.get(Number(row.user_id));
       const enriched = {
@@ -153,16 +180,32 @@ export async function GET(request: Request) {
       if (row.campaign_kind === "miniapp") return applyMiniAppCampaignMetrics(enriched, miniAppMetrics);
       const delivery = deliveryByCampaign.get(Number(row.id));
       const posts = postsByCampaign.get(Number(row.id));
+      if (row.source_campaign_kind === "channel_growth") {
+        const growth = growthByCampaign.get(Number(row.id));
+        return { ...enriched, spend: Number(growth?.spend || 0), subscriber_spend: Number(growth?.spend || 0),
+          verified_subscribers: Number(growth?.subscribers || 0), impressions: Number(posts?.growth_impressions || 0),
+          clicks: Number(clicksByCampaign.get(Number(row.id))?.actual_clicks || 0),
+          effective_cps: Number(growth?.subscribers || 0) > 0 ? Number(growth?.spend || 0) / Number(growth?.subscribers) : 0 };
+      }
       const clicks = Number(clicksByCampaign.get(Number(row.id))?.clicks || 0);
+      const billableViews = Number(billingByCampaign.get(Number(row.id))?.billable_views || 0);
       const spend = row.type === "broadcast" ? Number(delivery?.spend || 0) : Number(row.channel_spend || 0);
       return {
         ...enriched,
         spend,
-        impressions: row.type === "broadcast" ? Number(delivery?.impressions || 0) : Number(posts?.impressions || 0),
+        impressions: row.type === "broadcast"
+          ? Number(delivery?.impressions || 0)
+          : row.type === "views" ? billableViews : Number(posts?.impressions || 0),
         clicks: row.type === "broadcast" ? 0 : clicks,
         average_cpc: row.type === "broadcast" || clicks === 0 ? 0 : spend / clicks,
       };
     });
+
+    const channelMetrics = await getChannelReportingMetrics(pool, normalizedRows.filter(isStandardChannelReport).map((r: any) => Number(r.id)));
+    for (const row of normalizedRows) {
+      const metrics = channelMetrics.get(Number(row.id));
+      if (isStandardChannelReport(row) && metrics) Object.assign(row, channelMetricPayload(metrics, row.source_campaign_kind === "channel_growth"));
+    }
 
     return NextResponse.json({
       campaigns: normalizedRows,
@@ -185,10 +228,11 @@ export async function PATCH(request: Request) {
     const rejectionReason = String(moderation_notes || "").trim();
     if (action === "reject") return NextResponse.json({ error: "MODERATION_REASON_REQUIRED", code: "MODERATION_REASON_REQUIRED" }, { status: 400 });
     const [campaignRows]: any = await pool.query(
-      "SELECT c.name, u.telegram_id FROM campaigns c LEFT JOIN users u ON u.id = c.user_id WHERE c.id = ?",
+      `SELECT c.name,c.user_id,c.status,u.telegram_id FROM campaigns c LEFT JOIN users u ON u.id = c.user_id WHERE c.id = ? AND ${mainCampaignScopeSql("c")}`,
       [id]
     );
     const campaign = campaignRows[0];
+    if (!campaign) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
 
     if (action === "reject") {
       await pool.query("UPDATE campaigns SET status = 'rejected', rejection_reason = ? WHERE id = ?", [rejectionReason || null, id]);
@@ -199,8 +243,10 @@ export async function PATCH(request: Request) {
     }
 
     if (action === "approve") {
-      await pool.query("UPDATE campaigns SET status = 'active' WHERE id = ?", [id]);
-      await safeNotify(campaign?.telegram_id, `✅ Your campaign "${campaign.name}" was approved and is active.`);
+      const [update] = await pool.query<ResultSetHeader>("UPDATE campaigns SET status = 'active' WHERE id = ? AND status<>'active'", [id]);
+      if (update.affectedRows > 0) await enqueueCampaignNotification(pool, {
+        campaignId: Number(id), userId: Number(campaign.user_id), event: "approved", name: campaign.name,
+      });
       await recordAutomationAudit({ actorType: "admin", action: "manual_campaign_approve", entityType: "campaign", entityId: id, decision: "approve", reason: "admin_manual_review" });
       await recordAdminActionAudit({ adminId: admin?.id, action: "campaign_approve", entityType: "campaign", entityId: id, reason: "admin_manual_review" });
       return NextResponse.json({ success: true });

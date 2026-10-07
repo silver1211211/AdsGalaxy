@@ -1,5 +1,6 @@
 import "server-only";
-import type { PoolConnection, ResultSetHeader } from "mysql2/promise";
+import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import { recordBalanceNotificationTransition } from "@/lib/platformNotifications";
 
 export type DirectDebitResult =
   | { ok: true; duplicate: false }
@@ -19,6 +20,9 @@ export async function claimAdvertiserDirectDebit(
   },
 ): Promise<DirectDebitResult> {
   const amount = String(input.amount);
+  const [[balanceRow]] = await conn.query<Array<RowDataPacket & { ad_balance: string | number }>>(
+    "SELECT ad_balance FROM users WHERE id=? FOR UPDATE", [input.advertiserId]);
+  const previousBalance = Number(balanceRow?.ad_balance || 0);
   const [claim] = await conn.query<ResultSetHeader>(
     `INSERT IGNORE INTO advertiser_direct_debits
       (source_key,advertiser_id,campaign_id,campaign_table,billing_type,amount,status)
@@ -43,5 +47,10 @@ export async function claimAdvertiserDirectDebit(
     "UPDATE advertiser_direct_debits SET status='settled',settled_at=NOW() WHERE source_key=?",
     [input.sourceKey],
   );
+  await recordBalanceNotificationTransition(conn, {
+    userId: input.advertiserId,
+    previousBalance,
+    newBalance: Math.max(0, previousBalance - Number(amount)),
+  });
   return { ok: true, duplicate: false };
 }

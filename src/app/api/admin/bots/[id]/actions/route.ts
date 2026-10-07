@@ -3,9 +3,10 @@ import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
-import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
+import { BotActivationHealthError, reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
 import { isBotEncryptionError, loadBotToken } from "@/lib/botIntegration";
-import { notifyBotApproved, notifyBotRejected, notifyBotRemoved } from "@/lib/publisherNotifications";
+import { notifyBotApproved, notifyBotRejected, notifyBotRemoved, notifyBotPaused } from "@/lib/publisherNotifications";
+import { rejectEntityWithPolicy } from "@/lib/moderationRejections";
 
 type StatusRow = RowDataPacket & {
   id: number;
@@ -45,7 +46,7 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const { response } = await requireAdminPermission("operate");
+  const { admin, response } = await requireAdminPermission("operate");
   if (response) return response;
 
   try {
@@ -79,7 +80,43 @@ export async function POST(
     const newStatus = statusMap[normalizedAction];
     const botColumns = await getBotColumns();
     if (normalizedAction === "activate") {
-      await reactivateBotAfterHealthCheck(id, await loadBotToken(pool, { ...rows[0], id }), pool, new URL(request.url).origin);
+      try {
+        await reactivateBotAfterHealthCheck(id, await loadBotToken(pool, { ...rows[0], id }), pool, new URL(request.url).origin);
+      } catch (error) {
+        if (error instanceof BotActivationHealthError) {
+          if (error.health.permanent && ["token_invalid", "bot_deleted"].includes(error.health.status)) {
+            await rejectEntityWithPolicy({
+              entityType: "bot",
+              entityId: id,
+              ruleKey: "publisher.bot.invalid-integration",
+              publicRuleNumber: 4,
+              internalNote: "Telegram getMe explicitly rejected the stored bot credential.",
+              adminId: Number(admin?.id || 0),
+            });
+            if (oldStatus !== "rejected") {
+              await notifyBotRejected(rows[0].telegram_id, id, rows[0].bot_username || "");
+            }
+            await recordAdminActionAudit({
+              adminId: admin?.id,
+              action: "bot_rejected_invalid_integration",
+              entityType: "bot",
+              entityId: id,
+              reason: "telegram_getme_invalid_token",
+              metadata: { old_status: oldStatus, new_status: "rejected", policy_rule: 4 },
+            });
+            return NextResponse.json({ success: true, status: "rejected", approval_result: "rejected_invalid_integration" });
+          }
+          const retryAfterSeconds = Number(error.health.retryAfterSeconds || 0);
+          return NextResponse.json({
+            error: "Telegram verification is temporarily unavailable; the bot remains pending.",
+            code: "TEMPORARILY_UNVERIFIED",
+            approval_result: "temporarily_unverified",
+            retry_after_seconds: retryAfterSeconds || null,
+            retry_at: retryAfterSeconds ? new Date(Date.now() + retryAfterSeconds * 1000).toISOString() : null,
+          }, { status: 409 });
+        }
+        throw error;
+      }
     } else if (normalizedAction === "delete") {
       const { assignments, params } = updateAssignable(botColumns, {
         status: newStatus,
@@ -99,7 +136,7 @@ export async function POST(
         health_status: "paused",
       });
       if (assignments.length > 0) {
-        await pool.query(`UPDATE bots SET ${assignments.join(", ")} WHERE id = ?`, [...params, id]);
+        await pool.query(`UPDATE bots SET ${assignments.join(", ")}, notification_state_version=notification_state_version+1 WHERE id = ? AND status<>'paused'`, [...params, id]);
       }
     } else {
       await pool.query("UPDATE bots SET status = ? WHERE id = ?", [newStatus, id]);
@@ -114,6 +151,10 @@ export async function POST(
       await notifyBotRejected(rows[0].telegram_id, id, botUsername);
     } else if (normalizedAction === "delete" && oldStatus !== "deleted") {
       await notifyBotRemoved(rows[0].telegram_id, id, botUsername);
+    } else if (normalizedAction === "pause" && oldStatus !== "paused") {
+      const [[version]] = await pool.query<Array<RowDataPacket & { notification_state_version: number }>>(
+        "SELECT notification_state_version FROM bots WHERE id=?", [id]);
+      await notifyBotPaused(rows[0].telegram_id, id, botUsername, Number(version?.notification_state_version || 1));
     }
 
     await recordAdminActionAudit({

@@ -1,6 +1,7 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy Developer Platform query results are not schema-generated */
 import crypto from "crypto";
 import { directMiniappRewardCallbacksEnabled } from "@/lib/miniappDirectRewardCallbacks";
-import { dispatchPinnedHttpsCallback } from "@/lib/directCallbackTransport.mjs";
+import { dispatchPinnedHttpsCallback, validateDirectCallbackUrl } from "@/lib/directCallbackTransport.mjs";
 import type { PoolConnection } from "mysql2/promise";
 import pool from "@/lib/db";
 
@@ -76,16 +77,7 @@ function normalizedAllowedOrigin(value: string) {
 }
 
 function validatedWebhookUrl(value: unknown) {
-  const raw = clean(value);
-  let url: URL;
-  try { url = new URL(raw); } catch { throw new Error("Webhook URL must be valid HTTPS"); }
-  const host = url.hostname.toLowerCase();
-  const privateHost = host === "localhost" || host === "127.0.0.1" || host === "::1"
-    || /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
-    || /^169\.254\./.test(host);
-  if (url.protocol !== "https:" || privateHost || !host.includes(".")) throw new Error("Webhook URL must be a public HTTPS endpoint");
-  url.username = ""; url.password = ""; url.hash = "";
-  return url.toString();
+  return validateDirectCallbackUrl(clean(value)).toString();
 }
 
 async function getSettings(db: Db = pool) {
@@ -655,25 +647,12 @@ export async function processPendingWebhookDeliveries() {
         } : {}),
         "x-adsgalaxy-signature": signature,
       };
-      let responseStatus: number;
-      let responseHash: string;
-      let responseOk: boolean;
-      if (delivery.miniapp_reward_callback_id) {
-        const result = await dispatchPinnedHttpsCallback({
-          url: String(delivery.url), body, headers,
-        });
-        responseStatus = result.status;
-        responseHash = result.responseHash;
-        responseOk = result.ok;
-      } else {
-        const response = await fetch(String(delivery.url), {
-          method: "POST", headers, body, signal: AbortSignal.timeout(10_000),
-        });
-        const responseBody = await hashBoundedWebhookResponse(response);
-        responseStatus = response.status;
-        responseHash = `${responseBody.hash};bytes=${responseBody.bytesRead};truncated=${responseBody.truncated ? 1 : 0}`;
-        responseOk = response.ok;
-      }
+      const response = await dispatchPinnedHttpsCallback({
+        url: String(delivery.url), body, headers,
+      });
+      const responseStatus = response.status;
+      const responseHash = response.responseHash;
+      const responseOk = response.ok;
       if (responseOk) {
         await pool.query(
           `UPDATE developer_webhook_deliveries
@@ -689,9 +668,10 @@ export async function processPendingWebhookDeliveries() {
       }
     } catch (error: any) {
       const attempts = toInt(delivery.attempts) + 1;
+      const unsafeDestination = error?.code === "UNSAFE_CALLBACK_DESTINATION";
       const v2Terminal = isV2 && attempts >= 6;
       const legacyTerminal = !isV2 && attempts >= maxAttempts;
-      const terminal = v2Terminal || legacyTerminal;
+      const terminal = unsafeDestination || v2Terminal || legacyTerminal;
       const delay = isV2
         ? V2_RETRY_DELAYS_MINUTES[Math.min(attempts - 1, V2_RETRY_DELAYS_MINUTES.length - 1)]
         : retryDelay;

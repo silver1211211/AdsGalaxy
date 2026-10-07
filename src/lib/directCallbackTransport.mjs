@@ -6,6 +6,12 @@ import { isIP } from "node:net";
 export const DIRECT_CALLBACK_TIMEOUT_MS = 10_000;
 export const DIRECT_CALLBACK_RESPONSE_LIMIT = 64 * 1024;
 
+function callbackPolicyError(message) {
+  const error = new Error(message);
+  error.code = "UNSAFE_CALLBACK_DESTINATION";
+  return error;
+}
+
 function unsafeIpv4(address) {
   const octets = address.split(".").map(Number);
   if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return true;
@@ -47,22 +53,24 @@ export function isProhibitedCallbackAddress(address, family = isIP(String(addres
 
 export function validateDirectCallbackUrl(value) {
   const raw = String(value ?? "").trim();
-  if (!raw || /[\r\n]/.test(raw)) throw new Error("Callback URL is malformed");
+  if (!raw || /[\r\n]/.test(raw)) throw callbackPolicyError("Callback URL is malformed");
   let url;
-  try { url = new URL(raw); } catch { throw new Error("Callback URL is malformed"); }
-  if (url.protocol !== "https:") throw new Error("Callback URL must use HTTPS");
-  if (url.username || url.password) throw new Error("Callback URL must not contain credentials");
-  if (url.hash) throw new Error("Callback URL must not contain a fragment");
+  try { url = new URL(raw); } catch { throw callbackPolicyError("Callback URL is malformed"); }
+  if (url.protocol !== "https:") throw callbackPolicyError("Callback URL must use HTTPS");
+  if (url.username || url.password) throw callbackPolicyError("Callback URL must not contain credentials");
+  if (url.hash) throw callbackPolicyError("Callback URL must not contain a fragment");
   const hostname = url.hostname.toLowerCase();
-  if (!hostname || hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")) {
-    throw new Error("Callback URL must use a public host");
+  const hostFamily = isIP(hostname.replace(/^\[|\]$/g, ""));
+  if (!hostname || hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")
+    || (!hostFamily && !hostname.includes("."))) {
+    throw callbackPolicyError("Callback URL must use a public host");
   }
   const family = isIP(hostname.replace(/^\[|\]$/g, ""));
   if (family && isProhibitedCallbackAddress(hostname, family)) {
-    throw new Error("Callback URL must not use a private or reserved address");
+    throw callbackPolicyError("Callback URL must not use a private or reserved address");
   }
   if (url.port && (!/^\d+$/.test(url.port) || Number(url.port) < 1 || Number(url.port) > 65535)) {
-    throw new Error("Callback URL uses an unsupported port");
+    throw callbackPolicyError("Callback URL uses an unsupported port");
   }
   return url;
 }
@@ -74,7 +82,7 @@ export async function resolvePublicCallbackAddresses(url, resolver = systemLooku
     : await resolver(url.hostname, { all: true, verbatim: true });
   if (!Array.isArray(addresses) || addresses.length === 0
     || addresses.some(({ address, family }) => isProhibitedCallbackAddress(address, family))) {
-    throw new Error("Callback URL must resolve only to public addresses");
+    throw callbackPolicyError("Callback URL must resolve only to public addresses");
   }
   return addresses;
 }
@@ -88,7 +96,7 @@ export async function dispatchPinnedHttpsCallback(input, dependencies = {}) {
   const addresses = await resolvePublicCallbackAddresses(url, dependencies.resolve || systemLookup);
   const selected = dependencies.selectAddress ? dependencies.selectAddress(addresses) : addresses[0];
   if (!selected || isProhibitedCallbackAddress(selected.address, selected.family)) {
-    throw new Error("Callback URL must resolve only to public addresses");
+    throw callbackPolicyError("Callback URL must resolve only to public addresses");
   }
   const requestFactory = dependencies.request || defaultRequest;
   const timeoutMs = input.timeoutMs ?? DIRECT_CALLBACK_TIMEOUT_MS;

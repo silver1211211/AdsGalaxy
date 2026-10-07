@@ -122,7 +122,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
     setIsLoading(true);
     setNotification(null);
     try {
-      const res = await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(username)}`);
+      const res = await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(username)}`, { timeoutMs: 60000 });
       const data: unknown = await res.json();
       
       if (!res.ok) {
@@ -217,6 +217,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
   };
 
   const handleSubmit = async () => {
+    if (isLoading) return;
     if (!channelInfo) {
       setNotification({ type: "error", title: "Registration Failed", message: "Fetch the channel information before registering it." });
       return;
@@ -244,6 +245,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
     try {
       const res = await apiFetch(isEdit ? `/api/publisher/channels/${channel.id}` : "/api/publisher/channels", {
         method: isEdit ? "PATCH" : "POST",
+        timeoutMs: 60000,
         body: JSON.stringify({
           chat_id: isEdit ? channel?.chat_id : channelInfo.id,
           username: isEdit ? channel?.username : channelInfo.username,

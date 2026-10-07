@@ -1,7 +1,7 @@
 import type { FieldPacket, PoolConnection, QueryResult } from "mysql2/promise";
 import pool, { DB_QUERY_TIMEOUT_MS, DB_RETRY_ATTEMPTS } from "@/lib/db";
 
-type MysqlError = Error & { code?: string; errno?: number };
+type MysqlError = Error & { code?: string; errno?: number; sqlState?: string };
 
 const TRANSIENT_CODES = new Set([
   "ECONNRESET",
@@ -9,12 +9,14 @@ const TRANSIENT_CODES = new Set([
   "PROTOCOL_CONNECTION_LOST",
   "ER_LOCK_DEADLOCK",
   "ER_LOCK_WAIT_TIMEOUT",
+  "40001",
   "ER_STATEMENT_TIMEOUT",
 ]);
 
 export function isTransientDatabaseError(error: unknown) {
   const candidate = error as MysqlError;
   return TRANSIENT_CODES.has(String(candidate?.code || ""))
+    || candidate?.sqlState === "40001"
     || candidate?.errno === 1_213
     || candidate?.errno === 1_205
     || candidate?.errno === 1_969;
@@ -102,4 +104,20 @@ export async function withTransactionRetry<T>(
   }
 
   throw new Error("Database transaction retry attempts exhausted");
+}
+
+/**
+ * Canonical retry boundary for money-moving work. Every attempt receives a
+ * fresh pooled connection and a fresh transaction; callers must perform all
+ * authoritative reads again inside the callback and rely on a durable unique
+ * source key for idempotency.
+ */
+export function withFinancialTransactionRetry<T>(
+  operation: (connection: PoolConnection) => Promise<T>,
+  options: { operation: string; attempts?: number },
+) {
+  return withTransactionRetry(operation, {
+    operation: options.operation,
+    attempts: Math.min(4, Math.max(1, options.attempts ?? 4)),
+  });
 }

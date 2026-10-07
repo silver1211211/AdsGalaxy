@@ -8,6 +8,7 @@ import { columnExists } from "@/lib/schemaGuards";
 import { getAdminChannelSafetyMetrics } from "@/lib/channelSafety";
 import { logSlowRequest } from "@/lib/performanceTiming";
 import { CACHE_TTL_SECONDS, cacheGetOrSet, cacheSet, redisKeys } from "@/lib/redisCache";
+import { mainCampaignScopeSql } from "@/lib/silverCampaignControl";
 
 const DASHBOARD_CACHE_MS = CACHE_TTL_SECONDS.ADMIN_DASHBOARD * 1_000;
 const DASHBOARD_STALE_MS = 24 * 60 * 60 * 1000;
@@ -45,8 +46,8 @@ export async function GET(request: Request) {
         SUM(created_at >= CURDATE()) AS today,
         SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)) AS week,
         SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)) AS month FROM users`),
-      pool.query("SELECT status, COUNT(*) as count FROM campaigns GROUP BY status"),
-      pool.query("SELECT SUM(status = 'pending' AND type != 'broadcast') AS channel_pending, SUM(status = 'pending' AND type = 'broadcast') AS bot_pending FROM campaigns"),
+      pool.query(`SELECT c.status, COUNT(*) as count FROM campaigns c WHERE ${mainCampaignScopeSql("c")} GROUP BY c.status`),
+      pool.query(`SELECT SUM(c.status = 'pending' AND c.type != 'broadcast') AS channel_pending, SUM(c.status = 'pending' AND c.type = 'broadcast') AS bot_pending FROM campaigns c WHERE ${mainCampaignScopeSql("c")}`),
       pool.query("SELECT status, COUNT(*) as count FROM miniapp_rewarded_campaigns GROUP BY status"),
       pool.query("SELECT status, COUNT(*) as count FROM channels WHERE is_deleted = FALSE GROUP BY status"),
       pool.query("SELECT COUNT(*) as count, COALESCE(SUM(subscriber_count), 0) as subscribers FROM channels WHERE is_deleted = FALSE AND status = 'active'"),

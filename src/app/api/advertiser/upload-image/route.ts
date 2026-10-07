@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { validateMultipartRequest } from "@/lib/requestBodyValidation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,6 +9,8 @@ export async function POST(request: Request) {
   try {
     const user = await getAuthenticatedUser(request.headers.get("x-telegram-init-data"));
     void user;
+    const invalid = validateMultipartRequest(request, 1024 * 1024 + 64 * 1024);
+    if (invalid) return invalid;
 
     const formData = await request.formData();
     const file = formData.get("image");
@@ -39,7 +42,8 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({ url: imgData.data.url });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Failed to upload image" }, { status: getAuthErrorStatus(error) });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Failed to upload image";
+    return NextResponse.json({ error: message }, { status: getAuthErrorStatus(error) });
   }
 }

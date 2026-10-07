@@ -8,17 +8,53 @@ import {
   generateDirectCallbackSecret,
 } from "@/lib/miniappDirectRewardCallbacks";
 
-function callbackStatus(configuredStatus: string) {
+function callbackStatus(configuredStatus: string, failedDeliveries = 0) {
   const platformEnabled = directMiniappRewardCallbacksEnabled();
-  const effectiveStatus = configuredStatus === "active"
-    ? platformEnabled ? "active" : "saved_platform_disabled"
-    : "disabled_by_publisher";
+  const effectiveStatus = configuredStatus !== "active"
+    ? "disabled_by_publisher"
+    : !platformEnabled
+      ? "saved_platform_disabled"
+      : failedDeliveries > 0
+        ? "failed_attention"
+        : "active";
+  const statusReason = effectiveStatus === "active"
+    ? "Callback delivery is enabled and ready."
+    : effectiveStatus === "saved_platform_disabled"
+      ? "Callback delivery is disabled by platform configuration."
+      : effectiveStatus === "failed_attention"
+        ? "One or more callback deliveries exhausted all retry attempts."
+        : "Callback delivery was disabled by the publisher.";
   return {
     configured_status: configuredStatus,
     platform_enabled: platformEnabled,
     effective_status: effectiveStatus,
+    status_reason: statusReason,
   };
 }
+
+const CALLBACK_CONTRACT = {
+  event_type: "reward.eligible",
+  payload_format: {
+    event_id: "<stable unique event id>",
+    request_id: "<AdsGalaxy mediation request id>",
+    mini_app_id: "<numeric Mini App id>",
+    user_id: "<verified Telegram user id as a string>",
+    status: "completed",
+    completed_at: "<ISO-8601 timestamp>",
+  },
+  signature: {
+    version: "v2",
+    canonical_form: "timestamp.event_id.raw_body",
+    algorithm: "HMAC-SHA256",
+    headers: [
+      "x-adsgalaxy-event",
+      "x-adsgalaxy-event-id",
+      "x-adsgalaxy-timestamp",
+      "x-adsgalaxy-signature-version",
+      "x-adsgalaxy-signature",
+    ],
+  },
+};
 
 type PublicCallbackError = Error & { statusCode?: number; publicCode?: string };
 
@@ -98,14 +134,33 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
        WHERE c.miniapp_id = ? GROUP BY c.id`, [miniappId]
     );
     const row = rows[0];
+    const [latestRows] = await pool.query<RowDataPacket[]>(
+      `SELECT event_id, status, attempts, last_attempt_at, response_status, response_body, error_message
+       FROM developer_webhook_deliveries
+       WHERE miniapp_reward_callback_id = (SELECT id FROM miniapp_reward_callbacks WHERE miniapp_id = ? LIMIT 1)
+       ORDER BY id DESC LIMIT 1`,
+      [miniappId]
+    );
+    const latest = latestRows[0];
     return NextResponse.json(row ? {
       configured: true, callback_url: row.callback_url, status: row.status,
-      ...callbackStatus(String(row.status)),
+      ...callbackStatus(String(row.status), Number(row.failed || 0)),
       has_secret: true, secret_version: Number(row.secret_version), rotated_at: row.rotated_at,
       delivery_summary: { total: Number(row.deliveries), delivered: Number(row.delivered), pending: Number(row.pending), failed: Number(row.failed) },
+      latest_attempt: latest ? {
+        event_id: latest.event_id,
+        status: latest.status,
+        attempts: Number(latest.attempts || 0),
+        attempted_at: latest.last_attempt_at,
+        http_status: latest.response_status,
+        safe_response: latest.response_body,
+        last_error: latest.error_message,
+      } : null,
+      contract: CALLBACK_CONTRACT,
     } : {
       configured: false, status: "disabled", ...callbackStatus("disabled"),
-      has_secret: false, delivery_summary: { total: 0, delivered: 0, pending: 0, failed: 0 },
+      has_secret: false, delivery_summary: { total: 0, delivered: 0, pending: 0, failed: 0 }, latest_attempt: null,
+      contract: CALLBACK_CONTRACT,
     });
   } catch (error) { return failure(error); }
 }

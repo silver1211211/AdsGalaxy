@@ -3,6 +3,7 @@ import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
+import { refreshBotDeliveryReadiness } from "@/lib/botDeliveryReadyPool";
 
 type BotRow = RowDataPacket & { id: number; owner_telegram_id: string | number | null };
 type ExistingUserRow = RowDataPacket & { id: number };
@@ -47,6 +48,7 @@ async function storeUser(connection: PoolConnection, columns: Set<string>, botId
         [existing.id]
       );
     }
+    await refreshBotDeliveryReadiness(botId, connection);
     return "existing" as const;
   }
   const names = ["bot_id", "chat_id"];
@@ -67,6 +69,7 @@ async function storeUser(connection: PoolConnection, columns: Set<string>, botId
   addValue("status", isOwner ? "active" : "pending_verification");
   if (isOwner && columns.has("verification_success_at")) { names.push("verification_success_at"); placeholders.push("NOW()"); }
   await connection.query(`INSERT INTO bot_users (${names.join(", ")}) VALUES (${placeholders.join(", ")})`, insertValues);
+  await refreshBotDeliveryReadiness(botId, connection);
   return "added" as const;
 }
 

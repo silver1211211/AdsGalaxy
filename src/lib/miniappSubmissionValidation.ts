@@ -161,6 +161,7 @@ export function validateMiniAppSubmission(input: MiniAppSubmissionInput): Valida
   const username = normalizeBotUsername(input.miniapp_username);
   const botId = validateBotId(input.bot_id);
   const telegramBotId = validateBotId(input.telegram_bot_id ?? input.bot_id);
+  if (botId !== telegramBotId) fail("Bot ID fields must match.");
   const webappUrl = validateHttpsUrl(input.webapp_url);
   const miniappUrl = validateMiniAppUrl(input.miniapp_url, username.username);
 

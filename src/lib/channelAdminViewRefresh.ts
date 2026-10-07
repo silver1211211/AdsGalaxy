@@ -1,5 +1,6 @@
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { persistSuccessfulChannelViews } from "@/lib/channelViewPersistence";
 import { getPrivatePostViews } from "@/lib/telegramMtproto";
 
 type PostRow = RowDataPacket & {
@@ -44,23 +45,29 @@ export async function refreshChannelViews(channelId: number, limit = 25) {
       let fetched: number;
       let source: string;
       if (post.channel_type === "private") {
-        if (!post.tracking_account || post.tracking_account_status !== "active" || !["member", "already_member"].includes(String(post.tracking_account_member_status || ""))) throw new Error("private_tracking_account_not_verified_member");
-        const result = await getPrivatePostViews(post.chat_id, post.message_id, { preferredAccount: post.tracking_account, rotationSeed: post.id, requirePreferredAccount: true });
+        const result = await getPrivatePostViews(post.chat_id, post.message_id, {
+          preferredAccount: post.tracking_account,
+          rotationSeed: channelId,
+          verifyPrivateMembership: true,
+        });
         if (!result.ok) throw new Error(result.code);
         fetched = result.views;
         source = "admin_mtproto_private";
       } else {
         if (!post.username) throw new Error("missing_public_username");
-        const mtproto = await getPrivatePostViews(`@${post.username.replace(/^@/, "")}`, post.message_id, { rotationSeed: post.id });
-        if (mtproto.ok) { fetched = mtproto.views; source = "admin_mtproto_public"; }
-        else { try { fetched = await publicViews(post.username, post.message_id); source = "admin_public_api_fallback"; } catch (publicError) { throw new Error(`mtproto:${mtproto.code}; public:${publicError instanceof Error ? publicError.message : "failed"}`); } }
+        try {
+          fetched = await publicViews(post.username, post.message_id);
+          source = "admin_public_api";
+        } catch (publicError) {
+          const mtproto = await getPrivatePostViews(`@${post.username.replace(/^@/, "")}`, post.message_id, { rotationSeed: post.id });
+          if (!mtproto.ok) throw new Error(`public:${publicError instanceof Error ? publicError.message : "failed"}; mtproto:${mtproto.code}`);
+          fetched = mtproto.views;
+          source = "admin_mtproto_public_fallback";
+        }
       }
-      await pool.query(
-        `UPDATE campaign_posts SET views=GREATEST(COALESCE(views,0),?),last_views_update=NOW(),
-         view_fetch_status='success',view_fetch_error=NULL,view_fetch_source=? WHERE id=?`,
-        [Math.max(Number(post.views || 0), fetched), source, post.id]
-      );
-      await pool.query("UPDATE channels SET last_successful_view_fetch_at=NOW() WHERE id=?", [channelId]);
+      await persistSuccessfulChannelViews(pool, post.id, Math.max(Number(post.views || 0), fetched), source);
+      await pool.query("UPDATE channels SET last_successful_view_fetch_at=NOW() WHERE id=?", [channelId])
+        .catch(error => console.error("channel_view_diagnostic_failed", { channelId, error }));
       updated++;
     } catch (error) {
       const message = error instanceof Error ? error.message : "view_refresh_failed";
@@ -97,23 +104,29 @@ export async function refreshCampaignViews(campaignId: number, limit = 50) {
       let fetched: number;
       let source: string;
       if (post.channel_type === "private") {
-        if (!post.tracking_account || post.tracking_account_status !== "active" || !["member", "already_member"].includes(String(post.tracking_account_member_status || ""))) throw new Error("private_tracking_account_not_verified_member");
-        const result = await getPrivatePostViews(post.chat_id, post.message_id, { preferredAccount: post.tracking_account, rotationSeed: post.id, requirePreferredAccount: true });
+        const result = await getPrivatePostViews(post.chat_id, post.message_id, {
+          preferredAccount: post.tracking_account,
+          rotationSeed: post.channel_id,
+          verifyPrivateMembership: true,
+        });
         if (!result.ok) throw new Error(result.code);
         fetched = result.views;
         source = "pre_deletion_mtproto_private";
       } else {
         if (!post.username) throw new Error("missing_public_username");
-        const mtproto = await getPrivatePostViews(`@${post.username.replace(/^@/, "")}`, post.message_id, { rotationSeed: post.id });
-        if (mtproto.ok) { fetched = mtproto.views; source = "pre_deletion_mtproto_public"; }
-        else { try { fetched = await publicViews(post.username, post.message_id); source = "pre_deletion_public_api_fallback"; } catch (publicError) { throw new Error(`mtproto:${mtproto.code}; public:${publicError instanceof Error ? publicError.message : "failed"}`); } }
+        try {
+          fetched = await publicViews(post.username, post.message_id);
+          source = "pre_deletion_public_api";
+        } catch (publicError) {
+          const mtproto = await getPrivatePostViews(`@${post.username.replace(/^@/, "")}`, post.message_id, { rotationSeed: post.id });
+          if (!mtproto.ok) throw new Error(`public:${publicError instanceof Error ? publicError.message : "failed"}; mtproto:${mtproto.code}`);
+          fetched = mtproto.views;
+          source = "pre_deletion_mtproto_public_fallback";
+        }
       }
-      await pool.query(
-        `UPDATE campaign_posts SET views=GREATEST(COALESCE(views,0),?),last_views_update=NOW(),
-         view_fetch_status='success',view_fetch_error=NULL,view_fetch_source=? WHERE id=?`,
-        [Math.max(Number(post.views || 0), fetched), source, post.id]
-      );
-      await pool.query("UPDATE channels SET last_successful_view_fetch_at=NOW() WHERE id=?", [post.channel_id]);
+      await persistSuccessfulChannelViews(pool, post.id, Math.max(Number(post.views || 0), fetched), source);
+      await pool.query("UPDATE channels SET last_successful_view_fetch_at=NOW() WHERE id=?", [post.channel_id])
+        .catch(error => console.error("channel_view_diagnostic_failed", { channelId: post.channel_id, error }));
       updated++;
     } catch (error) {
       const message = error instanceof Error ? error.message : "view_refresh_failed";

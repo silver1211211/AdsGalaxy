@@ -25,9 +25,9 @@ test("exact final BOT unit reserves once and cannot reserve a second time", () =
   assert.equal(first.remainingAfterReservationUnits, 0n);
   const second = budget.evaluateBroadcastAffordability("0.00000000", "0.01000000");
   assert.equal(second.affordable, false);
-  assert.match(worker, /SELECT budget, status, daily_budget_limit FROM campaigns WHERE id = \? FOR UPDATE/);
+  assert.match(worker, /SELECT budget, status, daily_budget_limit, user_id, name FROM campaigns WHERE id = \? FOR UPDATE/);
   assert.match(worker, /UPDATE campaigns SET budget = budget - \? WHERE id = \? AND budget >= \? AND status = 'active'/);
-  assert.match(worker, /INSERT INTO broadcast_deliveries[\s\S]*status, retry_count\)[\s\S]*'pending'/);
+  assert.match(worker, /INSERT IGNORE INTO broadcast_deliveries[\s\S]*status, retry_count, delivery_claim_key\)[\s\S]*'pending'/);
 });
 
 test("insufficient locked reservations become budget_exhausted without financial side effects", () => {

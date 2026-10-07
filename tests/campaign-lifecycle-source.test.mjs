@@ -12,6 +12,8 @@ const cleanup = readFileSync("src/lib/campaignPostDeletion.ts", "utf8");
 const retryCleanupCron = readFileSync("src/app/api/cron/retry-telegram-cleanup/route.ts", "utf8");
 const retryCleanupEndpoint = readFileSync("src/app/api/admin/campaigns/[id]/cleanup/retry/route.ts", "utf8");
 const adminPage = readFileSync("src/app/admin/campaigns/[id]/page.tsx", "utf8");
+const adminListPage = readFileSync("src/app/admin/campaigns/page.tsx", "utf8");
+const dailyCapLifecycle = readFileSync("src/lib/channelDailyCap.ts", "utf8");
 const adminOperations = readFileSync("src/lib/campaignAdminOperations.ts", "utf8");
 const settlementSummaryRoute = readFileSync("src/app/api/admin/campaigns/[id]/settlement-summary/route.ts", "utf8");
 const deliveryStatusRoute = readFileSync("src/app/api/admin/campaigns/[id]/delivery-status/route.ts", "utf8");
@@ -30,6 +32,36 @@ test("pause_only stops delivery without settlement, stats refresh, or cleanup", 
   assert.match(block, /settlesFinancials:\s*false/);
   assert.match(block, /cleansTelegramPosts:\s*false/);
   assert.match(adminActionRoute, /admin_pause_only/);
+});
+
+test("daily-cap campaigns retain a custom manual-pause control", () => {
+  assert.match(adminListPage, /campaign\.status === "daily_cap_reached"/);
+  assert.match(adminListPage, /"pause_only"/);
+  assert.match(adminListPage, /It will remain paused until an admin resumes it/);
+  assert.match(adminPage, /campaign\.status === "active" \|\| campaign\.status === "daily_cap_reached"/);
+  assert.match(adminPage, /would normally resume automatically on the next billing day/);
+  assert.match(adminListPage, /ConfirmationModal/);
+  assert.match(adminPage, /ConfirmationModal/);
+  assert.doesNotMatch(adminListPage, /window\.confirm|window\.prompt/);
+  const detailsPauseConfirmation = adminPage.slice(
+    adminPage.indexOf("const openActionConfirm"),
+    adminPage.indexOf("const openEmergencyConfirm"),
+  );
+  assert.doesNotMatch(detailsPauseConfirmation, /window\.confirm|window\.prompt/);
+});
+
+test("manual pause overrides next-day daily-cap auto-resumption", () => {
+  assert.match(adminActionRoute, /oldStatus === "daily_cap_reached"[\s\S]*"admin_manual_pause"/);
+  assert.match(adminActionRoute, /status = 'paused'/);
+  assert.match(dailyCapLifecycle, /WHERE c\.status='daily_cap_reached' AND c\.daily_cap_billing_date<CURDATE\(\)/);
+  assert.doesNotMatch(dailyCapLifecycle, /status='paused'[\s\S]*daily_cap_billing_date<CURDATE\(\)/);
+});
+
+test("daily-cap and manual-paused labels remain visually distinct", () => {
+  assert.match(adminListPage, /Daily Cap Reached/);
+  assert.match(adminListPage, /daily_cap_reached"\) return "bg-blue-50/);
+  assert.match(adminPage, /daily_cap_reached"\) return "Daily Cap Reached"/);
+  assert.match(adminPage, /paused"\) return "Paused"/);
 });
 
 test("legacy pause, pause_finalize, and delete finalize before cleanup/delete", () => {
@@ -115,7 +147,7 @@ test("Telegram cleanup stores best-effort states and classifies non-fatal errors
 
 test("admin UI exposes Phase 1 lifecycle actions", () => {
   assert.match(adminPage, /openActionConfirm\("pause_only"\)/);
-  assert.match(adminPage, /Pause \+ Finalize/);
+  assert.match(adminPage, /Pause \+ Remove/);
   assert.match(adminPage, /openActionConfirm\("retry_cleanup"\)/);
   assert.match(adminPage, /Cleanup Status/);
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { calculateDepositBonus, depositBonusRateBasisPoints } from "../src/lib/depositBonus.ts";
+import { calculateDepositBonus, depositBonusRateBasisPoints } from "../src/lib/depositBonusMath.ts";
 
 const route = readFileSync("src/app/api/advertiser/deposits/[track_id]/route.ts", "utf8");
 const listRoute = readFileSync("src/app/api/advertiser/deposits/route.ts", "utf8");

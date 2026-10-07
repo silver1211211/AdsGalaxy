@@ -1,7 +1,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy campaign action payloads are not schema-generated */
 import { NextResponse } from "next/server";
+import { getCampaignClickAnalytics } from "@/lib/campaignAnalyticsAdjustments";
 import pool from "@/lib/db";
+import { isStandardChannelReport, getChannelReportingMetrics, channelMetricPayload } from "@/lib/channelReporting";
+import { getGrowthLiveImpressions } from "@/lib/channelGrowthStatistics";
 import { effectiveBidPerThousand, getAdvertiserDiscount } from "@/lib/advertiserDiscount";
+import { getChannelUnitPrice } from "@/lib/channelBilling";
 import { getAuthenticatedUser, getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 import { assertCampaignLifecycleColumns } from "@/lib/campaignLifecycle";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
@@ -15,7 +19,8 @@ import { pausableCampaignKind } from "@/lib/campaignPauseLifecycle";
 import { invalidateAdvertiserCaches } from "@/lib/redisCache";
 import { normalizeTeaserVariants,validateTeaserCpm,validateTeaserCta } from "@/lib/teaser";
 import { GROWTH_MIN_TOTAL_BUDGET, validateGrowthBudgets, validateGrowthMessageText } from "@/lib/channelGrowth";
-import { deleteActiveCampaignPosts } from "@/lib/campaignPostDeletion";
+import { reactivateCampaignAfterDailyCapIncrease } from "@/lib/channelDailyCap";
+import { campaignCreativeKind, didSensitiveCampaignContentChange } from "@/lib/campaignModeration";
 
 async function campaignMutationSuccess(userId: number, payload: Record<string, unknown>) {
   // Cache invalidation is fail-open and happens only after the authoritative DB write.
@@ -83,7 +88,7 @@ export async function GET(
         : `SELECT id, name, campaign_title, parse_mode, message_text, image_url, link, button_text,
              type, campaign_kind, billing_model, funding_model, cost_per_subscriber, destination_channel_id,
              growth_tracking_status, growth_seed_allocated, growth_seed_recovered,
-             budget, total_budget, channel_spend, cpm, category, continents, countries, languages, vpn_policy,
+             budget, total_budget, channel_spend, cpm, cpc, category, continents, countries, languages, vpn_policy,
              device_policy, os_policy, start_at, end_at, daily_budget_limit,
              frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,teaser_mode,teaser_enabled,teaser_cta_key,teaser_cpm,teaser_paused_at,teaser_resume_locked_until,
              direct_inventory_metadata, status, paused_at, resume_locked_until,
@@ -149,16 +154,27 @@ export async function GET(
         broadcast_stats: botStats
       };
     } else {
-      // Get total clicks
-      const [clickCount]: any = await pool.query(
-        "SELECT COUNT(*) as count FROM campaign_clicks WHERE campaign_id = ?",
-        [id]
-      );
+      const clickAnalytics = await getCampaignClickAnalytics(Number(id));
 
       // Get total views
       const [viewCount]: any = await pool.query(
         "SELECT SUM(views) as count FROM campaign_posts WHERE campaign_id = ?",
         [id]
+      );
+      const [billableViewRows]: any = await pool.query(
+        `SELECT COALESCE(SUM(billable_views),0) count, COALESCE(SUM(settled_spend),0) settled_spend FROM (
+           SELECT CASE WHEN settlement_type='view' THEN units ELSE 0 END billable_views,
+             advertiser_debit settled_spend FROM channel_advertiser_debits WHERE campaign_id=?
+           UNION ALL
+           SELECT CASE WHEN l.settlement_type='view' THEN l.new_units ELSE 0 END,
+             l.advertiser_debit FROM channel_settlement_ledger l
+           LEFT JOIN channel_fraud_billing_adjustments a ON a.settlement_ledger_id=l.id
+           WHERE l.campaign_id=? AND a.id IS NULL
+           UNION ALL
+           SELECT ts.impression_delta, ts.gross_amount FROM teaser_settlements ts
+           JOIN teaser_placements tp ON tp.id=ts.placement_id WHERE tp.campaign_id=?
+         ) settled_views`,
+        [id, id, id]
       );
 
       // Placement history is not part of standard campaign statistics. Keep a
@@ -183,7 +199,7 @@ export async function GET(
       let growthStats = {};
       if (campaign.campaign_kind === "channel_growth") {
         const [conversionRows]: any = await pool.query(
-          "SELECT COUNT(*) AS subscribers_acquired FROM channel_growth_conversions WHERE campaign_id = ? AND status = 'billed' AND fraud_status = 'clear'",
+          "SELECT COUNT(*) AS subscribers_acquired,COALESCE(SUM(advertiser_debit),0) subscriber_spend FROM channel_growth_conversions WHERE campaign_id = ? AND status = 'billed' AND fraud_status = 'clear'",
           [id]
         );
         const [pendingRows]: any = await pool.query(
@@ -191,14 +207,26 @@ export async function GET(
           [id]
         );
         growthStats = {
+          total_views: await getGrowthLiveImpressions(pool, Number(id)),
+          total_clicks: clickAnalytics.actualTrackedClicks,
+          displayed_clicks: clickAnalytics.actualTrackedClicks,
+          settled_spend: Number(conversionRows[0]?.subscriber_spend || 0),
+          subscriber_spend: Number(conversionRows[0]?.subscriber_spend || 0),
+          effective_cps: Number(conversionRows[0]?.subscribers_acquired || 0) > 0
+            ? Number(conversionRows[0]?.subscriber_spend || 0) / Number(conversionRows[0].subscribers_acquired) : 0,
           subscribers_acquired: Number(conversionRows[0]?.subscribers_acquired || 0),
           pending_verifications: Number(pendingRows[0]?.pending_verifications || 0),
         };
       }
 
       extraData = {
-        total_clicks: clickCount[0].count,
-        total_views: viewCount[0].count || 0,
+        total_clicks: clickAnalytics.displayedClicks,
+        actual_tracked_clicks: clickAnalytics.actualTrackedClicks,
+        historical_click_recovery_adjustment: clickAnalytics.recoveryBaseline + clickAnalytics.additiveAdjustment,
+        displayed_clicks: clickAnalytics.displayedClicks,
+        total_views: campaign.type === "views" ? Number(billableViewRows[0]?.count || 0) : Number(viewCount[0].count || 0),
+        raw_total_views: Number(viewCount[0].count || 0),
+        settled_spend: Number(billableViewRows[0]?.settled_spend || 0),
         posts: posts,
         ...growthStats,
       };
@@ -221,11 +249,25 @@ export async function GET(
       chartData = legacyChart;
     }
 
+    if (isStandardChannelReport(campaign)) {
+      const metrics = (await getChannelReportingMetrics(pool, [Number(id)])).get(Number(id));
+      if (metrics) {
+        Object.assign(extraData, channelMetricPayload(metrics, campaign.campaign_kind === "channel_growth"));
+        if (metrics.views <= 0) {
+          chartData = chartData.map(row => ({ ...row, count: 0 }));
+          extraData.posts = (extraData.posts || []).map((post: any) => ({ ...post, post_clicks: 0 }));
+        }
+      }
+    }
     return NextResponse.json({
       ...campaign,
+      internal_id: campaign.id,
+      display_id: Number(campaign.public_id || campaign.id),
       budget_cap: Number(campaign.total_budget ?? campaign.budget ?? 0),
       remaining_allowance: Number(campaign.budget ?? 0),
-      actual_spend: Number(campaign.total_budget ?? campaign.budget ?? 0) - Number(campaign.budget ?? 0),
+      actual_spend: campaign.type === "broadcast"
+        ? Number(campaign.total_budget ?? campaign.budget ?? 0) - Number(campaign.budget ?? 0)
+        : Number(extraData.settled_spend || 0),
       ...extraData,
       chart_data: chartData
     });
@@ -271,16 +313,18 @@ export async function PATCH(
         return NextResponse.json({ error: "This campaign cannot be edited in its current status" }, { status: 400 });
       }
 
-      const nextName = cleanString(body.name || campaign.name);
-      const nextTitle = cleanString(body.campaign_title || campaign.campaign_title);
+      const nextName = cleanString(body.name ?? campaign.name);
+      const nextTitle = cleanString(body.campaign_title ?? campaign.campaign_title);
       const nextMessage = String(body.message_text ?? campaign.message_text ?? "");
-      const nextLink = cleanString(body.link || campaign.link);
-      const nextButtonText = cleanString(body.button_text || campaign.button_text);
+      const nextLink = cleanString(body.link ?? campaign.link);
+      const nextButtonText = cleanString(body.button_text ?? campaign.button_text);
       const nextCategory = serializeCampaignCategories(body.category ?? campaign.category, 3);
-      let nextContinents = cleanString(body.continents || campaign.continents || "[]");
+      let nextContinents = cleanString(body.continents ?? campaign.continents ?? "[]");
       if (campaign.type !== "broadcast") {
         try {
-          nextContinents = serializeExplicitCampaignAudience(body.continents);
+          nextContinents = body.continents === undefined
+            ? cleanString(campaign.continents || "[]")
+            : serializeExplicitCampaignAudience(body.continents);
         } catch (error) {
           return NextResponse.json({
             error: error instanceof Error ? error.message : "Target audience is invalid",
@@ -289,7 +333,7 @@ export async function PATCH(
       }
       const imageFile = formData?.get("image") instanceof File ? formData.get("image") as File : null;
       const uploadedImageUrl = await uploadCampaignImage(imageFile);
-      const nextImageUrl = uploadedImageUrl || cleanString(body.image_url || campaign.image_url || "");
+      const nextImageUrl = uploadedImageUrl || cleanString(body.image_url ?? campaign.image_url ?? "");
       const targeting = normalizeAdvertiserTargeting({
         countries: body.countries ?? campaign.countries,
         languages: body.languages ?? campaign.languages,
@@ -334,16 +378,33 @@ export async function PATCH(
         }, { status: 400 });
       }
 
-      const sensitiveChanged = [
-        String(campaign.campaign_title || "") !== nextTitle,
-        String(campaign.message_text || "") !== nextMessage,
-        String(campaign.image_url || "") !== nextImageUrl,
-        String(campaign.link || "") !== nextLink,
-        String(campaign.button_text || "") !== nextButtonText,
-      ].some(Boolean);
       const requestedTeaserMode=String(body.teaser_mode||campaign.teaser_mode||"none");
       if(requestedTeaserMode==="standard_plus_teaser"&&String(campaign.teaser_mode||"none")!=="standard_plus_teaser")return NextResponse.json({error:"Teaser Ads must be created as a separate campaign."},{status:400});
-      let teaserVariants:string[]|null=null,teaserCta:string|null=null,teaserCpm:number|null=null;if(requestedTeaserMode!=="none"){if(campaign.type==="clicks")return NextResponse.json({error:"Teaser is available for Views campaigns only."},{status:400});try{teaserVariants=normalizeTeaserVariants(JSON.parse(String(body.teaser_variants||"[]")));teaserCta=validateTeaserCta(body.teaser_cta||campaign.teaser_cta_key);const [settingRows]=await pool.query<Array<RowDataPacket&{key:string;value:string}>>("SELECT `key`,value FROM settings WHERE `key` IN ('teaser_min_cpm','teaser_max_cpm')");const m=new Map(settingRows.map(row=>[row.key,Number(row.value)]));teaserCpm=validateTeaserCpm(body.teaser_cpm||campaign.teaser_cpm,{min:m.get("teaser_min_cpm")??.5,max:m.get("teaser_max_cpm")??6.5});}catch(error){return NextResponse.json({error:error instanceof Error?error.message:"Invalid Teaser settings"},{status:400});}}
+      let teaserVariants:string[]|null=null,teaserCta:string|null=null,teaserCpm:number|null=null;
+      let previousTeaserVariants:string[]=[];
+      if(requestedTeaserMode!=="none"){
+        if(campaign.type==="clicks")return NextResponse.json({error:"Teaser is available for Views campaigns only."},{status:400});
+        const [existingCreatives]=await pool.query<Array<RowDataPacket&{copy_text:string}>>("SELECT copy_text FROM teaser_creatives WHERE campaign_id=? AND active=1 ORDER BY position",[id]);
+        previousTeaserVariants=existingCreatives.map(row=>String(row.copy_text));
+        try{
+          teaserVariants=body.teaser_variants===undefined?previousTeaserVariants:normalizeTeaserVariants(JSON.parse(String(body.teaser_variants)));
+          teaserCta=validateTeaserCta(body.teaser_cta??campaign.teaser_cta_key);
+          const [settingRows]=await pool.query<Array<RowDataPacket&{key:string;value:string}>>("SELECT `key`,value FROM settings WHERE `key` IN ('teaser_min_cpm','teaser_max_cpm')");
+          const m=new Map(settingRows.map(row=>[row.key,Number(row.value)]));
+          teaserCpm=validateTeaserCpm(body.teaser_cpm??campaign.teaser_cpm,{min:m.get("teaser_min_cpm")??.5,max:m.get("teaser_max_cpm")??6.5});
+        }catch(error){return NextResponse.json({error:error instanceof Error?error.message:"Invalid Teaser settings"},{status:400});}
+      }
+      const creativeKind=campaignCreativeKind({type:campaign.type,campaignKind:campaign.campaign_kind,teaserMode:requestedTeaserMode});
+      const baseSensitiveChanged=didSensitiveCampaignContentChange(
+        creativeKind,
+        {destinationUrl:campaign.link,cta:creativeKind==="teaser"?campaign.teaser_cta_key:campaign.button_text,image:campaign.image_url,title:campaign.campaign_title,text:campaign.message_text,variants:previousTeaserVariants},
+        {destinationUrl:nextLink,cta:creativeKind==="teaser"?teaserCta:nextButtonText,image:nextImageUrl,title:nextTitle,text:nextMessage,variants:teaserVariants||previousTeaserVariants},
+      );
+      const teaserSensitiveChanged=requestedTeaserMode!=="none"&&didSensitiveCampaignContentChange("teaser",
+        {destinationUrl:campaign.link,cta:campaign.teaser_cta_key,title:campaign.campaign_title,text:campaign.message_text,variants:previousTeaserVariants},
+        {destinationUrl:nextLink,cta:teaserCta,title:nextTitle,text:nextMessage,variants:teaserVariants||previousTeaserVariants},
+      );
+      const sensitiveChanged=baseSensitiveChanged||teaserSensitiveChanged;
 
       const updates = [
         "name = ?",
@@ -383,6 +444,9 @@ export async function PATCH(
 
       values.push(id, user.id);
       await pool.query(`UPDATE campaigns SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`, values);
+      if (Number(targeting.daily_budget_limit || 0) > Number(campaign.daily_budget_limit || 0)) {
+        await reactivateCampaignAfterDailyCapIncrease(Number(id), Number(user.id));
+      }
       if(teaserVariants){
         // Preserve existing creative IDs for positions that remain in use.
         for(const [position,copy] of teaserVariants.entries()){
@@ -411,12 +475,12 @@ export async function PATCH(
           ]
         );
       }
-      await replaceCampaignExclusions(pool, {
-        campaignType: "campaign",
-        campaignId: Number(id),
-        inventoryType: campaign.type === "broadcast" ? "bot" : "channel",
-        identifiers: body.excluded_inventory,
-      });
+      if(body.excluded_inventory!==undefined)await replaceCampaignExclusions(pool, {
+          campaignType: "campaign",
+          campaignId: Number(id),
+          inventoryType: campaign.type === "broadcast" ? "bot" : "channel",
+          identifiers: body.excluded_inventory,
+        });
 
       if (sensitiveChanged) {
         await safeNotify(campaign.telegram_id, `Your campaign "${nextName}" was updated and sent for review. Delivery will resume after approval.`);
@@ -466,11 +530,13 @@ export async function PATCH(
             "UPDATE channel_growth_invites SET status='revoke_pending' WHERE campaign_id=? AND status='active'",
             [id]
           );
-          try {
-            await deleteActiveCampaignPosts(id);
-          } catch (error) {
-            console.error("Channel Growth pause cleanup failed", { campaignId: id, error: error instanceof Error ? error.message : "unknown_error" });
-          }
+          // Pausing is authoritative and must return immediately. The existing
+          // retry-telegram-cleanup job performs deletion and invite revocation
+          // after this durable cleanup queue is created.
+          await pool.query(
+            "UPDATE campaign_posts SET status='cleanup_pending', cleanup_status='pending' WHERE campaign_id=? AND status IN ('active','posted','sent','delete_failed')",
+            [id]
+          );
         }
         if(campaign.teaser_enabled)await pool.query("UPDATE teaser_placements SET status='removal_pending',removal_requested_at=COALESCE(removal_requested_at,NOW()),removal_reason='campaign_paused' WHERE campaign_id=? AND status IN ('active','awaiting_baseline')",[id]);
         return campaignMutationSuccess(Number(user.id), { success: true, status: "paused", cleanup_queued: true });
@@ -491,10 +557,14 @@ export async function PATCH(
         const discount = await getAdvertiserDiscount(pool, user.id);
         const isGrowthCampaign = campaign.campaign_kind === "channel_growth";
         const isClickCampaign = campaign.type === "clicks";
-        const grossRate = isClickCampaign ? campaign.cpc : campaign.cpm;
         const unitPrice = isGrowthCampaign
           ? String(campaign.cost_per_subscriber)
-          : String(effectiveBidPerThousand(grossRate, isClickCampaign ? discount.cpc_discount : discount.cpm_discount) / 1000);
+          : String(getChannelUnitPrice({
+              type: campaign.type,
+              cpm: campaign.cpm,
+              cpc: campaign.cpc,
+              discount: isClickCampaign ? discount.cpc_discount : discount.cpm_discount,
+            }));
         const [affordability] = await pool.query<RowDataPacket[]>(
           `SELECT EXISTS(
              SELECT 1 FROM campaigns c JOIN users u ON u.id=c.user_id

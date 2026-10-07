@@ -2,10 +2,13 @@ import "server-only";
 
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { channelFinancialEventsSql, getChannelReportingMetrics, isStandardChannelReport, presentChannelMetrics } from "@/lib/channelReporting";
+import { getGrowthLiveImpressions, getGrowthTodayImpressions } from "@/lib/channelGrowthStatistics";
 import { metricNumber } from "@/lib/statFormulas";
+import { getCampaignClickAnalytics } from "@/lib/campaignAnalyticsAdjustments";
 import {
   campaignAverageCpc,
-  campaignCostMetric,
+  channelAdvertiserMetrics,
   campaignCtr,
   campaignEffectiveCpm,
   type CampaignStatisticKind,
@@ -22,9 +25,11 @@ export type CampaignStatisticsRangeRequest = {
 
 type CampaignAuthority = {
   id: number;
+  public_id?: number | null;
   type: CampaignStatisticKind;
   channel_spend: unknown;
   teaser_mode?: string | null;
+  campaign_kind?: string | null;
 };
 
 type DateRange = {
@@ -42,6 +47,7 @@ type DailyEventRow = RowDataPacket & {
   spend: unknown;
   standard_spend: unknown;
   teaser_spend: unknown;
+  subscribers?: unknown;
 };
 
 function dateKey(value: Date) {
@@ -108,6 +114,7 @@ function zeroDay(date: string): DailyEventRow {
     spend: 0,
     standard_spend: 0,
     teaser_spend: 0,
+    subscribers: 0,
   } as DailyEventRow;
 }
 
@@ -251,19 +258,77 @@ async function fetchTeaserClickSummary(campaignId: number, range: DateRange) {
   return row;
 }
 
+async function buildLiveChannelStatistics(campaign: CampaignAuthority, requestedRange: CampaignStatisticsRangeRequest) {
+  const [[calendar]] = await pool.query<Array<RowDataPacket & { today: string }>>("SELECT DATE_FORMAT(UTC_DATE(), '%Y-%m-%d') today");
+  const today = String(calendar.today);
+  const range = resolveDateRange(requestedRange, today);
+  const growth = campaign.campaign_kind === "channel_growth";
+  const lifetime = (await getChannelReportingMetrics(pool, [campaign.id])).get(campaign.id)!;
+  const viewFilter = rangeFilter("ps.stat_date", range);
+  const clickFilter = rangeFilter("cc.created_at", range);
+  const moneyFilter = rangeFilter("event_at", range);
+  // Aggregate every day before bounding the chart, so lifetime totals are never truncated.
+  const [source] = await pool.query<DailyEventRow[]>(`SELECT date,SUM(views) views,SUM(clicks) clicks,
+      SUM(subscribers) subscribers,SUM(spend) spend,SUM(billable_views) billable_views,SUM(billable_clicks) billable_clicks
+    FROM (
+      SELECT DATE_FORMAT(ps.stat_date,'%Y-%m-%d') date,ps.views,0 clicks,0 subscribers,0 spend,0 billable_views,0 billable_clicks
+      FROM channel_post_daily_stats ps JOIN campaign_posts cp ON cp.id=ps.post_id
+      WHERE ps.campaign_id=? AND cp.delivery_confirmed_at IS NOT NULL AND cp.delivery_failed_at IS NULL${viewFilter.sql}
+      UNION ALL
+      SELECT DATE_FORMAT(cc.created_at,'%Y-%m-%d'),0,COUNT(*),0,0,0,0
+      FROM campaign_clicks cc WHERE cc.campaign_id=?${clickFilter.sql} GROUP BY DATE(cc.created_at)
+      UNION ALL
+      SELECT DATE_FORMAT(event_at,'%Y-%m-%d'),0,0,subscribers,spend,billable_views,billable_clicks
+      FROM (${channelFinancialEventsSql()}) financial WHERE campaign_id=?${moneyFilter.sql}
+    ) events GROUP BY date ORDER BY date`,
+    [campaign.id,...viewFilter.params,campaign.id,...clickFilter.params,campaign.id,...moneyFilter.params]);
+  if (range.end === today) {
+    let current = source.find(row => String(row.date) === today);
+    if (!current) { current = zeroDay(today); source.push(current); }
+    // Replace, never add to, today's rollup. Aggregation uses the same snapshot baseline.
+    current.views = await getGrowthTodayImpressions(pool, campaign.id);
+  }
+  const sums = source.reduce((sum,row) => ({ views: sum.views + metricNumber(row.views), clicks: sum.clicks + metricNumber(row.clicks),
+    subscribers: sum.subscribers + metricNumber(row.subscribers), spend: sum.spend + metricNumber(row.spend),
+    billable_views: sum.billable_views + metricNumber(row.billable_views), billable_clicks: sum.billable_clicks + metricNumber(row.billable_clicks) }),
+    { views:0,clicks:0,subscribers:0,spend:0,billable_views:0,billable_clicks:0 });
+  const totals = presentChannelMetrics(range.key === "all" ? lifetime : sums, lifetime.views, growth);
+  const daily = fillBoundedDays(source,range).slice(-MAX_CAMPAIGN_STATISTICS_DAILY_ROWS).map(row => {
+    const metrics = presentChannelMetrics({ views:metricNumber(row.views),clicks:metricNumber(row.clicks),subscribers:metricNumber(row.subscribers),
+      spend:metricNumber(row.spend),billable_views:metricNumber(row.billable_views),billable_clicks:metricNumber(row.billable_clicks) }, lifetime.views,growth);
+    return { ...metrics,date:String(row.date),raw_views:metrics.views,
+      cost_metric:growth ? metrics.effective_cps : campaign.type === "clicks" ? metrics.average_cpc : metrics.effective_cpm };
+  });
+  return { campaign_id:Number(campaign.public_id || campaign.id),internal_campaign_id:campaign.id,campaign_type:campaign.type,
+    primary_metric:campaign.type === "clicks" ? "clicks" : "views",billing_model:growth ? "cps" : campaign.type === "clicks" ? "cpc" : "cpm",
+    range:{key:range.key,from:range.start,to:range.end,bounded_to:MAX_CAMPAIGN_STATISTICS_DAILY_ROWS},
+    totals:{...totals,raw_views:totals.views,actual_tracked_clicks:totals.clicks,displayed_clicks:totals.clicks},
+    source_breakdown:{standard:{views:totals.views,clicks:totals.clicks,spend:totals.spend},teaser:{views:0,clicks:0,spend:0}},
+    teaser_enabled:false,daily_rows:daily,data_available:totals.views>0 || totals.spend>0 };
+}
+
 function summarizeDaily(row: DailyEventRow, kind: CampaignStatisticKind) {
-  const views = metricNumber(row.views);
-  const clicks = metricNumber(row.clicks);
   const spend = metricNumber(row.spend);
+  const metrics = channelAdvertiserMetrics({
+    kind,
+    rawViews: row.views,
+    actualClicks: row.clicks,
+    billableViews: row.billable_views,
+    billableClicks: row.billable_clicks,
+    spend,
+  });
   return {
     date: String(row.date),
-    views,
-    clicks,
-    ctr: campaignCtr(clicks, views),
+    views: metrics.visibleViews,
+    clicks: metrics.visibleClicks,
+    raw_views: metrics.rawViews,
+    billable_views: metrics.billableViews,
+    billable_clicks: metrics.billableClicks,
+    ctr: metrics.ctr,
     spend,
-    effective_cpm: campaignEffectiveCpm(spend, views),
-    average_cpc: campaignAverageCpc(spend, clicks),
-    cost_metric: campaignCostMetric(kind, spend, views, clicks),
+    effective_cpm: metrics.effectiveCpm,
+    average_cpc: metrics.averageCpc,
+    cost_metric: metrics.costMetric,
   };
 }
 
@@ -271,28 +336,42 @@ export async function buildAdvertiserCampaignStatistics(
   campaign: CampaignAuthority,
   requestedRange: CampaignStatisticsRangeRequest,
 ) {
+  if (isStandardChannelReport(campaign)) return buildLiveChannelStatistics(campaign, requestedRange);
   const [[calendar]] = await pool.query<Array<RowDataPacket & { today: string }>>(
-    "SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') today",
+    "SELECT DATE_FORMAT(UTC_DATE(), '%Y-%m-%d') today",
   );
   const range = resolveDateRange(requestedRange, String(calendar.today));
-  const [analytics, charges, teaserClicks, dailySource] = await Promise.all([
+  const [analytics, charges, teaserClicks, dailySource, clickAnalytics] = await Promise.all([
     fetchAnalyticsSummary(campaign.id, range),
     fetchChargeSummary(campaign.id, range),
     fetchTeaserClickSummary(campaign.id, range),
     fetchDaily(campaign.id, range),
+    getCampaignClickAnalytics(campaign.id),
   ]);
 
   const teaserViews = metricNumber(charges.teaser_views);
-  const totalViews = metricNumber(analytics.views) + teaserViews;
-  const totalClicks = metricNumber(analytics.clicks) + metricNumber(teaserClicks.clicks);
+  const rawViews = metricNumber(analytics.views) + teaserViews;
+  const actualStandardClicks = metricNumber(analytics.clicks);
+  const displayedStandardClicks = Math.max(actualStandardClicks, clickAnalytics.recoveryBaseline)
+    + clickAnalytics.additiveAdjustment;
+  const totalClicks = displayedStandardClicks + metricNumber(teaserClicks.clicks);
   const totalSpend = metricNumber(charges.spend);
   const billableViews = metricNumber(charges.billable_views);
   const billableClicks = metricNumber(charges.billable_clicks);
   const teaserSpend = metricNumber(charges.teaser_spend);
   const daily = dailySource.map((row) => summarizeDaily(row, campaign.type));
+  const metrics = channelAdvertiserMetrics({
+    kind: campaign.type,
+    rawViews,
+    actualClicks: totalClicks,
+    billableViews,
+    billableClicks,
+    spend: totalSpend,
+  });
 
   return {
-    campaign_id: campaign.id,
+    campaign_id: Number(campaign.public_id || campaign.id),
+    internal_campaign_id: campaign.id,
     campaign_type: campaign.type,
     primary_metric: campaign.type === "clicks" ? "clicks" : "views",
     range: {
@@ -302,19 +381,25 @@ export async function buildAdvertiserCampaignStatistics(
       bounded_to: MAX_CAMPAIGN_STATISTICS_DAILY_ROWS,
     },
     totals: {
-      views: totalViews,
-      clicks: totalClicks,
-      ctr: campaignCtr(totalClicks, totalViews),
+      views: metrics.visibleViews,
+      clicks: metrics.visibleClicks,
+      actual_tracked_clicks: actualStandardClicks + metricNumber(teaserClicks.clicks),
+      historical_click_recovery_adjustment: clickAnalytics.recoveryBaseline + clickAnalytics.additiveAdjustment,
+      displayed_clicks: totalClicks,
+      raw_views: metrics.rawViews,
+      ctr: metrics.ctr,
       spend: totalSpend,
       billable_views: billableViews,
       billable_clicks: billableClicks,
-      effective_cpm: campaignEffectiveCpm(totalSpend, totalViews),
-      average_cpc: campaignAverageCpc(totalSpend, totalClicks),
+      effective_cpm: metrics.effectiveCpm,
+      average_cpc: metrics.averageCpc,
     },
     source_breakdown: {
       standard: {
         views: metricNumber(analytics.views),
-        clicks: metricNumber(analytics.clicks),
+        clicks: displayedStandardClicks,
+        actual_tracked_clicks: actualStandardClicks,
+        historical_click_recovery_adjustment: clickAnalytics.recoveryBaseline + clickAnalytics.additiveAdjustment,
         spend: Math.max(0, totalSpend - teaserSpend),
       },
       teaser: {
@@ -325,7 +410,7 @@ export async function buildAdvertiserCampaignStatistics(
     },
     teaser_enabled: String(campaign.teaser_mode || "none") !== "none",
     daily_rows: daily,
-    data_available: totalViews > 0 || totalClicks > 0 || totalSpend > 0,
+    data_available: rawViews > 0 || totalClicks > 0 || totalSpend > 0,
   };
 }
 
@@ -334,9 +419,11 @@ export async function buildUnifiedNonChannelCampaignStatistics(
   kind: "miniapp" | "bot" | "growth",
   requestedRange: CampaignStatisticsRangeRequest,
 ) {
-  const [[calendar]] = await pool.query<Array<RowDataPacket & { today: string }>>("SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') today");
+  if (String(kind) === "growth") return buildLiveChannelStatistics({ id: campaignId, type: "views", campaign_kind: "channel_growth", channel_spend: 0 }, requestedRange);
+  const [[calendar]] = await pool.query<Array<RowDataPacket & { today: string }>>(
+    kind === "growth" ? "SELECT DATE_FORMAT(UTC_DATE(), '%Y-%m-%d') today" : "SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') today");
   const range = resolveDateRange(requestedRange, String(calendar.today));
-  const column = kind === "growth" ? "joined_at" : "created_at";
+  const column = kind === "growth" ? "billed_at" : "created_at";
   const filter = rangeFilter(column, range);
   let sql: string;
   let params: unknown[];
@@ -353,24 +440,68 @@ export async function buildUnifiedNonChannelCampaignStatistics(
       GROUP BY DATE(created_at) ORDER BY date DESC LIMIT ${MAX_CAMPAIGN_STATISTICS_DAILY_ROWS}`;
     params = [campaignId, ...filter.params];
   } else {
-    sql = `SELECT DATE_FORMAT(joined_at,'%Y-%m-%d') date,COUNT(*) views,0 clicks,COALESCE(SUM(advertiser_debit),0) spend
-      FROM channel_growth_conversions WHERE campaign_id=? AND status='billed' AND fraud_status='clear'${filter.sql}
-      GROUP BY DATE(joined_at) ORDER BY date DESC LIMIT ${MAX_CAMPAIGN_STATISTICS_DAILY_ROWS}`;
-    params = [campaignId, ...filter.params];
+    const viewFilter = rangeFilter("stat_date", range);
+    const clickFilter = rangeFilter("created_at", range);
+    sql = `SELECT date,SUM(views) views,SUM(clicks) clicks,SUM(subscribers) subscribers,SUM(spend) spend
+      FROM (
+        SELECT DATE_FORMAT(stat_date,'%Y-%m-%d') date,COALESCE(SUM(views),0) views,0 clicks,0 subscribers,0 spend
+        FROM channel_post_daily_stats WHERE campaign_id=?${viewFilter.sql} GROUP BY DATE(stat_date)
+        UNION ALL
+        SELECT DATE_FORMAT(created_at,'%Y-%m-%d'),0,COUNT(*),0,0
+        FROM campaign_clicks WHERE campaign_id=?${clickFilter.sql} GROUP BY DATE(created_at)
+        UNION ALL
+        SELECT DATE_FORMAT(billed_at,'%Y-%m-%d'),0,0,COUNT(*),COALESCE(SUM(advertiser_debit),0)
+        FROM channel_growth_conversions WHERE campaign_id=? AND status='billed' AND fraud_status='clear'${filter.sql}
+        GROUP BY DATE(billed_at)
+      ) events GROUP BY date ORDER BY date DESC LIMIT ${MAX_CAMPAIGN_STATISTICS_DAILY_ROWS}`;
+    params = [campaignId, ...viewFilter.params, campaignId, ...clickFilter.params, campaignId, ...filter.params];
   }
   const [source] = await pool.query<DailyEventRow[]>(sql, params);
+  let growthLiveViews: number | null = null;
+  if (kind === "growth" && range.end === String(calendar.today)) {
+    growthLiveViews = await getGrowthLiveImpressions(pool, campaignId);
+    const todayViews = await getGrowthTodayImpressions(pool, campaignId);
+    let today = source.find((row) => row.date === range.end);
+    if (!today) { today = zeroDay(range.end); source.unshift(today); }
+    today.views = todayViews;
+  }
   const rows = fillBoundedDays(source, range);
-  const daily = rows.map((row) => summarizeDaily(row, "views"));
-  const views = daily.reduce((sum, row) => sum + row.views, 0);
-  const clicks = daily.reduce((sum, row) => sum + row.clicks, 0);
-  const spend = daily.reduce((sum, row) => sum + row.spend, 0);
-  const unitCost = kind === "growth" && views > 0 ? spend / views : campaignEffectiveCpm(spend, views);
+  const daily = kind === "growth"
+    ? rows.map((row) => {
+        const views = metricNumber(row.views);
+        const clicks = metricNumber(row.clicks);
+        const subscribers = metricNumber(row.subscribers);
+        const spend = metricNumber(row.spend);
+        return {
+          date: String(row.date), views, clicks, subscribers, spend,
+          ctr: campaignCtr(clicks, views),
+          conversion_rate: clicks > 0 ? metricNumber((subscribers / clicks) * 100) : 0,
+          effective_cpm: 0, average_cpc: 0,
+          cost_metric: subscribers > 0 ? metricNumber(spend / subscribers) : 0,
+        };
+      })
+    : rows.map((row) => summarizeDaily(row, "views"));
+  const views = kind === "growth" && range.key === "all" && growthLiveViews !== null
+    ? growthLiveViews : daily.reduce((sum, row) => sum + row.views, 0);
+  let clicks = daily.reduce((sum, row) => sum + row.clicks, 0);
+  let spend = daily.reduce((sum, row) => sum + row.spend, 0);
+  let subscribers = kind === "growth" ? daily.reduce((sum, row) => sum + Number("subscribers" in row ? row.subscribers : 0), 0) : 0;
+  if (kind === "growth") {
+    const clickFilter = rangeFilter("created_at", range);
+    const [[totals]] = await pool.query<Array<RowDataPacket & { subscribers: number; spend: number; clicks: number }>>(
+      `SELECT COUNT(*) subscribers,COALESCE(SUM(advertiser_debit),0) spend,
+         (SELECT COUNT(*) FROM campaign_clicks WHERE campaign_id=?${clickFilter.sql}) clicks
+       FROM channel_growth_conversions WHERE campaign_id=? AND status='billed' AND fraud_status='clear'${filter.sql}`,
+      [campaignId, ...clickFilter.params, campaignId, ...filter.params]);
+    clicks = Number(totals?.clicks || 0); spend = Number(totals?.spend || 0); subscribers = Number(totals?.subscribers || 0);
+  }
+  const unitCost = kind === "growth" && subscribers > 0 ? spend / subscribers : campaignEffectiveCpm(spend, views);
   return {
     campaign_id: campaignId, campaign_type: "views" as const, primary_metric: "views" as const,
     range: { key: range.key, from: range.start, to: range.end, bounded_to: MAX_CAMPAIGN_STATISTICS_DAILY_ROWS },
-    totals: { views, clicks, subscribers: kind === "growth" ? views : 0, ctr: campaignCtr(clicks, views), spend, billable_views: views, billable_clicks: 0, effective_cpm: unitCost, average_cpc: campaignAverageCpc(spend, clicks) },
+    totals: { views, clicks, subscribers, ctr: campaignCtr(clicks, views), conversion_rate: clicks > 0 ? metricNumber((subscribers / clicks) * 100) : 0, spend, billable_views: views, billable_clicks: 0, effective_cpm: unitCost, average_cpc: campaignAverageCpc(spend, clicks) },
     source_breakdown: { standard: { views, clicks, spend }, teaser: { views: 0, clicks: 0, spend: 0 } },
-    teaser_enabled: false, daily_rows: daily.map((row) => ({ ...row, subscribers: kind === "growth" ? row.views : 0, cost_metric: kind === "growth" && row.views > 0 ? row.spend / row.views : row.cost_metric })),
+    teaser_enabled: false, daily_rows: daily.map((row) => ({ ...row, subscribers: kind === "growth" && "subscribers" in row ? Number(row.subscribers || 0) : 0 })),
     data_available: views > 0 || clicks > 0 || spend > 0,
   };
 }

@@ -5,6 +5,7 @@ import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { escapeTelegramHtml, sendTelegramMessage } from "@/lib/telegram";
 import { parseAdminPagination } from "@/lib/adminPagination";
+import { mainCampaignScopeSql } from "@/lib/silverCampaignControl";
 
 export async function GET(request: Request) {
   if (!(await checkAdminAuth())) {
@@ -21,14 +22,14 @@ export async function GET(request: Request) {
       FROM campaign_views_audit audit
       JOIN campaign_posts p ON audit.post_id = p.id
       JOIN campaigns c ON p.campaign_id = c.id
-      WHERE c.type != 'broadcast'
+      WHERE c.type != 'broadcast' AND ${mainCampaignScopeSql("c")}
     `;
     let countQuery = `
       SELECT COUNT(DISTINCT audit.post_id) as total 
       FROM campaign_views_audit audit
       JOIN campaign_posts p ON audit.post_id = p.id
       JOIN campaigns c ON p.campaign_id = c.id
-      WHERE c.type != 'broadcast'
+      WHERE c.type != 'broadcast' AND ${mainCampaignScopeSql("c")}
     `;
     const params: any[] = [];
 
@@ -63,7 +64,7 @@ export async function GET(request: Request) {
       FROM campaign_posts p
       LEFT JOIN campaigns c ON p.campaign_id = c.id
       LEFT JOIN channels ch ON p.channel_id = ch.id
-      WHERE p.id IN (?)
+      WHERE p.id IN (?) AND ${mainCampaignScopeSql("c")}
     `, [postIds]);
 
     const result = postIds.map((pid: number) => {
@@ -115,7 +116,7 @@ export async function PATCH(request: Request) {
       LEFT JOIN channels ch ON p.channel_id = ch.id
       LEFT JOIN users u_adv ON c.user_id = u_adv.id
       LEFT JOIN users u_pub ON ch.user_id = u_pub.id
-      WHERE p.id = ?
+      WHERE p.id = ? AND ${mainCampaignScopeSql("c")}
     `, [post_id]);
 
     if (!details.length) throw new Error("Post not found");

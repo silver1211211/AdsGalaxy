@@ -1,16 +1,26 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
+import { randomUUID } from "node:crypto";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 import { MiniAppSubmissionValidationError, validateMiniAppSubmission } from "@/lib/miniappSubmissionValidation";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import { notifyMiniAppSubmitted } from "@/lib/publisherNotifications";
 import { getMiniAppAggregateStatsByIds } from "@/lib/miniappReports";
 import { safeQueuePublisherWelcome } from "@/lib/supportMessages";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import { authenticatePublisherAsset, PublisherAssetError, publisherAssetErrorResponse, publisherAssetTelemetry } from "@/lib/publisherAssetOnboarding";
+import { verifyPublicBotIdentity } from "@/lib/telegramBotIdentity";
 
 type ExistingMiniAppRow = RowDataPacket & {
   id: number;
+  user_id: number;
   is_deleted: boolean | number;
+  status: string;
+  miniapp_name: string;
+  bot_id: string;
+  telegram_bot_id: string;
+  webapp_url: string;
+  miniapp_url: string;
 };
 
 function errorMessage(error: unknown, fallback: string) {
@@ -82,53 +92,77 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const requestId = randomUUID();
+  let publisherId: number | undefined;
+  publisherAssetTelemetry("miniapp_onboarding", { requestId, stage: "attempt", result: "started" });
   try {
     const blocked = await requireUserWritesAllowed();
     if (blocked) return blocked;
 
-    const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await authenticatePublisherAsset(request);
+    publisherId = Number(user.id);
+    publisherAssetTelemetry("miniapp_onboarding", { requestId, publisherId, stage: "auth", result: "success" });
     const input = validateMiniAppSubmission(await request.json());
-
-    const [existing] = await pool.query<ExistingMiniAppRow[]>(
-      "SELECT id, is_deleted FROM miniapps WHERE user_id = ? AND miniapp_username = ?",
-      [user.id, input.miniapp_username]
-    );
-
-    if (existing.length > 0 && !existing[0].is_deleted) {
-      return NextResponse.json({ error: "This Mini App username is already in your dashboard" }, { status: 400 });
+    const identity = await verifyPublicBotIdentity(input.miniapp_username, input.bot_id);
+    if (identity.id !== input.telegram_bot_id || identity.username.toLowerCase() !== input.miniapp_username.toLowerCase()) {
+      throw new PublisherAssetError("BOT_ID_MISMATCH", "The Bot Username and Bot ID do not identify the same Telegram bot.");
     }
+    input.miniapp_username = identity.username;
+    input.bot_id = identity.id;
+    input.telegram_bot_id = identity.id;
+    publisherAssetTelemetry("miniapp_onboarding", { requestId, publisherId, stage: "telegram_identity", result: "success", botUsername: identity.username, telegramBotId: identity.id });
 
-    if (existing.length > 0) {
-      await pool.query(
+    const connection = await pool.getConnection();
+    let id: number;
+    let idempotent = false;
+    let reactivated = false;
+    try {
+      await connection.beginTransaction();
+      const [existing] = await connection.query<ExistingMiniAppRow[]>(
+        "SELECT id,user_id,is_deleted,status,miniapp_name,bot_id,telegram_bot_id,webapp_url,miniapp_url FROM miniapps WHERE miniapp_username = ? FOR UPDATE",
+        [input.miniapp_username],
+      );
+      const current = existing[0];
+      if (current && Number(current.user_id) !== Number(user.id)) throw new PublisherAssetError("MINIAPP_OWNED_BY_ANOTHER_PUBLISHER", "This Mini App belongs to another publisher account.", 409);
+      const same = current && !current.is_deleted && current.miniapp_name === input.miniapp_name && String(current.bot_id) === input.bot_id && String(current.telegram_bot_id) === input.telegram_bot_id && current.webapp_url === input.webapp_url && current.miniapp_url === input.miniapp_url;
+      if (same) { id = current.id; idempotent = true; }
+      else if (current) {
+        await connection.query(
         `UPDATE miniapps
          SET miniapp_name = ?, bot_id = ?, telegram_bot_id = ?, webapp_url = ?, miniapp_url = ?, status = 'pending',
              admin_approved_at = NULL, admin_approved_by = NULL, is_deleted = FALSE
          WHERE id = ? AND user_id = ?`,
-        [input.miniapp_name, input.bot_id, input.telegram_bot_id, input.webapp_url, input.miniapp_url, existing[0].id, user.id]
-      );
-
-      await notifyMiniAppSubmitted(user.telegram_id, existing[0].id, input.miniapp_name);
-      await safeQueuePublisherWelcome(user.id);
-
-      return NextResponse.json({ success: true, id: existing[0].id });
-    }
-
-    const [result] = await pool.query<ResultSetHeader>(
+          [input.miniapp_name, input.bot_id, input.telegram_bot_id, input.webapp_url, input.miniapp_url, current.id, user.id],
+        );
+        id = current.id; reactivated = Boolean(current.is_deleted);
+      } else {
+        const [result] = await connection.query<ResultSetHeader>(
       `INSERT INTO miniapps (user_id, miniapp_name, miniapp_username, bot_id, telegram_bot_id, webapp_url, miniapp_url, status)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
-      [user.id, input.miniapp_name, input.miniapp_username, input.bot_id, input.telegram_bot_id, input.webapp_url, input.miniapp_url]
-    );
-
-    await notifyMiniAppSubmitted(user.telegram_id, result.insertId, input.miniapp_name);
-    await safeQueuePublisherWelcome(user.id);
-
-    return NextResponse.json({ success: true, id: result.insertId });
+          [user.id, input.miniapp_name, input.miniapp_username, input.bot_id, input.telegram_bot_id, input.webapp_url, input.miniapp_url],
+        );
+        id = result.insertId;
+      }
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback().catch(() => undefined); throw error;
+    } finally { connection.release(); }
+    publisherAssetTelemetry("miniapp_onboarding", { requestId, publisherId, stage: "persist", result: idempotent ? "idempotent_success" : reactivated ? "reactivated" : "success", botUsername: identity.username, telegramBotId: identity.id });
+    if (!idempotent) after(async () => {
+      try { await notifyMiniAppSubmitted(String(user.telegram_id), id, input.miniapp_name); } catch { /* post-commit only */ }
+      try { await safeQueuePublisherWelcome(user.id); } catch { /* post-commit only */ }
+    });
+    const response = NextResponse.json({ success: true, id, already_registered: idempotent });
+    response.headers.set("X-Request-Id", requestId);
+    return response;
   } catch (error: unknown) {
-    console.error("Publisher Mini Apps POST Error:", error);
-    const status = error instanceof MiniAppSubmissionValidationError
+    const status = error instanceof PublisherAssetError ? error.status : error instanceof MiniAppSubmissionValidationError
         ? 400
         : getAuthErrorStatus(error);
-    return NextResponse.json({ error: errorMessage(error, "Failed to submit Mini App") }, { status });
+    const code = error instanceof PublisherAssetError ? error.code : "MINIAPP_CREATE_FAILED";
+    publisherAssetTelemetry("miniapp_onboarding", { requestId, publisherId, stage: "response", result: "failed", code });
+    const response = error instanceof PublisherAssetError ? publisherAssetErrorResponse(error) : NextResponse.json({ error: status === 401 || status === 403 ? "Please reopen AdsGalaxy to verify your session." : errorMessage(error, "Failed to submit Mini App") }, { status });
+    response.headers.set("X-Request-Id", requestId);
+    return response;
   }
 }

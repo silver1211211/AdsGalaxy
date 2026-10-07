@@ -70,6 +70,8 @@ export type ChannelFraudDetectionResult = {
 
 const SEVERITY_POINTS: Record<FraudSeverity, number> = { low: 3, medium: 8, high: 18, critical: 30 };
 const SEVERITY_ORDER: Record<FraudSeverity | "none", number> = { none: 0, low: 1, medium: 2, high: 3, critical: 4 };
+const MAX_TRUST_PENALTY_PER_EVALUATION = 10;
+const MAX_RISK_INCREASE_PER_EVALUATION = 15;
 
 function numberValue(input: unknown) {
   const parsed = Number(input);
@@ -85,8 +87,37 @@ function rounded(input: number) {
 }
 
 function evaluationBucket(now = new Date()) {
-  const bucket = new Date(Math.floor(now.getTime() / 900_000) * 900_000);
-  return bucket.toISOString().slice(0, 19).replace("T", " ");
+  return now.toISOString().slice(0, 10) + " 00:00:00";
+}
+
+function incidentKey(channelId: number, signal: FraudSignal) {
+  return crypto.createHash("sha256").update([
+    channelId,
+    signal.fraudType,
+    signal.campaignId || 0,
+    signal.postId || 0,
+  ].join(":"), "utf8").digest("hex");
+}
+
+async function recordIncidents(connection: PoolConnection, channel: ChannelRow, signals: FraudSignal[]) {
+  const newSignals: FraudSignal[] = [];
+  for (const signal of signals) {
+    const key = incidentKey(channel.id, signal);
+    const [result] = await connection.query<ResultSetHeader>(
+      `INSERT INTO channel_fraud_incidents
+        (incident_key,channel_id,publisher_id,campaign_id,post_id,fraud_type,max_severity,status,
+         first_seen_at,last_seen_at,times_seen,last_reason,last_metadata)
+       VALUES (?,?,?,?,?,?,?,'open',NOW(),NOW(),1,?,?)
+       ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),last_seen_at=NOW(),times_seen=times_seen+1,
+         max_severity=IF(FIELD(VALUES(max_severity),'low','medium','high','critical')>
+           FIELD(max_severity,'low','medium','high','critical'),VALUES(max_severity),max_severity),
+         last_reason=VALUES(last_reason),last_metadata=VALUES(last_metadata)`,
+      [key, channel.id, channel.user_id, signal.campaignId || null, signal.postId || null,
+        signal.fraudType, signal.severity, signal.reason, signal.metadata ? JSON.stringify(signal.metadata) : null]
+    );
+    if (result.affectedRows === 1) newSignals.push({ ...signal, metadata: { ...signal.metadata, incident_key: key } });
+  }
+  return newSignals;
 }
 
 function highestSeverity(signals: FraudSignal[]): FraudSeverity | "none" {
@@ -219,14 +250,22 @@ export async function runChannelFraudDetection(limit = 200): Promise<ChannelFrau
         continue;
       }
       const evaluationId = insert.insertId;
-      const signals = await loadSignals(connection, channel);
+      const observedSignals = await loadSignals(connection, channel);
+      const signals = await recordIncidents(connection, channel, observedSignals);
       const oldTrust = clamp(numberValue(channel.publisher_trust_score ?? channel.traffic_quality_score ?? 60), -100, 100);
       const oldRisk = clamp(numberValue(channel.channel_fraud_risk_score), 0, 100);
-      const impact = Math.min(40, signals.reduce((sum, signal) => sum + SEVERITY_POINTS[signal.severity], 0));
+      const rawImpact = signals.reduce((sum, signal) => sum + SEVERITY_POINTS[signal.severity], 0);
+      const trustImpact = Math.min(MAX_TRUST_PENALTY_PER_EVALUATION, rawImpact);
+      const riskImpact = Math.min(MAX_RISK_INCREASE_PER_EVALUATION, rawImpact);
       const trustFrozen = Boolean(channel.trust_score_frozen_until && new Date(channel.trust_score_frozen_until).getTime() > Date.now());
-      const newTrust = trustFrozen ? oldTrust : rounded(signals.length ? clamp(oldTrust - impact, -100, 100) : clamp(oldTrust + 2, -100, 100));
-      const newRisk = rounded(signals.length ? clamp(oldRisk + impact, 0, 100) : clamp(oldRisk - 1.5, 0, 100));
-      const qualityDelta = signals.length ? -Math.min(25, impact * 0.65) : 1;
+      const hasObservedRisk = observedSignals.length > 0;
+      const newTrust = trustFrozen ? oldTrust : rounded(signals.length
+        ? clamp(oldTrust - trustImpact, -100, 100)
+        : hasObservedRisk ? oldTrust : clamp(oldTrust + 2, -100, 100));
+      const newRisk = rounded(signals.length
+        ? clamp(oldRisk + riskImpact, 0, 100)
+        : hasObservedRisk ? oldRisk : clamp(oldRisk - 1.5, 0, 100));
+      const qualityDelta = signals.length ? -Math.min(8, trustImpact * 0.65) : hasObservedRisk ? 0 : 1;
       const newTrafficQuality = rounded(clamp(numberValue(channel.traffic_quality_score ?? 60) + qualityDelta, 0, 100));
       const severity = highestSeverity(signals);
 
@@ -247,15 +286,39 @@ export async function runChannelFraudDetection(limit = 200): Promise<ChannelFrau
         `UPDATE channels SET publisher_trust_score=?,channel_fraud_risk_score=?,traffic_quality_score=?,
            traffic_risk_level=?,fraud_clean_streak=?,fraud_last_evaluated_at=NOW() WHERE id=?`,
         [newTrust, newRisk, newTrafficQuality, newRisk >= 80 ? "critical" : newRisk >= 60 ? "high" : newRisk >= 35 ? "medium" : "low",
-          signals.length ? 0 : numberValue(channel.fraud_clean_streak) + 1, channel.id]
+          hasObservedRisk ? 0 : numberValue(channel.fraud_clean_streak) + 1, channel.id]
       );
-      if (!signals.length) {
+      if (!hasObservedRisk) {
         recoveredChannels++;
       }
       await connection.query(
         `UPDATE channel_fraud_evaluations SET signal_count=?,highest_severity=?,new_trust_score=?,new_risk_score=?,completed_at=NOW() WHERE id=?`,
         [signals.length, severity, newTrust, newRisk, evaluationId]
       );
+      if (signals.some((signal) => signal.severity === "high" || signal.severity === "critical")) {
+        const [openCases] = await connection.query<RowDataPacket[]>(
+          `SELECT id FROM publisher_review_queue
+           WHERE publisher_id=? AND inventory_type='channel' AND inventory_id=?
+             AND status='open' AND reason='fraud_signal_manual_review'
+           LIMIT 1 FOR UPDATE`,
+          [channel.user_id, channel.id]
+        );
+        if (!openCases[0]) {
+          await connection.query(
+            `INSERT INTO publisher_review_queue
+              (publisher_id,inventory_type,inventory_id,risk_level,reason,status,metadata)
+             VALUES (?,'channel',?,'high','fraud_signal_manual_review','open',?)`,
+            [channel.user_id, channel.id, JSON.stringify({
+              source: "channel_fraud_detection",
+              incident_keys: signals.map((signal) => signal.metadata?.incident_key).filter(Boolean),
+              old_trust_score: oldTrust,
+              new_trust_score: newTrust,
+              old_risk_score: oldRisk,
+              new_risk_score: newRisk,
+            })]
+          );
+        }
+      }
       await connection.commit();
       channelsChecked++;
       eventsCreated += signals.length;

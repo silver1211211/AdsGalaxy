@@ -218,7 +218,7 @@ async function loadAuthenticatedStatusRow(
   const [rows]: any = await pool.query({
     sql: `SELECT u.id, u.status, u.banned_at, u.ban_reason, u.language,
                  u.ad_balance, u.balance_available, u.balance_locked, u.join_rewarded,
-                 (SELECT COALESCE(SUM(c.budget), 0)
+                 (SELECT COALESCE(SUM(CASE WHEN c.funding_model = 'direct_debit' THEN 0 ELSE c.budget END), 0)
                     FROM campaigns c
                    WHERE c.user_id = u.id
                      AND c.status IN ('pending', 'active', 'paused')) AS advertiser_balance_locked

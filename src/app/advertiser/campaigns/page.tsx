@@ -175,6 +175,21 @@ export default function MyCampaignsPage() {
   };
 
   useEffect(() => {
+    const root = document.documentElement;
+    const body = document.body;
+    const previousRootOverscroll = root.style.overscrollBehaviorY;
+    const previousBodyOverscroll = body.style.overscrollBehaviorY;
+
+    root.style.overscrollBehaviorY = "none";
+    body.style.overscrollBehaviorY = "none";
+
+    return () => {
+      root.style.overscrollBehaviorY = previousRootOverscroll;
+      body.style.overscrollBehaviorY = previousBodyOverscroll;
+    };
+  }, []);
+
+  useEffect(() => {
     setTitle("Campaigns");
     fetchCampaigns();
 
@@ -402,7 +417,7 @@ export default function MyCampaignsPage() {
 
   return (
     <DashboardLayout type="advertiser">
-      <div className="min-w-0 space-y-6 overflow-hidden pb-[max(2rem,env(safe-area-inset-bottom))]">
+      <div className="min-w-0 space-y-6 overflow-hidden">
         {/* Header */}
         <div className="relative overflow-hidden rounded-[2rem] bg-slate-950 p-6 text-white shadow-2xl shadow-blue-950/20">
           <div className="absolute -right-10 -top-12 h-32 w-32 rounded-full bg-[#0c9de8]/30 blur-3xl" />
@@ -661,6 +676,11 @@ export default function MyCampaignsPage() {
               <button onClick={loadMore} disabled={isLoadingMore} className="w-full rounded-2xl border border-blue-100 bg-white px-5 py-4 text-sm font-black uppercase tracking-widest text-[#0c9de8] disabled:opacity-60">
                 {isLoadingMore ? <Loader2 className="mx-auto animate-spin" size={18} /> : "See More"}
               </button>
+            )}
+            {!hasMore && !isLoadingMore && campaigns.length > 0 && (
+              <p className="pt-2 pb-[10dvh] text-center text-sm font-medium text-slate-400">
+                - End -
+              </p>
             )}
           </div>
         )}

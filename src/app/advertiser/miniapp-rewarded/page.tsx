@@ -466,18 +466,26 @@ export default function AdvertiserMiniAppRewardedPage() {
         if (!res.ok) throw new Error(data.error || "Failed to update campaign");
         router.push("/advertiser/campaigns");
       } else {
+        const createPayload={
+          ...payload,
+          direct_placement_mode:"network",
+          direct_inventory_scope:"network",
+          direct_inventory_type:"miniapp",
+          direct_inventory_ids:[],
+        };
+        const fingerprint=JSON.stringify(createPayload);
+        const storageKey="campaign-create:miniapp";
+        const saved=JSON.parse(sessionStorage.getItem(storageKey)||"null") as {fingerprint?:string;key?:string}|null;
+        const idempotencyKey=saved?.fingerprint===fingerprint&&saved.key?saved.key:crypto.randomUUID();
+        sessionStorage.setItem(storageKey,JSON.stringify({fingerprint,key:idempotencyKey}));
         const res = await apiFetch("/api/advertiser/miniapp-rewarded-campaigns", {
           method: "POST",
-          body: JSON.stringify({
-            ...payload,
-            direct_placement_mode: "network",
-            direct_inventory_scope: "network",
-            direct_inventory_type: "miniapp",
-            direct_inventory_ids: [],
-          }),
+          headers:{"Idempotency-Key":idempotencyKey},
+          body:JSON.stringify(createPayload),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Failed to create campaign");
+        sessionStorage.removeItem(storageKey);
         setForm(emptyForm);
         setSelectedCountries([]);
         setSelectedLanguages([]);

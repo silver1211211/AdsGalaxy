@@ -60,14 +60,16 @@ export function logStatus(success: number, failed: number): SystemLogStatus {
 }
 
 export async function createSystemLog(input: SystemLogInput, db: Db = pool) {
+  const knownIdempotent = input.logType === "publisher_trust_enforcement";
   try {
+    const duplicateClause = knownIdempotent ? " ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id), updated_at=NOW()" : "";
     const [result] = await db.query<ResultSetHeader>(
       `INSERT INTO system_logs
         (log_type, status, title, summary, period_start, period_end, slot_date, slot_time,
          attempted_count, success_count, failed_count, skipped_count, auto_paused_count,
          inactive_users_count, paused_bots_count, failed_bots_count,
          failure_reasons, affected_entities, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` + duplicateClause,
       [
         input.logType,
         input.status,
@@ -93,7 +95,8 @@ export async function createSystemLog(input: SystemLogInput, db: Db = pool) {
     return result?.insertId || null;
   } catch (error: unknown) {
     console.warn("System log write skipped", { type: input.logType, error: error instanceof Error ? error.message : "unknown_error" });
-    return null;
+    if (knownIdempotent) return null;
+    throw error;
   }
 }
 

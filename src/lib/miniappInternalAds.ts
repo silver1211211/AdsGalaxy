@@ -13,6 +13,7 @@ import { qualityScoreForWatchTier, watchDurationQualityTier, type WatchQualityTi
 import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { miniAppImpressionCost } from "@/lib/miniappExternalDeliveryMath";
 import { enqueueMiniAppBudgetExhaustedNotification, markMiniAppCampaignBudgetExhausted } from "@/lib/miniappCampaignNotifications";
+import { getMiniAppDailyAdvertiserSpend, markMiniAppDailyCapReached } from "@/lib/miniappDailyCap";
 
 export const INTERNAL_NETWORK_NAME = "AdsGalaxyInternal";
 
@@ -111,30 +112,37 @@ export async function getInternalAdsMaxSharePercent() {
   return (await getMiniAppOptimizationSettings()).internal_ads_max_share_percent;
 }
 
+export function calculateInternalRequestShare(internalRequests: number, totalRequests: number) {
+  const total = Math.max(0, Math.floor(Number(totalRequests) || 0));
+  const internal = Math.min(total, Math.max(0, Math.floor(Number(internalRequests) || 0)));
+  return { internal, total, percent: total === 0 ? 0 : Math.min(100, internal / total * 100) };
+}
+
 export async function canServeInternalAd(miniappId: number, conn: PoolConnection) {
   const maxSharePercent = (await getMiniAppOptimizationSettings(conn)).internal_ads_max_share_percent;
   if (maxSharePercent <= 0) return { allowed: false, reason: "internal_share_disabled", max_share_percent: maxSharePercent };
 
-  const [[requestRow]] = await conn.query<RowDataPacket[]>(
-    "SELECT COUNT(*) as total_requests FROM miniapp_mediation_requests WHERE miniapp_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)",
-    [miniappId]
-  );
-  const [[internalRow]] = await conn.query<RowDataPacket[]>(
-    "SELECT COUNT(*) as internal_impressions FROM miniapp_internal_ad_impressions WHERE miniapp_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)",
-    [miniappId]
+  const [[shareRow]] = await conn.query<RowDataPacket[]>(
+    `SELECT COUNT(*) AS total_requests, COALESCE(SUM(selected_network = ?),0) AS internal_requests
+     FROM miniapp_mediation_requests
+     WHERE miniapp_id = ? AND created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 HOUR)`,
+    [INTERNAL_NETWORK_NAME, miniappId]
   );
 
-  const totalRequests = Math.max(1, Number(requestRow?.total_requests || 0));
-  const internalImpressions = Number(internalRow?.internal_impressions || 0);
-  const currentShare = internalImpressions / totalRequests * 100;
+  const current = calculateInternalRequestShare(Number(shareRow?.internal_requests || 0), Number(shareRow?.total_requests || 0));
+  const projected = calculateInternalRequestShare(current.internal + 1, current.total + 1);
+  const allowed = projected.percent <= Math.min(100, Math.max(0, maxSharePercent));
 
   return {
-    allowed: currentShare < maxSharePercent,
-    reason: currentShare < maxSharePercent ? "eligible" : "internal_share_cap_reached",
+    allowed,
+    reason: allowed ? "eligible" : "internal_share_cap_reached",
     max_share_percent: maxSharePercent,
-    current_share_percent: currentShare,
-    internal_impressions: internalImpressions,
-    total_requests: totalRequests,
+    current_share_percent: current.percent,
+    projected_share_percent: projected.percent,
+    internal_requests: current.internal,
+    total_requests: current.total,
+    share_unit: "mediation_requests",
+    share_window: "rolling_1_hour_utc",
   };
 }
 
@@ -313,7 +321,7 @@ export async function selectInternalRewardedCampaign(input: {
            FROM miniapp_internal_ad_impressions
            WHERE campaign_id = ?
              AND telegram_user_id = ?
-             AND created_at >= CURDATE()`,
+             AND created_at >= UTC_DATE() AND created_at < DATE_ADD(UTC_DATE(), INTERVAL 1 DAY)`,
           [row.id, input.telegramUserId]
         );
         if (Number(frequencyRow?.seen || 0) >= frequencyCap) {
@@ -347,22 +355,23 @@ export async function selectInternalRewardedCampaign(input: {
 
     const [[pacingRow]] = await input.conn.query<RowDataPacket[]>(`
       SELECT
-        COALESCE(SUM(CASE WHEN created_at >= CURDATE() THEN cost ELSE 0 END), 0) as daily_spend,
         COALESCE(SUM(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR) THEN cost ELSE 0 END), 0) as hourly_spend,
         COALESCE(SUM(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 10 MINUTE) THEN cost ELSE 0 END), 0) as rolling_spend
       FROM miniapp_internal_ad_impressions
       WHERE campaign_id = ?
     `, [row.id]);
+    const dailySpend = toNumber(await getMiniAppDailyAdvertiserSpend(input.conn, Number(row.id)));
     const dailyBudgetLimit = toNumber(row.daily_budget_limit);
-    if (dailyBudgetLimit > 0 && toNumber(pacingRow?.daily_spend) + cost > dailyBudgetLimit) {
+    if (dailyBudgetLimit > 0 && dailySpend + cost > dailyBudgetLimit + 1e-10) {
+      await markMiniAppDailyCapReached(input.conn, Number(row.id));
       skipReason = "daily_budget_limit";
-      reject(row, skipReason, { daily_spend: pacingRow?.daily_spend, daily_budget_limit: dailyBudgetLimit, cost });
+      reject(row, skipReason, { daily_spend: dailySpend, daily_budget_limit: dailyBudgetLimit, cost });
       continue;
     }
     if (budget > 0) {
-      if (toNumber(pacingRow?.daily_spend) >= budget * 0.3) {
+      if (dailySpend >= budget * 0.3) {
         skipReason = "daily_campaign_pacing";
-        reject(row, skipReason, { daily_spend: pacingRow?.daily_spend, daily_limit: budget * 0.3 });
+        reject(row, skipReason, { daily_spend: dailySpend, daily_limit: budget * 0.3 });
         continue;
       }
       if (toNumber(pacingRow?.hourly_spend) >= budget * 0.1) {
@@ -384,7 +393,7 @@ export async function selectInternalRewardedCampaign(input: {
   const campaign = weightedRandomCampaign(eligibleCampaigns);
 
   if (!campaign) {
-    return { campaign: null, skip_reason: skipReason, diagnostics: { ...audit, ...(bypassingReachedNetworkShareCap ? { share_cap: cap, network_share_cap_bypassed: true } : {}), duration_ms: Date.now() - startedAt } };
+    return { campaign: null, skip_reason: skipReason, diagnostics: { ...audit, ...(bypassingReachedNetworkShareCap ? { share_cap: cap, network_share_cap_bypassed: true, cap_bypassed_due_to_no_external_fill: true } : {}), duration_ms: Date.now() - startedAt } };
   }
   audit.selected_campaign_id = Number(campaign.id);
 
@@ -411,7 +420,7 @@ export async function selectInternalRewardedCampaign(input: {
     diagnostics: {
       ...audit,
       cpm_weighted_selection: eligibleCampaigns.map((row) => ({ campaign_id: Number(row.id), cpm: toNumber(row.advertiser_cpm_bid) })),
-      ...(bypassingReachedNetworkShareCap ? { share_cap: cap, network_share_cap_bypassed: true } : {}),
+      ...(bypassingReachedNetworkShareCap ? { share_cap: cap, network_share_cap_bypassed: true, cap_bypassed_due_to_no_external_fill: true } : {}),
       duration_ms: Date.now() - startedAt,
     },
   };
@@ -505,12 +514,10 @@ export async function recordInternalAdImpression(input: {
     return { duplicate: false, insufficient_balance: false, budget_exhausted: true, cpm, cost };
   }
   if (toNumber(campaign.daily_budget_limit) > 0) {
-    const [[dailyRow]] = await input.conn.query<RowDataPacket[]>(
-      "SELECT COALESCE(SUM(advertiser_debit), 0) spend FROM miniapp_internal_ad_impressions WHERE campaign_id = ? AND created_at >= CURDATE()",
-      [input.campaignId]
-    );
-    if (toNumber(dailyRow?.spend) + cost > toNumber(campaign.daily_budget_limit) + 1e-10) {
-      throw new Error("daily_budget_limit");
+    const dailySpend = toNumber(await getMiniAppDailyAdvertiserSpend(input.conn, input.campaignId));
+    if (dailySpend + cost > toNumber(campaign.daily_budget_limit) + 1e-10) {
+      await markMiniAppDailyCapReached(input.conn, input.campaignId);
+      return { duplicate: false, insufficient_balance: false, daily_cap_reached: true, cpm, cost };
     }
   }
 
@@ -626,10 +633,16 @@ export async function recordInternalAdImpression(input: {
   if (campaignUpdate.affectedRows !== 1) throw new Error("campaign_budget_exhausted");
   const budgetExhausted = toNumber(campaign.remaining_budget) - cost + 1e-10 < cost;
   if (budgetExhausted) await enqueueMiniAppBudgetExhaustedNotification(input.conn, input.campaignId);
+  if (!budgetExhausted && toNumber(campaign.daily_budget_limit) > 0) {
+    const spendAfter = toNumber(await getMiniAppDailyAdvertiserSpend(input.conn, input.campaignId));
+    if (spendAfter + cost > toNumber(campaign.daily_budget_limit) + 1e-10) {
+      await markMiniAppDailyCapReached(input.conn, input.campaignId);
+    }
+  }
   const adsGalaxyFee = payout.ads_galaxy_revenue;
   const publisherRevenue = payout.publisher_revenue;
   const [dateRows] = await input.conn.query<Array<RowDataPacket & { stat_date: string }>>(
-    "SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS stat_date"
+    "SELECT DATE_FORMAT(UTC_DATE(), '%Y-%m-%d') AS stat_date"
   );
   const statDate = String(dateRows[0].stat_date);
   const grossCpm = cpm;

@@ -8,6 +8,7 @@ import { normalizeMiniAppCampaignCategories, validateMiniAppCampaignText } from 
 import { validateOptionalDailyBudget } from "@/lib/campaignBudget";
 import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByIds } from "@/lib/miniappCampaignMetrics";
 import type { ResultSetHeader } from "mysql2/promise";
+import { didSensitiveCampaignContentChange } from "@/lib/campaignModeration";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -75,7 +76,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (!id) return NextResponse.json({ error: "Invalid campaign ID" }, { status: 400 });
 
     const [rows]: any = await pool.query(
-      "SELECT id, advertiser_id, campaign_name, title, description, landing_url, image_url, logo_url, budget, remaining_budget, status, pause_reason, advertiser_cpm_bid, approved_at FROM miniapp_rewarded_campaigns WHERE id = ?",
+      "SELECT id, advertiser_id, campaign_name, title, description, cta_text, landing_url, image_url, logo_url, budget, remaining_budget, status, pause_reason, advertiser_cpm_bid, approved_at FROM miniapp_rewarded_campaigns WHERE id = ?",
       [id]
     );
     if (!rows.length) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
@@ -198,14 +199,15 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       description: String(updates.description ?? prev.description),
     });
 
-    if (updates.landing_url && !/^https?:\/\//i.test(updates.landing_url)) {
+    const nextLandingUrl=String(updates.landing_url??prev.landing_url??"");
+    if (!/^https?:\/\//i.test(nextLandingUrl)) {
       return NextResponse.json({ error: "Landing URL must start with https://" }, { status: 400 });
     }
 
-    const urlChanged = updates.landing_url && updates.landing_url !== prev.landing_url;
-    const imageChanged = updates.image_url !== undefined && updates.image_url !== prev.image_url;
-    const logoChanged = updates.logo_url !== undefined && updates.logo_url !== prev.logo_url;
-    const resubmitted = !!(urlChanged || imageChanged || logoChanged);
+    const resubmitted=didSensitiveCampaignContentChange("miniapp",
+      {destinationUrl:prev.landing_url,cta:prev.cta_text,image:prev.image_url,logo:prev.logo_url,title:prev.title,text:prev.description},
+      {destinationUrl:nextLandingUrl,cta:updates.cta_text??prev.cta_text,image:updates.image_url??prev.image_url,logo:updates.logo_url??prev.logo_url,title:updates.title??prev.title,text:updates.description??prev.description},
+    );
 
     if (resubmitted) {
       updates.creative_review_status = "pending";

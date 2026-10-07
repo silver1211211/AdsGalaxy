@@ -23,17 +23,19 @@ const ROLE_PERMISSIONS: Record<AdminRole, Set<string>> = {
   read_only_admin: new Set(["read"]),
 };
 
-export function normalizeAdminRole(role: unknown): AdminRole {
-  const normalized = String(role || "super_admin").toLowerCase();
-  if (normalized === "operations_admin" || normalized === "support_admin" || normalized === "read_only_admin") {
-    return normalized;
+export function normalizeAdminRole(role: unknown): AdminRole | null {
+  const normalized = String(role || "").trim().toLowerCase();
+  if (normalized === "super_admin" || normalized === "operations_admin"
+    || normalized === "support_admin" || normalized === "read_only_admin") {
+    return normalized as AdminRole;
   }
-  return "super_admin";
+  return null;
 }
 
 export function adminHasPermission(admin: AdminRow | null, permission: "read" | "operate" | "dangerous" | "support") {
   if (!admin) return false;
-  return ROLE_PERMISSIONS[normalizeAdminRole(admin.role)].has(permission);
+  const role = normalizeAdminRole(admin.role);
+  return role ? ROLE_PERMISSIONS[role].has(permission) : false;
 }
 
 export async function requireAdminPermission(permission: "read" | "operate" | "dangerous" | "support") {
@@ -132,7 +134,7 @@ export async function getAuthenticatedAdmin(): Promise<AdminRow | null> {
     if (!session) return null;
 
     const [rows] = await pool.query<SessionRow[]>(
-      `SELECT a.id, a.username, COALESCE(a.role, 'super_admin') as role, s.id as session_id
+      `SELECT a.id, a.username, a.role, s.id as session_id
        FROM admin_sessions s
        JOIN admins a ON a.id = s.admin_id
        WHERE s.id = ?
@@ -144,8 +146,10 @@ export async function getAuthenticatedAdmin(): Promise<AdminRow | null> {
     );
 
     if (rows.length > 0) {
+      const role = normalizeAdminRole(rows[0].role);
+      if (!role) return null;
       await pool.query("UPDATE admin_sessions SET last_used_at = NOW() WHERE id = ?", [rows[0].session_id]);
-      return rows[0];
+      return { ...rows[0], role };
     }
   } catch {
     // Session check failed — treat as unauthenticated.

@@ -4,6 +4,7 @@ import pool from "@/lib/db";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 import { dispatchMiniAppCampaignNotifications } from "@/lib/miniappCampaignNotifications";
 import { reconcileMiniAppBudgetExhaustion } from "@/lib/miniappExternalDeliverySync";
+import { reconcileMiniAppDailyCaps } from "@/lib/miniappDailyCap";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,7 @@ export async function GET(request: Request) {
   }
 
   try {
+    const dailyCapLifecycle = await reconcileMiniAppDailyCaps(100);
     const exhausted = await reconcileMiniAppBudgetExhaustion();
 
     const [readyCampaigns] = await pool.query<CampaignRow[]>(`
@@ -37,6 +39,7 @@ export async function GET(request: Request) {
       success: true,
       ready_campaigns: readyCampaigns.length,
       paused_exhausted: exhausted,
+      daily_cap_lifecycle: dailyCapLifecycle,
       notifications: await dispatchMiniAppCampaignNotifications(20),
     });
   } catch (error: unknown) {

@@ -2,6 +2,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
+import { mainCampaignScopeSql } from "@/lib/silverCampaignControl";
 import {
   MINIAPP_NETWORK_SETTING_KEYS,
   auditProductionAction,
@@ -89,8 +90,8 @@ async function getHealthOverview() {
     pausedBots: await countOne("SELECT COUNT(*) as count FROM bots WHERE is_deleted = FALSE AND status = 'paused'"),
     activeMiniApps: await countOne("SELECT COUNT(*) as count FROM miniapps WHERE is_deleted = FALSE AND status IN ('approved', 'monetized')"),
     pausedMiniApps: await countOne("SELECT COUNT(*) as count FROM miniapps WHERE is_deleted = FALSE AND status = 'paused'"),
-    activeAdvertisers: await countOne("SELECT COUNT(DISTINCT user_id) as count FROM campaigns WHERE status = 'active'"),
-    activeCampaigns: await countOne("SELECT COUNT(*) as count FROM campaigns WHERE status = 'active'"),
+    activeAdvertisers: await countOne(`SELECT COUNT(DISTINCT c.user_id) as count FROM campaigns c WHERE c.status = 'active' AND ${mainCampaignScopeSql("c")}`),
+    activeCampaigns: await countOne(`SELECT COUNT(*) as count FROM campaigns c WHERE c.status = 'active' AND ${mainCampaignScopeSql("c")}`),
     networkHealth,
     lastSchedulerRun,
     lastBroadcastRun,

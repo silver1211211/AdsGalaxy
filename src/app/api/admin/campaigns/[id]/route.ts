@@ -1,9 +1,14 @@
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { isStandardChannelReport, getChannelReportingMetrics, channelMetricPayload } from "@/lib/channelReporting";
+import { getGrowthLiveImpressions } from "@/lib/channelGrowthStatistics";
+import { mainCampaignScopeSql, recordSilverAudit, requireSilverAdmin, silverCampaignScopeSql } from "@/lib/silverCampaignControl";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
+import { getCampaignClickAnalytics } from "@/lib/campaignAnalyticsAdjustments";
+import { resolveCampaignPublicId } from "@/lib/campaignIdentity";
 
 type ColumnRow = RowDataPacket & { COLUMN_NAME: string };
 type GenericRow = RowDataPacket & Record<string, unknown>;
@@ -17,6 +22,7 @@ const EDITABLE_CAMPAIGN_FIELDS = {
   category: { type: "string", maxLength: 64 },
   cpm: { type: "number", min: 0 },
   cpc: { type: "number", min: 0 },
+  cost_per_subscriber: { type: "number", min: 0.00000001 },
   is_prioritized: { type: "boolean" },
 } as const;
 
@@ -33,6 +39,14 @@ async function getCampaignPostColumns() {
   return new Set(rows.map((row) => row.COLUMN_NAME));
 }
 
+export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
+  return handleCampaignDetailsGet(request, context, "main");
+}
+
+export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
+  return handleCampaignDetailsPatch(request, context, "main");
+}
+
 async function getCampaignColumns() {
   const [rows] = await pool.query<ColumnRow[]>(`
     SELECT COLUMN_NAME
@@ -44,17 +58,24 @@ async function getCampaignColumns() {
   return new Set(rows.map((row) => row.COLUMN_NAME));
 }
 
-export async function GET(
+export async function handleCampaignDetailsGet(
   request: Request,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
+  managementScope: "main" | "silver" = "main"
 ) {
-  if (!(await checkAdminAuth())) {
+  if (managementScope === "silver") {
+    const { response } = await requireSilverAdmin();
+    if (response) return response;
+  } else if (!(await checkAdminAuth())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   try {
     await ensureClassicSettlementColumns();
-    const { id } = await params;
+    const { id: requestedId } = await params;
+    const identity = managementScope === "main" ? await resolveCampaignPublicId(Number(requestedId)) : { id: Number(requestedId), public_id: Number(requestedId) };
+    if (!identity) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
+    const id = String(identity.id);
     const postColumns = await getCampaignPostColumns();
     const deletedAtExpr = postColumns.has("deleted_at") ? "cp.deleted_at" : "NULL";
     const deletedPostsExpr = postColumns.has("deleted_at")
@@ -88,10 +109,10 @@ export async function GET(
       : deleteFailedExpr;
 
     const [campaignRows] = await pool.query<GenericRow[]>(`
-      SELECT c.*, u.first_name, u.last_name, u.username, u.telegram_id
+      SELECT c.*, u.first_name, u.last_name, u.username, u.telegram_id, u.ad_balance AS advertiser_balance
       FROM campaigns c
       LEFT JOIN users u ON c.user_id = u.id
-      WHERE c.id = ?
+      WHERE c.id = ? AND ${managementScope === "silver" ? silverCampaignScopeSql("c") : mainCampaignScopeSql("c")}
     `, [id]);
 
     if (campaignRows.length === 0) {
@@ -147,10 +168,22 @@ export async function GET(
       WHERE cp.campaign_id = ?
     `, [id]);
 
-    const [clickRows] = await pool.query<Array<RowDataPacket & { total_clicks: number | string }>>(
-      "SELECT COUNT(*) as total_clicks FROM campaign_clicks WHERE campaign_id = ?",
-      [id]
-    );
+    let viewAccounting: Record<string, unknown> = {};
+    if (!isBroadcast) {
+      const [viewAccountingRows] = await pool.query<GenericRow[]>(`
+        SELECT
+          COALESCE((SELECT SUM(views) FROM campaign_posts WHERE campaign_id=?),0) raw_views,
+          COALESCE((SELECT SUM(fraud_excluded_views) FROM campaign_posts WHERE campaign_id=?),0) fraud_excluded_views,
+          COALESCE((SELECT SUM(waived_views) FROM channel_view_waivers WHERE campaign_id=?),0) waived_views,
+          COALESCE((SELECT SUM(units) FROM channel_advertiser_debits WHERE campaign_id=? AND settlement_type='view'),0)
+            + COALESCE((SELECT SUM(l.new_units) FROM channel_settlement_ledger l
+              LEFT JOIN channel_fraud_billing_adjustments a ON a.settlement_ledger_id=l.id
+              WHERE l.campaign_id=? AND l.settlement_type='view' AND a.id IS NULL),0) billable_views
+      `, [id,id,id,id,id]);
+      viewAccounting = viewAccountingRows[0] || {};
+    }
+
+    const clickAnalytics = await getCampaignClickAnalytics(Number(id));
 
     const [financialRows] = await pool.query<GenericRow[]>(
       `SELECT
@@ -160,7 +193,7 @@ export async function GET(
         END AS spend,
         (SELECT COUNT(*) FROM campaigns approved WHERE approved.user_id = c.user_id AND approved.status IN ('active', 'completed', 'budget_exhausted')) AS approved_count,
         (SELECT COUNT(*) FROM campaigns rejected WHERE rejected.user_id = c.user_id AND rejected.status = 'rejected') AS rejected_count
-       FROM campaigns c WHERE c.id = ?`,
+       FROM campaigns c WHERE c.id = ? AND ${managementScope === "silver" ? silverCampaignScopeSql("c") : mainCampaignScopeSql("c")}`,
       [id]
     );
 
@@ -189,21 +222,57 @@ export async function GET(
     `, [id]);
 
     const metrics = metricsRows[0] || {};
-    const totalViews = Number(metrics.total_views || 0);
-    const totalClicks = Number(clickRows[0]?.total_clicks || 0);
+    const isGrowthCampaign = String(campaignRows[0].campaign_kind || "") === "channel_growth";
+    const [growthRows] = isGrowthCampaign
+      ? await pool.query<GenericRow[]>(
+          `SELECT COUNT(*) verified_subscribers, COALESCE(SUM(advertiser_debit),0) subscriber_spend
+           FROM channel_growth_conversions
+           WHERE campaign_id=? AND status='billed' AND fraud_status='clear'`,
+          [id],
+        )
+      : [[] as GenericRow[]];
+    const growth = growthRows[0] || {};
+    const rawViews = isGrowthCampaign ? await getGrowthLiveImpressions(pool, Number(id)) : Number(viewAccounting.raw_views ?? metrics.total_views ?? 0);
+    const fraudExcludedViews = Number(viewAccounting.fraud_excluded_views || 0);
+    const waivedViews = Number(viewAccounting.waived_views || 0);
+    const billableViews = Number(viewAccounting.billable_views || 0);
+    const totalViews = isGrowthCampaign ? rawViews : (campaignRows[0].type === "views" ? billableViews : rawViews);
+    const outstandingValidViews = Math.max(0, rawViews - fraudExcludedViews - billableViews - waivedViews);
+    const totalClicks = isGrowthCampaign ? clickAnalytics.actualTrackedClicks : clickAnalytics.displayedClicks;
 
+    const canonical = isStandardChannelReport(campaignRows[0])
+      ? (await getChannelReportingMetrics(pool, [Number(id)])).get(Number(id)) : undefined;
+    const reporting = canonical ? channelMetricPayload(canonical, isGrowthCampaign) : {};
     return NextResponse.json({
       campaign: {
         ...campaignRows[0],
+        display_id: Number(campaignRows[0].public_id || requestedId),
         ...financialRows[0],
+        ...(canonical ? { spend: canonical.spend } : {}),
         teaser_creatives: teaserCreativeRows,
       },
       metrics: {
         ...metrics,
+        total_views: totalViews,
+        billable_views: billableViews,
+        raw_views: rawViews,
+        fraud_excluded_views: fraudExcludedViews,
+        waived_views: waivedViews,
+        outstanding_valid_views: outstandingValidViews,
         total_clicks: totalClicks,
-        ctr: totalViews > 0 ? totalClicks / totalViews : 0,
+        actual_tracked_clicks: clickAnalytics.actualTrackedClicks,
+        historical_click_recovery_adjustment: clickAnalytics.recoveryBaseline + clickAnalytics.additiveAdjustment,
+        displayed_clicks: totalClicks,
+        ctr: totalViews > 0 ? (totalClicks / totalViews) * 100 : 0,
+        verified_subscribers: Number(growth.verified_subscribers || 0),
+        subscriber_spend: Number(growth.subscriber_spend || 0),
+        effective_cps: Number(growth.verified_subscribers || 0) > 0
+          ? Number(growth.subscriber_spend || 0) / Number(growth.verified_subscribers)
+          : 0,
+        conversion_rate: totalClicks > 0 ? (Number(growth.verified_subscribers || 0) / totalClicks) * 100 : 0,
+        ...reporting,
       },
-      placements,
+      placements: canonical && canonical.views <= 0 ? placements.map(post => ({ ...post, clicks: 0 })) : placements,
     });
   } catch (error: unknown) {
     console.error("Admin Campaign Details API Error:", error);
@@ -211,16 +280,20 @@ export async function GET(
   }
 }
 
-export async function PATCH(
+export async function handleCampaignDetailsPatch(
   request: Request,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
+  managementScope: "main" | "silver" = "main"
 ) {
-  const { admin, response } = await requireAdminPermission("operate");
+  const { admin, response } = managementScope === "silver" ? await requireSilverAdmin() : await requireAdminPermission("operate");
   if (response) return response;
 
   try {
     await ensureClassicSettlementColumns();
-    const { id } = await params;
+    const { id: requestedId } = await params;
+    const identity = managementScope === "main" ? await resolveCampaignPublicId(Number(requestedId)) : { id: Number(requestedId), public_id: Number(requestedId) };
+    if (!identity) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
+    const id = String(identity.id);
     const body = await request.json() as Record<string, unknown>;
     const teaserCreativesInput = body.teaser_creatives;
     const fields = Object.keys(body).filter((field) => field !== "teaser_creatives");
@@ -233,12 +306,20 @@ export async function PATCH(
       return NextResponse.json({ error: "No fields to update" }, { status: 400 });
     }
 
-    const [campaignRows] = await pool.query<GenericRow[]>("SELECT * FROM campaigns WHERE id = ?", [id]);
+    const [campaignRows] = await pool.query<GenericRow[]>(`SELECT c.* FROM campaigns c WHERE c.id = ? AND ${managementScope === "silver" ? silverCampaignScopeSql("c") : mainCampaignScopeSql("c")}`, [id]);
     if (campaignRows.length === 0) {
       return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
     }
 
     const campaign = campaignRows[0];
+    if (isStandardChannelReport(campaign)) {
+      const rateField = campaign.campaign_kind === "channel_growth" ? "cost_per_subscriber" : campaign.type === "clicks" ? "cpc" : "cpm";
+      if (["cpm", "cpc", "cost_per_subscriber"].some(field => fields.includes(field) && field !== rateField)) {
+        return NextResponse.json({ error: "Pricing field does not match this campaign billing model" }, { status: 400 });
+      }
+    } else if (fields.includes("cost_per_subscriber")) {
+      return NextResponse.json({ error: "CPS is only available for Channel Growth" }, { status: 400 });
+    }
     const campaignColumns = await getCampaignColumns();
     const updates: string[] = [];
     const values: unknown[] = [];
@@ -373,6 +454,14 @@ export async function PATCH(
 
     try {
       await conn.beginTransaction();
+      const [lockedScopeRows] = await conn.query<GenericRow[]>(
+        `SELECT c.id FROM campaigns c WHERE c.id=? AND ${managementScope === "silver" ? silverCampaignScopeSql("c") : mainCampaignScopeSql("c")} FOR UPDATE`,
+        [id]
+      );
+      if (lockedScopeRows.length === 0) {
+        await conn.rollback();
+        return NextResponse.json({ error: "Campaign management scope changed" }, { status: 409 });
+      }
 
       if (updates.length > 0) {
         values.push(id);
@@ -431,7 +520,7 @@ export async function PATCH(
       conn.release();
     }
 
-    await recordAdminActionAudit({
+    const auditInput: Parameters<typeof recordAdminActionAudit>[0] = {
       adminId: admin?.id,
       action: "campaign_edit",
       entityType: "campaign",
@@ -445,7 +534,12 @@ export async function PATCH(
         new_values: newValues,
         timestamp: new Date().toISOString(),
       },
-    });
+    };
+    if (managementScope === "silver") {
+      await recordSilverAudit({ adminId: admin?.id, action: "campaign_edit", campaignId: Number(id), metadata: auditInput.metadata as Record<string, unknown> });
+    } else {
+      await recordAdminActionAudit(auditInput);
+    }
 
     return NextResponse.json({
       success: true,

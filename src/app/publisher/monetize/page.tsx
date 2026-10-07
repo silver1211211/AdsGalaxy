@@ -37,7 +37,7 @@ import {
   publicChannelUrl,
 } from "@/lib/telegramChannelInput";
 import { logPrivateChannelDiagnostic } from "@/lib/privateChannelDiagnostics";
-import { subscriberFreshness, telegramAudienceLabel } from "@/lib/channelRefreshPolicy";
+import { telegramAudienceLabel } from "@/lib/channelRefreshPolicy";
 import { useTranslations } from "@/i18n/client";
 import type { TranslationKey } from "@/i18n";
 
@@ -301,7 +301,7 @@ function InfoTip({ text }: { text: string }) {
   );
 }
 
-type BotVerifyStatus = "idle" | "loading" | "ok" | "mismatch" | "notfound" | "error";
+type BotVerifyStatus = "idle" | "loading" | "ok" | "mismatch" | "notfound" | "rate_limited" | "temporary" | "error";
 
 function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBotId, maWebUrl, setMaWebUrl, maMaUrl, setMaMaUrl, isLoading, onSubmit }: {
   maName: string; setMaName: (v: string) => void;
@@ -338,19 +338,16 @@ function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBo
     setBotVerify({ status: "loading", message: "" });
     verifyTimer.current = setTimeout(async () => {
       try {
-        const res = await apiFetch(`/api/telegram/verify-bot?username=${encodeURIComponent(u)}`);
+        const res = await apiFetch(`/api/telegram/verify-bot?username=${encodeURIComponent(u)}&bot_id=${encodeURIComponent(maBotId.trim())}`, { timeoutMs: 20000 });
         const data = await res.json();
         if (!res.ok) {
-          setBotVerify({ status: "notfound", message: data.error || "Bot not found on Telegram" });
-          return;
-        }
-        if (String(data.id) !== maBotId.trim()) {
-          setBotVerify({ status: "mismatch", message: `Bot ID doesn't match @${data.username || u}` });
+          const status: BotVerifyStatus = data.code === "BOT_ID_MISMATCH" ? "mismatch" : data.code === "BOT_NOT_FOUND" || data.code === "NOT_A_TELEGRAM_BOT" ? "notfound" : data.code === "TELEGRAM_RATE_LIMITED" ? "rate_limited" : "temporary";
+          setBotVerify({ status, message: data.error || "Telegram verification is temporarily unavailable" });
           return;
         }
         setBotVerify({ status: "ok", message: `Verified: @${data.username || u}` });
       } catch {
-        setBotVerify({ status: "error", message: "Could not reach verification service" });
+        setBotVerify({ status: "temporary", message: "Telegram verification is temporarily unavailable" });
       }
     }, 700);
 
@@ -388,40 +385,23 @@ function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBo
     return () => { if (urlVerifyTimer.current) clearTimeout(urlVerifyTimer.current); };
   }, [maWebUrl]);
 
-  // Direct Mini App URL reachability check
+  // Telegram launch URLs are deterministic bot/app links, not generic websites.
   useEffect(() => {
     if (maUrlVerifyTimer.current) clearTimeout(maUrlVerifyTimer.current);
 
-    let parsed: URL | null = null;
-    try { parsed = new URL(maMaUrl.trim()); } catch { /* invalid url */ }
-
-    const urlOk = parsed && parsed.protocol === "https:" && parsed.hostname.includes(".");
-    if (!urlOk || !maMaUrl.trim()) {
+    const telegramLaunch = /^https:\/\/(?:t\.me|telegram\.me)\/[A-Za-z][A-Za-z0-9_]*(?:\/[^/?#]+|\?startapp=[^&#]+)(?:[?#].*)?$/i.test(maMaUrl.trim());
+    if (!telegramLaunch || !maMaUrl.trim()) {
       setMaUrlVerify({ status: "idle", message: "" });
       return;
     }
-
-    setMaUrlVerify({ status: "loading", message: "" });
-    maUrlVerifyTimer.current = setTimeout(async () => {
-      try {
-        const res = await apiFetch(`/api/verify-url?url=${encodeURIComponent(maMaUrl.trim())}`);
-        const data = await res.json();
-        if (!res.ok) {
-          setMaUrlVerify({ status: "notfound", message: data.error || "URL is not reachable" });
-          return;
-        }
-        setMaUrlVerify({ status: "ok", message: "URL is reachable" });
-      } catch {
-        setMaUrlVerify({ status: "error", message: "Could not check URL" });
-      }
-    }, 900);
+    setMaUrlVerify({ status: "ok", message: "Telegram Mini App link format is valid" });
 
     return () => { if (maUrlVerifyTimer.current) clearTimeout(maUrlVerifyTimer.current); };
   }, [maMaUrl]);
 
-  const botVerifyOk  = botVerify.status === "ok" || botVerify.status === "error";
-  const urlVerifyOk  = urlVerify.status === "ok" || urlVerify.status === "error";
-  const maUrlVerifyOk = maUrlVerify.status === "ok" || maUrlVerify.status === "error";
+  const botVerifyOk  = botVerify.status === "ok";
+  const urlVerifyOk  = urlVerify.status === "ok";
+  const maUrlVerifyOk = maUrlVerify.status === "ok";
   const canSubmit = allFilled && !anyErr && !isLoading && botVerifyOk && urlVerifyOk && maUrlVerifyOk;
 
   const inputCls = (err: string, verified?: boolean) => cn(
@@ -488,8 +468,8 @@ function MaForm({ maName, setMaName, maUsername, setMaUsername, maBotId, setMaBo
             </p>
           </>
         )}
-        {!errs.botId && botVerify.status === "error" && (
-          <p className="text-[11px] font-bold text-amber-500 pl-1">{botVerify.message} — check ID manually</p>
+        {!errs.botId && (botVerify.status === "temporary" || botVerify.status === "rate_limited" || botVerify.status === "error") && (
+          <p className="text-[11px] font-bold text-amber-500 pl-1">{botVerify.message}{botVerify.status === "rate_limited" ? " — retry shortly" : ""}</p>
         )}
         <p className="text-[11px] text-slate-400 pl-1">Get this numeric ID from BotFather or Telegram&apos;s getMe response. Never enter a bot token.</p>
       </div>
@@ -706,9 +686,9 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
           ? await apiFetch("/api/telegram/chat-info", {
               method: "POST",
               body: JSON.stringify({ invite_link: rawInput }),
-              timeoutMs: 20000,
+              timeoutMs: 60000,
             })
-          : await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(rawInput)}`);
+          : await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(rawInput)}`, { timeoutMs: 60000 });
         const data = await res.json();
         if (cancelled) return;
         setBotPermissions(data.permissions || null);
@@ -793,9 +773,9 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
         ? await apiFetch("/api/telegram/chat-info", {
             method: "POST",
             body: JSON.stringify({ invite_link: normalizedChInviteLink }),
-            timeoutMs: 20000,
+            timeoutMs: 60000,
           })
-        : await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(normalizedChUsername!)}`);
+        : await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(normalizedChUsername!)}`, { timeoutMs: 60000 });
       const data = await res.json();
       if (!res.ok) {
         if (data.error === "PERMISSION_REQUIRED") {
@@ -884,9 +864,10 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
   }
 
   async function handleChSubmit() {
+    if (isLoading || !chInfo) return;
     const title = chTitle.trim();
     if (title.length < 3)  { setToast({ type: "error", title: t("publisher.channels.registrationFailed"), message: t("publisher.channels.nameMin") }); return; }
-    if (title.length > 50) { setToast({ type: "error", title: t("publisher.channels.registrationFailed"), message: t("publisher.channels.nameMax") }); return; }
+    if (title.length > 128) { setToast({ type: "error", title: t("publisher.channels.registrationFailed"), message: "Channel name must be at most 128 characters." }); return; }
     const verifiedChannelType = chInfo?.channel_type === "private" ? "private" : chIsPrivate ? "private" : "public";
     setIsLoading(true);
     setToast(null);
@@ -908,6 +889,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
       }
       const res = await apiFetch("/api/publisher/channels", {
         method: "POST",
+        timeoutMs: 60000,
         body: JSON.stringify({
           chat_id: chInfo.id,
           username: verifiedChannelType === "private" ? (chInfo.username || null) : chInfo.username,
@@ -2440,8 +2422,6 @@ export default function MonetizePage() {
                                       <span>Refreshed {new Date(ch.subscribers_last_success_at).toLocaleString()}</span>
                                     </>
                                   )}
-                      {subscriberFreshness(ch.subscribers_last_success_at)==="delayed" && <span className="text-amber-600">Refresh delayed</span>}
-                      {(ch.subscribers_fetch_status === "failed" || subscriberFreshness(ch.subscribers_last_success_at)==="stale") && <span className="text-amber-600">Count may be stale</span>}
                       <span className="text-slate-300">·</span>
                       <span>{ch.posts_per_day ?? 1}/day</span>
                       {cats.length > 0 && (

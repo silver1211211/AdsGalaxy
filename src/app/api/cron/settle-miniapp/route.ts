@@ -4,6 +4,7 @@ import pool from "@/lib/db";
 import { creditUserLockedBalance } from "@/lib/earnings";
 import { recordPayoutSafetyCheck } from "@/lib/revenueProtection";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
+import { withFinancialTransactionRetry } from "@/lib/dbResilience";
 
 export const dynamic = "force-dynamic";
 
@@ -15,41 +16,39 @@ async function settleInternalImpressions() {
   let settled = 0;
   let totalLocked = 0;
   for (const candidate of candidates) {
-    const conn = await pool.getConnection();
     try {
-      await conn.beginTransaction();
-      const [rows] = await conn.query<Array<RowDataPacket & { id: number; miniapp_id: number; publisher_id: number; publisher_revenue: string | number; stat_date: string; settlement_id: number | null; stats_applied: number }>>(`
+      const revenue = await withFinancialTransactionRetry(async (conn) => {
+        const [rows] = await conn.query<Array<RowDataPacket & { id: number; miniapp_id: number; publisher_id: number; publisher_revenue: string | number; stat_date: string; settlement_id: number | null; stats_applied: number }>>(`
         SELECT i.id,i.miniapp_id,m.user_id publisher_id,i.publisher_revenue,DATE_FORMAT(i.created_at,'%Y-%m-%d') stat_date,
           s.id settlement_id,COALESCE(s.stats_applied,0) stats_applied
         FROM miniapp_internal_ad_impressions i JOIN miniapps m ON m.id=i.miniapp_id
         LEFT JOIN miniapp_internal_publisher_settlements s ON s.impression_id=i.id
         WHERE i.id=? AND (s.id IS NULL OR s.status='pending') FOR UPDATE`, [candidate.id]);
-      const row = rows[0];
-      if (!row) { await conn.rollback(); continue; }
-      const revenue = Math.max(0, toNumber(row.publisher_revenue));
-      let settlementId = Number(row.settlement_id || 0);
-      if (!settlementId) {
-        const [insert] = await conn.query<ResultSetHeader>(`
+        const row = rows[0];
+        if (!row) return null;
+        const publisherRevenue = Math.max(0, toNumber(row.publisher_revenue));
+        let settlementId = Number(row.settlement_id || 0);
+        if (!settlementId) {
+          const [insert] = await conn.query<ResultSetHeader>(`
           INSERT INTO miniapp_internal_publisher_settlements
             (impression_id,miniapp_id,publisher_id,publisher_revenue,status,stats_applied)
-          VALUES (?,?,?,?,'pending',0)`, [row.id,row.miniapp_id,row.publisher_id,revenue]);
-        settlementId = Number(insert.insertId);
-      }
-      if (!(await creditUserLockedBalance(conn,row.publisher_id,revenue))) {
-        await conn.rollback(); continue;
-      }
-      if (!Number(row.stats_applied)) {
-        await conn.query(`UPDATE miniapp_daily_stats
+          VALUES (?,?,?,?,'pending',0)`, [row.id,row.miniapp_id,row.publisher_id,publisherRevenue]);
+          settlementId = Number(insert.insertId);
+        }
+        if (!(await creditUserLockedBalance(conn,row.publisher_id,publisherRevenue))) throw new Error("miniapp_publisher_credit_failed");
+        if (!Number(row.stats_applied)) {
+          await conn.query(`UPDATE miniapp_daily_stats
           SET publisher_revenue=publisher_revenue+?, net_cpm=((publisher_revenue)/GREATEST(impressions,1))*1000
           WHERE miniapp_id=? AND network_name='AdsGalaxyInternal' AND date=?`,
-          [revenue,row.miniapp_id,row.stat_date]);
-      }
-      await conn.query("UPDATE miniapp_internal_publisher_settlements SET status='locked',stats_applied=1,settled_at=NOW() WHERE id=? AND status='pending'", [settlementId]);
-      await conn.commit(); settled++; totalLocked += revenue;
+          [publisherRevenue,row.miniapp_id,row.stat_date]);
+        }
+        await conn.query("UPDATE miniapp_internal_publisher_settlements SET status='locked',stats_applied=1,settled_at=NOW() WHERE id=? AND status='pending'", [settlementId]);
+        return publisherRevenue;
+      }, { operation: "miniapp_internal_publisher_settlement" });
+      if (revenue !== null) { settled++; totalLocked += revenue; }
     } catch (error) {
-      await conn.rollback();
       console.error("Mini App internal publisher settlement failed", { impression_id: candidate.id, error });
-    } finally { conn.release(); }
+    }
   }
   return { scanned: candidates.length, settled, total_locked: Number(totalLocked.toFixed(8)) };
 }
@@ -142,7 +141,6 @@ export async function GET(_req: NextRequest) {
       LIMIT 500
     `);
 
-    const conn = await pool.getConnection();
     const results = {
       scanned: statsToSettle.length,
       settled: 0,
@@ -150,12 +148,10 @@ export async function GET(_req: NextRequest) {
       total_locked: 0,
     };
 
-    try {
-      for (const stat of statsToSettle) {
-        await conn.beginTransaction();
-
+    for (const stat of statsToSettle) {
         try {
-          const [lockedStats] = await conn.query<DailyStatRow[]>(`
+          const outcome = await withFinancialTransactionRetry(async (conn) => {
+            const [lockedStats] = await conn.query<DailyStatRow[]>(`
             SELECT
               ds.id,
               ds.miniapp_id,
@@ -181,11 +177,7 @@ export async function GET(_req: NextRequest) {
             FOR UPDATE
           `, [stat.id]);
 
-          if (lockedStats.length === 0) {
-            await conn.rollback();
-            results.skipped++;
-            continue;
-          }
+            if (lockedStats.length === 0) return { settled: false, amount: 0 };
 
           const lockedStat = lockedStats[0];
           const rawPublisherRevenue = toNumber(lockedStat.publisher_revenue);
@@ -220,9 +212,7 @@ export async function GET(_req: NextRequest) {
                  WHERE id = ?`,
                 [lockedStat.id]
               );
-              await conn.commit();
-              results.skipped++;
-              continue;
+              return { settled: false, amount: 0 };
             }
             advertiserPaid = toNumber(ledger.gross_revenue);
             publisherRevenue = toNumber(ledger.publisher_revenue);
@@ -239,9 +229,7 @@ export async function GET(_req: NextRequest) {
           }
 
           if (publisherRevenue <= 0) {
-            await conn.rollback();
-            results.skipped++;
-            continue;
+            return { settled: false, amount: 0 };
           }
 
           const safetyCheck = await recordPayoutSafetyCheck({
@@ -260,11 +248,9 @@ export async function GET(_req: NextRequest) {
               network_name: lockedStat.network_name,
               daily_stat_id: lockedStat.id,
             },
-          });
+          }, conn);
           if (safetyCheck.status !== "passed") {
-            await conn.rollback();
-            results.skipped++;
-            continue;
+            throw new Error("miniapp_payout_safety_check_failed");
           }
 
           const [insertResult] = await conn.query<ResultSetHeader>(`
@@ -282,30 +268,26 @@ export async function GET(_req: NextRequest) {
           ]);
 
           if (insertResult.affectedRows !== 1) {
-            await conn.rollback();
-            results.skipped++;
-            continue;
+            return { settled: false, amount: 0 };
           }
 
           const credited = await creditUserLockedBalance(conn, lockedStat.user_id, publisherRevenue);
           if (!credited) {
-            await conn.rollback();
-            results.skipped++;
-            continue;
+            throw new Error("miniapp_publisher_credit_failed");
           }
-
-          await conn.commit();
-          results.settled++;
-          results.total_locked += publisherRevenue;
+          return { settled: true, amount: publisherRevenue };
+          }, { operation: "miniapp_external_publisher_settlement" });
+          if (outcome.settled) {
+            results.settled++;
+            results.total_locked += outcome.amount;
+          } else {
+            results.skipped++;
+          }
         } catch (error) {
-          await conn.rollback();
           results.skipped++;
           console.error("Mini App settlement failed", { daily_stat_id: stat.id, error });
         }
       }
-    } finally {
-      conn.release();
-    }
 
     return NextResponse.json({ success: true, internalResults, results });
   } catch (error: unknown) {

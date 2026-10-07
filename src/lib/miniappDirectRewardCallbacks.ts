@@ -9,7 +9,8 @@ import {
 } from "@/lib/directCallbackTransport.mjs";
 
 export function directMiniappRewardCallbacksEnabled() {
-  return process.env.MINIAPP_DIRECT_REWARD_CALLBACKS_ENABLED === "true";
+  const value = String(process.env.MINIAPP_DIRECT_REWARD_CALLBACKS_ENABLED || "").trim().toLowerCase();
+  return value !== "false" && value !== "0" && value !== "off";
 }
 
 export function generateDirectCallbackSecret() {

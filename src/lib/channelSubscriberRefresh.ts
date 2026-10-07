@@ -21,6 +21,10 @@ export function classifyTelegramFailure(value: unknown) {
   return "transient_network";
 }
 
+function subscriberFailureClass(code: string) {
+  return ["permission_denied", "channel_inaccessible", "missing_bot_token", "session_auth_error"].includes(code) ? "permanent" : "temporary";
+}
+
 export async function fetchPublicMemberCount(chatId: string, fetcher: typeof fetch = fetch): Promise<CountResult> {
   const token = process.env.BOT_TOKEN;
   if (!token) return { ok: false, code: "missing_bot_token" };
@@ -84,10 +88,12 @@ export async function refreshSubscriberChannel(channel: any, minimum: number, no
   };
   const result = channel.channel_type === "private" ? await deps.privateCount(channel, health) : await deps.publicCount(channel.chat_id);
   if (!result.ok) {
-    const retry = result.retryAfterSeconds ? new Date(now.getTime() + Math.min(86400, result.retryAfterSeconds) * 1000) : null;
     const failureCode = result.code || "subscriber_refresh_failed";
+    const failureClass = subscriberFailureClass(failureCode);
+    const retrySeconds = result.retryAfterSeconds ? Math.min(86400, result.retryAfterSeconds) : failureClass === "permanent" ? 86400 : Math.min(21600, 300 * Math.max(1, Number(channel.subscribers_consecutive_failures || 0) + 1));
+    const retry = new Date(now.getTime() + retrySeconds * 1000);
     await deps.query("UPDATE channels SET subscribers_last_attempt_at=?,subscribers_fetch_status='failed',subscribers_fetch_error_code=?,subscribers_consecutive_failures=subscribers_consecutive_failures+1,subscribers_next_retry_at=? WHERE id=?", [now, failureCode, retry, channel.id]);
-    return { status: "failed", code: failureCode, nextRetryAt: retry };
+    return { status: "failed", code: failureCode, failureClass, nextRetryAt: retry };
   }
 
   const previousBelowSince = channel.below_minimum_since ? new Date(channel.below_minimum_since) : null;

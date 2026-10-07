@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthErrorStatus } from "@/lib/auth";
+import { authenticatePublisherAsset, PublisherAssetError, publisherAssetErrorResponse } from "@/lib/publisherAssetOnboarding";
 import type { RowDataPacket } from "mysql2/promise";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import { getBotAudienceStats } from "@/lib/botAudience";
@@ -31,8 +32,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await authenticatePublisherAsset(request);
     const { id: botId } = await params;
 
     // Verify ownership
@@ -52,6 +52,7 @@ export async function GET(
       pending_verification: counts.pending_verification
     });
   } catch (error: unknown) {
+    if (error instanceof PublisherAssetError) return publisherAssetErrorResponse(error);
     return NextResponse.json({ error: errorMessage(error) }, { status: getAuthErrorStatus(error) });
   }
 }
@@ -63,8 +64,7 @@ export async function POST(
   try {
     const blocked = await requireUserWritesAllowed();
     if (blocked) return blocked;
-    const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await authenticatePublisherAsset(request);
     const { id: botId } = await params;
 
     const { chat_ids } = await request.json(); // Array of chat_ids
@@ -147,6 +147,7 @@ export async function POST(
       message: "User verification in progress..."
     });
   } catch (error: unknown) {
+    if (error instanceof PublisherAssetError) return publisherAssetErrorResponse(error);
     console.error("Bulk Add Bot Users Error:", error);
     return NextResponse.json({ error: errorMessage(error) }, { status: getAuthErrorStatus(error) });
   }

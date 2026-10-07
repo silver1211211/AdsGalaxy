@@ -12,7 +12,9 @@ import {
 import { decryptPrivateInviteLink } from "@/lib/privateInviteLinkVault";
 import { classifyChannelGeoConfidence } from "@/lib/channelGeoQuality";
 import { parseAdminPagination } from "@/lib/adminPagination";
-import { verifyAndStoreChannelIdentity } from "@/lib/channelTelegramIdentity";
+import { ChannelVerificationError, verifyAndStoreChannelIdentity } from "@/lib/channelTelegramIdentity";
+import { rejectEntityWithPolicy } from "@/lib/moderationRejections";
+import { notifyChannelRejected } from "@/lib/publisherNotifications";
 
 async function tableExists(table: string) {
   const [rows]: any = await pool.query("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? LIMIT 1", [table]);
@@ -54,10 +56,12 @@ export async function GET(request: Request) {
     const identityFields = hasTelegramIdentities
       ? `, ti.telegram_chat_id AS telegram_identity_chat_id,ti.current_username AS telegram_current_username,
           ti.previous_username AS telegram_previous_username,ti.bot_member_status,ti.bot_can_post,
+          ti.verification_state AS telegram_verification_state,ti.last_checked_at AS telegram_access_checked_at,
           ti.last_verified_at AS telegram_last_verified_at,ti.last_username_changed_at,
           ti.last_failure_code AS telegram_failure_code,ti.last_failure_reason AS telegram_failure_reason`
       : `, NULL AS telegram_identity_chat_id,NULL AS telegram_current_username,NULL AS telegram_previous_username,
-          NULL AS bot_member_status,NULL AS bot_can_post,NULL AS telegram_last_verified_at,
+          NULL AS bot_member_status,NULL AS bot_can_post,NULL AS telegram_verification_state,
+          NULL AS telegram_access_checked_at,NULL AS telegram_last_verified_at,
           NULL AS last_username_changed_at,NULL AS telegram_failure_code,NULL AS telegram_failure_reason`;
     const identityJoin = hasTelegramIdentities ? " LEFT JOIN channel_telegram_identities ti ON ti.channel_id=c.id" : "";
     const recoveryFields = `,
@@ -143,7 +147,7 @@ export async function GET(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  const { response } = await requireAdminPermission("operate");
+  const { admin, response } = await requireAdminPermission("operate");
   if (response) return response;
 
   try {
@@ -179,12 +183,36 @@ export async function PATCH(request: Request) {
     const status = statusMap[normalizedAction];
 
     if (normalizedAction === "activate") {
-      const identity = await verifyAndStoreChannelIdentity({
-        channelId: id,
-        chatId: channel.chat_id,
-        username: channel.username,
-        source: "admin_activate",
-      });
+      let identity;
+      try {
+        identity = await verifyAndStoreChannelIdentity({
+          channelId: id,
+          chatId: channel.chat_id,
+          username: channel.username,
+          source: "admin_activate",
+        });
+      } catch (error) {
+        if (!(error instanceof ChannelVerificationError)) throw error;
+        if (["temporarily_rate_limited", "temporary_telegram_error"].includes(error.code)) {
+          const retryAt = error.retryAfterSeconds
+            ? new Date(Date.now() + error.retryAfterSeconds * 1000).toISOString()
+            : null;
+          return NextResponse.json({ error: error.message, code: "TEMPORARILY_UNVERIFIED", classification: error.code, retry_at: retryAt }, { status: 409 });
+        }
+        if (error.code === "inaccessible_channel" || error.code === "missing_permission") {
+          const missing = error.code === "missing_permission";
+          await rejectEntityWithPolicy({
+            entityType: "channel", entityId: id,
+            ruleKey: missing ? "publisher.channel.missing-permissions" : "publisher.channel.inaccessible-channel",
+            publicRuleNumber: missing ? 5 : 4,
+            internalNote: error.message,
+            adminId: Number(admin?.id || 0),
+          });
+          await notifyChannelRejected(channel.telegram_id, id, channel.title).catch(() => undefined);
+          return NextResponse.json({ success: true, status: "rejected", classification: error.code, policy_rule: missing ? 5 : 4 });
+        }
+        return NextResponse.json({ error: error.message, code: "IDENTITY_UNRESOLVED", classification: error.code }, { status: 409 });
+      }
       channel.chat_id = identity.chatId;
       channel.username = identity.username;
       const privacySchema = await getChannelPrivacySchema();
@@ -195,6 +223,14 @@ export async function PATCH(request: Request) {
         schema: privacySchema,
       });
       if (channel.channel_type === "private" && tracking.status !== "active") {
+        if (tracking.status === "pending_manual" && tracking.reason === "bot_invite_permission_missing") {
+          await rejectEntityWithPolicy({ entityType: "channel", entityId: id,
+            ruleKey: "publisher.channel.missing-permissions", publicRuleNumber: 5,
+            internalNote: "Ads Galaxy bot needs invite/add-member permission for private tracking onboarding.",
+            adminId: Number(admin?.id || 0) });
+          await notifyChannelRejected(channel.telegram_id, id, channel.title).catch(() => undefined);
+          return NextResponse.json({ success: true, status: "rejected", classification: "missing_invite_permission", policy_rule: 5 });
+        }
         return NextResponse.json({
           error: "Private channel activation requires a verified MTProto tracking-account membership.",
           tracking,

@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { assertBotIntegrationSecretReadable, isBotEncryptionError, verifyBotIntegrationSecret } from "@/lib/botIntegration";
+import { refreshBotDeliveryReadiness } from "@/lib/botDeliveryReadyPool";
 
 type BotRow = RowDataPacket & { id: number; status: string; integration_secret_hash: string | null; integration_secret_encrypted: string | null };
 type ExistingUserRow = RowDataPacket & { id: number; integration_first_seen_at: string | null };
@@ -178,6 +179,7 @@ async function handleIntegration(request: Request, params: Promise<{ botId: stri
          integration_last_error_at = NULL, integration_last_error = NULL WHERE id = ?`,
       [effectiveUserId, bot.id]
     );
+    await refreshBotDeliveryReadiness(bot.id, connection);
     await connection.query(
       `INSERT INTO bot_integration_events (bot_id, event_type, telegram_user_id, username, message, source_hash, request_id_hash)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,

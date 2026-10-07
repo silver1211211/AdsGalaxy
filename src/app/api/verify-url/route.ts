@@ -1,84 +1,58 @@
 import { NextResponse } from "next/server";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { lookup } from "node:dns/promises";
+import { authenticatePublisherAsset, PublisherAssetError, publisherAssetErrorResponse } from "@/lib/publisherAssetOnboarding";
 
-const BLOCKED_HOSTNAMES = /^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+|::1|0:0:0:0:0:0:0:1)$/i;
-const VALID_HOSTNAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
+const BLOCKED = /^(localhost|0\.0\.0\.0|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|::1$|fc|fd|fe[89ab])/i;
+const HOST = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
+const MAX_REDIRECTS = 3;
 
-function validPublicHttpsUrl(parsed: URL) {
+function safeUrl(value: string) {
+  let parsed: URL;
+  try { parsed = new URL(value); } catch { throw new PublisherAssetError("INVALID_URL", "Enter a valid public HTTPS URL."); }
   const hostname = parsed.hostname.toLowerCase();
-  return parsed.protocol === "https:"
-    && !parsed.username
-    && !parsed.password
-    && (!parsed.port || parsed.port === "443")
-    && !hostname.endsWith(".")
-    && VALID_HOSTNAME.test(hostname)
-    && !BLOCKED_HOSTNAMES.test(hostname);
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || (parsed.port && parsed.port !== "443") || !HOST.test(hostname) || BLOCKED.test(hostname)) throw new PublisherAssetError("INVALID_URL", "Enter a valid public HTTPS URL.");
+  return parsed;
 }
 
-async function resolvesToPublicAddress(hostname: string) {
-  const addresses = await Promise.race([
-    lookup(hostname, { all: true, verbatim: true }),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("DNS_TIMEOUT")), 2_000)),
-  ]);
-  if (addresses.length === 0) return false;
-  return addresses.every(({ address }) => !BLOCKED_HOSTNAMES.test(address)
-    && !/^fc|^fd|^fe8|^fe9|^fea|^feb/i.test(address.replaceAll(":", "")));
+async function assertPublicDns(hostname: string) {
+  let addresses: Array<{ address: string }>;
+  try { addresses = await Promise.race([lookup(hostname, { all: true, verbatim: true }), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("dns_timeout")), 2_000))]); }
+  catch { throw new PublisherAssetError("URL_TEMPORARILY_UNAVAILABLE", "URL host lookup is temporarily unavailable. Retry shortly.", 503); }
+  if (!addresses.length || addresses.some(({ address }) => BLOCKED.test(address) || /^f[cd]|^fe[89ab]/i.test(address.replaceAll(":", "")))) throw new PublisherAssetError("URL_NOT_PUBLIC", "URL host is not publicly reachable.", 422);
+}
+
+async function checkReachability(initial: URL) {
+  let current = initial;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    await assertPublicDns(current.hostname);
+    let response: Response;
+    try { response = await fetch(current, { method: "HEAD", redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(6_000) }); }
+    catch { throw new PublisherAssetError("URL_TEMPORARILY_UNAVAILABLE", "URL is temporarily unreachable. Retry shortly.", 503); }
+    if (response.status === 405) {
+      try { response = await fetch(current, { method: "GET", redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(6_000), headers: { Range: "bytes=0-0" } }); }
+      catch { throw new PublisherAssetError("URL_TEMPORARILY_UNAVAILABLE", "URL is temporarily unreachable. Retry shortly.", 503); }
+    }
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location || hop === MAX_REDIRECTS) throw new PublisherAssetError("URL_REDIRECT_INVALID", "URL redirects too many times.", 422);
+      current = safeUrl(new URL(location, current).toString());
+      continue;
+    }
+    if (response.ok) return { status: response.status };
+    throw new PublisherAssetError("URL_UNREACHABLE", "URL is not reachable.", 422);
+  }
+  throw new PublisherAssetError("URL_REDIRECT_INVALID", "URL redirects too many times.", 422);
 }
 
 export async function GET(request: Request) {
   try {
-    const initData = request.headers.get("x-telegram-init-data");
-    await getAuthenticatedUser(initData);
-
-    const { searchParams } = new URL(request.url);
-    const url = searchParams.get("url")?.trim();
-
-    if (!url) {
-      return NextResponse.json({ error: "url is required" }, { status: 400 });
-    }
-
-    let parsed: URL;
-    try {
-      parsed = new URL(url);
-    } catch {
-      return NextResponse.json({ error: "Invalid URL" }, { status: 400 });
-    }
-
-    if (!validPublicHttpsUrl(parsed)) {
-      return NextResponse.json({ error: "Enter a valid public HTTPS URL" }, { status: 400 });
-    }
-
-    if (!(await resolvesToPublicAddress(parsed.hostname))) {
-      return NextResponse.json({ error: "URL host is not publicly reachable" }, { status: 422 });
-    }
-
-    const res = await fetch(parsed.toString(), {
-      method: "HEAD",
-      signal: AbortSignal.timeout(5_000),
-      redirect: "manual",
-    });
-
-    if (res.ok) {
-      return NextResponse.json({ ok: true, status: res.status });
-    }
-
-    return NextResponse.json(
-      { error: `URL returned ${res.status} ${res.statusText}` },
-      { status: 422 }
-    );
-  } catch (error: any) {
-    const authStatus = getAuthErrorStatus(error);
-    if (authStatus === 403) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: authStatus });
-    }
-    console.warn("Verify URL validation failed", {
-      code: "URL_VERIFICATION_FAILED",
-      reason: String(error?.name || "FETCH_FAILED"),
-    });
-    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
-      return NextResponse.json({ error: "URL timed out — check if it is reachable" }, { status: 422 });
-    }
-    return NextResponse.json({ error: "Could not reach URL" }, { status: 422 });
+    await authenticatePublisherAsset(request);
+    const value = new URL(request.url).searchParams.get("url")?.trim();
+    if (!value) throw new PublisherAssetError("URL_REQUIRED", "URL is required.");
+    const result = await checkReachability(safeUrl(value));
+    return NextResponse.json({ ok: true, status: result.status });
+  } catch (error: unknown) {
+    if (error instanceof PublisherAssetError) return publisherAssetErrorResponse(error);
+    return NextResponse.json({ error: "URL verification is temporarily unavailable.", code: "URL_TEMPORARILY_UNAVAILABLE", retryable: true }, { status: 503 });
   }
 }

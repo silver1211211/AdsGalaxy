@@ -9,6 +9,9 @@ import { shadowWriteChannelAllocation } from "@/lib/channelAllocationLedger";
 import { resolvePrivateInviteLink } from "@/lib/telegramMtproto";
 import { claimAdvertiserDirectDebit } from "@/lib/advertiserDirectDebit";
 import { deleteActiveCampaignPosts, deleteExhaustedChannelCampaignPosts } from "@/lib/campaignPostDeletion";
+import { enqueueCampaignNotification } from "@/lib/platformNotifications";
+import { getChannelDailySpend } from "@/lib/channelDailySpend";
+import { markChannelDailyCapReached } from "@/lib/channelDailyCap";
 
 export const GROWTH_DEFAULTS = { min: 0.25, recommended: 0.56, max: 5, publisher: 60, platform: 30, reserve: 10, seedCap: 10 } as const;
 export const GROWTH_MIN_TOTAL_BUDGET = 100;
@@ -57,18 +60,36 @@ export function growthInviteHash(value: string) { return crypto.createHash("sha2
 export function isMembershipJoin(oldStatus: string | null, newStatus: string | null) {
   return !["member","administrator","creator"].includes(String(oldStatus)) && ["member","administrator","creator"].includes(String(newStatus));
 }
-async function telegram(method: string, body: Record<string, unknown>) {
-  const token=process.env.BOT_TOKEN; if(!token) throw new Error("Growth tracking bot is not configured");
-  const response=await fetch(`https://api.telegram.org/bot${token}/${method}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body),signal:AbortSignal.timeout(10_000)});
-  const payload=await response.json(); if(!response.ok||!payload.ok) throw new Error("Telegram destination verification failed"); return payload.result;
+export type GrowthDestinationVerificationCode = "BOT_NOT_ADMIN" | "BOT_INVITE_PERMISSION_REQUIRED" | "PRIVATE_INVITE_APPROVAL_REQUIRED" | "TELEGRAM_UNAVAILABLE" | "INVALID_DESTINATION_CHANNEL";
+export class GrowthDestinationVerificationError extends Error {
+  constructor(public code: GrowthDestinationVerificationCode, message: string) {
+    super(message);
+    this.name="GrowthDestinationVerificationError";
+  }
+}
+async function telegram(method: string, body: Record<string, unknown>, failureCode: GrowthDestinationVerificationCode) {
+  const token=process.env.BOT_TOKEN;
+  if(!token)throw new GrowthDestinationVerificationError("TELEGRAM_UNAVAILABLE","Telegram verification is unavailable");
+  try {
+    const response=await fetch(`https://api.telegram.org/bot${token}/${method}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body),signal:AbortSignal.timeout(10_000)});
+    const payload=await response.json().catch(()=>({}));
+    if(!response.ok||!payload.ok){
+      if(response.status===429||response.status>=500)throw new GrowthDestinationVerificationError("TELEGRAM_UNAVAILABLE","Telegram verification is unavailable");
+      throw new GrowthDestinationVerificationError(failureCode,failureCode==="BOT_NOT_ADMIN"?"Bot is not an admin":"Channel could not be verified");
+    }
+    return payload.result;
+  } catch(error) {
+    if(error instanceof GrowthDestinationVerificationError)throw error;
+    throw new GrowthDestinationVerificationError("TELEGRAM_UNAVAILABLE","Telegram verification is unavailable");
+  }
 }
 export async function verifyGrowthDestination(value: string) {
   const normalized=String(value||"").trim(); let chatRef:string|number;
-  if(/^https:\/\/t\.me\/(?:\+|joinchat\/)/i.test(normalized)){const resolved=await resolvePrivateInviteLink(normalized);if(!resolved.ok)throw new Error("Private destination could not be resolved");chatRef=resolved.chatId;}
+  if(/^https:\/\/t\.me\/(?:\+|joinchat\/)/i.test(normalized)){const resolved=await resolvePrivateInviteLink(normalized);if(!resolved.ok){if(resolved.code==="join_request_required")throw new GrowthDestinationVerificationError("PRIVATE_INVITE_APPROVAL_REQUIRED","Private invite requires administrator approval");throw new GrowthDestinationVerificationError("INVALID_DESTINATION_CHANNEL","Private destination could not be resolved");}chatRef=resolved.chatId;}
   else {const username=normalized.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)\/?$/i)?.[1];if(!username)throw new Error("Destination must be a Telegram channel link");chatRef=`@${username}`;}
-  const me=await telegram("getMe",{}); const chat=await telegram("getChat",{chat_id:chatRef});
+  const me=await telegram("getMe",{},"TELEGRAM_UNAVAILABLE"); const chat=await telegram("getChat",{chat_id:chatRef},"INVALID_DESTINATION_CHANNEL");
   if(chat.type!=="channel")throw new Error("Destination must be a Telegram channel");
-  const member=await telegram("getChatMember",{chat_id:chat.id,user_id:me.id});
+  const member=await telegram("getChatMember",{chat_id:chat.id,user_id:me.id},"BOT_NOT_ADMIN");
   const admin=member.status==="creator"||member.status==="administrator"; const canInvite=member.status==="creator"||member.can_invite_users===true;
   if(!admin||!canInvite)throw new Error("Add @Ads_Galaxy_bot as administrator with invite permission");
   return { chatId:Number(chat.id), title:String(chat.title||""), username:chat.username?String(chat.username):null };
@@ -86,6 +107,15 @@ export async function processGrowthMembershipEvent(eventId: number) {
     const campaign=campaigns[0]; const cps=Number(campaign?.cost_per_subscriber||0);
     if (!campaign || Number(campaign.destination_chat_id) !== Number(event.destination_chat_id) || Number(event.source_publisher_id) === Number(campaign.user_id) || !event.campaign_valid_at_event || cps <= 0 || Number(campaign.budget) + 1e-10 < cps) { const reason=!campaign?"invalid_campaign":Number(event.source_publisher_id)===Number(campaign.user_id)?"self_delivery":!event.campaign_valid_at_event?"campaign_inactive_at_event":"insufficient_budget";await conn.query("UPDATE channel_growth_membership_events SET processing_status='nonbillable',nonbillable_reason=?,processed_at=NOW() WHERE id=?",[reason,eventId]); await conn.commit(); return {status:"nonbillable"}; }
     const sourceKey=`channel_growth:${campaign.id}:${event.destination_chat_id}:${event.telegram_user_id}`;
+    // The campaign lock serializes conversion billing and cap changes.
+    const dailySpend = await getChannelDailySpend(conn, Number(campaign.id));
+    const dailyLimit = Number(campaign.daily_budget_limit || 0);
+    if (campaign.status === "daily_cap_reached" || (dailyLimit > 0 && dailySpend + cps > dailyLimit + 1e-10)) {
+      await markChannelDailyCapReached(conn, Number(campaign.id));
+      await conn.query("UPDATE channel_growth_membership_events SET processing_status='nonbillable',nonbillable_reason='daily_budget_limit',processed_at=UTC_TIMESTAMP() WHERE id=?", [eventId]);
+      await conn.commit();
+      return { status: "daily_cap_reached" };
+    }
     const [claim]=await conn.query<ResultSetHeader>(`INSERT IGNORE INTO channel_growth_conversions (campaign_id,destination_chat_id,telegram_user_id,invite_id,campaign_post_id,source_channel_id,source_publisher_id,membership_event_id,joined_at,cost_per_subscriber,debit_source_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,[campaign.id,event.destination_chat_id,event.telegram_user_id,event.invite_id,event.campaign_post_id,event.source_channel_id,event.source_publisher_id,event.id,event.event_at,cps,sourceKey]);
     if (claim.affectedRows!==1) { await conn.query("UPDATE channel_growth_membership_events SET processing_status='duplicate',nonbillable_reason='duplicate_subscriber',processed_at=NOW() WHERE id=?",[eventId]); await conn.commit(); return {status:"duplicate"}; }
     if (campaign.funding_model === "direct_debit") {
@@ -106,10 +136,13 @@ export async function processGrowthMembershipEvent(eventId: number) {
     const publisherMax=money(cps*settings.publisher/100); const publisher=money(publisherMax*quality.qualityWeight); const qualityAdjustment=money(publisherMax-publisher); const platform=money(cps*settings.platform/100); const reserve=money(cps*settings.reserve/100);
     const outstandingSeed=Math.max(0,Number(campaign.growth_seed_allocated||0)-Number(campaign.growth_seed_recovered||0)); const seedRecovery=Math.min(platform,outstandingSeed);
     if (!(await creditUserLockedBalance(conn,event.source_publisher_id,publisher))) throw new Error("GROWTH_PUBLISHER_CREDIT_FAILED");
-    await conn.query("UPDATE channel_growth_conversions SET status='billed',advertiser_debit=?,publisher_allocation=?,platform_allocation=?,reserve_allocation=?,quality_adjustment=?,seed_recovery=?,billed_at=NOW() WHERE id=?",[cps,publisher,platform,reserve,qualityAdjustment,seedRecovery,claim.insertId]);
+    await conn.query("UPDATE channel_growth_conversions SET status='billed',advertiser_debit=?,publisher_allocation=?,platform_allocation=?,reserve_allocation=?,quality_adjustment=?,seed_recovery=?,billed_at=UTC_TIMESTAMP() WHERE id=?",[cps,publisher,platform,reserve,qualityAdjustment,seedRecovery,claim.insertId]);
     await conn.query("UPDATE campaigns SET channel_publisher_earnings=channel_publisher_earnings+?,channel_platform_revenue=channel_platform_revenue+?,channel_reserve_amount=channel_reserve_amount+?,growth_seed_recovered=growth_seed_recovered+? WHERE id=?",[publisher,platform,reserve,seedRecovery,campaign.id]);
     const becameExhausted=Number(campaign.budget)-cps+1e-10<cps;
-    if(becameExhausted){await conn.query("UPDATE campaigns SET status='budget_exhausted',budget_exhausted_at=NOW() WHERE id=?",[campaign.id]);await conn.query("UPDATE channel_growth_invites SET status='revoke_pending' WHERE campaign_id=? AND status='active'",[campaign.id]);await conn.query("UPDATE campaign_posts SET status='cleanup_pending' WHERE campaign_id=? AND status IN ('active','posted','sent')",[campaign.id]);}
+    if (!becameExhausted && dailyLimit > 0 && dailySpend + cps + cps > dailyLimit + 1e-10) {
+      await markChannelDailyCapReached(conn, Number(campaign.id));
+    }
+    if(becameExhausted){await conn.query("UPDATE campaigns SET status='budget_exhausted',budget_exhausted_at=NOW() WHERE id=?",[campaign.id]);await conn.query("UPDATE channel_growth_invites SET status='revoke_pending' WHERE campaign_id=? AND status='active'",[campaign.id]);await conn.query("UPDATE campaign_posts SET status='cleanup_pending' WHERE campaign_id=? AND status IN ('active','posted','sent')",[campaign.id]);await enqueueCampaignNotification(conn,{campaignId:Number(campaign.id),userId:Number(campaign.user_id),event:"completed",name:String(campaign.name||`Campaign #${campaign.id}`)});}
     await shadowWriteChannelAllocation(conn,{sourceKey,sourceType:"adjustment",sourceRecordId:Number(claim.insertId),campaignId:Number(campaign.id),postId:Number(event.campaign_post_id),channelId:Number(event.source_channel_id),advertiserId:Number(campaign.user_id),publisherId:Number(event.source_publisher_id),billableUnits:1,unitPrice:cps,advertiserDebit:cps,publisherAllocation:publisher,platformAllocation:platform,reserveAllocation:reserve,qualityAdjustment,policyVersion:"channel-growth-v1-60-30-10-quality",occurredAt:new Date(event.event_at),settledAt:new Date(),fraudStatus:"clear"});
     await conn.query("UPDATE channel_growth_membership_events SET processing_status='billed',processed_at=NOW() WHERE id=?",[eventId]);
     await conn.commit();

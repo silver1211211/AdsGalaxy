@@ -2,7 +2,8 @@ import crypto from "crypto";
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthErrorStatus } from "@/lib/auth";
+import { authenticatePublisherAsset, PublisherAssetError, publisherAssetErrorResponse } from "@/lib/publisherAssetOnboarding";
 import {
   diagnoseBotIntegrationSecret,
   isBotEncryptionError,
@@ -57,8 +58,7 @@ async function telegramJson(token: string, method: string) {
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const checks: Check[] = [];
   try {
-    const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await authenticatePublisherAsset(request);
     const { id } = await params;
     checks.push(check("publisher_authorization", "Publisher authorization valid", "success", "Publisher owns this bot and is authorized to run diagnostics."));
 
@@ -192,6 +192,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       checks,
     });
   } catch (error: unknown) {
+    if (error instanceof PublisherAssetError) return publisherAssetErrorResponse(error);
     if (isBotEncryptionError(error)) {
       checks.push(check("credential_failure", "Credential verification", "failure", "Bot credential verification failed.", error.code));
       return NextResponse.json({ success: false, status: "failure", checks, error: publisherBotEncryptionErrorMessage() }, { status: 503 });

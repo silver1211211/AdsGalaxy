@@ -26,6 +26,8 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [bootState, setBootState] = useState<BootState>("ready");
   const isPublisherDashboard = type === "publisher" && pathname === "/publisher";
+  const isAdvertiserCampaignsPage =
+    type === "advertiser" && pathname === "/advertiser/campaigns";
   const [referralPopupBlockingPromo, setReferralPopupBlockingPromo] = useState(isPublisherDashboard);
 
   const handleReferralBlockingChange = React.useCallback((isBlocking: boolean) => {
@@ -86,7 +88,7 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
   }
 
   return (
-    <div className="ag-miniapp-shell relative min-h-screen overflow-x-hidden bg-[radial-gradient(circle_at_top_left,rgba(12,157,232,0.12),transparent_32%),linear-gradient(180deg,#f8fbff_0%,#f1f7fc_42%,#ffffff_100%)]">
+    <div className={`ag-miniapp-shell relative overflow-x-hidden bg-[radial-gradient(circle_at_top_left,rgba(12,157,232,0.12),transparent_32%),linear-gradient(180deg,#f8fbff_0%,#f1f7fc_42%,#ffffff_100%)] ${isAdvertiserCampaignsPage ? "" : "min-h-screen"}`}>
       <div className="pointer-events-none fixed inset-x-0 top-0 z-0 h-64 bg-gradient-to-b from-[#0c9de8]/10 to-transparent" />
       <SelfPromotionAd enabled={isPublisherDashboard && !referralPopupBlockingPromo} delayMs={2500} />
       <Header toggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)} />
@@ -99,8 +101,8 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
       {type === "publisher" && (
         <ReferralSprintPopup onBlockingChange={handleReferralBlockingChange} />
       )}
-      <main className="relative z-10 min-h-screen pt-16 transition-all duration-300 lg:pl-64">
-        <div className="mx-auto max-w-7xl p-4 pb-8 lg:p-8">
+      <main className={`relative z-10 pt-16 transition-all duration-300 lg:pl-64 ${isAdvertiserCampaignsPage ? "" : "min-h-screen"}`}>
+        <div className={`mx-auto max-w-7xl p-4 lg:p-8 ${isAdvertiserCampaignsPage ? "pb-0 lg:pb-0" : "pb-8"}`}>
           {children}
         </div>
       </main>

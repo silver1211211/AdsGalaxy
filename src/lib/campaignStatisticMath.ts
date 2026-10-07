@@ -34,3 +34,30 @@ export function campaignCostMetric(
     ? campaignEffectiveCpm(spend, billableViews)
     : campaignAverageCpc(spend, billableClicks);
 }
+
+export function channelAdvertiserMetrics(input: {
+  kind: CampaignStatisticKind;
+  rawViews: unknown;
+  actualClicks: unknown;
+  billableViews: unknown;
+  billableClicks: unknown;
+  spend: unknown;
+}) {
+  const rawViews = metric(input.rawViews);
+  const actualClicks = metric(input.actualClicks);
+  const billableViews = metric(input.billableViews);
+  const billableClicks = metric(input.billableClicks);
+  const spend = metric(input.spend);
+
+  return {
+    rawViews,
+    billableViews,
+    billableClicks,
+    visibleViews: input.kind === "views" ? billableViews : rawViews,
+    visibleClicks: actualClicks,
+    ctr: campaignCtr(actualClicks, input.kind === "views" ? billableViews : rawViews),
+    effectiveCpm: input.kind === "views" ? campaignEffectiveCpm(spend, billableViews) : 0,
+    averageCpc: input.kind === "clicks" ? campaignAverageCpc(spend, billableClicks) : 0,
+    costMetric: campaignCostMetric(input.kind, spend, billableViews, billableClicks),
+  };
+}

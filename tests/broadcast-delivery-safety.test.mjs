@@ -14,8 +14,10 @@ test("broadcast worker remains secured and scheduled", () => {
 });
 
 test("broadcast throttle defaults are bounded", () => {
-  assert.match(worker, /CRON_BROADCAST_BATCH_SIZE \|\| "20"/);
-  assert.match(worker, /Math\.min\(100, Math\.max\(1/);
+  assert.match(worker, /CRON_BROADCAST_BATCH_SIZE \|\| "60"/);
+  assert.match(worker, /Math\.min\(60, Math\.max\(1/);
+  assert.match(worker, /const maxWorkerCount = 1/);
+  assert.match(worker, /nextGlobalSendAt.*\+ 1000/s);
   assert.match(worker, /Number\(bot\.posts_per_day\) \|\| 1/);
 });
 
@@ -24,6 +26,7 @@ test("healthy integrated bots and verified reachable non-owner users are selecte
   assert.match(worker, /integration_secret_encrypted IS NOT NULL/);
   assert.match(worker, /integration_secret_hash IS NOT NULL/);
   assert.match(worker, /botUserBroadcastEligibleCondition/);
+  assert.match(worker, /JOIN bot_delivery_ready_pool ready/);
 });
 
 test("Telegram transport and rate-limit retry are bounded", () => {

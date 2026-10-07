@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+/* eslint-disable @typescript-eslint/no-explicit-any -- legacy availability row shapes */
 import pool from "@/lib/db";
 import { checkAdminAuth } from "@/lib/adminAuth";
 import { channelCampaignMatchesInventory, serializeExplicitCampaignAudience } from "@/lib/channelAudience";
+import { mainCampaignScopeSql } from "@/lib/silverCampaignControl";
 
 export async function GET(request: Request) {
   if (!(await checkAdminAuth())) {
@@ -75,8 +77,8 @@ export async function GET(request: Request) {
       }
       const [channels]: any = await pool.query(`
         SELECT c.*, 
-        (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id = c.id AND cp.created_at > (NOW() + INTERVAL ? MINUTE) - INTERVAL 1 DAY) as daily_posts,
-        (SELECT MAX(created_at) FROM campaign_posts cp WHERE cp.channel_id = c.id) as last_post_at
+        (SELECT COUNT(*) FROM campaign_posts cp JOIN campaigns mc ON mc.id=cp.campaign_id WHERE cp.channel_id = c.id AND ${mainCampaignScopeSql("mc")} AND cp.created_at > (NOW() + INTERVAL ? MINUTE) - INTERVAL 1 DAY) as daily_posts,
+        (SELECT MAX(cp.created_at) FROM campaign_posts cp JOIN campaigns mc ON mc.id=cp.campaign_id WHERE cp.channel_id = c.id AND ${mainCampaignScopeSql("mc")}) as last_post_at
         FROM channels c
         WHERE c.status = 'active' AND c.is_deleted = FALSE
       `, [predictionMinutes]);

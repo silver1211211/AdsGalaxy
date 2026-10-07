@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
+/* eslint-disable @typescript-eslint/no-explicit-any -- settings and transactional rows are dynamically shaped */
 import pool from "@/lib/db";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { processVerifiedReferralForUser } from "@/lib/referralSprint";
 import { blockReferralForUserIfSelfDevice, getReferralSecuritySignals } from "@/lib/referralSecurity";
+import { withFinancialTransactionRetry } from "@/lib/dbResilience";
 
 export async function POST(request: Request) {
   try {
@@ -10,10 +12,6 @@ export async function POST(request: Request) {
     const user = await getAuthenticatedUser(initData, { request });
     if (!user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    if (user.join_rewarded) {
-      return NextResponse.json({ error: "Already rewarded" }, { status: 400 });
     }
 
     const [[referralChannelSetting]]: any = await pool.query(
@@ -55,14 +53,39 @@ export async function POST(request: Request) {
       );
     }
 
-    // Success! Update user
-    await pool.query(
-      "UPDATE users SET join_rewarded = TRUE, balance_available = balance_available + ? WHERE id = ?",
-      [rewardAmount, user.id]
-    );
-    const referralReward = await processVerifiedReferralForUser(Number(user.id));
+    const rewardResult = await withFinancialTransactionRetry(async (connection) => {
+      const [[lockedUser]]: any = await connection.query(
+        "SELECT join_rewarded FROM users WHERE id = ? FOR UPDATE", [user.id]
+      );
+      if (!lockedUser) throw new Error("join_reward_user_missing");
+      if (Boolean(lockedUser.join_rewarded)) return { credited: false, idempotent: true };
+      const idempotencyKey = `join_channel_reward:${user.id}`;
+      const [ledger]: any = await connection.query(
+        `INSERT IGNORE INTO referral_reward_ledger
+          (user_id, source_type, source_id, reward_type, amount, status,
+           eligible_at, settled_amount, settled_at, idempotency_key, reason, metadata)
+         VALUES (?, 'publisher_join_channel', ?, 'publisher_join_channel', ?, 'paid',
+           NOW(), ?, NOW(), ?, 'verified_required_channel_membership', ?)`,
+        [user.id, user.id, rewardAmount, rewardAmount, idempotencyKey,
+          JSON.stringify({ channel_username: channelUsername })]
+      );
+      if (ledger.affectedRows !== 1) {
+        await connection.query("UPDATE users SET join_rewarded = TRUE WHERE id = ?", [user.id]);
+        return { credited: false, idempotent: true };
+      }
+      const [credited]: any = await connection.query(
+        `UPDATE users SET join_rewarded = TRUE, balance_available = balance_available + ?
+         WHERE id = ? AND join_rewarded = FALSE`, [rewardAmount, user.id]
+      );
+      if (credited.affectedRows !== 1) throw new Error("join_reward_credit_race");
+      return { credited: true, idempotent: false };
+    }, { operation: "publisher_join_reward" });
+    const referralReward = rewardResult.credited
+      ? await processVerifiedReferralForUser(Number(user.id))
+      : { processed: false, reason: "join_reward_already_recorded" };
 
-    return NextResponse.json({ success: true, reward: rewardAmount, referral_reward: referralReward });
+    return NextResponse.json({ success: true, reward: rewardResult.credited ? rewardAmount : 0,
+      idempotent: rewardResult.idempotent, referral_reward: referralReward });
 
   } catch (error: any) {
     console.error("Verify Join Error:", error);

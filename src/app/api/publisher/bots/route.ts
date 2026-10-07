@@ -1,12 +1,15 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
+import { randomUUID } from "node:crypto";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { botTokenHash, encryptBotToken, ensureBotIntegration, isBotEncryptionError, publisherBotEncryptionErrorMessage, resolveBotIntegrationStatus } from "@/lib/botIntegration";
 import { notifyBotSubmitted } from "@/lib/publisherNotifications";
 import { botUserCountExpressions } from "@/lib/botAudience";
 import { safeQueuePublisherWelcome } from "@/lib/supportMessages";
+import { authenticatePublisherAsset, PublisherAssetError, publisherAssetErrorResponse, publisherAssetTelemetry } from "@/lib/publisherAssetOnboarding";
+import { verifyPublisherBotToken } from "@/lib/publisherBotToken";
 
 type ExistingBotRow = RowDataPacket & { id: number; user_id: number; is_deleted: boolean | number };
 
@@ -141,12 +144,15 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const requestId = randomUUID(); let publisherId: number | undefined;
+  publisherAssetTelemetry("bot_onboarding", { requestId, stage: "attempt", result: "started" });
   try {
     const blocked = await requireUserWritesAllowed();
     if (blocked) return blocked;
 
-    const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await authenticatePublisherAsset(request);
+    publisherId = Number(user.id);
+    publisherAssetTelemetry("bot_onboarding", { requestId, publisherId, stage: "auth", result: "success" });
 
     const body = await request.json();
     const { bot_token, posts_per_day, continents, categories } = body;
@@ -155,39 +161,29 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Bot token is required" }, { status: 400 });
     }
 
-    // 1. Validate bot token with Telegram
     const normalizedToken = String(bot_token).trim();
-    if (!/^\d{5,15}:[A-Za-z0-9_-]{20,}$/.test(normalizedToken)) {
-      return NextResponse.json({ error: "Bot token format is invalid" }, { status: 400 });
-    }
-    const tgRes = await fetch(`https://api.telegram.org/bot${normalizedToken}/getMe`, { signal: AbortSignal.timeout(8000), cache: "no-store" });
-    const tgData = await tgRes.json();
-
-    if (!tgData.ok) {
-      return NextResponse.json({ error: "Invalid bot token or Telegram API error" }, { status: 400 });
-    }
-
-    const { username: bot_username, first_name: bot_name } = tgData.result;
+    const verifiedBot = await verifyPublisherBotToken(normalizedToken);
+    const { username: bot_username, name: bot_name } = verifiedBot;
+    publisherAssetTelemetry("bot_onboarding", { requestId, publisherId, stage: "telegram_identity", result: "success", botUsername: bot_username, telegramBotId: verifiedBot.id });
 
     // 2. Check if bot already exists
-    const [existing] = await pool.query<ExistingBotRow[]>(
-      "SELECT id, user_id, is_deleted FROM bots WHERE bot_token_hash = ? OR bot_token = ?",
-      [botTokenHash(normalizedToken), normalizedToken]
-    );
+    const connection = await pool.getConnection();
+    let botId: number; let integrationUrl: string; let idempotent = false;
+    try {
+      await connection.beginTransaction();
+      const [existing] = await connection.query<ExistingBotRow[]>("SELECT id,user_id,is_deleted FROM bots WHERE bot_token_hash = ? OR bot_token = ? FOR UPDATE", [botTokenHash(normalizedToken), normalizedToken]);
 
     if (existing.length > 0) {
       const bot = existing[0];
       
-      if (bot.user_id !== user.id) {
-        return NextResponse.json({ error: "This bot is already registered by another user" }, { status: 400 });
-      }
+      if (Number(bot.user_id) !== Number(user.id)) throw new PublisherAssetError("BOT_OWNED_BY_ANOTHER_PUBLISHER", "This bot is already registered by another user.", 409);
 
       if (!bot.is_deleted) {
-        return NextResponse.json({ error: "This bot is already active in your dashboard." }, { status: 400 });
-      }
-
-      // Reactivate soft-deleted bot
-      await pool.query(
+        botId = bot.id; idempotent = true;
+        integrationUrl = await ensureBotIntegration(connection, new URL(request.url).origin, bot.id);
+      } else {
+        // Reactivate soft-deleted bot.
+        await connection.query(
         `UPDATE bots SET 
           bot_username = ?,
           bot_name = ?, 
@@ -204,27 +200,29 @@ export async function POST(request: Request) {
           reactivated_at = NOW()
          WHERE id = ?`,
         [bot_username, bot_name, `secure:${botTokenHash(normalizedToken)}`, encryptBotToken(normalizedToken), botTokenHash(normalizedToken), posts_per_day, JSON.stringify(continents), JSON.stringify(categories || []), bot.id]
-      );
-
-      const integrationUrl = await ensureBotIntegration(pool, new URL(request.url).origin, bot.id);
-      await notifyBotSubmitted(user.telegram_id, bot.id, bot_username);
-      await safeQueuePublisherWelcome(user.id);
-      return NextResponse.json({ success: true, id: bot.id, bot_id: bot.id, integration_url: integrationUrl, message: "Bot reactivated and updated" });
-    }
-
-    // 3. Insert new bot
-    const [result] = await pool.query<ResultSetHeader>(
+        );
+        botId = bot.id;
+        integrationUrl = await ensureBotIntegration(connection, new URL(request.url).origin, bot.id);
+      }
+    } else {
+      const [result] = await connection.query<ResultSetHeader>(
       `INSERT INTO bots (user_id, bot_token, bot_token_encrypted, bot_token_hash, bot_username, bot_name, posts_per_day, continents, categories, status)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
       [user.id, `secure:${botTokenHash(normalizedToken)}`, encryptBotToken(normalizedToken), botTokenHash(normalizedToken), bot_username, bot_name, posts_per_day, JSON.stringify(continents), JSON.stringify(categories || [])]
-    );
-
-    const integrationUrl = await ensureBotIntegration(pool, new URL(request.url).origin, result.insertId);
-    await notifyBotSubmitted(user.telegram_id, result.insertId, bot_username);
-    await safeQueuePublisherWelcome(user.id);
-    return NextResponse.json({ success: true, id: result.insertId, bot_id: result.insertId, integration_url: integrationUrl }, { status: 201 });
+      );
+      botId = result.insertId;
+      integrationUrl = await ensureBotIntegration(connection, new URL(request.url).origin, result.insertId);
+    }
+    await connection.commit();
+    } catch (error) { await connection.rollback().catch(() => undefined); throw error; } finally { connection.release(); }
+    publisherAssetTelemetry("bot_onboarding", { requestId, publisherId, stage: "persist", result: idempotent ? "idempotent_success" : "success", botUsername: bot_username, telegramBotId: verifiedBot.id });
+    if (!idempotent) after(async () => { try { await notifyBotSubmitted(String(user.telegram_id), botId, bot_username); } catch {} try { await safeQueuePublisherWelcome(user.id); } catch {} });
+    const response = NextResponse.json({ success: true, id: botId, bot_id: botId, integration_url: integrationUrl, already_registered: idempotent }, { status: idempotent ? 200 : 201 });
+    response.headers.set("X-Request-Id", requestId); return response;
   } catch (error: unknown) {
-    console.error("API Error:", error);
+    const code = error instanceof PublisherAssetError ? error.code : "BOT_CREATE_FAILED";
+    publisherAssetTelemetry("bot_onboarding", { requestId, publisherId, stage: "response", result: "failed", code });
+    if (error instanceof PublisherAssetError) return publisherAssetErrorResponse(error);
     if (isBotEncryptionError(error)) {
       console.error("Publisher bot encryption/configuration failure", { code: error.code });
       return NextResponse.json({ error: publisherBotEncryptionErrorMessage() }, { status: 503 });

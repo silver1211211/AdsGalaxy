@@ -11,7 +11,6 @@ import {
 } from "@/lib/inventoryOptimization";
 import {
   autoPauseBot,
-  checkBotHealth,
   classifyBotUserSendFailure,
   classifyBotTokenFailure,
   markBotUserDeliverySuccess,
@@ -28,6 +27,7 @@ import { campaignExcludesIdentifier, loadCampaignExclusions } from "@/lib/campai
 import { botUserBroadcastEligibleCondition } from "@/lib/botAudience";
 import { composeCampaignCreativeTelegramHtml } from "@/lib/campaignCreative";
 import { campaignCategoryMatches } from "@/lib/campaignCategories";
+import { isCampaignDeliveryAllowed, silverCampaignDeliverySql } from "@/lib/silverCampaignControl";
 import { calculateBroadcastPayout, getBroadcastPayoutSettings, type BroadcastPayout } from "@/lib/broadcastPublisherCpmEngine";
 import {
   addBroadcastMoney,
@@ -36,6 +36,7 @@ import {
   refundedBroadcastStatus,
 } from "@/lib/broadcastBudgetLifecycle";
 import { claimAdvertiserDirectDebit } from "@/lib/advertiserDirectDebit";
+import { enqueueCampaignNotification } from "@/lib/platformNotifications";
 
 export const dynamic = 'force-dynamic';
 
@@ -78,6 +79,17 @@ function parseTargetList(value: unknown): string[] {
   }
 }
 
+function broadcastDeliveryClaimKey(campaignId: number, userId: number, frequencyCap: unknown, now = new Date()) {
+  const cap = Math.min(24, Math.max(1, Number(frequencyCap) || 1));
+  const slotHours = 24 / cap;
+  const slot = Math.floor(now.getUTCHours() / slotHours);
+  return `broadcast:${campaignId}:user:${userId}:${now.toISOString().slice(0, 10)}:slot:${slot}`;
+}
+
+function wait(milliseconds: number) {
+  return milliseconds > 0 ? new Promise((resolve) => setTimeout(resolve, milliseconds)) : Promise.resolve();
+}
+
 async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: any; cost: number }, db = pool) {
   if (!Number.isFinite(input.cost) || input.cost <= 0) {
     return { ok: false as const, reason: "invalid_campaign_cost" };
@@ -86,7 +98,7 @@ async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: 
   try {
     await conn.beginTransaction();
     const [campaignRows]: any = await conn.query(
-      "SELECT budget, status, daily_budget_limit FROM campaigns WHERE id = ? FOR UPDATE",
+      "SELECT budget, status, daily_budget_limit, user_id, name FROM campaigns WHERE id = ? FOR UPDATE",
       [input.campaign.id]
     );
     const lockedCampaign = campaignRows[0];
@@ -101,6 +113,10 @@ async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: 
          WHERE id = ? AND status = 'active'`,
         [input.campaign.id]
       );
+      await enqueueCampaignNotification(conn, {
+        campaignId: Number(input.campaign.id), userId: Number(lockedCampaign.user_id),
+        event: "completed", name: String(lockedCampaign.name || input.campaign.name || `Campaign #${input.campaign.id}`),
+      });
       await conn.commit();
       return { ok: false as const, reason: "campaign_budget_exhausted" };
     }
@@ -116,6 +132,22 @@ async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: 
       }
     }
 
+    const deliveryClaimKey = broadcastDeliveryClaimKey(
+      Number(input.campaign.id),
+      Number(input.user.id),
+      input.campaign.frequency_cap_per_user,
+    );
+    const [deliveryResult]: any = await conn.query(
+      `INSERT IGNORE INTO broadcast_deliveries
+        (campaign_id, bot_id, user_id, chat_id, cost, publisher_reward, status, retry_count, delivery_claim_key)
+       VALUES (?, ?, ?, ?, ?, 0, 'pending', 0, ?)`,
+      [input.campaign.id, input.bot.id, input.user.id, input.user.chat_id, input.cost, deliveryClaimKey]
+    );
+    if (deliveryResult.affectedRows !== 1) {
+      await conn.rollback();
+      return { ok: false as const, reason: "delivery_already_claimed" };
+    }
+
     const [budgetResult]: any = await conn.query(
       "UPDATE campaigns SET budget = budget - ? WHERE id = ? AND budget >= ? AND status = 'active'",
       [input.cost, input.campaign.id, input.cost]
@@ -125,21 +157,19 @@ async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: 
       return { ok: false as const, reason: "campaign_budget_race" };
     }
 
-    const [deliveryResult]: any = await conn.query(
-      `INSERT INTO broadcast_deliveries
-        (campaign_id, bot_id, user_id, chat_id, cost, publisher_reward, status, retry_count)
-       VALUES (?, ?, ?, ?, ?, 0, 'pending', 0)`,
-      [input.campaign.id, input.bot.id, input.user.id, input.user.chat_id, input.cost]
-    );
     const [[updatedCampaign]]: any = await conn.query("SELECT budget FROM campaigns WHERE id = ?", [input.campaign.id]);
     const remainingBudget = updatedCampaign?.budget ?? 0;
     if (!canFundBroadcastDelivery(remainingBudget, input.cost)) {
-      await conn.query(
+      const [exhausted] = await conn.query<import("mysql2/promise").ResultSetHeader>(
         `UPDATE campaigns
          SET status = 'budget_exhausted', budget_exhausted_at = NOW(), pause_reason = 'budget_exhausted'
          WHERE id = ? AND status = 'active'`,
         [input.campaign.id]
       );
+      if (exhausted.affectedRows === 1) await enqueueCampaignNotification(conn, {
+        campaignId: Number(input.campaign.id), userId: Number(lockedCampaign.user_id),
+        event: "completed", name: String(lockedCampaign.name || input.campaign.name || `Campaign #${input.campaign.id}`),
+      });
     }
     await conn.commit();
     return {
@@ -393,10 +423,11 @@ export async function GET(req: NextRequest) {
     // only those primary keys. This prevents every tick from locking a broad
     // range of active campaigns while billing traffic is using them.
     const [exhaustedCandidates]: any = await pool.query(`
-      SELECT c.id
+      SELECT c.id,c.user_id,c.name
       FROM campaigns c
       LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
       WHERE c.type='broadcast' AND c.status='active'
+        AND ${silverCampaignDeliverySql("c")}
         AND (COALESCE(c.cpm,0)<=0 OR c.budget < ROUND(GREATEST(COALESCE(c.cpm,0)-CASE WHEN ard.expires_at>UTC_TIMESTAMP() THEN ard.cpm_discount ELSE 0 END,0.01)/1000,8))
       ORDER BY c.id
       LIMIT 50
@@ -408,6 +439,10 @@ export async function GET(req: NextRequest) {
          WHERE status='active' AND id IN (${ids.map(() => "?").join(",")})`,
         ids,
       );
+      for (const campaign of exhaustedCandidates) await enqueueCampaignNotification(pool, {
+        campaignId: Number(campaign.id), userId: Number(campaign.user_id),
+        event: "completed", name: String(campaign.name || `Campaign #${campaign.id}`),
+      });
     }
 
     // 1. Find active broadcast campaigns with budget
@@ -424,11 +459,15 @@ export async function GET(req: NextRequest) {
 
     const [campaignRows]: any = await pool.query(`
       SELECT c.*, COALESCE(u.advertiser_trust_level, 'new') as advertiser_trust_level,
+        COALESCE(bs.successful_deliveries_window,0) AS fairness_deliveries,
+        bs.last_selected_at AS fairness_last_selected_at,
         GREATEST(COALESCE(c.cpm,0) - CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN ard.cpm_discount ELSE 0 END,0.01) effective_cpm
       FROM campaigns c
       JOIN users u ON c.user_id = u.id
       LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
+      LEFT JOIN bot_broadcast_campaign_state bs ON bs.campaign_id=c.id
       WHERE c.type = 'broadcast' AND c.status = 'active'
+        AND ${silverCampaignDeliverySql("c")}
         AND COALESCE(c.cpm,0) > 0
         AND c.budget >= ROUND(GREATEST(COALESCE(c.cpm,0) - CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN ard.cpm_discount ELSE 0 END,0.01) / 1000,8)
         AND (c.funding_model <> 'direct_debit' OR u.ad_balance >= ROUND(GREATEST(COALESCE(c.cpm,0) - CASE WHEN ard.expires_at > UTC_TIMESTAMP() THEN ard.cpm_discount ELSE 0 END,0.01) / 1000,8))
@@ -445,7 +484,7 @@ export async function GET(req: NextRequest) {
               AND bd.created_at >= CURDATE()
           ), 0) < c.daily_budget_limit
         )
-      ORDER BY c.cpm DESC
+      ORDER BY COALESCE(bs.successful_deliveries_window,0) ASC, bs.last_selected_at ASC, c.cpm DESC
     `);
     const campaigns = campaignRows.map((campaign: any) => {
       const trustMultiplier = trustMultipliers[normalizeAdvertiserTrustLevel(campaign.advertiser_trust_level)] || 1;
@@ -467,6 +506,8 @@ export async function GET(req: NextRequest) {
         }),
       };
     }).sort((a: any, b: any) => {
+      const fairnessDifference = Number(a.fairness_deliveries || 0) - Number(b.fairness_deliveries || 0);
+      if (fairnessDifference !== 0) return fairnessDifference;
       const aTrust = trustMultipliers[normalizeAdvertiserTrustLevel(a.advertiser_trust_level)] || 1;
       const bTrust = trustMultipliers[normalizeAdvertiserTrustLevel(b.advertiser_trust_level)] || 1;
       const aScore = (Number(a.cpm || 0) || 0) * aTrust * qualityMultiplier(a.quality_score) * (Number(a.campaign_priority_score || 50) / 50);
@@ -475,19 +516,25 @@ export async function GET(req: NextRequest) {
     });
 
     let totalDispatched = 0;
-    const configuredBatchSize = Number.parseInt(process.env.CRON_BROADCAST_BATCH_SIZE || "20", 10);
-    const limit = Math.min(100, Math.max(1, Number.isFinite(configuredBatchSize) ? configuredBatchSize : 20));
+    const configuredBatchSize = Number.parseInt(process.env.CRON_BROADCAST_BATCH_SIZE || "60", 10);
+    const limit = Math.min(60, Math.max(1, Number.isFinite(configuredBatchSize) ? configuredBatchSize : 60));
     const dispatches = [];
     const botExclusions = await loadCampaignExclusions(pool, "campaign", campaigns.map((campaign: { id: number | string }) => Number(campaign.id)), "bot");
 
     for (const campaign of campaigns) {
       if (totalDispatched >= limit) break;
+      const campaignQuota = Math.min(limit - totalDispatched, Math.max(1, Math.ceil(limit / Math.max(1, campaigns.length))));
+      let campaignDispatched = 0;
 
       // Find suitable bots
       const [bots]: any = await pool.query(`
-        SELECT * FROM bots
-        WHERE status = 'active' AND is_deleted = FALSE
+        SELECT bots.*,ready.successful_deliveries_window AS ready_successful_deliveries
+        FROM bots
+        JOIN bot_delivery_ready_pool ready ON ready.bot_id=bots.id
+        WHERE bots.status = 'active' AND bots.is_deleted = FALSE
         AND COALESCE(health_status, 'active') IN ('active', 'healthy')
+        AND ready.active_audience_count > 0
+        AND (ready.cooldown_until IS NULL OR ready.cooldown_until <= NOW())
         AND bot_username IS NOT NULL AND bot_username <> ''
         AND integration_secret_encrypted IS NOT NULL
         AND integration_secret_hash IS NOT NULL
@@ -520,14 +567,7 @@ export async function GET(req: NextRequest) {
           });
           continue;
         }
-        const health = await checkBotHealth({ id: bot.id, bot_token: bot.bot_token });
-        if (health.ok) {
-          healthyBots.push(bot);
-        } else {
-          pausedBotsSkipped++;
-          failedBots++;
-          incrementFailure(normalizeFailureReason(health.reason || health.status));
-        }
+        healthyBots.push(bot);
       }
 
       const suitableBots = rankInventoryForDelivery(healthyBots.filter((bot: any) => {
@@ -544,9 +584,10 @@ export async function GET(req: NextRequest) {
         }
         return true;
       }), deliverySettings, Number(campaign.campaign_priority_score || 50)) as any[];
+      suitableBots.sort((a, b) => Number(a.ready_successful_deliveries || 0) - Number(b.ready_successful_deliveries || 0));
 
       for (const bot of suitableBots) {
-        if (totalDispatched >= limit) break;
+        if (totalDispatched >= limit || campaignDispatched >= campaignQuota) break;
 
         // Find users for this bot that are eligible
         // posts_per_day logic:
@@ -561,6 +602,7 @@ export async function GET(req: NextRequest) {
           SELECT bu.* 
           FROM bot_users bu
           JOIN bots delivery_bot ON delivery_bot.id = bu.bot_id
+          JOIN bot_delivery_ready_pool ready_pool ON ready_pool.bot_id=bu.bot_id
           WHERE bu.bot_id = ?
           AND ${botUserBroadcastEligibleCondition("bu", "delivery_bot")}
           AND (bu.last_broadcast_at IS NULL OR bu.last_broadcast_at < NOW() - INTERVAL ? HOUR)
@@ -582,7 +624,7 @@ export async function GET(req: NextRequest) {
             WHERE in_flight.campaign_id=? AND in_flight.user_id=bu.id
               AND in_flight.status IN ('pending','sending','retry_wait')
           )
-          ORDER BY CASE WHEN bu.status='active' THEN 0 ELSE 1 END, bu.id
+          ORDER BY CASE WHEN bu.id>ready_pool.audience_cursor THEN 0 ELSE 1 END, bu.id
           LIMIT ?
         `, [
           bot.id,
@@ -592,12 +634,16 @@ export async function GET(req: NextRequest) {
           campaign.id,
           campaign.frequency_cap_per_user || null,
           campaign.id,
-          limit - totalDispatched
+          Math.min(
+            campaignQuota - campaignDispatched,
+            Math.max(1, Math.ceil(campaignQuota / Math.max(1, suitableBots.length))),
+          )
         ]);
 
         for (const user of users) {
           dispatches.push({ campaign, bot, user });
           totalDispatched++;
+          campaignDispatched++;
         }
       }
     }
@@ -623,11 +669,22 @@ export async function GET(req: NextRequest) {
     }
 
     // Execute dispatches "together"
-    const requestedWorkerCount = Math.max(1, parseInt(process.env.CRON_BROADCAST_WORKERS || "2", 10) || 2);
-    const maxWorkerCount = Math.min(5, Math.max(1, parseInt(process.env.CRON_BROADCAST_WORKER_MAX || "5", 10) || 5));
+    const requestedWorkerCount = Math.max(1, parseInt(process.env.CRON_BROADCAST_WORKERS || "1", 10) || 1);
+    const maxWorkerCount = 1;
     const workerCount = Math.min(requestedWorkerCount, maxWorkerCount);
+    let nextGlobalSendAt = Date.now();
     const results = await processBoundedQueue(dispatches, workerCount, async ({ campaign, bot, user }) => {
       try {
+        const sendSlot = nextGlobalSendAt;
+        nextGlobalSendAt = Math.max(Date.now(), nextGlobalSendAt) + 1000;
+        await wait(sendSlot - Date.now());
+        const [[readyState]]: any = await pool.query(
+          "SELECT cooldown_until FROM bot_delivery_ready_pool WHERE bot_id=? AND ready=1 AND active_audience_count>0",
+          [bot.id],
+        );
+        if (!readyState || (readyState.cooldown_until && new Date(readyState.cooldown_until).getTime() > Date.now())) {
+          return { status: "skipped", user: user.id, campaign_id: campaign.id, campaign_name: campaign.name, failure_reason: "bot_cooldown" };
+        }
         const replyMarkup = {
           inline_keyboard: [[
             { text: campaign.button_text, url: campaign.link }
@@ -643,6 +700,18 @@ export async function GET(req: NextRequest) {
             error: reservation.reason === "daily_budget_limit" ? "Daily budget limit reached" : "Campaign budget exhausted",
             failure_reason: reservation.reason,
           };
+        }
+
+        const silverDelivery = await isCampaignDeliveryAllowed(Number(campaign.id));
+        if (!silverDelivery.allowed) {
+          await refundBroadcastReservation({
+            deliveryId: reservation.deliveryId,
+            campaignId: campaign.id,
+            failureReason: silverDelivery.reason,
+            telegramError: silverDelivery.reason,
+            attempts: 0,
+          });
+          return { status: "skipped", user: user.id, campaign_id: campaign.id, campaign_name: campaign.name, failure_reason: silverDelivery.reason };
         }
 
         let res;
@@ -671,14 +740,29 @@ export async function GET(req: NextRequest) {
           if (finalized.insufficientBalance) {
             return { status: "failed", user: user.id, campaign_id: campaign.id, campaign_name: campaign.name, failure_reason: "insufficient_balance" };
           }
+          await pool.query(
+            `INSERT INTO bot_broadcast_campaign_state(campaign_id,fairness_window_date,successful_deliveries_window,last_selected_at,last_success_at)
+             VALUES(?,CURDATE(),1,NOW(),NOW()) ON DUPLICATE KEY UPDATE
+               successful_deliveries_window=IF(fairness_window_date=CURDATE(),successful_deliveries_window+1,1),
+               fairness_window_date=CURDATE(),last_selected_at=NOW(),last_success_at=NOW()`,
+            [campaign.id],
+          );
+          await pool.query(
+            `UPDATE bot_delivery_ready_pool SET
+               successful_deliveries_window=IF(fairness_window_date=CURDATE(),successful_deliveries_window+1,1),
+               fairness_window_date=CURDATE(),consecutive_permanent_failures=0,
+               audience_cursor=?,last_selected_at=NOW(),last_success_at=NOW(),cooldown_until=NULL
+             WHERE bot_id=?`,
+            [user.id,bot.id],
+          );
           const remainingBudget = reservation.remainingBudget;
           const budgetExhausted = evaluateBroadcastAffordability(remainingBudget, cost).exhausted;
 
           if (budgetExhausted) {
               try {
-                const [advertiser]: any = await pool.query("SELECT chat_id FROM users WHERE id = ?", [campaign.user_id]);
-                if (advertiser[0]?.chat_id) {
-                  await sendTelegramMessage(advertiser[0].chat_id, `Campaign Budget Exhausted\n\nYour broadcast campaign "${campaign.name || 'Untitled'}" has exhausted its budget.\n\nPlease top up your budget to resume the broadcast.`, {
+                const [advertiser]: any = await pool.query("SELECT telegram_id FROM users WHERE id = ?", [campaign.user_id]);
+                if (advertiser[0]?.telegram_id) {
+                  await sendTelegramMessage(advertiser[0].telegram_id, `Campaign Budget Exhausted\n\nYour broadcast campaign "${campaign.name || 'Untitled'}" has exhausted its budget.\n\nPlease top up your budget to resume the broadcast.`, {
                     parse_mode: SAFE_TELEGRAM_PARSE_MODE
                   });
                 }
@@ -710,7 +794,17 @@ export async function GET(req: NextRequest) {
               await autoPauseBot(bot.id, botFailure);
             } else {
               const userFailure = classifyBotUserSendFailure(res?.description, Number(res?.error_code || 0));
-              if (userFailure) await markBotUserInactive(user.id, userFailure);
+              if (userFailure) {
+                await markBotUserInactive(user.id, userFailure);
+                await pool.query(
+                  `UPDATE bot_delivery_ready_pool
+                   SET consecutive_permanent_failures=consecutive_permanent_failures+1,
+                       cooldown_until=CASE WHEN consecutive_permanent_failures+1>=3 THEN DATE_ADD(NOW(),INTERVAL 30 MINUTE) ELSE cooldown_until END,
+                       last_failure_at=NOW()
+                   WHERE bot_id=?`,
+                  [bot.id],
+                );
+              }
             }
           }
           return { 

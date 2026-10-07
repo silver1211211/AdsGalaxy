@@ -1,11 +1,11 @@
 "use client";
 /* eslint-disable @typescript-eslint/no-explicit-any, @next/next/no-img-element -- legacy campaign rows and creative previews */
 
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import AdminLayout from "@/components/layout/AdminLayout";
 import { useAdminRequestGuard } from "@/hooks/useAdminRequestGuard";
-import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Zap, Megaphone, CircleHelp } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, X, Eye, Search, Pause, Play, Zap, Megaphone, CircleHelp, RotateCcw } from "lucide-react";
 import EmptyState from "@/components/ui/EmptyState";
 import { SkeletonTableRows } from "@/components/ui/Skeleton";
 import Modal from "@/components/ui/Modal";
@@ -16,7 +16,7 @@ import { campaignPolicyScopes, type PolicyScope } from "@/lib/policyRegistry";
 import ModerationHistory from "@/components/admin/ModerationHistory";
 import { getApiErrorMessage } from "@/lib/apiErrorMessage";
 
-type CampaignConfirmActionType = "approve" | "reject" | "pause" | "resume";
+type CampaignConfirmActionType = "approve" | "reject" | "pause" | "pause_only" | "resume";
 type ConfirmAction = {
   id: number;
   kind: string;
@@ -31,9 +31,11 @@ type EmergencyAction = {
   mode: "fill_empty_slots" | "replace_everything";
   isBroadcast: boolean;
 } | null;
+type PauseChoice = { id: number; kind: string; name: string } | null;
 
 type AdminCampaignRow = {
   id: number;
+  main_display_number?: number;
   campaign_kind: "campaign" | "miniapp";
   source_campaign_kind?: string | null;
   teaser_mode?: string | null;
@@ -50,6 +52,8 @@ type AdminCampaignRow = {
   status: string;
   budget: string | number;
   cpm: string | number;
+  cpc?: string | number;
+  cost_per_subscriber?: string | number;
   link: string;
   message_text?: string;
   image_url?: string;
@@ -95,7 +99,17 @@ function money(value: unknown) {
 
 function statusLabel(campaign: AdminCampaignRow) {
   if (campaign.requires_re_moderation) return "Re-Moderation";
+  if (campaign.status === "daily_cap_reached") return "Daily Cap Reached";
+  if (campaign.status === "budget_exhausted") return "Budget Exhausted";
   return campaign.status === "approved" ? "Active" : campaign.status.replaceAll("_", " ");
+}
+
+function statusBadgeClass(status: string) {
+  if (status === "daily_cap_reached") return "bg-blue-50 text-blue-700 border border-blue-200";
+  if (status === "active") return "bg-emerald-50 text-emerald-700 border border-emerald-200";
+  if (status === "pending") return "bg-amber-50 text-amber-700 border border-amber-200";
+  if (status === "rejected") return "bg-red-50 text-red-700 border border-red-200";
+  return "bg-slate-100 text-slate-700 border border-slate-200";
 }
 
 function renderTargetingList(value: unknown) {
@@ -172,7 +186,7 @@ function renderDateRestriction(value: unknown) {
   return new Date(String(value)).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 }
 
-export default function AdminCampaignsPage() {
+export function AdminCampaignsView({ silverMode = false }: { silverMode?: boolean }) {
   const beginListRequest = useAdminRequestGuard();
   const [campaigns, setCampaigns] = useState<AdminCampaignRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -185,6 +199,7 @@ export default function AdminCampaignsPage() {
   const [error, setError] = useState("");
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [emergencyAction, setEmergencyAction] = useState<EmergencyAction>(null);
+  const [pauseChoice, setPauseChoice] = useState<PauseChoice>(null);
   const [typedConfirmation, setTypedConfirmation] = useState("");
   const [emergencySendAll, setEmergencySendAll] = useState(true);
   const [emergencyRecipientCount, setEmergencyRecipientCount] = useState("100");
@@ -195,12 +210,14 @@ export default function AdminCampaignsPage() {
   
   const [viewModalOpen, setViewModalOpen] = useState(false);
   const [selectedCampaign, setSelectedCampaign] = useState<AdminCampaignRow | null>(null);
+  const [releaseCampaignId, setReleaseCampaignId] = useState<number | null>(null);
+  const apiBase = silverMode ? "/api/check/silver/campaigns" : "/api/admin/campaigns";
 
-  const fetchCampaigns = async (p: number, s: string, q: string, trust = trustFilter) => {
+  const fetchCampaigns = useCallback(async (p: number, s: string, q: string, trust = trustFilter) => {
     const controller = beginListRequest();
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/campaigns?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}&trust=${encodeURIComponent(trust)}`, { signal: controller.signal });
+      const res = await fetch(`${apiBase}?page=${p}&limit=10&status=${s}&search=${encodeURIComponent(q)}&trust=${encodeURIComponent(trust)}`, { signal: controller.signal });
       const data = await res.json();
       setCampaigns(data.campaigns);
       setTotalPages(data.totalPages);
@@ -210,19 +227,26 @@ export default function AdminCampaignsPage() {
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
-  };
+  }, [apiBase, beginListRequest, trustFilter]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
       fetchCampaigns(page, statusFilter, search, trustFilter);
     }, 500);
     return () => clearTimeout(timer);
-  }, [page, statusFilter, trustFilter, search, beginListRequest]);
+  }, [page, statusFilter, trustFilter, search, fetchCampaigns]);
+
+  useEffect(() => {
+    if (!silverMode) return;
+    const refresh = () => void fetchCampaigns(page, statusFilter, search, trustFilter);
+    window.addEventListener("silver-campaigns-changed", refresh);
+    return () => window.removeEventListener("silver-campaigns-changed", refresh);
+  }, [silverMode, page, statusFilter, search, trustFilter, fetchCampaigns]);
 
   const handleAction = async (id: number, action: string, kind = "campaign", ruleKey = "", note = "") => {
     setActionLoading(id);
     try {
-      const endpoint = action === "reject" ? "/api/admin/moderation-rejections" : kind === "miniapp" ? "/api/admin/miniapp-rewarded-campaigns" : "/api/admin/campaigns";
+      const endpoint = action === "reject" ? "/api/admin/moderation-rejections" : kind === "miniapp" ? "/api/admin/miniapp-rewarded-campaigns" : apiBase;
       const res = await fetch(endpoint, {
         method: action === "reject" ? "POST" : "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -238,7 +262,7 @@ export default function AdminCampaignsPage() {
     }
   };
 
-  const handleManagementAction = async (id: number, action: "pause" | "resume", kind = "campaign") => {
+  const handleManagementAction = async (id: number, action: "pause" | "pause_only" | "pause_finalize" | "resume", kind = "campaign") => {
     setActionLoading(id);
     try {
       if (kind === "miniapp") {
@@ -250,7 +274,7 @@ export default function AdminCampaignsPage() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || "Action failed");
       } else {
-        const res = await fetch(`/api/admin/campaigns/${id}/actions`, {
+        const res = await fetch(`${apiBase}/${id}/actions`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action })
@@ -267,11 +291,11 @@ export default function AdminCampaignsPage() {
   };
 
   const handleEmergencyPush = async (id: number, mode: "fill_empty_slots" | "replace_everything", confirmation = "", isBroadcast = false) => {
-    const label = mode === "fill_empty_slots" ? "Fill Empty Slots" : "Replace Everything";
+    const label = mode === "fill_empty_slots" ? "Fill Empty Slots" : "Replace in Every Channel";
 
     setActionLoading(id);
     try {
-      const res = await fetch(`/api/admin/campaigns/${id}/emergency-push`, {
+      const res = await fetch(`${apiBase}/${id}/emergency-push`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -310,7 +334,7 @@ export default function AdminCampaignsPage() {
     try {
       const response = await fetch(campaign.campaign_kind === "miniapp"
         ? "/api/admin/miniapp-rewarded-campaigns"
-        : `/api/admin/campaigns/${campaign.id}`);
+        : `${apiBase}/${silverMode ? campaign.id : (campaign.main_display_number ?? campaign.id)}`);
       if (!response.ok) return;
       const data = await response.json();
       const details = campaign.campaign_kind === "miniapp"
@@ -327,6 +351,24 @@ export default function AdminCampaignsPage() {
     setConfirmAction({ id, kind, action, title, message, danger });
   };
 
+  const releaseToMain = async () => {
+    if (!releaseCampaignId) return;
+    const id = releaseCampaignId;
+    setReleaseCampaignId(null);
+    setActionLoading(id);
+    try {
+      const response = await fetch(`${apiBase}/${id}/release`, { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(getApiErrorMessage(data, "Campaign release failed"));
+      setToast({ type: "success", title: "Campaign released", message: "The campaign is visible to Main Admin again." });
+      await fetchCampaigns(page, statusFilter, search, trustFilter);
+    } catch (releaseError) {
+      setError(releaseError instanceof Error ? releaseError.message : "Campaign release failed");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const runConfirmedAction = async () => {
     if (!confirmAction) return;
     const { id, kind, action } = confirmAction;
@@ -335,7 +377,7 @@ export default function AdminCampaignsPage() {
     if (action === "approve" || action === "reject") {
       await handleAction(id, action, kind, policyRuleKey, internalNote);
     } else {
-      await handleManagementAction(id, action as "pause" | "resume", kind);
+      await handleManagementAction(id, action as "pause" | "pause_only" | "resume", kind);
     }
   };
 
@@ -384,9 +426,10 @@ export default function AdminCampaignsPage() {
   };
 
   const isFiltering = search.trim().length > 0 || statusFilter !== "all" || trustFilter !== "all";
+  const PageFrame = silverMode ? React.Fragment : AdminLayout;
 
   return (
-    <AdminLayout>
+    <PageFrame>
       <Modal isOpen={!!error} onClose={() => setError("")} type="error" title="Error">{error}</Modal>
       <Toast
         isOpen={!!toast}
@@ -394,6 +437,16 @@ export default function AdminCampaignsPage() {
         type={toast?.type || "success"}
         title={toast?.title || ""}
         message={toast?.message || ""}
+      />
+      <ConfirmationModal
+        isOpen={releaseCampaignId !== null}
+        onClose={() => setReleaseCampaignId(null)}
+        onConfirm={releaseToMain}
+        title="Release campaign"
+        message="Release this campaign back to Main Admin? Silver-only control ends immediately."
+        confirmBtnText="Release"
+        confirmBtnVariant="primary"
+        isLoading={actionLoading !== null}
       />
       <ConfirmationModal
         isOpen={!!confirmAction}
@@ -409,17 +462,34 @@ export default function AdminCampaignsPage() {
           <ModerationRejectFields scopes={(() => { const row = campaigns.find((item: AdminCampaignRow) => item.id === confirmAction.id && item.campaign_kind === confirmAction.kind); const specific: PolicyScope[] = confirmAction.kind === "miniapp" ? ["advertiser.mini-app"] : campaignPolicyScopes(row || {}); return ["advertiser.general", ...specific]; })()} ruleKey={policyRuleKey} internalNote={internalNote} onRuleKey={setPolicyRuleKey} onInternalNote={setInternalNote} />
         )}
       </ConfirmationModal>
+      {pauseChoice && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/60 p-3 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="pause-campaign-title">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl sm:p-6">
+            <h2 id="pause-campaign-title" className="text-lg font-bold text-slate-950">Pause “{pauseChoice.name}”?</h2>
+            <p className="mt-2 text-sm text-slate-600">Choose whether existing Telegram ads should stay live. Removing ads from channels does not delete the campaign or its accounting history.</p>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              <button className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-left text-sm font-bold text-amber-900" onClick={async () => { const choice=pauseChoice; setPauseChoice(null); await handleManagementAction(choice.id,"pause_only",choice.kind); }}>
+                Pause Only<span className="mt-1 block text-xs font-normal">Stop new delivery; keep current Telegram ads.</span>
+              </button>
+              <button className="rounded-xl bg-red-600 px-4 py-3 text-left text-sm font-bold text-white" onClick={async () => { const choice=pauseChoice; setPauseChoice(null); await handleManagementAction(choice.id,"pause_finalize",choice.kind); }}>
+                Pause + Remove<span className="mt-1 block text-xs font-normal text-red-50">Settle safely, then remove this campaign from all channels.</span>
+              </button>
+            </div>
+            <button className="mt-4 w-full rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700" onClick={() => setPauseChoice(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
       <ConfirmationModal
         isOpen={!!emergencyAction}
         onClose={() => { setEmergencyAction(null); setTypedConfirmation(""); }}
         onConfirm={runEmergencyConfirm}
-        title={emergencyAction?.isBroadcast ? "Emergency Broadcast Push" : emergencyAction?.mode === "replace_everything" ? "Emergency Push: Replace Everything" : "Emergency Push: Fill Empty Slots"}
+        title={emergencyAction?.isBroadcast ? "Emergency Broadcast Push" : emergencyAction?.mode === "replace_everything" ? "Emergency Push: Replace in Every Channel" : "Emergency Push: Fill Empty Slots"}
         message={emergencyAction?.isBroadcast
           ? "Send immediately to active eligible bot users, bypassing the normal posting interval."
           : emergencyAction?.mode === "replace_everything"
-          ? "This deletes currently active ads before pushing this campaign. Type CONFIRM to continue."
-          : "Emergency push this campaign to eligible empty channel slots now?"}
-        confirmBtnText={emergencyAction?.mode === "replace_everything" ? "Replace Everything" : "Push Now"}
+          ? "May safely replace Ads Galaxy placements, but never exceeds publisher daily post limits. With bypass on, every eligible active channel is attempted. Financial and eligibility rules remain enforced. Type CONFIRM to continue."
+          : "Uses unused publisher-authorized slots and never deletes an existing ad. Without bypass it uses upcoming slots within three hours; with bypass it may consume a future slot early."}
+        confirmBtnText={emergencyAction?.mode === "replace_everything" ? "Replace in Every Channel" : "Fill Empty Slots"}
         confirmBtnVariant={emergencyAction?.mode === "replace_everything" ? "danger" : "primary"}
         isLoading={actionLoading !== null}
         typedConfirmation={emergencyAction?.mode === "replace_everything" ? {
@@ -433,12 +503,12 @@ export default function AdminCampaignsPage() {
             <label className="flex items-center gap-2 text-sm font-semibold text-slate-800">
               <input type="checkbox" checked={ignoreEmergencyRules} onChange={(event) => setIgnoreEmergencyRules(event.target.checked)} />
               Bypass timing and spacing rules
-              <span title="Pushes immediately without the 3-hour schedule window, recent-post spacing, or same-campaign 24-hour cooldown.">
+              <span title="Bypasses timing and spacing only. Daily post count, financial caps, eligibility, targeting, permissions, and idempotency remain enforced.">
                 <CircleHelp size={14} className="text-blue-600" />
               </span>
             </label>
             <p className="text-xs text-slate-600">
-              Daily channel post caps and campaign/channel exclusions are always enforced. Leave unchecked to follow all normal placement rules.
+              Hard daily post count, financial caps, eligibility, targeting, permissions, exclusions, and idempotency are always enforced. Fill Empty Slots never deletes an ad.
             </p>
           </div>
         )}
@@ -464,7 +534,7 @@ export default function AdminCampaignsPage() {
         <div className="fixed inset-0 z-[100] bg-slate-900/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-lg w-full max-w-2xl shadow-xl border border-slate-200 flex flex-col max-h-[90vh]">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
-              <h3 className="text-lg font-bold text-slate-900">Campaign Details (#{selectedCampaign.id})</h3>
+              <h3 className="text-lg font-bold text-slate-900">Campaign Details (#{selectedCampaign.main_display_number ?? selectedCampaign.id})</h3>
               <span className="rounded border border-slate-200 bg-slate-100 px-2 py-1 text-[10px] font-black text-slate-700">{selectedCampaign.teaser_mode === "teaser_only" ? "TEASER" : selectedCampaign.type_label}</span>
               <button onClick={() => setViewModalOpen(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
                 <X size={20} />
@@ -544,8 +614,8 @@ export default function AdminCampaignsPage() {
                     <div><span className="text-slate-500">Type:</span> <span className="font-medium text-slate-900">{selectedCampaign.teaser_mode === "teaser_only" ? "TEASER" : selectedCampaign.type_label}</span></div>
                     <div><span className="text-slate-500">Budget:</span> <span className="font-medium text-slate-900">{money(selectedCampaign.budget)}</span></div>
                     <div><span className="text-slate-500">Remaining:</span> <span className="font-medium text-slate-900">{money(selectedCampaign.remaining_budget)}</span></div>
-                    <div><span className="text-slate-500">CPM:</span> <span className="font-medium text-slate-900">${selectedCampaign.cpm}</span></div>
-                    {selectedCampaign.type === "clicks" && <div><span className="text-slate-500">CPC:</span> <span className="font-medium text-slate-900">{money(selectedCampaign.average_cpc)}</span></div>}
+                    <div><span className="text-slate-500">{selectedCampaign.source_campaign_kind === "channel_growth" ? "CPS" : selectedCampaign.type === "clicks" && String(selectedCampaign.teaser_mode || "none") === "none" ? "CPC" : "CPM"}:</span> <span className="font-medium text-slate-900">${selectedCampaign.source_campaign_kind === "channel_growth" ? selectedCampaign.cost_per_subscriber : selectedCampaign.type === "clicks" && String(selectedCampaign.teaser_mode || "none") === "none" ? selectedCampaign.cpc : selectedCampaign.cpm}</span></div>
+                    {selectedCampaign.type === "clicks" && String(selectedCampaign.teaser_mode || "none") !== "none" && <div><span className="text-slate-500">CPC:</span> <span className="font-medium text-slate-900">{money(selectedCampaign.average_cpc)}</span></div>}
                     <div><span className="text-slate-500">Status:</span> <span className="font-medium text-slate-900 capitalize">{statusLabel(selectedCampaign)}</span></div>
                     <div><span className="text-slate-500">Trust:</span> <span className="font-medium text-slate-900 capitalize">{selectedCampaign.advertiser_trust_level || "new"}</span></div>
                     <div><span className="text-slate-500">Quality:</span> <span className="font-medium text-slate-900 capitalize">{selectedCampaign.quality_score || 50} / {selectedCampaign.quality_tier || "average"}</span></div>
@@ -555,7 +625,7 @@ export default function AdminCampaignsPage() {
                     <div><span className="text-slate-500">Approved:</span> <span className="font-medium text-slate-900">{selectedCampaign.advertiser_approved_campaigns || 0}</span></div>
                     <div><span className="text-slate-500">Rejected:</span> <span className="font-medium text-slate-900">{selectedCampaign.advertiser_rejected_campaigns || 0}</span></div>
                     {selectedCampaign.status === "rejected" && selectedCampaign.rejection_reason && <div className="col-span-2 rounded-md border border-red-100 bg-red-50 p-2 text-red-700"><span className="font-semibold">Rejection reason:</span> {selectedCampaign.rejection_reason}</div>}
-                    <div className="col-span-2"><ModerationHistory entityType={selectedCampaign.campaign_kind === "miniapp" ? "miniapp_rewarded_campaign" : "campaign"} entityId={selectedCampaign.id} /></div>
+                    {!silverMode && <div className="col-span-2"><ModerationHistory entityType={selectedCampaign.campaign_kind === "miniapp" ? "miniapp_rewarded_campaign" : "campaign"} entityId={selectedCampaign.id} /></div>}
                     <div className="col-span-2 border-t border-slate-200 pt-3">
                       <span className="text-slate-500 block mb-2">Full Targeting Configuration</span>
                       <div className="grid grid-cols-1 gap-2 rounded-md bg-white p-3 text-xs sm:grid-cols-2">
@@ -570,7 +640,7 @@ export default function AdminCampaignsPage() {
                         <div><span className="text-slate-500">Frequency Cap:</span> <span className="font-medium text-slate-900">{selectedCampaign.frequency_cap_per_user || "No cap"}</span></div>
                         <div><span className="text-slate-500">Start:</span> <span className="font-medium text-slate-900">{renderDateRestriction(selectedCampaign.start_at)}</span></div>
                         <div><span className="text-slate-500">End:</span> <span className="font-medium text-slate-900">{renderDateRestriction(selectedCampaign.end_at)}</span></div>
-                        <div className="col-span-2"><span className="text-slate-500">Daily Budget:</span> <span className="font-medium text-slate-900">{selectedCampaign.daily_budget_limit ? `$${selectedCampaign.daily_budget_limit}` : "No cap"}</span></div>
+                        <div className="col-span-2"><span className="text-slate-500">Daily Cap:</span> <span className="font-medium text-slate-900">{Number(selectedCampaign.daily_budget_limit || 0) > 0 ? `$${Number(selectedCampaign.daily_budget_limit).toFixed(2)}` : "No daily cap"}</span></div>
                       </div>
                     </div>
                   </div>
@@ -657,20 +727,20 @@ export default function AdminCampaignsPage() {
                         </span>
                         <span className="max-w-[150px] truncate font-medium text-slate-900" title={campaign.name}>{campaign.name}</span>
                       </div>
-                      <div className="text-xs text-slate-500 mt-0.5">ID: #{campaign.id} - User: {campaign.user_id}</div>
+                      <div className="text-xs text-slate-500 mt-0.5">ID: #{campaign.main_display_number ?? campaign.id} - User: {campaign.user_id}</div>
                       <div className="text-xs text-slate-500 capitalize">Trust: {campaign.advertiser_trust_level || "new"} - Quality: {campaign.quality_score || 50}</div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="font-black text-slate-900">{campaign.type_label}</div>
                       <div className="text-xs text-slate-500">Budget: {money(campaign.budget)}</div>
                       <div className="text-xs text-slate-500">Spend: {money(campaign.spend)}</div>
-                      <div className="text-xs text-slate-500">{campaign.type === "clicks" ? `CPC: ${money(campaign.average_cpc)}` : `CPM: ${money(campaign.cpm)}`}</div>
+                      <div className="text-xs text-slate-500">{campaign.source_campaign_kind === "channel_growth" ? `CPS: ${money(campaign.cost_per_subscriber)}` : campaign.type === "clicks" ? `CPC: ${money(String(campaign.teaser_mode || "none") === "none" ? campaign.cpc : campaign.average_cpc)}` : `CPM: ${money(campaign.cpm)}`}</div>
                     </td>
                     <td className="px-4 py-3">
                       <a href={campaign.link} target="_blank" className="text-blue-600 hover:underline block truncate max-w-[150px]">{campaign.link}</a>
                     </td>
                     <td className="px-4 py-3">
-                      <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${campaign.status === 'active' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : campaign.status === 'pending' ? 'bg-amber-50 text-amber-700 border border-amber-200' : campaign.status === 'rejected' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-700 border border-slate-200'}`}>
+                      <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${statusBadgeClass(campaign.status)}`}>
                         {statusLabel(campaign)}
                       </span>
                     </td>
@@ -678,7 +748,7 @@ export default function AdminCampaignsPage() {
                       <div className="flex items-center justify-end gap-2">
                         {campaign.campaign_kind === 'campaign' && (
                           <Link
-                            href={`/admin/campaigns/${campaign.id}`}
+                            href={silverMode ? `/check/silver/campaigns/${campaign.id}` : `/admin/campaigns/${campaign.main_display_number ?? campaign.id}`}
                             className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors cursor-pointer"
                             title="View Details"
                           >
@@ -692,7 +762,18 @@ export default function AdminCampaignsPage() {
                         >
                           <Eye size={16} />
                         </button>
-                        {campaign.status === "pending" && (
+                        {silverMode && campaign.campaign_kind === "campaign" && (
+                          <button
+                            onClick={() => setReleaseCampaignId(campaign.id)}
+                            disabled={actionLoading === campaign.id}
+                            className="rounded-full border border-blue-200 bg-blue-50 p-2 text-blue-600 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+                            title="Release"
+                            aria-label={`Release campaign ${campaign.id}`}
+                          >
+                            {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin" /> : <RotateCcw size={16} />}
+                          </button>
+                        )}
+                        {!silverMode && campaign.status === "pending" && (
                           <>
                             <button
                               onClick={() => openConfirmAction(campaign.id, campaign.campaign_kind, "approve", "Approve Campaign", "Approve this campaign?")}
@@ -717,7 +798,7 @@ export default function AdminCampaignsPage() {
                             {campaign.campaign_kind === 'campaign' && (
                               <>
                                 <button
-                                  onClick={() => openEmergencyConfirm(campaign.id, "fill_empty_slots", campaign.type === "broadcast")}
+                                  onClick={() => openEmergencyConfirm(silverMode ? campaign.id : (campaign.main_display_number ?? campaign.id), "fill_empty_slots", campaign.type === "broadcast")}
                                   disabled={actionLoading === campaign.id}
                                   className="p-1.5 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-md transition-colors border border-blue-100 cursor-pointer disabled:cursor-not-allowed"
                                   title={campaign.type === "broadcast" ? "Emergency Broadcast Push" : "Emergency Push: Fill Empty Slots"}
@@ -725,17 +806,19 @@ export default function AdminCampaignsPage() {
                                   {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Zap size={16} />}
                                 </button>
                                 {campaign.type !== "broadcast" && <button
-                                  onClick={() => openEmergencyConfirm(campaign.id, "replace_everything", campaign.type === "broadcast")}
+                                  onClick={() => openEmergencyConfirm(silverMode ? campaign.id : (campaign.main_display_number ?? campaign.id), "replace_everything", campaign.type === "broadcast")}
                                   disabled={actionLoading === campaign.id}
                                   className="px-2 py-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-md transition-colors border border-red-100 cursor-pointer disabled:cursor-not-allowed text-[10px] font-bold"
-                                  title="Emergency Push: Replace Everything"
+                                  title="Emergency Push: Replace in Every Channel"
                                 >
                                   Replace
                                 </button>}
                               </>
                             )}
                             <button
-                              onClick={() => openConfirmAction(campaign.id, campaign.campaign_kind, "pause", "Pause Campaign", "Pause this campaign?")}
+                              onClick={() => campaign.campaign_kind === "campaign" && ["views","clicks"].includes(campaign.type)
+                                ? setPauseChoice({ id: campaign.main_display_number ?? campaign.id, kind: campaign.campaign_kind, name: campaign.name })
+                                : openConfirmAction(campaign.id, campaign.campaign_kind, "pause", "Pause Campaign", "Pause this campaign?")}
                               disabled={actionLoading === campaign.id}
                               className="p-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 rounded-md transition-colors border border-amber-100 cursor-pointer disabled:cursor-not-allowed"
                               title="Pause"
@@ -752,6 +835,23 @@ export default function AdminCampaignsPage() {
                             title="Resume"
                           >
                             {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Play size={16} />}
+                          </button>
+                        )}
+                        {!silverMode && campaign.campaign_kind === "campaign" && campaign.status === "daily_cap_reached" && (
+                          <button
+                            onClick={() => openConfirmAction(
+                              campaign.main_display_number ?? campaign.id,
+                              campaign.campaign_kind,
+                              "pause_only",
+                              `Pause “${campaign.name}”?`,
+                              `“${campaign.name}” has reached today’s daily cap and would normally resume automatically on the next billing day. Pause it manually? It will remain paused until an admin resumes it.`,
+                            )}
+                            disabled={actionLoading === campaign.id}
+                            className="p-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 rounded-md transition-colors border border-amber-100 cursor-pointer disabled:cursor-not-allowed"
+                            title="Pause manually"
+                            aria-label={`Pause ${campaign.name} manually`}
+                          >
+                            {actionLoading === campaign.id ? <Loader2 size={16} className="animate-spin"/> : <Pause size={16} />}
                           </button>
                         )}
                       </div>
@@ -771,6 +871,10 @@ export default function AdminCampaignsPage() {
           </div>
         </div>
       </div>
-    </AdminLayout>
+    </PageFrame>
   );
+}
+
+export default function AdminCampaignsPage() {
+  return <AdminCampaignsView />;
 }

@@ -1,7 +1,9 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
+import { authenticateChannelPublisher, channelTelegram, requireChannelBotPermissions, requireChannelPublisherAuthority, requireStableChannelId, throwIfPrivateVerificationUnavailable, ChannelOnboardingError, onboardingErrorResponse, channelOnboardingTelemetry } from "@/lib/channelOnboarding";
+import { randomUUID } from "node:crypto";
 import { normalizePostingTimes, normalizePostsPerDay } from "@/lib/postingTimes";
 import { requireUserWritesAllowed } from "@/lib/productionSafety";
 import {
@@ -28,6 +30,7 @@ import { sanitizePublisherChannel } from "@/lib/channelRefreshPolicy";
 import { logPublisherChannelError, publisherChannelError } from "@/lib/publisherChannelErrors";
 import { isTransientDatabaseError, queryWithRetry } from "@/lib/dbResilience";
 import { validateTeaserDailyLimit } from "@/lib/teaser";
+import { verifyTelegramChannelAccess } from "@/lib/telegramChannelAccess";
 
 type ExistingChannelRow = RowDataPacket & { id: number; user_id: number; is_deleted: boolean | number };
 
@@ -66,18 +69,22 @@ async function columnExists(tableName: string, columnName: string) {
   return rows.length > 0;
 }
 
-async function telegram(token: string, method: string, body: Record<string, unknown>) {
+const telegram = channelTelegram;
+
+/** The committed registration is authoritative; auxiliary failures cannot undo API success. */
+function scheduleSubmissionFollowUp(channelId: number, chatId: string, username: string | null, publisherId: number, telegramId: string, title: string) {
   try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+    after(async () => {
+      try {
+        const access = await verifyTelegramChannelAccess({ channelId, chatId, username, source: "submission", persist: true, autoPauseActive: false });
+        if (access.ok) await sendChannelWelcomePostIfNeeded(channelId, chatId);
+      } catch (error) { logPublisherChannelError("submission_health", error); }
+      try { await notifyChannelSubmitted(telegramId, channelId, title); }
+      catch (error) { logPublisherChannelError("submission_notification", error); }
+      try { await safeQueuePublisherWelcome(publisherId); }
+      catch (error) { logPublisherChannelError("submission_welcome", error); }
     });
-    return response.json();
-  } catch (error) {
-    logPublisherChannelError(`telegram_${method}`, error);
-    return { ok: false, description: "Unable to reach Telegram. Please try again." };
-  }
+  } catch (error) { logPublisherChannelError("submission_followup_schedule", error); }
 }
 
 function addTrackingColumns(
@@ -210,12 +217,26 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const requestId = randomUUID();
+  channelOnboardingTelemetry({ requestId, stage: "attempt", result: "started" });
+  const response = await registerChannel(request, requestId);
+  const body = await response.clone().json().catch(() => ({}));
+  const candidate = body.code || body.error?.code;
+  const code = typeof candidate === "string" && /^[A-Z_]+$/.test(candidate) ? candidate : `HTTP_${response.status}`;
+  channelOnboardingTelemetry({ requestId, stage: "response", result: response.ok ? "success" : "failed", code });
+  response.headers.set("X-Request-Id", requestId);
+  return response;
+}
+
+async function registerChannel(request: Request, requestId: string) {
+  let publisherId: number | undefined;
   try {
     const blocked = await requireUserWritesAllowed();
     if (blocked) return blocked;
 
-    const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await authenticateChannelPublisher(request);
+    publisherId = Number(user.id);
+    channelOnboardingTelemetry({ requestId, publisherId, stage: "auth", result: "success" });
 
     const body = await request.json();
     const {
@@ -229,7 +250,6 @@ export async function POST(request: Request) {
       channel_type,
       invite_link,
       verification_token,
-      subscriber_count,
       teaser_enabled,
       teaser_daily_limit,
     } = body;
@@ -251,7 +271,6 @@ export async function POST(request: Request) {
     const normalizedInviteHash = normalizedChannelType === "private" ? hashInviteLink(normalizedPrivateInviteLink) : null;
     let normalizedUsername = normalizedChannelType === "public" ? normalizePublicChannelUsername(username) : null;
     let resolvedChatId = String(chat_id || "").trim();
-    let privateSubscriberCount = Number.isFinite(Number(subscriber_count)) ? Number(subscriber_count) : null;
     let tokenInspection: PrivateChannelTokenInspection | null = null;
 
     if (normalizedChannelType === "private" && !normalizedPrivateInviteLink) {
@@ -299,6 +318,7 @@ export async function POST(request: Request) {
       } else {
         const resolved = await resolvePrivateInviteLink(normalizedPrivateInviteLink!);
         if (!resolved.ok) {
+          throwIfPrivateVerificationUnavailable(resolved.code);
           logPrivateChannelDiagnostic("channel_submit_rejected", {
             token_received: tokenInspection.tokenReceived,
             token_valid: tokenInspection.valid,
@@ -313,7 +333,6 @@ export async function POST(request: Request) {
         }
 
         resolvedChatId = resolved.chatId;
-        privateSubscriberCount = resolved.participantsCount;
       }
     }
 
@@ -356,7 +375,7 @@ export async function POST(request: Request) {
     const minSubscribers = MINIMUM_PUBLISHER_CHANNEL_SUBSCRIBERS;
 
     // 2. Verify Telegram access and fetch current member count.
-    const chatData = await telegram(botToken, "getChat", { chat_id: resolvedChatId });
+    const chatData = await telegram(botToken, "getChat", { chat_id: normalizedChannelType === "public" ? `@${normalizedUsername}` : resolvedChatId });
     if (!chatData.ok) {
       return publisherChannelError("CHANNEL_NOT_ACCESSIBLE", 400);
     }
@@ -364,6 +383,8 @@ export async function POST(request: Request) {
     if (chatData.result?.type !== "channel") {
       return publisherChannelError("INVALID_CHANNEL", 400);
     }
+    requireStableChannelId(chatData.result.id);
+    channelOnboardingTelemetry({ requestId, publisherId, chatId: String(chatData.result.id), mode: normalizedChannelType, stage: "resolved", result: "success" });
 
     const telegramUsername = normalizePublicChannelUsername(chatData.result?.username);
     if (normalizedChannelType === "public") {
@@ -394,26 +415,19 @@ export async function POST(request: Request) {
     if (!meData.ok) return publisherChannelError("TELEGRAM_TEMPORARILY_UNAVAILABLE", 503);
     const memberData = await telegram(botToken, "getChatMember", { chat_id: resolvedChatId, user_id: meData.result?.id });
     const member = memberData.result;
+    requireChannelBotPermissions(memberData.ok ? member : undefined, normalizedChannelType === "private");
+    await requireChannelPublisherAuthority(botToken, resolvedChatId, String(user.telegram_id));
+    channelOnboardingTelemetry({ requestId, publisherId, chatId: resolvedChatId, mode: normalizedChannelType, stage: "ownership_and_bot", result: "success" });
     const isCreator = member?.status === "creator";
-    const hasRequiredAdminAccess = memberData.ok
-      && (member?.status === "administrator" || isCreator)
-      && (isCreator || member?.can_post_messages === true)
-      && (isCreator || member?.can_delete_messages === true)
-      && (normalizedChannelType !== "private" || isCreator || member?.can_invite_users === true);
-    if (!hasRequiredAdminAccess) {
-      return publisherChannelError("PERMISSION_REQUIRED", 400);
-    }
     const teaserStatus = !normalizedTeaserEnabled
       ? "disabled"
       : (isCreator || member?.can_edit_messages === true) ? "active" : "needs_permission";
 
-    const tgData = await telegram(botToken, "getChatMemberCount", { chat_id: resolvedChatId });
+    const tgData = await telegram<number>(botToken, "getChatMemberCount", { chat_id: resolvedChatId });
 
-    if (!tgData.ok && privateSubscriberCount === null) {
-      return publisherChannelError("PERMISSION_REQUIRED", 400);
-    }
-
-    const subscriberCount = tgData.ok ? Number(tgData.result || 0) : Number(privateSubscriberCount || 0);
+    if (!tgData.ok) throw new ChannelOnboardingError("TELEGRAM_TEMPORARILY_UNAVAILABLE", "Unable to verify the channel member count. Please try again shortly.", 503);
+    const subscriberCount = Number(tgData.result);
+    if (!Number.isSafeInteger(subscriberCount) || subscriberCount < 0) throw new ChannelOnboardingError("TELEGRAM_INVALID_RESPONSE", "Unable to verify the channel member count. Please try again shortly.", 503);
 
     if (subscriberCount < minSubscribers) {
       return Response.json({
@@ -432,15 +446,17 @@ export async function POST(request: Request) {
     );
 
     if (existing.length > 0) {
+      if (existing.length > 1) throw new ChannelOnboardingError("CHANNEL_IDENTITY_CONFLICT", "This channel has conflicting existing registrations. Please contact support.", 409);
       const channel = existing[0];
       
-      if (channel.user_id !== user.id) {
-        return publisherChannelError("CHANNEL_ALREADY_EXISTS", 409);
+      if (Number(channel.user_id) !== Number(user.id)) {
+        throw new ChannelOnboardingError("CHANNEL_OWNED_BY_ANOTHER_PUBLISHER", "This channel belongs to another AdsGalaxy publisher account.", 409);
       }
 
       // If it exists and NOT deleted, don't allow adding again
       if (!channel.is_deleted) {
-        return publisherChannelError("CHANNEL_ALREADY_EXISTS", 409);
+        channelOnboardingTelemetry({ requestId, publisherId, chatId: resolvedChatId, stage: "persist", result: "already_registered" });
+        return NextResponse.json({ success: true, id: channel.id, already_registered: true });
       }
 
       // If it belongs to same user and IS deleted, reactivate/update it
@@ -504,11 +520,26 @@ export async function POST(request: Request) {
 
       updateParams.push(channel.id);
 
-      await queryWithRetry(
-        `UPDATE channels SET ${updateColumns.join(", ")} WHERE id = ?`,
-        updateParams,
-        { operation: "publisher_channel_reactivate" }
-      );
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        const [locked] = await connection.query<ExistingChannelRow[]>("SELECT id,user_id,is_deleted FROM channels WHERE id=? FOR UPDATE", [channel.id]);
+        if (!locked[0] || Number(locked[0].user_id) !== Number(user.id)) throw new ChannelOnboardingError("CHANNEL_OWNED_BY_ANOTHER_PUBLISHER", "This channel belongs to another AdsGalaxy publisher account.", 409);
+        const [claims] = await connection.query<Array<RowDataPacket & {channel_id: number; telegram_chat_id: string | null}>>("SELECT channel_id,telegram_chat_id FROM channel_telegram_identities WHERE channel_id=? OR telegram_chat_id=? FOR UPDATE", [channel.id, resolvedChatId]);
+        if (claims.some(claim => Number(claim.channel_id) !== Number(channel.id) || (claim.telegram_chat_id && claim.telegram_chat_id !== resolvedChatId))) throw new ChannelOnboardingError("CHANNEL_IDENTITY_CONFLICT", "This channel has a conflicting existing registration. Please contact support.", 409);
+        if (locked[0].is_deleted) {
+          await connection.query(`UPDATE channels SET ${updateColumns.join(", ")} WHERE id = ?`, updateParams);
+          if (!claims.length) {
+            await connection.query("INSERT INTO channel_telegram_identities (channel_id,telegram_chat_id,channel_type,current_username,verification_state,last_check_source) VALUES (?,?,?,?,'unknown','submission_claim')", [channel.id,resolvedChatId,normalizedChannelType,normalizedUsername]);
+          } else {
+            await connection.query("UPDATE channel_telegram_identities SET telegram_chat_id=?,channel_type=?,current_username=? WHERE channel_id=?", [resolvedChatId,normalizedChannelType,normalizedUsername,channel.id]);
+          }
+        }
+        await connection.commit();
+      } catch (error) {
+        await connection.rollback().catch(() => undefined);
+        throw error;
+      } finally { connection.release(); }
 
       if (normalizedChannelType === "private") {
         logPrivateChannelDiagnostic("channel_submit_persisted", {
@@ -523,13 +554,14 @@ export async function POST(request: Request) {
         });
       }
 
-      await notifyChannelSubmitted(user.telegram_id, channel.id, normalizedTitle);
-      await safeQueuePublisherWelcome(user.id);
+      scheduleSubmissionFollowUp(channel.id, resolvedChatId, normalizedUsername, Number(user.id), String(user.telegram_id), normalizedTitle);
+      channelOnboardingTelemetry({ requestId, publisherId, chatId: resolvedChatId, stage: "persist", result: "reactivated" });
 
       return NextResponse.json({
         success: true,
         id: channel.id,
         message: "Channel reactivated and updated",
+        telegram_access_state: "unknown",
       });
     }
 
@@ -594,23 +626,40 @@ export async function POST(request: Request) {
 
     const placeholders = insertColumns.map(() => "?").join(", ");
     let result: ResultSetHeader;
+    const writeConn=await pool.getConnection();
     try {
-      [result] = await pool.query(
+      await writeConn.beginTransaction();
+      [result] = await writeConn.query(
         `INSERT INTO channels (${insertColumns.join(", ")}) VALUES (${placeholders})`,
         insertParams
       ) as [ResultSetHeader, unknown];
+      await writeConn.query(
+        `INSERT INTO channel_telegram_identities
+          (channel_id,telegram_chat_id,channel_type,current_username,bot_member_status,bot_can_post,
+           verification_state,last_checked_at,last_check_source)
+         VALUES (?,?,?,?,?,?, 'unknown',UTC_TIMESTAMP(6),'submission_claim')`,
+        [result.insertId,resolvedChatId,normalizedChannelType,normalizedUsername,member?.status||null,
+          isCreator||member?.can_post_messages===true?1:0]
+      );
+      await writeConn.commit();
     } catch (insertError) {
-      if (!isTransientDatabaseError(insertError)) throw insertError;
-
-      // A reset after COMMIT is ambiguous. Verify before asking the publisher to
-      // retry, so the same Telegram channel is not accidentally registered twice.
-      const [recovered] = await queryWithRetry<ExistingChannelRow[]>(
-        "SELECT id, user_id, is_deleted FROM channels WHERE chat_id = ? ORDER BY id DESC LIMIT 1",
+      await writeConn.rollback().catch(()=>undefined);
+      const code=String((insertError as {code?:unknown})?.code||"");
+      if(code!=="ER_DUP_ENTRY"&&!isTransientDatabaseError(insertError))throw insertError;
+      const [recovered] = await queryWithRetry<Array<ExistingChannelRow&{telegram_chat_id:string}>>(
+        `SELECT c.id,c.user_id,c.is_deleted,i.telegram_chat_id
+         FROM channel_telegram_identities i JOIN channels c ON c.id=i.channel_id
+         WHERE i.telegram_chat_id=? LIMIT 1`,
         [resolvedChatId],
         { operation: "publisher_channel_insert_recovery" }
       );
-      if (!recovered[0] || recovered[0].user_id !== user.id || recovered[0].is_deleted) throw insertError;
+      if(!recovered[0])throw insertError;
+      if(Number(recovered[0].user_id)!==Number(user.id)||recovered[0].is_deleted){
+        return publisherChannelError("CHANNEL_ALREADY_EXISTS",409);
+      }
       result = { insertId: recovered[0].id } as unknown as ResultSetHeader;
+    } finally {
+      writeConn.release();
     }
 
     if (normalizedChannelType === "private") {
@@ -626,14 +675,12 @@ export async function POST(request: Request) {
       });
     }
 
-    await notifyChannelSubmitted(user.telegram_id, result.insertId, normalizedTitle);
-    await sendChannelWelcomePostIfNeeded(result.insertId, resolvedChatId).catch((welcomeError: unknown) => {
-      logPublisherChannelError("welcome_post", welcomeError);
-    });
-    await safeQueuePublisherWelcome(user.id);
-
-    return NextResponse.json({ success: true, id: result.insertId });
+    scheduleSubmissionFollowUp(result.insertId, resolvedChatId, normalizedUsername, Number(user.id), String(user.telegram_id), normalizedTitle);
+    channelOnboardingTelemetry({ requestId, publisherId, chatId: resolvedChatId, stage: "persist", result: "success" });
+    return NextResponse.json({ success: true, id: result.insertId, telegram_access_state: "unknown" });
   } catch (error: unknown) {
+    channelOnboardingTelemetry({ requestId, publisherId, stage: "final", result: "failed", code: error instanceof ChannelOnboardingError ? error.code : "CHANNEL_CREATE_FAILED" });
+    if (error instanceof ChannelOnboardingError) return onboardingErrorResponse(error);
     logPublisherChannelError("create", error);
     if (isTransientDatabaseError(error)) {
       return publisherChannelError("DATABASE_TEMPORARILY_UNAVAILABLE", 503);

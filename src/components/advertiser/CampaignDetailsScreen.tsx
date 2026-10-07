@@ -44,6 +44,7 @@ interface Campaign {
   actual_spend?: string | number;
   pause_reason?: string | null;
   cpm: string | number;
+  cpc?: string | number | null;
   campaign_title?: string | null;
   message_text: string;
   image_url: string | null;
@@ -164,7 +165,7 @@ function computeCtr(campaign: Campaign) {
     return Number(campaign.ctr);
   const clicks = Number(campaign.total_clicks ?? campaign.clicks ?? 0);
   const views = Number(campaign.total_views ?? campaign.impressions ?? 0);
-  if (views <= 0) return null;
+  if (views <= 0) return (campaign.type === "views" || campaign.type === "clicks") && String(campaign.teaser_mode || "none") === "none" && campaign.kind !== "miniapp" ? 0 : null;
   return (clicks / views) * 100;
 }
 
@@ -522,12 +523,18 @@ export default function CampaignDetailsScreen({
         )}
 
         {usesUnifiedStatistics ? (
+          <>
+          {(campaign.kind === "channel" || campaign.campaign_kind === "channel_growth") && String(campaign.teaser_mode || "none") === "none" &&
+            <p className="text-xs font-bold text-slate-500">
+              {campaign.campaign_kind === "channel_growth" ? "CPS" : campaign.type === "clicks" ? "CPC" : "CPM"}: ${Number(campaign.campaign_kind === "channel_growth" ? campaign.cost_per_subscriber : campaign.type === "clicks" ? campaign.cpc : campaign.cpm).toFixed(4)}
+            </p>}
           <CampaignStatisticsPanel
             campaignId={campaign.id}
             campaignType={campaign.type === "clicks" ? "clicks" : "views"}
             campaignLabel={statisticsLabel}
             campaignKind={statisticsKind}
           />
+          </>
         ) : (
           <>
         {/* Stats Grid */}

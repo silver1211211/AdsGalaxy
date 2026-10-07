@@ -1,45 +1,10 @@
 import type { Pool, PoolConnection, RowDataPacket } from "mysql2/promise";
+import { enqueuePlatformNotification, recordBalanceNotificationTransition } from "@/lib/platformNotifications";
+import { calculateDepositBonus, decimalToUnits, unitsToDecimal } from "@/lib/depositBonusMath";
+
+export { calculateDepositBonus, depositBonusRateBasisPoints } from "@/lib/depositBonusMath";
 
 export const DEPOSIT_BONUS_PROMOTION_SLUG = "deposit-bonus-2026-two-month";
-
-const MONEY_SCALE = BigInt(100_000_000);
-
-function decimalToUnits(value: unknown): bigint {
-  const text = String(value ?? "0").trim();
-  if (!/^\d+(?:\.\d+)?$/.test(text)) throw new Error("invalid_deposit_amount");
-  const [whole, fraction = ""] = text.split(".");
-  return BigInt(whole) * MONEY_SCALE + BigInt((fraction + "00000000").slice(0, 8));
-}
-
-function unitsToDecimal(units: bigint): string {
-  const whole = units / MONEY_SCALE;
-  const fraction = (units % MONEY_SCALE).toString().padStart(8, "0");
-  return `${whole}.${fraction}`;
-}
-
-export function depositBonusRateBasisPoints(amount: unknown): number {
-  const units = decimalToUnits(amount);
-  if (units < BigInt(100) * MONEY_SCALE) return 0;
-  if (units < BigInt(300) * MONEY_SCALE) return 500;
-  if (units < BigInt(720) * MONEY_SCALE) return 750;
-  if (units < BigInt(2201) * MONEY_SCALE) return 1000;
-  return 1200;
-}
-
-export function calculateDepositBonus(amount: unknown) {
-  const principalUnits = decimalToUnits(amount);
-  const rateBasisPoints = depositBonusRateBasisPoints(amount);
-  const rawNumerator = principalUnits * BigInt(rateBasisPoints);
-  const rawUnits = rawNumerator / BigInt(10_000);
-  const centUnits = BigInt(1_000_000);
-  const bonusUnits = ((rawUnits + centUnits / BigInt(2)) / centUnits) * centUnits;
-  return {
-    rateBasisPoints,
-    ratePercent: unitsToDecimal(BigInt(rateBasisPoints) * BigInt(10_000)),
-    bonusAmount: unitsToDecimal(bonusUnits),
-    totalCredited: unitsToDecimal(principalUnits + bonusUnits),
-  };
-}
 
 type PromotionRow = RowDataPacket & {
   id: number;
@@ -177,7 +142,7 @@ export async function confirmDepositCredit(
         rateBasisPoints: Number(bonuses[0]?.rate_basis_points || 0),
       };
     }
-    if (!["pending", "waiting", "paying"].includes(deposit.status)) {
+    if (!["pending", "waiting", "paying", "canceled"].includes(deposit.status)) {
       await conn.commit();
       return {
         credited: false,
@@ -187,6 +152,10 @@ export async function confirmDepositCredit(
         rateBasisPoints: 0,
       };
     }
+
+    const [[balanceBefore]] = await conn.query<Array<RowDataPacket & { ad_balance: string | number }>>(
+      "SELECT ad_balance FROM users WHERE id=? FOR UPDATE", [input.userId]);
+    const previousBalance = Number(balanceBefore?.ad_balance || 0);
 
     const [updated] = await conn.query<import("mysql2/promise").ResultSetHeader>(
       `UPDATE deposits
@@ -210,6 +179,19 @@ export async function confirmDepositCredit(
       userId: input.userId,
       confirmedAmount: input.confirmedAmount,
       confirmedAt: input.confirmedAt,
+    });
+    const [[balanceAfter]] = await conn.query<Array<RowDataPacket & { ad_balance: string | number }>>(
+      "SELECT ad_balance FROM users WHERE id=?", [input.userId]);
+    const newBalance = Number(balanceAfter?.ad_balance || 0);
+    await recordBalanceNotificationTransition(conn, { userId: input.userId, previousBalance, newBalance });
+    await enqueuePlatformNotification(conn, {
+      eventKey: `deposit_success:${deposit.id}`,
+      userId: input.userId,
+      eventType: "deposit_success",
+      entityType: "deposit",
+      entityId: deposit.id,
+      messageHtml: `<b>Deposit successful ✅</b>\n\n<b>$${Number(input.confirmedAmount).toFixed(2)}</b> has been added to your Ads Galaxy balance.`,
+      metadata: { principal_amount: input.confirmedAmount, bonus_amount: bonus.bonusAmount },
     });
     await conn.commit();
     return {

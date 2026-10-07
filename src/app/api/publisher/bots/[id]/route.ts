@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthErrorStatus } from "@/lib/auth";
+import { authenticatePublisherAsset, PublisherAssetError, publisherAssetErrorResponse } from "@/lib/publisherAssetOnboarding";
 import { reactivateBotAfterHealthCheck } from "@/lib/botLifecycle";
 import { ensureBotIntegration, isBotEncryptionError, loadBotToken, publisherBotEncryptionErrorMessage, regenerateBotIntegration, resolveBotIntegrationStatus } from "@/lib/botIntegration";
 import { notifyBotRemoved } from "@/lib/publisherNotifications";
@@ -69,8 +70,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await authenticatePublisherAsset(request);
     const { id } = await params;
     const [hasBotUserSource, hasIntegrationFirstSeen, hasBroadcastDeliveries, hasBroadcastPublisherReward, hasBotIntegrationEvents] = await Promise.all([
       columnExists("bot_users", "source"),
@@ -190,6 +190,7 @@ export async function GET(
       headers: { "Cache-Control": "private, no-store, max-age=0" },
     });
   } catch (error: unknown) {
+    if (error instanceof PublisherAssetError) return publisherAssetErrorResponse(error);
     if (isBotEncryptionError(error)) {
       console.error("GET Bot Details encryption/configuration failure", { code: error.code });
       return NextResponse.json({ error: publisherBotEncryptionErrorMessage() }, { status: 503 });
@@ -207,8 +208,7 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await authenticatePublisherAsset(request);
     const { id } = await params;
 
     const body = await request.json().catch(() => ({}));
@@ -290,6 +290,7 @@ export async function PATCH(
 
     return NextResponse.json({ error: "No update fields provided" }, { status: 400 });
   } catch (error: unknown) {
+    if (error instanceof PublisherAssetError) return publisherAssetErrorResponse(error);
     if (isBotEncryptionError(error)) {
       console.error("PATCH Bot encryption/configuration failure", { code: error.code });
       return NextResponse.json({ error: publisherBotEncryptionErrorMessage() }, { status: 503 });
@@ -304,8 +305,7 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await authenticatePublisherAsset(request);
     const { id } = await params;
 
     const [botRows] = await pool.query<RowDataPacket[]>(
@@ -330,6 +330,7 @@ export async function DELETE(
 
     return NextResponse.json({ success: true });
   } catch (error: unknown) {
+    if (error instanceof PublisherAssetError) return publisherAssetErrorResponse(error);
     console.error("DELETE Bot Error:", error);
     return NextResponse.json({ error: error instanceof Error ? error.message : "Failed to delete bot" }, { status: getAuthErrorStatus(error) });
   }

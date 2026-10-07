@@ -1,18 +1,19 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
-import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
+import { getAuthErrorStatus } from "@/lib/auth";
+import { authenticatePublisherAsset, PublisherAssetError, publisherAssetErrorResponse } from "@/lib/publisherAssetOnboarding";
 import { buildMiniAppReport, getMiniAppReportParams } from "@/lib/miniappReports";
+import type { RowDataPacket } from "mysql2/promise";
 
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const initData = request.headers.get("x-telegram-init-data");
-    const user = await getAuthenticatedUser(initData);
+    const user = await authenticatePublisherAsset(request);
     const { id } = await params;
 
-    const [rows]: any = await pool.query(
+    const [rows] = await pool.query<RowDataPacket[]>(
       "SELECT id FROM miniapps WHERE id = ? AND user_id = ? AND is_deleted = FALSE",
       [id, user.id]
     );
@@ -24,9 +25,10 @@ export async function GET(
     const { startDate, endDate, dateSearch } = getMiniAppReportParams(request.url);
     const report = await buildMiniAppReport(id, startDate, endDate, dateSearch);
     return NextResponse.json(report);
-  } catch (error: any) {
+  } catch (error: unknown) {
+    if (error instanceof PublisherAssetError) return publisherAssetErrorResponse(error);
     console.error("Publisher Mini App Report Error:", error);
     const status = getAuthErrorStatus(error);
-    return NextResponse.json({ error: error.message || "Failed to fetch Mini App report" }, { status });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Failed to fetch Mini App report" }, { status });
   }
 }

@@ -15,6 +15,7 @@ import { replaceCampaignExclusions } from "@/lib/campaignInventoryExclusions";
 import { validateTotalBudget } from "@/lib/campaignBudget";
 import { safeQueueAdvertiserOnboarding } from "@/lib/supportMessages";
 import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByIds } from "@/lib/miniappCampaignMetrics";
+import { campaignCreateFingerprint, completeCampaignCreate, failCampaignCreate, reserveCampaignCreate } from "@/lib/campaignCreateIdempotency";
 
 function cleanText(value: unknown) {
   return String(value || "").trim();
@@ -219,6 +220,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const conn = await pool.getConnection();
+  let createReservationId:number|null=null;
 
   try {
     const user = await getAuthenticatedUser(request.headers.get("x-telegram-init-data"));
@@ -271,6 +273,11 @@ export async function POST(request: Request) {
     if (!/^https?:\/\//i.test(landingUrl) || !/^https?:\/\//i.test(imageUrl)) {
       return NextResponse.json({ error: "Landing URL and image URL must be valid http(s) URLs" }, { status: 400 });
     }
+    const reservation=await reserveCampaignCreate({advertiserId:Number(user.id),operation:"miniapp",rawKey:String(request.headers.get("idempotency-key")||""),fingerprint:campaignCreateFingerprint(body)});
+    if(reservation.outcome==="replay")return NextResponse.json(reservation.response);
+    if(reservation.outcome==="conflict")return NextResponse.json({error:"This Idempotency-Key was already used for different campaign details."},{status:409});
+    if(reservation.outcome==="in_progress")return NextResponse.json({error:"This campaign creation request is still processing. Retry with the same Idempotency-Key."},{status:409,headers:{"Retry-After":"2"}});
+    createReservationId=reservation.id;
     const imageMetadata = await validateCreativeImageUrl(imageUrl);
     if (logoUrl) {
       const logoMetadata = await validateCreativeImageUrl(logoUrl, 500 * 1024);
@@ -391,15 +398,18 @@ export async function POST(request: Request) {
 
     await safeQueueAdvertiserOnboarding(user.id, conn);
 
+    await completeCampaignCreate(conn,{reservationId:createReservationId,campaignId:Number(result.insertId),response:{success:true,id:Number(result.insertId)}});
     await conn.commit();
     return NextResponse.json({ success: true, id: result.insertId });
   } catch (error: any) {
+    if(createReservationId!==null)await failCampaignCreate(createReservationId,error).catch(()=>undefined);
     try {
       await conn.rollback();
     } catch {
       // Transaction may not have started.
     }
-    return NextResponse.json({ error: error.message || "Failed to create Mini App rewarded campaign" }, { status: getAuthErrorStatus(error) });
+    const status=Number(error?.status||0)||getAuthErrorStatus(error);
+    return NextResponse.json({ error: error.message || "Failed to create Mini App rewarded campaign" }, { status });
   } finally {
     conn.release();
   }

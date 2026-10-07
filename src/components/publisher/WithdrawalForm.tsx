@@ -1,6 +1,7 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars -- legacy form retains loose API errors and icon imports */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import {
   Wallet,
@@ -38,6 +39,7 @@ export default function WithdrawalForm({ availableBalance, onClose, onSuccess, t
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [limits, setLimits] = useState({ min: 10, max: 500 });
+  const requestKeyRef = useRef(crypto.randomUUID());
 
   // Range slider value (percentage)
   const [percent, setPercent] = useState(0);
@@ -112,11 +114,13 @@ export default function WithdrawalForm({ availableBalance, onClose, onSuccess, t
     try {
       const res = await apiFetch("/api/publisher/withdrawals", {
         method: "POST",
+        headers: { "Idempotency-Key": requestKeyRef.current },
         body: JSON.stringify({ amount: val, network, address }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to place withdrawal");
 
+      requestKeyRef.current = crypto.randomUUID();
       onSuccess();
       onClose();
     } catch (err: any) {

@@ -4,14 +4,21 @@ import test from "node:test";
 
 const read = (path) => readFileSync(path, "utf8");
 
-test("campaign feed is a stable five-at-a-time server page", () => {
+test("campaign feed is a stable fifteen-at-a-time server page", () => {
   const route = read("src/app/api/advertiser/campaign-feed/route.ts");
   const page = read("src/app/advertiser/campaigns/page.tsx");
-  assert.match(route, /const PAGE_SIZE = 5/);
+  assert.match(route, /const PAGE_SIZE = 15/);
+  assert.match(route, /params\.push\(PAGE_SIZE \+ 1\)/);
+  assert.match(route, /const has_more = rows\.length > PAGE_SIZE/);
+  assert.match(route, /rows\.slice\(0, PAGE_SIZE\)/);
   assert.match(route, /ORDER BY feed\.created_at DESC, feed\.source ASC, feed\.id DESC LIMIT \?/);
   assert.match(route, /next_cursor/);
   assert.match(page, /api\/advertiser\/campaign-feed/);
+  assert.match(page, /cursor \? \[\.\.\.current, \.\.\.data\.results\] : data\.results/);
+  assert.match(page, /\{hasMore && \(/);
   assert.match(page, /See More/);
+  assert.match(page, /!hasMore && !isLoadingMore && campaigns\.length > 0/);
+  assert.match(page, /- End -/);
   assert.doesNotMatch(page, /Promise\.all\(\[\s*apiFetch\("\/api\/advertiser\/campaigns"\)/);
 });
 
