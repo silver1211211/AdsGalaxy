@@ -1,6 +1,7 @@
 import "server-only";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { decimalToUnits, unitsToDecimal } from "@/lib/channelAllocationMath";
 
 type ReconciliationRow = RowDataPacket & {
   internal_id: number;
@@ -70,5 +71,64 @@ export async function inspectChannelCampaignFinancialIntegrity(campaignId: numbe
     differences,
     balanced: Object.values(differences).every((value) => Math.abs(value) <= 0.00000001)
       && number(row.pending_publisher_credits) === 0,
+  };
+}
+
+/**
+ * AdsGalaxy V1.01 Unified Financial Reconciliation Probe.
+ * Inspects canonical settlement records, reserve advances, and ARR recoveries.
+ * Pure read-only verification; never mutates balances.
+ */
+export async function inspectUnifiedChannelFinancialReconciliation(
+  conn: { query: Function } = pool,
+  campaignId?: number
+): Promise<{
+  campaignId?: number;
+  totalAdvertiserDebitDecimal: string;
+  totalPublisherCreditDecimal: string;
+  totalPlatformRevenueDecimal: string;
+  totalReserveContributionDecimal: string;
+  totalArrRecoveredDecimal: string;
+  isBalanced: boolean;
+  discrepancyDecimal: string;
+}> {
+  const clauses = ["status = 'settled'"];
+  const params: any[] = [];
+  if (campaignId !== undefined) {
+    clauses.push("campaign_id = ?");
+    params.push(campaignId);
+  }
+
+  const [rows] = await conn.query(
+    `SELECT
+       COALESCE(SUM(advertiser_debit), 0) AS total_debit,
+       COALESCE(SUM(publisher_credit), 0) AS total_pub,
+       COALESCE(SUM(platform_revenue), 0) AS total_plat,
+       COALESCE(SUM(reserve_contribution), 0) AS total_res,
+       COALESCE(SUM(arr_recovered), 0) AS total_arr
+     FROM channel_unified_settlement_events
+     WHERE ${clauses.join(" AND ")}`,
+    params
+  );
+
+  const row = (rows as any[])[0] || {};
+  const debitUnits = decimalToUnits(row.total_debit || "0.00000000");
+  const pubUnits = decimalToUnits(row.total_pub || "0.00000000");
+  const platUnits = decimalToUnits(row.total_plat || "0.00000000");
+  const resUnits = decimalToUnits(row.total_res || "0.00000000");
+  const arrUnits = decimalToUnits(row.total_arr || "0.00000000");
+
+  const componentsSum = pubUnits + arrUnits + platUnits + resUnits;
+  const diffUnits = debitUnits > componentsSum ? debitUnits - componentsSum : componentsSum - debitUnits;
+
+  return {
+    campaignId,
+    totalAdvertiserDebitDecimal: unitsToDecimal(debitUnits),
+    totalPublisherCreditDecimal: unitsToDecimal(pubUnits),
+    totalPlatformRevenueDecimal: unitsToDecimal(platUnits),
+    totalReserveContributionDecimal: unitsToDecimal(resUnits),
+    totalArrRecoveredDecimal: unitsToDecimal(arrUnits),
+    isBalanced: diffUnits === BigInt(0),
+    discrepancyDecimal: unitsToDecimal(diffUnits),
   };
 }

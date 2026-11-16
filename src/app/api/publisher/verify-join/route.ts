@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 /* eslint-disable @typescript-eslint/no-explicit-any -- settings and transactional rows are dynamically shaped */
 import pool from "@/lib/db";
+import { withFinancialPostingContext } from "@/lib/financialPostingContext";
 import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { processVerifiedReferralForUser } from "@/lib/referralSprint";
 import { blockReferralForUserIfSelfDevice, getReferralSecuritySignals } from "@/lib/referralSecurity";
@@ -73,10 +74,15 @@ export async function POST(request: Request) {
         await connection.query("UPDATE users SET join_rewarded = TRUE WHERE id = ?", [user.id]);
         return { credited: false, idempotent: true };
       }
-      const [credited]: any = await connection.query(
+      const [credited]: any = await withFinancialPostingContext(connection, {
+        sourceKey: `referral:publisher-join:${user.id}`,
+        sourceSystem: "publisher_join_reward",
+        sourceRecordId: String(user.id),
+        policyVersion: "historical-join-reward-v1",
+      }, () => connection.query(
         `UPDATE users SET join_rewarded = TRUE, balance_available = balance_available + ?
          WHERE id = ? AND join_rewarded = FALSE`, [rewardAmount, user.id]
-      );
+      ));
       if (credited.affectedRows !== 1) throw new Error("join_reward_credit_race");
       return { credited: true, idempotent: false };
     }, { operation: "publisher_join_reward" });

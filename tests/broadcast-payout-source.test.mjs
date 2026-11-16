@@ -4,7 +4,8 @@ import { test } from "node:test";
 
 const engine = readFileSync("src/lib/broadcastPublisherCpmEngine.ts", "utf8");
 const broadcastCron = readFileSync("src/app/api/cron/process-broadcast/route.ts", "utf8");
-const emergencyPush = readFileSync("src/app/api/admin/campaigns/[id]/emergency-push/route.ts", "utf8");
+const emergencyPushRoute = readFileSync("src/app/api/admin/campaigns/[id]/emergency-push/route.ts", "utf8");
+const emergencyPush = readFileSync("src/lib/campaignEmergencyPushHandler.ts", "utf8");
 const adminSettings = readFileSync("src/app/api/admin/settings/route.ts", "utf8");
 const publisherAnalytics = readFileSync("src/app/api/publisher/bots/[id]/analytics/route.ts", "utf8");
 const advertiserDetails = readFileSync("src/app/api/advertiser/campaigns/[id]/route.ts", "utf8");
@@ -35,6 +36,7 @@ test("Bot payout uses configurable publisher, reserve, and platform shares", () 
 });
 
 test("normal broadcasts and Emergency Push share the same Bot payout calculator", () => {
+  assert.match(emergencyPushRoute, /handleCampaignEmergencyPush/);
   for (const source of [broadcastCron, emergencyPush]) {
     assert.match(source, /getBroadcastPayoutSettings/);
     assert.match(source, /calculateBroadcastPayout/);

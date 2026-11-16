@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Search,
   Loader2,
@@ -117,13 +117,36 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
     }
   }, [step, onClose, isEdit]);
 
+  const verificationInFlight = useRef(false);
+  const verificationRetryUntil = useRef(0);
+  const [verificationRetryAt, setVerificationRetryAt] = useState(0);
+  useEffect(() => {
+    if (!verificationRetryAt) return;
+    let timer: number | undefined;
+    const checkExpiry = () => {
+      const remaining = verificationRetryAt - Date.now();
+      if (remaining <= 0) { setVerificationRetryAt(0); return; }
+      timer = window.setTimeout(checkExpiry, Math.min(remaining, 2147483647));
+    };
+    checkExpiry();
+    return () => { if (timer !== undefined) window.clearTimeout(timer); };
+  }, [verificationRetryAt]);
+
   const handleFetchInfo = async () => {
-    if (!username) return;
+    if (!username || verificationInFlight.current || Date.now() < verificationRetryUntil.current) return;
+    verificationInFlight.current = true;
     setIsLoading(true);
     setNotification(null);
     try {
       const res = await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(username)}`, { timeoutMs: 60000 });
       const data: unknown = await res.json();
+      if (res.status === 429 && (data as {code?: string}).code === "TELEGRAM_RATE_LIMITED") {
+        const retry = Number(res.headers.get("Retry-After"));
+        if (Number.isFinite(retry) && retry > 0) {
+          verificationRetryUntil.current = Date.now() + retry * 1000;
+          setVerificationRetryAt(verificationRetryUntil.current);
+        }
+      }
       
       if (!res.ok) {
         const legacyData = data as { error?: unknown; message?: string };
@@ -151,6 +174,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
         message: err instanceof Error ? err.message : "Failed to fetch channel info"
       });
     } finally {
+      verificationInFlight.current = false;
       setIsLoading(false);
     }
   };
@@ -217,7 +241,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
   };
 
   const handleSubmit = async () => {
-    if (isLoading) return;
+    if (isLoading || verificationInFlight.current || Date.now() < verificationRetryUntil.current) return;
     if (!channelInfo) {
       setNotification({ type: "error", title: "Registration Failed", message: "Fetch the channel information before registering it." });
       return;
@@ -240,6 +264,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
       return;
     }
 
+    verificationInFlight.current = true;
     setIsLoading(true);
     setNotification(null);
     try {
@@ -262,6 +287,10 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
 
       if (!res.ok) {
         const data = await res.json();
+        if (res.status === 429 && data.code === "TELEGRAM_RATE_LIMITED") {
+          const retry = Number(res.headers.get("Retry-After"));
+          if (Number.isFinite(retry) && retry > 0) { verificationRetryUntil.current = Date.now() + retry * 1000; setVerificationRetryAt(verificationRetryUntil.current); }
+        }
         throw new Error(getApiErrorMessage(data, `Failed to ${isEdit ? 'update' : 'add'} channel`));
       }
 
@@ -274,6 +303,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
         message: err instanceof Error ? err.message : `Failed to ${isEdit ? "update" : "add"} channel`
       });
     } finally {
+      verificationInFlight.current = false;
       setIsLoading(false);
     }
   };
@@ -348,7 +378,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                 <div className="pt-4">
                   <button
                     onClick={handleFetchInfo}
-                    disabled={!username || isLoading}
+                    disabled={!username || isLoading || verificationRetryAt > Date.now()}
                     className="w-full py-3.5 bg-slate-900 disabled:bg-slate-200 text-white font-black rounded-2xl transition-all flex items-center justify-center gap-2 text-sm"
                   >
                     {isLoading ? <Loader2 className="animate-spin" size={20} /> : <Search size={20} />}
@@ -545,7 +575,7 @@ export default function AddChannelScreen({ onClose, onSuccess, channel }: AddCha
                   </button>
                   <button
                     onClick={handleSubmit}
-                    disabled={isLoading || selectedContinents.length === 0 || selectedCategories.length === 0 || postingTimes.length === 0 || postingTimes.length > postsPerDay}
+                    disabled={isLoading || verificationRetryAt > Date.now() || selectedContinents.length === 0 || selectedCategories.length === 0 || postingTimes.length === 0 || postingTimes.length > postsPerDay}
                     className="flex-1 py-3.5 bg-[#0c9de8] hover:bg-blue-600 disabled:bg-slate-200 text-white font-black rounded-2xl transition-all flex items-center justify-center gap-2 text-sm"
                   >
                     {isLoading && <Loader2 className="animate-spin" size={20} />}

@@ -65,9 +65,9 @@ for(const [model,unit] of [['CPM',6.2/1000],['CPC',0.065],['CPS',0.56]])test(`Q/
 });
 test('U/V: long source diagnostic failure cannot undo successful monotonic count',async()=>{
   const persist=load('src/lib/channelViewPersistence.ts');let views=10;let updates=0;
-  const db={query:async(sql,p)=>{updates++;if(sql.includes('SET views=')){assert.match(sql,/GREATEST/);views=Math.max(views,p[0]);return [{}];}
+  const db={query:async(sql,p)=>{updates++;if(sql.includes('SET views=')){assert.match(sql,/GREATEST/);assert.ok(p.includes('pre_deletion_mtproto_public_fallback'));views=Math.max(views,p[0]);return [{affectedRows:1}];}
     assert.equal(p[0],'pre_deletion_mtproto_public_fallback');throw Object.assign(Error('too long'),{code:'ER_DATA_TOO_LONG'});}};
-  await persist.persistSuccessfulChannelViews(db,1,20,'pre_deletion_mtproto_public_fallback');assert.equal(views,20);assert.equal(updates,2);
+  await persist.persistSuccessfulChannelViews(db,1,20,'pre_deletion_mtproto_public_fallback');assert.equal(views,20);assert.equal(updates,1);
   const labels=[...read('src/lib/channelAdminViewRefresh.ts').matchAll(/source = "([^"]+)"/g)].map(m=>m[1]);
   assert.ok(labels.every(s=>s.length<=128));assert.match(read('db/migrations/20260928_0155_channel_view_fetch_source_width.sql'),/VARCHAR\(128\)/);
 });
@@ -77,7 +77,8 @@ test('Z: Teaser, Bot and Mini App never enter the new Channel presentation gate'
 test('pricing and public/admin integration use billing-model guards',()=>{
   const admin=read('src/app/admin/campaigns/[id]/page.tsx');assert.match(admin,/editData.cost_per_subscriber !== undefined/);assert.match(admin,/editData.cpc !== undefined/);
   assert.match(admin,/Billable Impressions/);
-  for(const file of ['src/app/api/admin/campaigns/[id]/route.ts','src/app/api/advertiser/campaigns/[id]/route.ts','src/app/api/advertiser/campaign-feed/route.ts','src/app/api/admin/campaigns/route.ts'])assert.match(read(file),/channelMetricPayload/);
+  assert.match(read('src/app/api/admin/campaigns/[id]/route.ts'),/handleCampaignDetailsGet/);
+  for(const file of ['src/lib/campaignDetailsHandler.ts','src/app/api/advertiser/campaigns/[id]/route.ts','src/app/api/advertiser/campaign-feed/route.ts','src/app/api/admin/campaigns/route.ts'])assert.match(read(file),/channelMetricPayload/);
 });
 
 test('stale same-day CPC is resumed through the existing transactional lifecycle',async()=>{

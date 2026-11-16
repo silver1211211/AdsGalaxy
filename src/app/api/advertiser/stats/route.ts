@@ -7,6 +7,8 @@ import { logSlowRequest } from "@/lib/performanceTiming";
 import { CACHE_TTL_SECONDS, cacheGetOrSet, redisKeys } from "@/lib/redisCache";
 import { getMiniAppCampaignMetricsByAdvertiser } from "@/lib/miniappCampaignMetrics";
 import { displayedClicksSql } from "@/lib/campaignAnalyticsAdjustments";
+import { getAiStudioSettings } from "@/lib/aiPromotionStudio/config";
+import { getOfficialAiAdvertiserSpend } from "@/lib/aiPromotionStudio/spendService";
 
 export async function GET(request: Request) {
   const startedAt = Date.now();
@@ -75,7 +77,31 @@ export async function GET(request: Request) {
         conversion_value: Number(conversion.conversion_value || 0), miniapp_impressions: Number(miniapp.views || 0), recent_campaigns: recentResult[0],
       };
     });
-    return NextResponse.json({ ...payload, ad_balance: Number(user.ad_balance || 0), ad_balance_locked: Number(user.advertiser_balance_locked || 0) }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
+
+    // Check if the current user is the official AI Promotion Studio advertiser
+    const settings = await getAiStudioSettings();
+    const isOfficialAiAdvertiser = Boolean(settings.advertiserUserId && userId === settings.advertiserUserId);
+    let officialAiData: Record<string, any> = { is_official_ai_advertiser: false };
+
+    if (isOfficialAiAdvertiser) {
+      const officialSpend = await getOfficialAiAdvertiserSpend(pool, userId);
+      officialAiData = {
+        is_official_ai_advertiser: true,
+        official_ai_total_spend: officialSpend.totalSpendUsdt,
+        official_ai_today_spend: officialSpend.periodSpendUsdt.todayUsdt,
+        official_ai_month_spend: officialSpend.periodSpendUsdt.thisMonthUsdt,
+      };
+    }
+
+    return NextResponse.json(
+      {
+        ...payload,
+        ...officialAiData,
+        ad_balance: Number(user.ad_balance || 0),
+        ad_balance_locked: Number(user.advertiser_balance_locked || 0),
+      },
+      { headers: { "Cache-Control": "private, no-store, max-age=0" } }
+    );
   } catch (error) {
     const status = getAuthErrorStatus(error);
     console.error("Stats API Error:", error);

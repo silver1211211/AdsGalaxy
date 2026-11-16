@@ -38,7 +38,7 @@ export default function WithdrawalForm({ availableBalance, onClose, onSuccess, t
   const [address, setAddress] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
-  const [limits, setLimits] = useState({ min: 10, max: 500 });
+  const [limits, setLimits] = useState({ max: 500 });
   const requestKeyRef = useRef(crypto.randomUUID());
 
   // Range slider value (percentage)
@@ -58,7 +58,6 @@ export default function WithdrawalForm({ availableBalance, onClose, onSuccess, t
         const data = await res.json();
         if (res.ok) {
           setLimits({
-            min: parseFloat(data.min_withdraw || "10"),
             max: parseFloat(data.max_withdraw || "500")
           });
         }
@@ -92,8 +91,12 @@ export default function WithdrawalForm({ availableBalance, onClose, onSuccess, t
 
   const handleSubmit = async () => {
     const val = parseFloat(amount);
-    if (isNaN(val) || val < limits.min) {
-      setError(`Minimum withdrawal is $${limits.min}`);
+    if (!Number.isFinite(val) || val <= NETWORK_FEES[network]) {
+      setError("Withdrawal amount must exceed the network fee");
+      return;
+    }
+    if (val < 50) {
+      setError("Minimum withdrawal is 50 USDT");
       return;
     }
     if (val > limits.max) {
@@ -215,7 +218,7 @@ export default function WithdrawalForm({ availableBalance, onClose, onSuccess, t
                   />
                 </div>
                 <div className="flex justify-between text-[10px] font-bold text-slate-400">
-                  <span>Min ${limits.min}</span>
+                  <span>Minimum 50 USDT</span>
                   <span>Max ${limits.max}</span>
                 </div>
               </div>

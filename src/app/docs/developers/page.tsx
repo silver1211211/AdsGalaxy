@@ -66,9 +66,9 @@ export default function DeveloperDocsPage() {
         "Callback delivery is at least once. Every retry retains the same event_id and payload, so insert event_id under a UNIQUE constraint and credit the user in the same database transaction. Duplicate deliveries must not create duplicate rewards.",
       ], code:{language:"javascript",value:nodeRewardCallbackVerificationExample}},
       { id:"delivery", title:"5. Delivery, retries, and HTTP responses", body:[
-        "Return HTTP 2xx only after signature verification and the idempotent credit transaction commits. Non-2xx responses or network failures are retried with a fresh timestamp and signature.",
-        "Attempts are immediate, then 1, 5, 15, 60, and 360 minutes after failures. Attempt six is terminal. Secret rotation retains the previous secret for a 24-hour overlap.",
-        "CALLBACK_SCHEMA_NOT_READY means callback database setup is temporarily incomplete; retry configuration later. It must not be interpreted as Disabled by publisher. Invalid/private URLs are rejected, while receiver timeouts and non-2xx responses enter the retry schedule.",
+        "Return HTTP 2xx only after signature verification and the idempotent credit transaction commits. Non-2xx responses or network failures are retried once immediately with a fresh timestamp and signature.",
+        "The first attempt starts after the verified completion commits. If both immediate attempts fail, the delivery is marked failed with the endpoint reason; there is no delayed direct reward retry. Secret rotation retains the previous secret for a 24-hour overlap.",
+        "CALLBACK_SCHEMA_NOT_READY means callback database setup is temporarily incomplete; retry configuration later. It must not be interpreted as Disabled by publisher. Invalid/private URLs are rejected, while receiver timeouts and non-2xx responses appear in delivery history after the immediate retry.",
       ]},
       { id:"wallet", title:"Safe wallet order", body:["Use one authoritative, idempotent server transaction."], bullets:[
         "Verify the callback signature against the exact raw request body.",

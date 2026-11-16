@@ -90,7 +90,7 @@ function wait(milliseconds: number) {
   return milliseconds > 0 ? new Promise((resolve) => setTimeout(resolve, milliseconds)) : Promise.resolve();
 }
 
-async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: any; cost: number }, db = pool) {
+async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: any; cost: number; payout: BroadcastPayout }, db = pool) {
   if (!Number.isFinite(input.cost) || input.cost <= 0) {
     return { ok: false as const, reason: "invalid_campaign_cost" };
   }
@@ -139,9 +139,14 @@ async function reserveBroadcastDelivery(input: { campaign: any; bot: any; user: 
     );
     const [deliveryResult]: any = await conn.query(
       `INSERT IGNORE INTO broadcast_deliveries
-        (campaign_id, bot_id, user_id, chat_id, cost, publisher_reward, status, retry_count, delivery_claim_key)
-       VALUES (?, ?, ?, ?, ?, 0, 'pending', 0, ?)`,
-      [input.campaign.id, input.bot.id, input.user.id, input.user.chat_id, input.cost, deliveryClaimKey]
+        (campaign_id, bot_id, user_id, chat_id, cost, publisher_reward, status, retry_count, delivery_claim_key,
+         creative_revision_id,approved_destination_url,creative_snapshot_json,payout_snapshot_json)
+       VALUES (?, ?, ?, ?, ?, 0, 'pending', 0, ?, ?, ?, ?, ?)`,
+      [input.campaign.id, input.bot.id, input.user.id, input.user.chat_id, input.cost, deliveryClaimKey,
+        input.campaign.approved_creative_revision_id || null,input.campaign.link,
+        JSON.stringify({campaign_title:input.campaign.campaign_title,message_text:input.campaign.message_text,
+          image_url:input.campaign.image_url,button_text:input.campaign.button_text,link:input.campaign.link}),
+        JSON.stringify(input.payout)]
     );
     if (deliveryResult.affectedRows !== 1) {
       await conn.rollback();
@@ -226,7 +231,7 @@ async function finalizeBroadcastDelivery(input: {
           return { idempotent: true };
         }
         await conn.query("UPDATE campaigns SET budget=budget+?,status='paused',pause_reason='insufficient_balance' WHERE id=?", [delivery.cost, input.campaign.id]);
-        await conn.query("UPDATE broadcast_deliveries SET cost=0,publisher_reward=0,reserve_amount=0,platform_revenue=0,status='failed_final',failure_reason='insufficient_balance',failure_category='funding',last_failure_at=NOW() WHERE id=?", [input.deliveryId]);
+        await conn.query("UPDATE broadcast_deliveries SET cost=0,publisher_reward=0,reserve_amount=0,platform_revenue=0,status='failed_final',failure_reason='insufficient_balance',failure_category='funding',last_failure_at=NOW(),cleanup_status='pending',cleanup_next_retry_at=UTC_TIMESTAMP(6) WHERE id=?", [input.deliveryId]);
         await conn.commit();
         return { idempotent: false, insufficientBalance: true };
       }
@@ -366,14 +371,64 @@ export async function GET(req: NextRequest) {
 
     const payoutSettings = await getBroadcastPayoutSettings();
 
+    // A confirmed Telegram message can be financially finalized after a
+    // worker crash without sending the message a second time.
+    const [confirmedUnfinalized]: any = await pool.query(
+      `SELECT bd.id,bd.campaign_id,bd.bot_id,bd.user_id,bd.telegram_message_id,
+         bd.payout_snapshot_json,bd.retry_count
+       FROM broadcast_deliveries bd WHERE bd.status='sending'
+         AND bd.telegram_message_id IS NOT NULL AND bd.telegram_message_id>0
+       ORDER BY bd.id LIMIT 30`);
+    for (const delivery of confirmedUnfinalized) {
+      try {
+        if (!delivery.payout_snapshot_json) throw new Error('missing_payout_snapshot');
+        const payout = JSON.parse(String(delivery.payout_snapshot_json)) as BroadcastPayout;
+        await finalizeBroadcastDelivery({deliveryId:Number(delivery.id),
+          campaign:{id:Number(delivery.campaign_id)},bot:{id:Number(delivery.bot_id)},
+          user:{id:Number(delivery.user_id)},payout,attempts:Number(delivery.retry_count||1),
+          telegramMessageId:Number(delivery.telegram_message_id)});
+        await pool.query(`UPDATE broadcast_deliveries bd JOIN campaigns c ON c.id=bd.campaign_id
+          SET bd.cleanup_status='pending',bd.cleanup_next_retry_at=UTC_TIMESTAMP(6)
+          WHERE bd.id=? AND bd.status='sent' AND c.status='paused'
+            AND c.pause_reason='moderation_cleanup' AND bd.cleanup_status IS NULL`,[delivery.id]);
+      } catch (error) {
+        console.error('Confirmed Bot send finalization failed',{delivery_id:delivery.id,
+          reason:error instanceof Error?error.message:'unknown_error'});
+      }
+    }
+
+    // A moderation transition can invalidate an unsent reservation. Compete
+    // with the sender's pending->sending claim; only the winner may act.
+    const [cancelRows]: any = await pool.query(
+      `SELECT bd.id,bd.campaign_id FROM broadcast_deliveries bd
+       JOIN campaigns c ON c.id=bd.campaign_id
+       WHERE bd.status IN ('pending','retry_wait')
+         AND (NOT (c.status='active' OR (c.status='budget_exhausted' AND c.pause_reason='budget_exhausted'))
+           OR NOT (bd.creative_revision_id <=> c.approved_creative_revision_id))
+       ORDER BY bd.id LIMIT 50`,
+    );
+    for (const row of cancelRows) await refundBroadcastReservation({
+      deliveryId:Number(row.id),campaignId:Number(row.campaign_id),
+      failureReason:"campaign_moderation_stopped_delivery",
+      telegramError:"Campaign creative changed before delivery",attempts:0,
+    });
+
     // Recover abandoned leases, then process durable retries before claiming
     // new recipients. Reservations remain debited until success or final fail.
-    await pool.query(`UPDATE broadcast_deliveries SET status='retry_wait',sending_at=NULL,lease_expires_at=NULL,
-      next_retry_at=LEAST(COALESCE(next_retry_at,NOW()),NOW())
-      WHERE status='sending' AND lease_expires_at<NOW()`);
+    // A timed-out send may have succeeded at Telegram. Never resend that
+    // reservation without a proven non-delivery response.
+    const [[ambiguousSends]]: any = await pool.query(
+      `SELECT COUNT(*) count FROM broadcast_deliveries
+       WHERE status='sending' AND telegram_message_id IS NULL AND lease_expires_at<NOW()`);
+    if (Number(ambiguousSends?.count || 0) > 0) await upsertAdminAlert({
+      alertType:"broadcast_failed",severity:"high",title:"Bot sends need manual reconciliation",
+      details:`${ambiguousSends.count} Telegram sends have an unknown outcome; automatic resend is blocked.`,
+      metadata:{route:"/api/cron/process-broadcast",reason:"ambiguous_telegram_send"},
+    });
     const retryLimit = Math.min(50, Math.max(1, Number(process.env.CRON_BROADCAST_RETRY_BATCH_SIZE || 20)));
     const [retryRows]: any = await pool.query(
       `SELECT bd.id delivery_id,bd.retry_count,bd.chat_id,bd.user_id,bd.bot_id,bd.campaign_id,
+         bd.creative_snapshot_json,bd.payout_snapshot_json,
          c.campaign_title,c.message_text,c.image_url,c.button_text,c.link,c.cpm,
          GREATEST(COALESCE(c.cpm,0)-CASE WHEN ard.expires_at>UTC_TIMESTAMP() THEN ard.cpm_discount ELSE 0 END,0.01) effective_cpm
        FROM broadcast_deliveries bd
@@ -381,40 +436,66 @@ export async function GET(req: NextRequest) {
        JOIN bots b ON b.id=bd.bot_id AND b.status='active' AND b.is_deleted=FALSE
        LEFT JOIN advertiser_rate_discounts ard ON ard.user_id=c.user_id
        WHERE bd.status='retry_wait' AND bd.next_retry_at<=NOW()
+         AND (c.status='active' OR (c.status='budget_exhausted' AND c.pause_reason='budget_exhausted'))
+         AND (bd.creative_revision_id <=> c.approved_creative_revision_id)
        ORDER BY bd.next_retry_at,bd.id LIMIT ?`, [retryLimit]);
     if (retryRows.length) {
       await processBoundedQueue(retryRows, Math.min(2, retryRows.length), async (retry: any) => {
         const [claim]: any = await pool.query(
-          `UPDATE broadcast_deliveries SET status='sending',sending_at=NOW(),lease_expires_at=DATE_ADD(NOW(),INTERVAL 90 SECOND)
-           WHERE id=? AND status='retry_wait' AND next_retry_at<=NOW()`, [retry.delivery_id]);
+          `UPDATE broadcast_deliveries bd JOIN campaigns c ON c.id=bd.campaign_id
+           SET bd.status='sending',bd.sending_at=NOW(),bd.lease_expires_at=DATE_ADD(NOW(),INTERVAL 90 SECOND)
+           WHERE bd.id=? AND bd.status='retry_wait' AND bd.next_retry_at<=NOW()
+             AND (c.status='active' OR (c.status='budget_exhausted' AND c.pause_reason='budget_exhausted'))
+             AND (bd.creative_revision_id <=> c.approved_creative_revision_id)`, [retry.delivery_id]);
         if (claim.affectedRows !== 1) return;
         const attempt = Number(retry.retry_count || 0) + 1;
         try {
           const [[bot]]: any = await pool.query("SELECT * FROM bots WHERE id=? LIMIT 1", [retry.bot_id]);
           if (!bot) throw new Error("broadcast_retry_bot_missing");
           const token = await loadBotToken(pool, bot);
-          const response = await sendTelegramMessage(retry.chat_id, composeCampaignCreativeTelegramHtml(retry.campaign_title, retry.message_text), {
-            photo: retry.image_url || undefined, parse_mode: "HTML", token,
-            reply_markup: { inline_keyboard: [[{ text: retry.button_text, url: retry.link }]] },
+          const snapshot = retry.creative_snapshot_json ? JSON.parse(String(retry.creative_snapshot_json)) : retry;
+          const payout = retry.payout_snapshot_json ? JSON.parse(String(retry.payout_snapshot_json)) as BroadcastPayout
+            : calculateBroadcastPayout(retry.effective_cpm, payoutSettings);
+          const response = await sendTelegramMessage(retry.chat_id, composeCampaignCreativeTelegramHtml(snapshot.campaign_title, snapshot.message_text), {
+            photo: snapshot.image_url || undefined, parse_mode: "HTML", token,
+            reply_markup: { inline_keyboard: [[{ text: snapshot.button_text, url: snapshot.link }]] },
           });
+          if (!response) throw new Error('ambiguous_telegram_send');
           if (response?.ok) {
+            const messageId = Number(response.result?.message_id || 0);
+            if (!Number.isSafeInteger(messageId) || messageId <= 0) throw new Error("telegram_send_missing_message_id");
+            await pool.query("UPDATE broadcast_deliveries SET telegram_message_id=? WHERE id=? AND status='sending'",
+              [messageId,retry.delivery_id]);
             const finalized = await finalizeBroadcastDelivery({
               deliveryId: retry.delivery_id, campaign: { id: retry.campaign_id }, bot: { id: retry.bot_id },
-              user: { id: retry.user_id }, payout: calculateBroadcastPayout(retry.effective_cpm, payoutSettings), attempts: attempt,
-              telegramMessageId: Number(response.result?.message_id || 0) || null,
+              user: { id: retry.user_id }, payout, attempts: attempt,
+              telegramMessageId: messageId,
             });
             if (finalized.insufficientBalance) return { status: "failed", failure_reason: "insufficient_balance" };
+            await pool.query(`UPDATE broadcast_deliveries bd JOIN campaigns c ON c.id=bd.campaign_id
+              SET bd.cleanup_status='pending',bd.cleanup_next_retry_at=UTC_TIMESTAMP(6)
+              WHERE bd.id=? AND bd.status='sent' AND c.status='paused'
+                AND c.pause_reason='moderation_cleanup' AND bd.cleanup_status IS NULL`,[retry.delivery_id]);
           } else if (!(await scheduleBroadcastRetry(retry.delivery_id, response, attempt))) {
             await refundBroadcastReservation({ deliveryId: retry.delivery_id, campaignId: retry.campaign_id,
               failureReason: normalizeFailureReason(response?.description), telegramError: String(response?.description || "Telegram failure"), attempts: attempt });
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : "Telegram retry failure";
-          const synthetic = { error_code: 0, description: message };
-          if (!(await scheduleBroadcastRetry(retry.delivery_id, synthetic, attempt))) {
-            await refundBroadcastReservation({ deliveryId: retry.delivery_id, campaignId: retry.campaign_id,
-              failureReason: normalizeFailureReason(message), telegramError: message, attempts: attempt });
+          const [[sentEvidence]]: any = await pool.query(
+            "SELECT telegram_message_id FROM broadcast_deliveries WHERE id=?",[retry.delivery_id]);
+          if (sentEvidence?.telegram_message_id) {
+            await pool.query(`UPDATE broadcast_deliveries SET failure_reason='post_send_finalize_failed',
+              failure_category='manual_review',telegram_error=?,last_failure_at=NOW()
+              WHERE id=? AND status='sending'`,[message.slice(0,500),retry.delivery_id]);
+            return;
           }
+          const synthetic = { error_code: 0, description: message };
+          // An exception after entering Telegram has an unknown delivery
+          // outcome. Keep the reservation for manual reconciliation.
+          await pool.query(`UPDATE broadcast_deliveries SET failure_reason='ambiguous_telegram_send',
+            failure_category='manual_review',telegram_error=?,last_failure_at=NOW()
+            WHERE id=? AND status='sending'`,[synthetic.description.slice(0,500),retry.delivery_id]);
         }
       });
     }
@@ -693,13 +774,28 @@ export async function GET(req: NextRequest) {
 
         const payout = calculateBroadcastPayout(campaign.effective_cpm, payoutSettings);
         const cost = payout.advertiserDebit;
-        const reservation = await reserveBroadcastDelivery({ campaign, bot, user, cost });
+        const reservation = await reserveBroadcastDelivery({ campaign, bot, user, cost, payout });
         if (!reservation.ok) {
           return {
             status: 'skipped', user: user.id, campaign_id: campaign.id, campaign_name: campaign.name,
             error: reservation.reason === "daily_budget_limit" ? "Daily budget limit reached" : "Campaign budget exhausted",
             failure_reason: reservation.reason,
           };
+        }
+
+        const [sendClaim]: any = await pool.query(
+          `UPDATE broadcast_deliveries bd JOIN campaigns c ON c.id=bd.campaign_id
+           SET bd.status='sending',bd.sending_at=NOW(),bd.lease_expires_at=DATE_ADD(NOW(),INTERVAL 90 SECOND)
+           WHERE bd.id=? AND bd.status='pending'
+             AND (c.status='active' OR (c.status='budget_exhausted' AND c.pause_reason='budget_exhausted'))
+             AND (bd.creative_revision_id <=> c.approved_creative_revision_id)`,
+          [reservation.deliveryId],
+        );
+        if (sendClaim.affectedRows !== 1) {
+          await refundBroadcastReservation({deliveryId:reservation.deliveryId,campaignId:campaign.id,
+            failureReason:"campaign_moderation_stopped_delivery",telegramError:"Campaign changed before send",attempts:0});
+          return {status:"skipped",user:user.id,campaign_id:campaign.id,campaign_name:campaign.name,
+            failure_reason:"campaign_moderation_stopped_delivery"};
         }
 
         const silverDelivery = await isCampaignDeliveryAllowed(Number(campaign.id));
@@ -724,22 +820,28 @@ export async function GET(req: NextRequest) {
           });
         } catch (sendError) {
           const message = sendError instanceof Error ? sendError.message : "Telegram send failed";
-          const synthetic = { error_code: 0, description: message };
-          if (await scheduleBroadcastRetry(reservation.deliveryId, synthetic, 1)) {
-            return { status: 'retry_wait', user: user.id, campaign_id: campaign.id, campaign_name: campaign.name, failure_reason: normalizeFailureReason(message) };
-          }
-          await refundBroadcastReservation({ deliveryId: reservation.deliveryId, campaignId: campaign.id, failureReason: normalizeFailureReason(message), telegramError: message, attempts: 1 });
+          await pool.query(`UPDATE broadcast_deliveries SET failure_reason='ambiguous_telegram_send',
+            failure_category='manual_review',telegram_error=?,last_failure_at=NOW()
+            WHERE id=? AND status='sending'`,[message.slice(0,500),reservation.deliveryId]);
           throw sendError;
         }
 
         if (res?.ok) {
+          const messageId = Number(res.result?.message_id || 0);
+          if (!Number.isSafeInteger(messageId) || messageId <= 0) throw new Error("telegram_send_missing_message_id");
+          await pool.query("UPDATE broadcast_deliveries SET telegram_message_id=? WHERE id=? AND status='sending'",
+            [messageId,reservation.deliveryId]);
           const finalized = await finalizeBroadcastDelivery({
             deliveryId: reservation.deliveryId, campaign, bot, user, payout, attempts: 1,
-            telegramMessageId: Number(res.result?.message_id || 0) || null,
+            telegramMessageId: messageId,
           });
           if (finalized.insufficientBalance) {
             return { status: "failed", user: user.id, campaign_id: campaign.id, campaign_name: campaign.name, failure_reason: "insufficient_balance" };
           }
+          await pool.query(`UPDATE broadcast_deliveries bd JOIN campaigns c ON c.id=bd.campaign_id
+            SET bd.cleanup_status='pending',bd.cleanup_next_retry_at=UTC_TIMESTAMP(6)
+            WHERE bd.id=? AND bd.status='sent' AND c.status='paused'
+              AND c.pause_reason='moderation_cleanup' AND bd.cleanup_status IS NULL`,[reservation.deliveryId]);
           await pool.query(
             `INSERT INTO bot_broadcast_campaign_state(campaign_id,fairness_window_date,successful_deliveries_window,last_selected_at,last_success_at)
              VALUES(?,CURDATE(),1,NOW(),NOW()) ON DUPLICATE KEY UPDATE
@@ -777,6 +879,13 @@ export async function GET(req: NextRequest) {
           };
         }
 
+        if (!res) {
+          await pool.query(`UPDATE broadcast_deliveries SET failure_reason='ambiguous_telegram_send',
+            failure_category='manual_review',telegram_error='Telegram returned no outcome',last_failure_at=NOW()
+            WHERE id=? AND status='sending'`,[reservation.deliveryId]);
+          return {status:'error',user:user.id,campaign_id:campaign.id,campaign_name:campaign.name,
+            failure_reason:'ambiguous_telegram_send'};
+        }
         const failureMessage = String(res?.description || "Unknown error");
         if (await scheduleBroadcastRetry(reservation.deliveryId, res, 1)) {
           return { status: 'retry_wait', user: user.id, campaign_id: campaign.id, campaign_name: campaign.name, error: failureMessage, failure_reason: normalizeFailureReason(failureMessage) };

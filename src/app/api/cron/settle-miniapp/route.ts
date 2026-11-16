@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { creditUserLockedBalance } from "@/lib/earnings";
+import { creditSettledPublisherBalance, isZeroOrdinaryLockEnabled } from "@/lib/earnings";
+import { recordReferralCommission } from "@/lib/referralCommission";
 import { recordPayoutSafetyCheck } from "@/lib/revenueProtection";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 import { withFinancialTransactionRetry } from "@/lib/dbResilience";
@@ -35,14 +36,25 @@ async function settleInternalImpressions() {
           VALUES (?,?,?,?,'pending',0)`, [row.id,row.miniapp_id,row.publisher_id,publisherRevenue]);
           settlementId = Number(insert.insertId);
         }
-        if (!(await creditUserLockedBalance(conn,row.publisher_id,publisherRevenue))) throw new Error("miniapp_publisher_credit_failed");
+        if (!(await creditSettledPublisherBalance(conn,row.publisher_id,publisherRevenue,{
+          sourceKey:`miniapp:internal:${settlementId}:publisher`,
+          sourceSystem:"miniapp_internal",
+          sourceRecordId:String(settlementId),
+          policyVersion:"miniapp-internal-settlement-v1",
+        }))) throw new Error("miniapp_publisher_credit_failed");
+      await recordReferralCommission(conn, {
+        monetizingUserId: Number(row.publisher_id),
+        monetizedAmount: publisherRevenue,
+        productType: "miniapp",
+        sourceEventKey: `miniapp:internal:${settlementId}`,
+      });
         if (!Number(row.stats_applied)) {
           await conn.query(`UPDATE miniapp_daily_stats
           SET publisher_revenue=publisher_revenue+?, net_cpm=((publisher_revenue)/GREATEST(impressions,1))*1000
           WHERE miniapp_id=? AND network_name='AdsGalaxyInternal' AND date=?`,
           [publisherRevenue,row.miniapp_id,row.stat_date]);
         }
-        await conn.query("UPDATE miniapp_internal_publisher_settlements SET status='locked',stats_applied=1,settled_at=NOW() WHERE id=? AND status='pending'", [settlementId]);
+        await conn.query("UPDATE miniapp_internal_publisher_settlements SET status=?,stats_applied=1,settled_at=NOW() WHERE id=? AND status='pending'", [isZeroOrdinaryLockEnabled() ? "unlocked" : "locked", settlementId]);
         return publisherRevenue;
       }, { operation: "miniapp_internal_publisher_settlement" });
       if (revenue !== null) { settled++; totalLocked += revenue; }
@@ -256,7 +268,7 @@ export async function GET(_req: NextRequest) {
           const [insertResult] = await conn.query<ResultSetHeader>(`
             INSERT IGNORE INTO miniapp_earnings_settlements
               (miniapp_id, user_id, daily_stat_id, network_name, date, impressions, publisher_revenue, status, locked_at, unlock_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'locked', NOW(), DATE_ADD(NOW(), INTERVAL 30 DAY))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), DATE_ADD(NOW(), INTERVAL 30 DAY))
           `, [
             lockedStat.miniapp_id,
             lockedStat.user_id,
@@ -265,16 +277,28 @@ export async function GET(_req: NextRequest) {
             lockedStat.date,
             Math.max(0, Math.floor(toNumber(lockedStat.impressions))),
             publisherRevenue,
+            isZeroOrdinaryLockEnabled() ? "unlocked" : "locked",
           ]);
 
           if (insertResult.affectedRows !== 1) {
             return { settled: false, amount: 0 };
           }
 
-          const credited = await creditUserLockedBalance(conn, lockedStat.user_id, publisherRevenue);
+          const credited = await creditSettledPublisherBalance(conn, lockedStat.user_id, publisherRevenue, {
+            sourceKey:`miniapp:external:${insertResult.insertId}:publisher`,
+            sourceSystem:"miniapp_external",
+            sourceRecordId:String(insertResult.insertId),
+            policyVersion:"miniapp-external-settlement-v1",
+          });
           if (!credited) {
             throw new Error("miniapp_publisher_credit_failed");
           }
+          await recordReferralCommission(conn, {
+            monetizingUserId: Number(lockedStat.user_id),
+            monetizedAmount: publisherRevenue,
+            productType: "miniapp",
+            sourceEventKey: `miniapp:external:${insertResult.insertId}`,
+          });
           return { settled: true, amount: publisherRevenue };
           }, { operation: "miniapp_external_publisher_settlement" });
           if (outcome.settled) {

@@ -78,7 +78,7 @@ export default function ChannelDetailsScreen({
   const rawTrackingStatus = String(channel.tracking_account_status || "");
   const trackingStatus = rawTrackingStatus === "active"
     ? "active"
-    : channel.status === "active" && rawTrackingStatus === "pending_manual"
+    : rawTrackingStatus === "pending_manual" || channel.status === "pending"
       ? "pending_manual"
       : "limited";
   const manualUsernames: Array<{ account: number; username: string }> = Array.isArray(channel.tracking_manual_usernames)
@@ -156,7 +156,7 @@ export default function ChannelDetailsScreen({
                     {trackingStatus === "active"
                       ? `Tracking account ${channel.tracking_account || ""} is connected for private-channel view checks.`
                       : trackingStatus === "pending_manual"
-                        ? "Add one AdsGalaxy tracking account to this private channel so view checks can become fully available."
+                        ? (channel.suggested_fix || "Add the AdsGalaxy tracking account as a member and keep the bot as an administrator with posting and invite permissions. Then retry approval.")
                         : "Private view tracking will be completed after approval and tracking setup."}
                   </p>
                   {trackingStatus === "pending_manual" && manualUsernames.length > 0 && (

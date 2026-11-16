@@ -7,7 +7,6 @@ import Sidebar from "./Sidebar";
 import { apiFetch } from "@/lib/api";
 import BannedScreen from "@/components/auth/BannedScreen";
 import SelfPromotionAd from "@/components/shared/SelfPromotionAd";
-import ReferralSprintPopup from "@/components/shared/ReferralSprintPopup";
 import { safePrepareTelegramWebApp } from "@/lib/telegramWebApp";
 import { miniappReloadDebug } from "@/lib/miniappReloadDebug";
 import { useTranslations } from "@/i18n/client";
@@ -28,17 +27,6 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
   const isPublisherDashboard = type === "publisher" && pathname === "/publisher";
   const isAdvertiserCampaignsPage =
     type === "advertiser" && pathname === "/advertiser/campaigns";
-  const [referralPopupBlockingPromo, setReferralPopupBlockingPromo] = useState(isPublisherDashboard);
-
-  const handleReferralBlockingChange = React.useCallback((isBlocking: boolean) => {
-    setReferralPopupBlockingPromo(isBlocking);
-  }, []);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- pathname transitions reset popup ownership
-    setReferralPopupBlockingPromo(isPublisherDashboard);
-  }, [isPublisherDashboard]);
-
   useEffect(() => {
     let cancelled = false;
 
@@ -90,7 +78,7 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
   return (
     <div className={`ag-miniapp-shell relative overflow-x-hidden bg-[radial-gradient(circle_at_top_left,rgba(12,157,232,0.12),transparent_32%),linear-gradient(180deg,#f8fbff_0%,#f1f7fc_42%,#ffffff_100%)] ${isAdvertiserCampaignsPage ? "" : "min-h-screen"}`}>
       <div className="pointer-events-none fixed inset-x-0 top-0 z-0 h-64 bg-gradient-to-b from-[#0c9de8]/10 to-transparent" />
-      <SelfPromotionAd enabled={isPublisherDashboard && !referralPopupBlockingPromo} delayMs={2500} />
+      <SelfPromotionAd enabled={isPublisherDashboard} delayMs={2500} />
       <Header toggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)} />
       <Sidebar
         type={type}
@@ -98,9 +86,6 @@ export default function DashboardLayout({ children, type }: DashboardLayoutProps
         onClose={() => setIsSidebarOpen(false)}
       />
 
-      {type === "publisher" && (
-        <ReferralSprintPopup onBlockingChange={handleReferralBlockingChange} />
-      )}
       <main className={`relative z-10 pt-16 transition-all duration-300 lg:pl-64 ${isAdvertiserCampaignsPage ? "" : "min-h-screen"}`}>
         <div className={`mx-auto max-w-7xl p-4 lg:p-8 ${isAdvertiserCampaignsPage ? "pb-0 lg:pb-0" : "pb-8"}`}>
           {children}

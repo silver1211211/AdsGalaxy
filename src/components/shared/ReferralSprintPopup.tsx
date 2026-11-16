@@ -105,10 +105,6 @@ export default function ReferralSprintPopup({ onBlockingChange }: ReferralSprint
     onBlockingChange?.(visible && isQueueActive);
   }, [isQueueActive, onBlockingChange, visible]);
 
-  const joinReward = Number(meta.referral_join_reward_amount ?? 0.005);
-  const verificationReward = Number(meta.referral_verification_reward_amount ?? 0.01);
-  const totalReward = Number(meta.referral_reward_amount ?? (joinReward + verificationReward));
-  const formatReward = (value: number) => `$${value.toFixed(3)}`;
 
   return (
     <AnimatePresence>
@@ -172,43 +168,22 @@ export default function ReferralSprintPopup({ onBlockingChange }: ReferralSprint
                 </div>
               </div>
 
-              {/* Earn per referral info */}
               <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
                 <div className="flex items-start gap-3">
                   <Sparkles className="mt-0.5 shrink-0 text-[#0c9de8]" size={18} />
                   <p className="text-sm font-medium leading-relaxed text-slate-700">
-                    Invite friends, earn up to{" "}
-                    <span className="font-black text-slate-900">
-                      {formatReward(totalReward)}
-                    </span>{" "}
-                    per referral, and climb the sprint leaderboard for bonus prizes.
+                    Invite friends and earn 10% when they receive eligible publisher earnings or make a confirmed advertiser deposit. Verified referrals can also count toward sprint prizes.
                   </p>
                 </div>
               </div>
-
-              {/* Reward breakdown */}
               <div className="mt-3 grid grid-cols-2 gap-3">
                 <div className="rounded-2xl border border-slate-100 bg-white p-4 shadow-sm">
-                  <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-xl bg-blue-50 text-[#0c9de8]">
-                    <UserPlus size={17} />
-                  </div>
-                  <p className="text-2xl font-black text-slate-900">
-                    {formatReward(joinReward)}
-                  </p>
-                  <p className="mt-1 text-xs font-medium leading-5 text-slate-500">
-                    when your referral joins
-                  </p>
+                  <p className="text-2xl font-black text-slate-900">10%</p>
+                  <p className="mt-1 text-xs font-medium leading-5 text-slate-500">of eligible publisher earnings</p>
                 </div>
                 <div className="rounded-2xl border border-slate-100 bg-white p-4 shadow-sm">
-                  <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-xl bg-blue-50 text-[#0c9de8]">
-                    <ShieldCheck size={17} />
-                  </div>
-                  <p className="text-2xl font-black text-slate-900">
-                    {formatReward(verificationReward)}
-                  </p>
-                  <p className="mt-1 text-xs font-medium leading-5 text-slate-500">
-                    after channel verification
-                  </p>
+                  <p className="text-2xl font-black text-slate-900">10%</p>
+                  <p className="mt-1 text-xs font-medium leading-5 text-slate-500">of confirmed advertiser deposits</p>
                 </div>
               </div>
 

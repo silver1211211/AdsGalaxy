@@ -119,7 +119,7 @@ const sections: DocsSection[] = [
     body: [
       "Verify with the AdsGalaxy-generated callback signing secret. rawBody is the exact byte sequence received and must be verified before JSON reserialization. Require a recent timestamp and require the header event ID to match payload event_id.",
       "Delivery is at least once and retries keep the same event_id and payload. Insert event_id under a UNIQUE constraint and credit the user in the same database transaction. Duplicate deliveries must not create duplicate rewards. Return HTTP 2xx only after successful processing.",
-      "AdsGalaxy attempts delivery immediately, then after 1, 5, 15, 60, and 360 minutes. Common failures are a non-public or non-HTTPS URL, an invalid signature or stale timestamp, a receiver timeout/non-2xx response, and temporary platform setup unavailability.",
+      "AdsGalaxy sends the signed callback as soon as the verified ad completion commits. If the endpoint fails, AdsGalaxy retries once immediately, then records a final failure and reason in delivery history. It does not schedule a later direct reward callback. Return HTTP 2xx only after the reward is safely credited.",
     ],
     code: { language: "javascript", value: nodeRewardCallbackVerificationExample },
   },
@@ -257,7 +257,7 @@ const sections: DocsSection[] = [
     body: [
       "Configure the optional Reward callback directly in Publisher > Mini Apps > Mini App Details. AdsGalaxy generates the signing secret and shows it only after creation or rotation.",
       "Verify signatures against the exact raw body, reject timestamps older than five minutes, deduplicate event_id under a unique constraint, and credit the wallet in the same transaction.",
-      "See the Developer documentation for callback verification in Node.js, PHP, and Python, retry behavior, raw-body handling, and optional advanced API references.",
+      "See the Developer documentation for callback verification in Node.js, PHP, and Python, the immediate retry, raw-body handling, and optional advanced API references.",
     ],
   },
   {

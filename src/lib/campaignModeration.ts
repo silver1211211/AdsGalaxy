@@ -7,6 +7,8 @@ export type SensitiveCreative = {
   title?: unknown;
   text?: unknown;
   variants?: unknown;
+  titleColor?: unknown;
+  bodyColor?: unknown;
 };
 
 function text(value: unknown) { return String(value ?? "").trim(); }
@@ -26,7 +28,11 @@ export function getSensitiveCreativeFingerprint(kind: CampaignCreativeKind, crea
     base.variants = variants(creative.variants);
   } else {
     base.image = text(creative.image);
-    if (kind === "miniapp") base.logo = text(creative.logo);
+    if (kind === "miniapp") {
+      base.logo = text(creative.logo);
+      base.title_color = text(creative.titleColor);
+      base.body_color = text(creative.bodyColor);
+    }
   }
   return JSON.stringify(base);
 }

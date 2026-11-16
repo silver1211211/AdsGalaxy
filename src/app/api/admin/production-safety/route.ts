@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy production-control payloads are not schema-generated */
+import { recordChannelStatusTransitionAudit } from "@/lib/channelStatusAudit";
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { requireAdminPermission } from "@/lib/adminAuth";
@@ -200,7 +201,94 @@ export async function PATCH(request: Request) {
       const params = selectedOnly ? [ids] : [];
 
       if (target === "channels") {
-        await pool.query(`UPDATE channels SET status = ?, paused_reason = ?, suggested_fix = ? WHERE is_deleted = FALSE${selectedSql}`, [status, status === "paused" ? reason || "Paused by admin." : null, status === "paused" ? "Paused by platform operations." : null, ...params]);
+        if (status === "paused") {
+          const [matchingChannels]: any = await pool.query(
+            `SELECT id, chat_id, status, telegram_access_version
+             FROM channels
+             WHERE is_deleted = FALSE AND status NOT IN ('paused', 'rejected', 'deleted')${selectedSql}`,
+            params
+          );
+          if (matchingChannels.length > 0) {
+            const targetIds = matchingChannels.map((ch: any) => Number(ch.id));
+            await pool.query(
+              `UPDATE channels
+               SET status = 'paused',
+                   paused_reason = ?,
+                   suggested_fix = 'Paused by platform operations.',
+                   paused_by_actor = 'admin',
+                   admin_paused_at = UTC_TIMESTAMP(6),
+                   telegram_access_version = COALESCE(telegram_access_version, 0) + 1
+               WHERE id IN (?)`,
+              [reason || "Paused by admin.", targetIds]
+            );
+            for (const ch of matchingChannels) {
+              await recordChannelStatusTransitionAudit(pool, {
+                channelId: Number(ch.id),
+                telegramChatId: ch.chat_id,
+                previousStatus: String(ch.status),
+                newStatus: "paused",
+                sourceWorker: "admin_production_safety_bulk",
+                reasonCode: "production_safety_bulk_pause",
+                reasonText: reason || "Paused by admin.",
+                evidenceClassification: "manual",
+                actorType: "admin",
+                actorId: admin?.id || null,
+                transitionIntent: "manual",
+                verificationVersion: Number(ch.telegram_access_version || 0) + 1,
+              });
+            }
+          }
+        } else {
+          const [matchingChannels]: any = await pool.query(
+            `SELECT id, chat_id, status, telegram_access_version
+             FROM channels
+             WHERE is_deleted = FALSE
+               AND status = 'paused'
+               AND COALESCE(paused_by_actor, 'admin') <> 'publisher'
+               AND publisher_paused_at IS NULL
+               AND LOWER(COALESCE(paused_reason, '')) NOT LIKE 'paused by publisher%'
+               AND COALESCE(marketplace_admin_status, 'approved') = 'approved'
+               AND COALESCE(under_review, 0) = 0
+               AND COALESCE(monetization_paused_reason, '') <> 'below_minimum'
+               AND COALESCE(below_minimum_review_required, 0) = 0
+               AND COALESCE(subscriber_count, 0) >= 100
+               AND chat_id IS NOT NULL AND TRIM(CAST(chat_id AS CHAR)) <> '' AND CAST(chat_id AS CHAR) <> '0'
+               AND COALESCE(telegram_access_state, 'healthy') = 'healthy'${selectedSql}`,
+            params
+          );
+          if (matchingChannels.length > 0) {
+            const targetIds = matchingChannels.map((ch: any) => Number(ch.id));
+            await pool.query(
+              `UPDATE channels
+               SET status = 'active',
+                   paused_reason = NULL,
+                   suggested_fix = NULL,
+                   paused_by_actor = NULL,
+                   admin_paused_at = NULL,
+                   telegram_access_version = COALESCE(telegram_access_version, 0) + 1
+               WHERE id IN (?)`,
+              [targetIds]
+            );
+            for (const ch of matchingChannels) {
+              await recordChannelStatusTransitionAudit(pool, {
+                channelId: Number(ch.id),
+                telegramChatId: ch.chat_id,
+                previousStatus: String(ch.status),
+                newStatus: "active",
+                sourceWorker: "admin_production_safety_bulk",
+                reasonCode: "production_safety_bulk_resume",
+                reasonText: reason || "Resumed by platform operations.",
+                evidenceClassification: "manual",
+                actorType: "admin",
+                actorId: admin?.id || null,
+                transitionIntent: "manual",
+                verificationVersion: Number(ch.telegram_access_version || 0) + 1,
+                recoveryAction: "bulk_resume",
+                recoveryOutcome: "active",
+              });
+            }
+          }
+        }
       } else if (target === "bots") {
         await pool.query(`UPDATE bots SET status = ?, paused_reason = ?, suggested_fix = ?, health_status = ? WHERE is_deleted = FALSE${selectedSql}`, [status, status === "paused" ? reason || "Paused by admin." : null, status === "paused" ? "Paused by platform operations." : null, status === "paused" ? "paused" : "active", ...params]);
       } else if (target === "miniapps") {

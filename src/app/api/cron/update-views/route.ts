@@ -2,10 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { channelViewCadenceSql } from "@/lib/channelViewCadence";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { persistSuccessfulChannelViews } from "@/lib/channelViewPersistence";
+import { persistFailedChannelViewFetch, persistSuccessfulChannelViews } from "@/lib/channelViewPersistence";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 import { CACHE_TTL_SECONDS, cacheGet, cacheSet, redisKeys } from "@/lib/redisCache";
-import { debitConfirmedChannelViews } from "@/lib/channelFastBilling";
+import { dispatchVerifiedChannelViewBilling,retryLatestUnsettledSmartReachAudit } from "@/lib/channelVerifiedViewBillingDispatcher";
+import {SMART_REACH_POLICY_VERSION} from "@/lib/channelSmartReachConfiguration";
+import { isChannelV101UnifiedSettlementEnabled } from "@/lib/channelUnifiedSettlement";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import { getMtprotoViewPoolAvailability, getPrivatePostViews, isMtprotoReauthenticationRequired, mtprotoAccountNumber } from "@/lib/telegramMtproto";
 import { settleGrowthSeedViews } from "@/lib/channelGrowth";
@@ -41,6 +43,7 @@ type ViewPost = RowDataPacket & {
   campaign_kind: string | null;
   campaign_type: string | null;
   campaign_status: string | null;
+  financial_policy_version: string | null;
   settled_views: number | string | null;
   delivery_confirmed_at: Date | string | null;
 };
@@ -123,6 +126,18 @@ async function usesNumericViewTimestamp() {
   return ["bigint", "int", "decimal", "double", "float"].includes(String(rows[0]?.DATA_TYPE || "").toLowerCase());
 }
 
+async function hasViewNextRetryAtColumn() {
+  try {
+    const [rows] = await pool.query<Array<RowDataPacket & { COLUMN_NAME: string }>>(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'campaign_posts' AND COLUMN_NAME = 'view_next_retry_at' LIMIT 1`
+    );
+    return rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -132,7 +147,7 @@ function errorCode(error: unknown) {
   return error instanceof Error ? error.message.slice(0, 120) : "unknown_error";
 }
 
-export function publicFallbackRetryDelayMs(randomValue = Math.random()) {
+function publicFallbackRetryDelayMs(randomValue = Math.random()) {
   const bounded = Math.min(1, Math.max(0, randomValue));
   return 750 + Math.floor(bounded * 751);
 }
@@ -175,7 +190,10 @@ async function refreshPublicUsername(chatId: string | null) {
       body: JSON.stringify({ chat_id: chatId }),
       signal: AbortSignal.timeout(6_000),
     });
-    const data = await response.json().catch(() => ({})) as { ok?: boolean; result?: { username?: string }; description?: string };
+    const data = await response.json().catch(() => ({})) as { ok?: boolean; result?: { id?: number | string; username?: string }; description?: string };
+    if (data.ok && data.result?.id !== undefined && String(data.result.id) !== String(chatId)) {
+      return { username: null, error: "identity_mismatch" };
+    }
     if (data.ok && data.result?.username) {
       const metadata = { username: data.result.username };
       await cacheSet(metadataKey, metadata, CACHE_TTL_SECONDS.TELEGRAM_METADATA);
@@ -188,12 +206,7 @@ async function refreshPublicUsername(chatId: string | null) {
 }
 
 async function markFailure(post: ViewPost, reason: string, source: string, lastUpdateValue: number | Date, retryAfterSeconds?: number | null) {
-  const policy = classifyViewFailure(reason, retryAfterSeconds);
-  await pool.query(
-    `UPDATE campaign_posts SET last_views_update = ?, view_fetch_status = ?,
-       view_fetch_error = ?, view_fetch_source = ? WHERE id = ?`,
-    [lastUpdateValue, policy.terminal ? "terminal" : "failed", encodeViewFailure(reason, retryAfterSeconds), source, post.id]
-  );
+  await persistFailedChannelViewFetch(pool, post.id, reason, source, lastUpdateValue, retryAfterSeconds);
 }
 
 async function getSkipStats(): Promise<SkipStats> {
@@ -298,14 +311,19 @@ export async function GET(request: NextRequest) {
         THEN 300
       WHEN cp.view_fetch_status = 'failed' THEN 900
       ELSE ${channelViewCadenceSql(privacy.hasChannelType ? "ch.channel_type='private' OR NULLIF(ch.username,'') IS NULL" : "NULLIF(ch.username,'') IS NULL")} END`;
+    const hasNextRetryAt = await hasViewNextRetryAtColumn();
+    const retryCooldownGuard = hasNextRetryAt
+      ? "(cp.view_next_retry_at IS NULL OR cp.view_next_retry_at <= UTC_TIMESTAMP(6))"
+      : "TRUE";
     const eligibility = `(cp.view_fetch_status <> 'terminal' OR cp.view_fetch_status IS NULL)
+      AND ${retryCooldownGuard}
       AND (cp.last_views_update IS NULL OR cp.last_views_update = 0
         OR TIMESTAMPDIFF(SECOND, ${lastUpdateOrder}, NOW()) >= ${retryDelaySeconds})`;
     const channelType = privacy.hasChannelType ? "ch.channel_type" : "'public'";
     const trackingAccount = privacy.hasTrackingAccount ? "ch.tracking_account" : "NULL";
     const trackingAccountStatus = privacy.hasTrackingAccountStatus ? "ch.tracking_account_status" : "NULL";
     const trackingMemberStatus = privacy.hasTrackingAccountMemberStatus ? "ch.tracking_account_member_status" : "NULL";
-    const activePostConditions = `cp.status = 'active'
+    const activePostConditions = `cp.status IN ('active','cleanup_pending','delete_failed')
          AND cp.deleted_at IS NULL
          AND cp.delivery_failed_at IS NULL
          AND cp.delivery_confirmed_at IS NOT NULL
@@ -364,7 +382,7 @@ export async function GET(request: NextRequest) {
       const pageShard = (batchSlot + pagesProcessed) % VIEW_SHARD_COUNT;
       const pageLimit = Math.min(VIEW_FETCH_PAGE_SIZE, VIEW_FETCH_MAX_POSTS - stats.postsChecked);
       const [posts] = await pool.query<ViewPost[]>(
-      `SELECT cp.id, cp.channel_id, cp.message_id, cp.views, ch.chat_id, c.campaign_kind,
+      `SELECT cp.id, cp.channel_id, cp.message_id, cp.views, ch.chat_id, c.campaign_kind,c.financial_policy_version,
          c.type AS campaign_type, c.status AS campaign_status, cp.settled_views, cp.delivery_confirmed_at,
          ch.username AS channel_username, ${channelType} AS channel_type, ${trackingAccount} AS tracking_account,
          ${trackingAccountStatus} AS tracking_account_status,${trackingMemberStatus} AS tracking_account_member_status
@@ -511,6 +529,14 @@ export async function GET(request: NextRequest) {
             if (refreshed.username) {
               username = refreshed.username;
               await pool.query("UPDATE channels SET username = ? WHERE id = ?", [username, post.channel_id]);
+              await pool.query(
+                `UPDATE channel_telegram_identities
+                 SET previous_username = CASE WHEN current_username IS NOT NULL AND current_username <> ? THEN current_username ELSE previous_username END,
+                     current_username = ?,
+                     last_username_changed_at = CASE WHEN current_username IS NOT NULL AND current_username <> ? THEN UTC_TIMESTAMP(6) ELSE last_username_changed_at END
+                 WHERE channel_id = ? AND telegram_chat_id = ?`,
+                [username, username, username, post.channel_id, String(post.chat_id || "")]
+              ).catch(() => undefined);
               stats.publicFallbackAttempts += 1;
               result = await fetchPublicViews(username, post.message_id);
               providerBreaker.record(result);
@@ -588,7 +614,20 @@ export async function GET(request: NextRequest) {
         }
 
         const monotonicViews = acceptedMonotonicViews(previousViews, fetchedViews ?? -1);
-        await persistSuccessfulChannelViews(pool, post.id, monotonicViews, source, lastUpdateValue);
+        const accepted = await persistSuccessfulChannelViews(pool, post.id, monotonicViews, source, lastUpdateValue);
+        // Stale/equal observation or deletion won the race: no audit row, success counter,
+        // view billing or log may be produced for an observation that changed nothing.
+        if (!accepted.updated) {
+          if(post.financial_policy_version===SMART_REACH_POLICY_VERSION && post.campaign_status==="active"){
+            try { await retryLatestUnsettledSmartReachAudit(pool,Number(post.id),monotonicViews); }
+            catch(retryError){
+              stats.billingFailed+=1;
+              console.error("Smart Reach audit settlement retry failed",{post_id:post.id,reason:errorCode(retryError)});
+              errors.push({post_id:post.id,source:"smart_reach_audit_retry",reason:errorCode(retryError)});
+            }
+          }
+          await delay(VIEW_FETCH_DELAY_MS); continue;
+        } // keep per-post pacing
         console.info("Channel view post updated", {
           post_id: post.id,
           channel_id: post.channel_id,
@@ -606,21 +645,26 @@ export async function GET(request: NextRequest) {
           accepted_views: monotonicViews,
           source,
         });
-        await pool.query(
+        const auditInsert=await pool.query<ResultSetHeader>(
           `INSERT INTO campaign_views_audit (post_id, channel_id, total_views, last_views_count, status)
            VALUES (?, ?, ?, ?, 'valid')`,
           [post.id, post.channel_id, monotonicViews, previousViews]
-        ).catch(error => console.error("channel_view_audit_failed", { post_id: post.id, error }));
+        ).catch(error => {console.error("channel_view_audit_failed", { post_id: post.id, error });return null;});
         await pool.query("UPDATE channels SET last_successful_view_fetch_at=NOW() WHERE id=?", [post.channel_id])
           .catch(error => console.error("channel_view_diagnostic_failed", { post_id: post.id, error }));
-        if (post.campaign_kind === "channel_growth" || post.campaign_type === "views") {
+        const isUnified = isChannelV101UnifiedSettlementEnabled();
+        const shouldBillViews = post.campaign_kind === "channel_growth" || post.campaign_type === "views" ||
+          post.financial_policy_version===SMART_REACH_POLICY_VERSION || (isUnified && post.campaign_type === "clicks");
+        if (shouldBillViews) {
           stats.billingTriggered += 1;
           try {
             if (post.campaign_kind === "channel_growth") {
               await settleGrowthSeedViews(Number(post.id), monotonicViews);
             } else {
-              const billing = await debitConfirmedChannelViews(Number(post.id), monotonicViews);
-              if (!billing.debited || billing.units === 0) stats.billingNoDelta += 1;
+              const billing = await dispatchVerifiedChannelViewBilling(pool,{postId:Number(post.id),
+                viewAuditId:auditInsert?.[0]?.insertId??null,confirmedViews:monotonicViews});
+              if (("debited" in billing && (!billing.debited || billing.units === 0)) ||
+                  ("status" in billing && billing.status!=="settled")) stats.billingNoDelta += 1;
             }
           } catch (billingError) {
             // The confirmed monotonic view count is already durable. Keep it

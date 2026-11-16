@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { creditUserAvailableBalance } from "@/lib/earnings";
+import { recordReferralCommission } from "@/lib/referralCommission";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 
 export const dynamic = "force-dynamic";
@@ -17,7 +18,18 @@ async function settleBroadcastPublisherDelivery(candidateId: number, db = pool) 
     const row = rows[0];
     if (!row) { await conn.rollback(); return { settled: false, idempotent: true, reward: 0 }; }
     const reward = Math.max(0, Number(row.publisher_reward || 0));
-    if (!(await creditUserAvailableBalance(conn, row.publisher_id, reward))) throw new Error("publisher_credit_failed");
+    if (!(await creditUserAvailableBalance(conn, row.publisher_id, reward, {
+      sourceKey:`bot:broadcast:${candidateId}:publisher`,
+      sourceSystem:"bot_broadcast",
+      sourceRecordId:String(candidateId),
+      policyVersion:"bot-broadcast-settlement-v1",
+    }))) throw new Error("publisher_credit_failed");
+    await recordReferralCommission(conn, {
+      monetizingUserId: Number(row.publisher_id),
+      monetizedAmount: reward,
+      productType: "bot",
+      sourceEventKey: `bot:broadcast:${candidateId}`,
+    });
     const [updated] = await conn.query<ResultSetHeader>(
       "UPDATE broadcast_deliveries SET publisher_settled_at=NOW() WHERE id=? AND publisher_settled_at IS NULL", [candidateId]);
     if (updated.affectedRows !== 1) throw new Error("publisher_settlement_race");

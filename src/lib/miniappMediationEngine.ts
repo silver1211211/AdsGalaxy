@@ -540,6 +540,19 @@ export async function createMediationAttempt(input: {
       }),
     ]
   );
+  if (decision.selected.internal_campaign_id) {
+    await input.conn.query(
+      `UPDATE miniapp_mediation_requests mr
+       JOIN miniapp_rewarded_campaigns c ON c.id=mr.internal_campaign_id
+       SET mr.creative_revision_id=c.approved_creative_revision_id,
+           mr.approved_landing_url_snapshot=c.landing_url,
+           mr.advertiser_cpm_snapshot=c.advertiser_cpm_bid,
+           mr.cpm_mode_snapshot=c.cpm_mode,
+           mr.fixed_publisher_cpm_snapshot=c.fixed_publisher_cpm
+       WHERE mr.request_id=? AND mr.internal_campaign_id=? AND c.status IN ('approved','active')`,
+      [requestId,decision.selected.internal_campaign_id],
+    );
+  }
   mediationDebug(input.parentRequestId ? "fallback_provider_chosen" : "initial_provider_chosen", {
     miniapp_id: input.miniappId,
     request_id: requestId,

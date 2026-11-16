@@ -4,7 +4,8 @@ import { getChannelDailySpend } from "@/lib/channelDailySpend";
 import { aggregateChannelStatistics } from "@/lib/channelStatistics";
 import { markCampaignBudgetExhausted } from "@/lib/campaignLifecycle";
 import { deleteExhaustedChannelCampaignPosts, type CampaignPostDeletionSummary } from "@/lib/campaignPostDeletion";
-import { creditUserLockedBalance } from "@/lib/earnings";
+import { creditSettledPublisherBalance, isZeroOrdinaryLockEnabled } from "@/lib/earnings";
+import { recordReferralCommission } from "@/lib/referralCommission";
 import { recordPayoutSafetyCheck } from "@/lib/revenueProtection";
 import { ensureClassicSettlementColumns } from "@/lib/schemaGuards";
 import { sendTelegramMessage } from "@/lib/telegram";
@@ -14,13 +15,15 @@ import { enforcePublisherTrust, type PublisherTrustEnforcementResult } from "@/l
 import { applyChannelFraudBillingPolicy } from "@/lib/channelFraudBilling";
 import { refreshCampaignViews } from "@/lib/channelAdminViewRefresh";
 import { createSystemLog } from "@/lib/systemLogs";
-import { settlePendingChannelPublisherCredits } from "@/lib/channelFastBilling";
+import { debitChannelClick, debitConfirmedChannelViews, settlePendingChannelPublisherCredits } from "@/lib/channelFastBilling";
 import { getChannelUnitPrice, money } from "@/lib/channelBilling";
 import { calculateCurrentCanonicalAllocation, shadowWriteChannelAllocation, unitsToDecimal } from "@/lib/channelAllocationLedger";
 import { claimAdvertiserDirectDebit } from "@/lib/advertiserDirectDebit";
 import { cleanupChannelDailyCapPosts, markChannelDailyCapReached } from "@/lib/channelDailyCap";
 import { outstandingViewsSql, waivedViewsForPostSql } from "@/lib/channelViewWaivers";
 import { withFinancialTransactionRetry } from "@/lib/dbResilience";
+import { isUnifiedSettlementActive, isUnifiedSchemaReady, getUnifiedChannelPayoutSplit } from "@/lib/channelUnifiedSettlement";
+import { CHANNEL_BILLABLE_CAMPAIGN_SQL, CHANNEL_BILLABLE_POST_SQL } from "@/lib/campaignCreativeRevision";
 
 type SettlementKind = "view" | "click";
 type ChannelPayoutPolicy = {
@@ -131,6 +134,17 @@ async function channelPayoutPolicy(): Promise<ChannelPayoutPolicy> {
 }
 
 export function calculateChannelPayoutSplit(advertiserDebit: number, policy: ChannelPayoutPolicy): ChannelPayoutSplit {
+  if (isUnifiedSettlementActive()) {
+    const direct = getUnifiedChannelPayoutSplit(advertiserDebit, policy);
+    return {
+      advertiserDebit: amount(direct.advertiserDebit),
+      platformRevenue: amount(direct.platformRevenue),
+      publisherPoolBeforeReserve: amount(direct.publisherPoolBeforeReserve),
+      reserveAmount: amount(direct.reserveAmount),
+      publisherCredit: amount(direct.publisherCredit),
+    };
+  }
+
   const debit = amount(advertiserDebit);
   const platformRevenue = amount(debit * (policy.platformMarginPercent / 100));
   const publisherPoolBeforeReserve = amount(debit - platformRevenue);
@@ -175,6 +189,7 @@ async function lockedPost(connection: PoolConnection, postId: number) {
 }
 
 async function countOutstandingCampaignEngagement(campaignId: number) {
+  const unpaidClickSql = unpaidAcceptedClickSql(await isUnifiedSchemaReady(pool));
   const [rows] = await pool.query<Array<RowDataPacket & { outstanding_count: number }>>(
     `SELECT COUNT(*) AS outstanding_count
      FROM campaign_posts cp
@@ -183,23 +198,227 @@ async function countOutstandingCampaignEngagement(campaignId: number) {
        AND COALESCE(c.campaign_kind, 'standard') <> 'channel_growth'
        AND cp.delivery_confirmed_at IS NOT NULL
        AND cp.delivery_failed_at IS NULL
-       AND cp.deleted_at IS NULL
-       AND ((c.type = 'views' AND ${outstandingViewsSql("cp")} > 0)
-         OR (c.type = 'clicks' AND (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id) > COALESCE(cp.settled_clicks, 0)))`,
+        AND (cp.deleted_at IS NULL OR (c.status='paused' AND c.pause_reason='moderation_cleanup'
+          AND cp.billing_cutoff_at IS NOT NULL AND cp.deleted_at IS NOT NULL))
+        AND ((c.type = 'views' AND ${outstandingViewsSql("cp")} > 0
+          AND (cp.deleted_at IS NULL OR (cp.view_accepted_at IS NOT NULL AND cp.view_accepted_at<=cp.billing_cutoff_at)))
+          OR (c.type = 'clicks' AND (cp.deleted_at IS NULL
+            AND (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id = cp.id AND cc.is_bot=0) > COALESCE(cp.settled_clicks, 0)
+          OR cp.deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM campaign_clicks cc WHERE cc.post_id=cp.id
+            AND cc.campaign_id=cp.campaign_id AND cc.is_bot=0 AND cc.accepted_at IS NOT NULL
+            AND cc.accepted_at<=cp.billing_cutoff_at AND ${unpaidClickSql}))))`,
     [campaignId]
   );
   return Number(rows[0]?.outstanding_count || 0);
+}
+
+/** Recover events committed before a confirmed moderation deletion. The fast
+ * billing entry points own all money writes and recheck each event under locks.
+ * A failed candidate remains visible on the next run; no in-memory cursor is
+ * used as a financial acknowledgement.
+ */
+export function unpaidAcceptedClickSql(unifiedReady: boolean) {
+  return `NOT EXISTS (SELECT 1 FROM channel_advertiser_debits cad
+    WHERE cad.source_key=CONCAT('click:',cc.id))${unifiedReady ? ` AND NOT EXISTS
+    (SELECT 1 FROM channel_unified_settlement_events cue WHERE cue.idempotency_key=
+      CONCAT('v101:click:c_',cc.campaign_id,':p_',cc.post_id,':clk_',cc.id))` : ''}`;
+}
+
+export async function recoverDeletedAcceptedEngagement(options: { campaignId?: number; channelId?: number }) {
+  const failedDetails: Array<{ postId: number; reason: string }> = [];
+  const settledPosts = new Set<number>();
+  let candidates = 0, advertiserDebited = 0, publisherCredited = 0, platformRevenue = 0, reserveAmount = 0;
+  let lastPostId = 0;
+  const unifiedReady = await isUnifiedSchemaReady(pool);
+  const unpaidClickSql = unpaidAcceptedClickSql(unifiedReady);
+  for (let batch = 0; batch < MAX_SETTLEMENT_BATCHES_PER_RUN; batch += 1) {
+    const [posts] = await pool.query<Array<RowDataPacket & { post_id: number; campaign_type: string; views: number }>>(
+      `SELECT cp.id post_id,c.type campaign_type,cp.views
+       FROM campaign_posts cp JOIN campaigns c ON c.id=cp.campaign_id
+       WHERE cp.id>? AND c.status='paused' AND c.pause_reason='moderation_cleanup'
+         AND c.approved_creative_revision_id IS NOT NULL
+         AND cp.deleted_at IS NOT NULL AND cp.billing_cutoff_at IS NOT NULL
+         AND cp.delivery_confirmed_at IS NOT NULL AND cp.delivery_failed_at IS NULL
+         AND (? IS NULL OR cp.campaign_id=?) AND (? IS NULL OR cp.channel_id=?)
+         AND ((c.type='views' AND cp.view_accepted_at IS NOT NULL
+           AND cp.view_accepted_at<=cp.billing_cutoff_at AND ${outstandingViewsSql("cp")}>0)
+           OR (c.type='clicks' AND EXISTS(SELECT 1 FROM campaign_clicks cc WHERE cc.post_id=cp.id AND cc.campaign_id=cp.campaign_id
+               AND cc.is_bot=0 AND cc.accepted_at IS NOT NULL AND cc.accepted_at<=cp.billing_cutoff_at
+               AND ${unpaidClickSql}
+               )))
+       ORDER BY cp.id LIMIT ${MAX_POSTS_PER_RUN}`,
+      [lastPostId,options.campaignId??null,options.campaignId??null,options.channelId??null,options.channelId??null],
+    );
+    if (!posts.length) break;
+    lastPostId = Number(posts[posts.length-1].post_id);
+    candidates += posts.length;
+    for (const post of posts) {
+      const postId = Number(post.post_id);
+      try {
+        const record = (result: Awaited<ReturnType<typeof debitConfirmedChannelViews>>) => {
+          if (!result.debited) return;
+          settledPosts.add(postId);
+          advertiserDebited += Number(result.advertiserDebit || 0);
+          publisherCredited += Number(result.publisherCredit || 0);
+          platformRevenue += Number(result.platformRevenue || 0);
+          reserveAmount += Number(result.reserveAmount || 0);
+        };
+        if (post.campaign_type === 'views') {
+          record(await debitConfirmedChannelViews(postId,Number(post.views)));
+        } else {
+          let lastClickId = 0;
+          for (let page = 0; page < 20; page += 1) {
+            const [clicks] = await pool.query<Array<RowDataPacket & { id: number }>>(
+              `SELECT cc.id FROM campaign_clicks cc JOIN campaign_posts cp ON cp.id=cc.post_id
+               WHERE cc.post_id=? AND cc.id>? AND cc.campaign_id=cp.campaign_id AND cc.is_bot=0
+                 AND cc.accepted_at IS NOT NULL AND cc.accepted_at<=cp.billing_cutoff_at
+                 AND ${unpaidClickSql}
+                 ORDER BY cc.id LIMIT 100`,
+              [postId,lastClickId],
+            );
+            if (!clicks.length) break;
+            lastClickId = Number(clicks[clicks.length-1].id);
+            for (const click of clicks) record(await debitChannelClick(postId,Number(click.id)));
+            if (clicks.length<100) break;
+            if (page===19) throw new Error('accepted_click_recovery_safety_limit');
+          }
+        }
+      } catch (error) {
+        failedDetails.push({postId,reason:error instanceof Error?error.message:'accepted_engagement_recovery_failed'});
+      }
+    }
+    if (posts.length<MAX_POSTS_PER_RUN) break;
+  }
+  return {candidates,settledPosts:settledPosts.size,failedDetails,advertiserDebited,publisherCredited,platformRevenue,reserveAmount};
+}
+
+/** Recover only confirmed engagement through the canonical V1.01 billing entry points.
+ * Candidate paging is bounded and uses a monotonic post id, so an unfunded
+ * reserve advance cannot starve later posts or spin inside one cron run.
+ */
+async function settleCanonicalChannelBatch(options: {
+  channelId?: number;
+  campaignId?: number;
+  skipGlobalMaintenance?: boolean;
+  campaignStatuses?: Array<"active" | "paused" | "pending">;
+}): Promise<ChannelSettlementResult> {
+  await ensureClassicSettlementColumns();
+  if (!(await isUnifiedSchemaReady(pool))) throw new Error("v101_batch_schema_not_ready");
+  const recovered = await recoverDeletedAcceptedEngagement(options);
+  const payoutPolicy = await channelPayoutPolicy();
+  let fraudDetection: ChannelSettlementResult["fraudDetection"] = { skipped: true };
+  let fraudBilling: ChannelSettlementResult["fraudBilling"] = { skipped: true };
+  if (!options.skipGlobalMaintenance) {
+    // A failed pre-settlement fraud check must stop a financial batch.
+    fraudDetection = await runChannelFraudDetection();
+    fraudBilling = await applyChannelFraudBillingPolicy();
+  }
+  const failedDetails: ChannelSettlementResult["failedDetails"] = [];
+  const settledPosts = new Set<number>();
+  let candidates = 0, batches = 0, lastPostId = 0;
+  let advertiserDebited = 0, publisherCredited = 0, platformRevenue = 0, reserveAmount = 0;
+  while (batches < MAX_SETTLEMENT_BATCHES_PER_RUN) {
+    const [page] = await pool.query<CandidateRow[]>(
+      `SELECT cp.id AS post_id
+       FROM campaign_posts cp
+       JOIN campaigns c ON c.id=cp.campaign_id
+       JOIN channels ch ON ch.id=cp.channel_id
+       JOIN users publisher ON publisher.id=ch.user_id
+       WHERE cp.id>? AND ${CHANNEL_BILLABLE_CAMPAIGN_SQL} AND ${CHANNEL_BILLABLE_POST_SQL}
+         AND COALESCE(c.campaign_kind,'standard')<>'channel_growth'
+         AND ch.status='active' AND ch.is_deleted=FALSE
+         AND (ch.settlement_excluded_until IS NULL OR ch.settlement_excluded_until<=UTC_TIMESTAMP())
+         AND COALESCE(publisher.is_banned,0)=0 AND COALESCE(publisher.status,'active')<>'banned'
+         AND cp.delivery_confirmed_at IS NOT NULL AND cp.delivery_failed_at IS NULL
+         AND cp.deleted_at IS NULL
+         AND (? IS NULL OR cp.channel_id=?) AND (? IS NULL OR cp.campaign_id=?)
+         AND ((c.type='views' AND cp.views>cp.settled_views+${waivedViewsForPostSql("cp")})
+           OR (c.type='clicks' AND (cp.views>0 OR
+             (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id=cp.id AND cc.is_bot=0)>cp.settled_clicks)))
+       ORDER BY cp.id LIMIT ${MAX_POSTS_PER_RUN}`,
+      [lastPostId, options.channelId ?? null, options.channelId ?? null, options.campaignId ?? null, options.campaignId ?? null],
+    );
+    if (!page.length) break;
+    batches += 1;
+    candidates += page.length;
+    lastPostId = Number(page[page.length - 1].post_id);
+    for (const candidate of page) {
+      const postId = Number(candidate.post_id);
+      try {
+        // This read only chooses an entry point. Each billing call locks and
+        // revalidates the campaign, post, view proof, budget, and idempotency key.
+        const [rows] = await pool.query<Array<RowDataPacket & {
+          campaign_type: string; views: number; settled_views: number; settled_clicks: number; valid_clicks: number;
+        }>>(
+          `SELECT c.type campaign_type,cp.views,cp.settled_views,cp.settled_clicks,
+             (SELECT COUNT(*) FROM campaign_clicks cc WHERE cc.post_id=cp.id AND cc.is_bot=0) valid_clicks
+           FROM campaign_posts cp JOIN campaigns c ON c.id=cp.campaign_id WHERE cp.id=?`,
+          [postId],
+        );
+        const post = rows[0];
+        if (!post) continue;
+        const record = (result: Awaited<ReturnType<typeof debitConfirmedChannelViews>>) => {
+          if (!result.debited) return;
+          settledPosts.add(postId);
+          advertiserDebited += Number(result.advertiserDebit || 0);
+          publisherCredited += Number(result.publisherCredit || 0);
+          platformRevenue += Number(result.platformRevenue || 0);
+          reserveAmount += Number(result.reserveAmount || 0);
+        };
+        if (post.campaign_type === "views") {
+          if (Number(post.views) > Number(post.settled_views)) record(await debitConfirmedChannelViews(postId, Number(post.views)));
+        } else if (post.campaign_type === "clicks") {
+          const validClicks = Number(post.valid_clicks || 0);
+          if (validClicks > Number(post.settled_clicks || 0)) {
+            const [clicks] = await pool.query<Array<RowDataPacket & { id: number }>>(
+              "SELECT id FROM campaign_clicks WHERE post_id=? AND is_bot=0 ORDER BY id LIMIT 100 OFFSET ?",
+              [postId, Number(post.settled_clicks || 0)],
+            );
+            for (const click of clicks) record(await debitChannelClick(postId, Number(click.id)));
+          } else if (validClicks === 0 && Number(post.views) > 0) {
+            record(await debitConfirmedChannelViews(postId, Number(post.views)));
+          }
+        }
+      } catch (error) {
+        failedDetails.push({ postId, reason: error instanceof Error ? error.message : "v101_batch_candidate_failed" });
+        console.error("Canonical V1.01 batch candidate failed", { postId, error });
+      }
+    }
+    if (page.length < MAX_POSTS_PER_RUN) break;
+  }
+  let statisticsAggregation: ChannelSettlementResult["statisticsAggregation"] = { skipped: true };
+  let trustEnforcement: ChannelSettlementResult["trustEnforcement"] = { skipped: true };
+  if (!options.skipGlobalMaintenance) {
+    try { statisticsAggregation = await aggregateChannelStatistics(); }
+    catch (error) { statisticsAggregation = { error: error instanceof Error ? error.message : "statistics_aggregation_failed" }; }
+    try { trustEnforcement = await enforcePublisherTrust(); }
+    catch (error) { trustEnforcement = { error: error instanceof Error ? error.message : "publisher_trust_enforcement_failed" }; }
+  }
+  return {
+    candidates:candidates+recovered.candidates,
+    settledPosts:settledPosts.size+recovered.settledPosts,
+    failedPosts:failedDetails.length+recovered.failedDetails.length,
+    failedDetails:[...failedDetails,...recovered.failedDetails],
+    advertiserDebited:amount(advertiserDebited+recovered.advertiserDebited),
+    publisherCredited:amount(publisherCredited+recovered.publisherCredited),
+    platformRevenue:amount(platformRevenue+recovered.platformRevenue),
+    reserveAmount:amount(reserveAmount+recovered.reserveAmount),
+    exhaustedCampaigns: 0, details: [], deletions: {}, statisticsAggregation,
+    payoutPolicy, fraudDetection, fraudBilling, trustEnforcement,
+  };
 }
 
 export async function settleChannelCampaigns(options: {
   channelId?: number;
   campaignId?: number;
   skipGlobalMaintenance?: boolean;
-  campaignStatuses?: Array<"active" | "paused">;
+  campaignStatuses?: Array<"active" | "paused" | "pending">;
 } = {}): Promise<ChannelSettlementResult> {
+  if (isUnifiedSettlementActive()) return settleCanonicalChannelBatch(options);
   await ensureClassicSettlementColumns();
+  const recovered = await recoverDeletedAcceptedEngagement(options);
   const payoutPolicy = await channelPayoutPolicy();
-  const campaignStatuses = options.campaignStatuses?.length ? options.campaignStatuses : ["active", "paused"];
+  const campaignStatuses = options.campaignStatuses?.length ? options.campaignStatuses : ["active", "paused", "pending"];
   const campaignStatusPlaceholders = campaignStatuses.map(() => "?").join(",");
   let fraudDetection: ChannelSettlementResult["fraudDetection"];
   let fraudBilling: ChannelSettlementResult["fraudBilling"];
@@ -243,6 +462,8 @@ export async function settleChannelCampaigns(options: {
      JOIN channels ch ON ch.id = cp.channel_id
      JOIN users publisher ON publisher.id = ch.user_id
      WHERE c.status IN (${campaignStatusPlaceholders})
+       AND (c.status<>'pending' OR (c.approved_creative_revision_id IS NOT NULL
+         AND c.pending_creative_revision_id IS NOT NULL AND c.status_before_creative_review='active'))
        AND COALESCE(c.campaign_kind, 'standard') <> 'channel_growth'
        AND ch.status = 'active'
        AND ch.is_deleted = FALSE
@@ -393,12 +614,19 @@ export async function settleChannelCampaigns(options: {
              channel_publisher_earnings = channel_publisher_earnings + ?,
              channel_platform_revenue = channel_platform_revenue + ?,
              channel_reserve_amount = channel_reserve_amount + ?
-           WHERE id = ? AND status IN (${campaignStatusPlaceholders})`,
+           WHERE id = ? AND status IN (${campaignStatusPlaceholders})
+             AND (status<>'pending' OR (approved_creative_revision_id IS NOT NULL
+               AND pending_creative_revision_id IS NOT NULL AND status_before_creative_review='active'))`,
           [remaining, debit, publisherCredit, platform, reserve, post.campaign_id, ...campaignStatuses]
         );
         if (!("affectedRows" in campaignUpdate) || campaignUpdate.affectedRows !== 1) throw new Error("campaign_debit_failed");
 
-        if (!(await creditUserLockedBalance(connection, post.publisher_id, publisherCredit))) throw new Error("publisher_credit_failed");
+        if (!(await creditSettledPublisherBalance(connection, post.publisher_id, publisherCredit, {
+          sourceKey: `channel:settlement:${kind}:${post.post_id}:${settledThrough}:publisher`,
+          sourceSystem: "channel_settlement",
+          sourceRecordId: `${post.post_id}:${kind}:${settledThrough}`,
+          policyVersion: "channel-legacy-settlement-v1",
+        }))) throw new Error("publisher_credit_failed");
 
         const settlementTable = kind === "view" ? "ad_settlements_views" : "ad_settlements";
         const metricColumn = kind === "view" ? "views_count" : "clicks_count";
@@ -406,9 +634,9 @@ export async function settleChannelCampaigns(options: {
           `INSERT INTO ${settlementTable}
             (post_id, campaign_id, advertiser_id, channel_id, publisher_id, ${metricColumn}, advertiser_paid,
              publisher_reward, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'locked')`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [post.post_id, post.campaign_id, post.advertiser_id, post.channel_id, post.publisher_id,
-            settledUnits, debit, publisherCredit]
+            settledUnits, debit, publisherCredit, isZeroOrdinaryLockEnabled() ? "unlocked" : "locked"]
         );
 
         const [ledgerInsert] = await connection.query<ResultSetHeader>(
@@ -428,6 +656,14 @@ export async function settleChannelCampaigns(options: {
             publisherCredit, publisherCredit, effectivePublisherCpm, effectivePublisherCpc,
             platform, reserve, isExhausted ? 0 : remaining, isExhausted]
         );
+
+        await recordReferralCommission(connection, {
+          monetizingUserId: post.publisher_id,
+          monetizedAmount: publisherCredit,
+          productType: "channel",
+          sourceEventKey: `channel:settle:${ledgerInsert.insertId}`,
+          metadata: { post_id: post.post_id, campaign_id: post.campaign_id },
+        });
 
         const settledColumn = kind === "view" ? "settled_views" : "settled_clicks";
         await connection.query(
@@ -559,14 +795,14 @@ export async function settleChannelCampaigns(options: {
   }
 
   return {
-    candidates: totalCandidates,
-    settledPosts: details.length,
-    failedPosts,
-    failedDetails,
-    advertiserDebited: amount(details.reduce((sum, item) => sum + item.amount_debited, 0)),
-    publisherCredited: amount(details.reduce((sum, item) => sum + item.publisher_credited, 0)),
-    platformRevenue: amount(details.reduce((sum, item) => sum + item.platform_revenue, 0)),
-    reserveAmount: amount(details.reduce((sum, item) => sum + item.reserve_amount, 0)),
+    candidates: totalCandidates+recovered.candidates,
+    settledPosts: details.length+recovered.settledPosts,
+    failedPosts:failedPosts+recovered.failedDetails.length,
+    failedDetails:[...failedDetails,...recovered.failedDetails],
+    advertiserDebited: amount(details.reduce((sum, item) => sum + item.amount_debited, recovered.advertiserDebited)),
+    publisherCredited: amount(details.reduce((sum, item) => sum + item.publisher_credited, recovered.publisherCredited)),
+    platformRevenue: amount(details.reduce((sum, item) => sum + item.platform_revenue, recovered.platformRevenue)),
+    reserveAmount: amount(details.reduce((sum, item) => sum + item.reserve_amount, recovered.reserveAmount)),
     exhaustedCampaigns: exhausted.size,
     details,
     deletions,
@@ -578,7 +814,7 @@ export async function settleChannelCampaigns(options: {
   };
 }
 
-export type CampaignSettlementBeforeDeletionAction = "advertiser_pause" | "admin_pause" | "admin_delete";
+export type CampaignSettlementBeforeDeletionAction = "advertiser_pause" | "admin_pause" | "admin_delete" | "moderation_cleanup";
 
 export type CampaignSettlementBeforeDeletionResult = {
   ok: boolean;

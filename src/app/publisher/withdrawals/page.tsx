@@ -77,7 +77,7 @@ export default function WithdrawalPage() {
               <Lock size={20} />
             </div>
             <div className="space-y-1">
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Locked</p>
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Locked balance</p>
               <h2 className="text-2xl font-black text-slate-900 tracking-tight">${parseFloat(data.balance.balance_locked).toFixed(2)}</h2>
             </div>
             <div className="w-full py-2 bg-slate-50 text-slate-400 rounded-xl text-[10px] font-black uppercase tracking-widest text-center">

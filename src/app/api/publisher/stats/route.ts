@@ -248,12 +248,16 @@ export async function GET(request: Request) {
     };
       },
     );
+    const [[pendingWithdrawalRow]]: any = await pool.query(
+      "SELECT COALESCE(SUM(amount), 0) AS amount FROM withdrawals WHERE user_id = ? AND status = 'pending' AND refunded = 0",
+      [user.id],
+    );
     return NextResponse.json({
       ...payload,
       // These values come from the authenticated MariaDB lookup on every request.
       balance_locked: user.balance_locked,
       balance_available: user.balance_available,
-      balance_pending: user.balance_locked,
+      balance_pending: pendingWithdrawalRow?.amount ?? "0.00000000",
       join_rewarded: user.join_rewarded,
     }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
   } catch (error: any) {

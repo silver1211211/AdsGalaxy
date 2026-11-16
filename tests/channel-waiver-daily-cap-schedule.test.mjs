@@ -7,6 +7,7 @@ const migration = read('db/migrations/20260926_0148_channel_view_waivers_daily_c
 const lifecycleMigration = read('db/migrations/20260926_0149_platform_lifecycle_notifications_slots.sql');
 const campaign60Closure = read('db/migrations/20260926_0150_campaign_60_historical_delivery_closure.sql');
 const adminDetail = read('src/app/api/admin/campaigns/[id]/route.ts');
+const campaignDetailsHandler = read('src/lib/campaignDetailsHandler.ts');
 const adminList = read('src/app/api/admin/campaigns/route.ts');
 const waivers = read('src/lib/channelViewWaivers.ts');
 const settlement = read('src/lib/channelSettlement.ts');
@@ -15,6 +16,7 @@ const deletion = read('src/lib/campaignPostDeletion.ts');
 const dailyCap = read('src/lib/channelDailyCap.ts');
 const processAds = read('src/app/api/cron/process-ads/route.ts');
 const emergency = read('src/app/api/admin/campaigns/[id]/emergency-push/route.ts');
+const emergencyHandler = read('src/lib/campaignEmergencyPushHandler.ts');
 const channelDelivery = read('src/lib/channelDelivery.ts');
 const clickRoute = read('src/app/api/clicks/[id]/[postId]/route.ts');
 const broadcast = read('src/app/api/cron/process-broadcast/route.ts');
@@ -22,7 +24,8 @@ const readyPool = read('src/lib/botDeliveryReadyPool.ts');
 const lifecycle = read('src/lib/botLifecycle.ts');
 
 test('1 Views admin detail uses financially billable views', () => {
-  assert.match(adminDetail, /type === "views" \? billableViews : rawViews/);
+  assert.match(adminDetail, /handleCampaignDetailsGet/);
+  assert.match(campaignDetailsHandler, /campaignRows\[0\]\.type === "views" \? billableViews : rawViews/);
   assert.equal(Number(((200 / 8064) * 100).toFixed(8)), 2.48015873);
 });
 test('2 Views admin list uses billable views', () => assert.match(adminList, /row\.type === "views" \? billableViews/));
@@ -47,7 +50,7 @@ test('9 waived views are excluded from legacy settlement', () => assert.match(se
 test('10 waived views are excluded from fast billing', () => assert.match(fastBilling, /settled_views \|\| 0\) \+ Number\(post\.waived_views/));
 test('11 waived views are excluded from outstanding calculations', () => assert.match(waivers, /views,0\).*settled_views,0\).*waivedViewsForPostSql/s));
 test('12 forensic admin reporting retains raw fraud waiver and billable values', () => {
-  for (const field of ['raw_views','fraud_excluded_views','waived_views','outstanding_valid_views','billable_views']) assert.match(adminDetail, new RegExp(field));
+  for (const field of ['raw_views','fraud_excluded_views','waived_views','outstanding_valid_views','billable_views']) assert.match(campaignDetailsHandler, new RegExp(field));
 });
 test('13 daily settlement locks the campaign row', () => assert.match(fastBilling, /SELECT id FROM campaigns WHERE id=\? FOR UPDATE/));
 test('14 cap transition has an explicit lifecycle state', () => assert.match(dailyCap, /status='daily_cap_reached'/));
@@ -64,11 +67,16 @@ test('17b future generations are not included in the historical waiver', () => {
 test('18 delivery-failed rows without messages are normalized without Telegram delete', () => assert.match(deletion, /status='delivery_failed'[\s\S]*message_id IS NULL/));
 test('19 campaign 60 identity migration remains pinned to internal 64', () => assert.match(read('db/migrations/20260926_0147_campaign_identity_delivery_fairness.sql'), /SET public_id=60[\s\S]*WHERE id=64/));
 test('20 scheduled Views delivery uses tracked CTA', () => assert.match(processAds, /trackedChannelCtaUrl/));
-test('21 Emergency Push Views delivery uses tracked CTA', () => assert.match(emergency, /trackedChannelCtaUrl/));
-test('22 Views clicks cannot enter CPC fast billing', () => assert.match(fastBilling, /post\.campaign_type !== `\$\{input\.type\}s`/));
+test('21 Emergency Push Views delivery uses tracked CTA', () => {
+  assert.match(emergency, /handleCampaignEmergencyPush/);
+  assert.match(emergencyHandler, /trackedChannelCtaUrl/);
+});
+test('22 Views clicks cannot enter CPC fast billing', () => assert.match(fastBilling, /input\.type === "click" \? post\.campaign_type !== "clicks"/));
 test('23 Click campaigns retain click-unit settlement', () => assert.match(settlement, /campaign_type === "clicks" \? "click" : "view"/));
 test('24 scheduled and Emergency Push share the placement reservation helper', () => {
-  assert.match(processAds, /reserveChannelPlacement/); assert.match(emergency, /reserveChannelPlacement/);
+  assert.match(processAds, /reserveChannelPlacement/);
+  assert.match(emergency, /handleCampaignEmergencyPush/);
+  assert.match(emergencyHandler, /reserveChannelPlacement/);
 });
 test('25 claim key is campaign channel generation unique', () => assert.match(channelDelivery, /channel:\$\{campaignId\}:\$\{channelId\}:generation:\$\{generation\}/));
 test('26 saved posting_times take precedence over generated scheduler_slot', () => {
@@ -108,7 +116,7 @@ test('32 fill mode never deletes and respects the hard configured count', () => 
   const slots = read('src/lib/channelScheduleSlots.ts');
   assert.match(slots, /input\.mode === "fill_empty_slots"/);
   assert.match(channelDelivery, /used_capacity \|\| 0\) >= Math\.max\(1, Number\(input\.capacityLimit\)\)/);
-  assert.match(emergency, /capacityLimit:/);
+  assert.match(emergencyHandler, /capacityLimit:mode === "fill_empty_slots"/);
   assert.doesNotMatch(slots.slice(slots.indexOf('input.mode === "fill_empty_slots"'), slots.indexOf('if (input.bypassTiming')), /replacesPostId:\s*[1-9]/);
 });
 test('33 replacement selects overrepresented coverage and protects final placements', () => {
@@ -117,10 +125,11 @@ test('33 replacement selects overrepresented coverage and protects final placeme
   assert.match(slots, /unavoidableCoverageConflict/);
 });
 test('34 emergency replacement settles and deletes only its selected victim', () => {
-  assert.match(emergency, /refreshChannelViews/);
-  assert.match(emergency, /settleChannelCampaigns/);
-  assert.match(emergency, /deleteCampaignPostsByIds\(\[scheduleSlot\.replacesPostId\]/);
-  assert.doesNotMatch(emergency, /deleteActivePostsForReplacementSafely/);
+  assert.match(emergency, /handleCampaignEmergencyPush/);
+  assert.match(emergencyHandler, /refreshChannelViews/);
+  assert.match(emergencyHandler, /settleChannelCampaigns/);
+  assert.match(emergencyHandler, /deleteCampaignPostsByIds\(\[scheduleSlot\.replacesPostId\]/);
+  assert.doesNotMatch(emergencyHandler, /deleteActivePostsForReplacementSafely/);
 });
 test('35 cap increase can reactivate with a fresh generation', () => {
   assert.match(dailyCap, /reactivateCampaignAfterDailyCapIncrease/);

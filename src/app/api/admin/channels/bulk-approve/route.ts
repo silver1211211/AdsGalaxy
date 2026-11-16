@@ -1,3 +1,4 @@
+import { recordChannelStatusTransitionAudit } from "@/lib/channelStatusAudit";
 import { NextResponse } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
@@ -5,9 +6,11 @@ import { requireAdminPermission } from "@/lib/adminAuth";
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { notifyChannelApproved, notifyChannelRejected } from "@/lib/publisherNotifications";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
-import { onboardPrivateChannelTracking } from "@/lib/privateChannelTrackingOnboarding";
+import { onboardPrivateChannelTracking, privateTrackingFailureMessage } from "@/lib/privateChannelTrackingOnboarding";
 import { ChannelVerificationError, verifyAndStoreChannelIdentity } from "@/lib/channelTelegramIdentity";
 import { rejectEntityWithPolicy } from "@/lib/moderationRejections";
+import { getPublicChannelApprovalEligibility } from "@/lib/publicChannelApproval";
+import { enqueueAssetNotification } from "@/lib/platformNotifications";
 
 type PendingChannel = RowDataPacket & {
   id: number;
@@ -17,6 +20,7 @@ type PendingChannel = RowDataPacket & {
   username: string | null;
   channel_type: "public" | "private";
   telegram_id: string | number | null;
+  requires_live_verification?: number | boolean | null;
 };
 
 export async function POST(request: Request) {
@@ -48,8 +52,10 @@ export async function POST(request: Request) {
     params.push(...selectedIds);
   }
   const [channels] = await pool.query<PendingChannel[]>(
-    `SELECT ch.id,ch.user_id,ch.title,ch.chat_id,ch.username,ch.channel_type,u.telegram_id
+    `SELECT ch.id,ch.user_id,ch.title,ch.chat_id,ch.username,ch.channel_type,u.telegram_id,
+            1 AS requires_live_verification
      FROM channels ch JOIN users u ON u.id=ch.user_id
+     LEFT JOIN channel_telegram_identities ti ON ti.channel_id=ch.id
      WHERE ch.status='pending' AND ch.is_deleted=FALSE${selectionClause}
      ORDER BY ch.id`,
     params
@@ -67,97 +73,170 @@ export async function POST(request: Request) {
   let sharedCooldownUntil = 0;
   const privacySchema = await getChannelPrivacySchema();
   for (const channel of channels) {
-    if (sharedCooldownUntil > Date.now()) {
-      deferred.push({ channel_id: channel.id, reason: "Telegram verification deferred because the shared Bot API caller is cooling down.", retry_at: new Date(sharedCooldownUntil).toISOString() });
-      continue;
-    }
     try {
-      let identity;
-      try {
-        identity = await verifyAndStoreChannelIdentity({
-          channelId: channel.id,
-          chatId: channel.chat_id,
-          username: channel.username,
-          source: "bulk_approve",
-        });
-      } catch (error) {
-        if (error instanceof ChannelVerificationError) {
-          if (error.code === "temporarily_rate_limited") {
-            sharedCooldownUntil = Date.now() + Math.max(1, Number(error.retryAfterSeconds || 60)) * 1000;
-            deferred.push({ channel_id: channel.id, reason: error.message, retry_at: new Date(sharedCooldownUntil).toISOString() });
-            continue;
-          }
-          if (error.code === "temporary_telegram_error") {
-            deferred.push({ channel_id: channel.id, reason: error.message, retry_at: null });
-            continue;
-          }
-          if (error.code === "inaccessible_channel") {
-            await rejectEntityWithPolicy({ entityType: "channel", entityId: channel.id,
-              ruleKey: "publisher.channel.inaccessible-channel", publicRuleNumber: 4,
-              internalNote: error.message, adminId: Number(admin?.id || 0) });
-            rejected.push({ channel_id: channel.id, rule: 4, reason: error.message });
-            await notifyChannelRejected(channel.telegram_id, channel.id, channel.title).catch(() => notificationFailures.push(channel.id));
-            continue;
-          }
-          if (error.code === "missing_permission") {
-            await rejectEntityWithPolicy({ entityType: "channel", entityId: channel.id,
-              ruleKey: "publisher.channel.missing-permissions", publicRuleNumber: 5,
-              internalNote: error.message, adminId: Number(admin?.id || 0) });
-            missingPermission.push({ channel_id: channel.id, rule: 5, reason: error.message });
-            await notifyChannelRejected(channel.telegram_id, channel.id, channel.title).catch(() => notificationFailures.push(channel.id));
-            continue;
-          }
-          unresolved.push({ channel_id: channel.id, reason: error.message });
+      let confirmedPrivateTracking: number | null = null;
+      if (channel.channel_type === "public") {
+        const eligibility = await getPublicChannelApprovalEligibility(channel.id);
+        if (!eligibility.eligible) {
+          unresolved.push({ channel_id: channel.id, reason: eligibility.reason });
           continue;
         }
-        identityVerificationFailures.push({
-          channel_id: channel.id,
-          reason: error instanceof Error ? error.message : "Telegram channel verification failed.",
-        });
-        continue;
+      }
+      if (channel.channel_type !== "public") {
+        if (channel.channel_type === "private") {
+          const tracking = await onboardPrivateChannelTracking({
+            channelId: channel.id,
+            chatId: channel.chat_id,
+            channelType: "private",
+            schema: privacySchema,
+          });
+          if (tracking.status !== "active") {
+            if (tracking.status === "pending_manual" && /rate.limit|flood/i.test(tracking.reason)) {
+              deferred.push({ channel_id: channel.id, reason: privateTrackingFailureMessage(tracking.reason), retry_at: tracking.retryAfterSeconds ? new Date(Date.now() + tracking.retryAfterSeconds * 1000).toISOString() : null });
+              continue;
+            }
+            const fix = privateTrackingFailureMessage(tracking.status === "pending_manual" ? tracking.reason : "tracking_not_active");
+            await pool.query("UPDATE channels SET failure_reason=?,suggested_fix=? WHERE id=? AND status='pending'",
+              [tracking.status === "pending_manual" ? tracking.reason : "private_tracking_unverified", fix, channel.id]);
+            trackingOnboardingFailures.push({ channel_id: channel.id, reason: fix });
+            continue;
+          }
+          confirmedPrivateTracking = tracking.tracking_account;
+        }
       }
 
-      channel.chat_id = identity.chatId;
-      channel.username = identity.username;
-
-      const tracking = await onboardPrivateChannelTracking({
-        channelId: channel.id,
-        chatId: channel.chat_id,
-        channelType: channel.channel_type === "private" ? "private" : "public",
-        schema: privacySchema,
-      });
-
-      if (channel.channel_type === "private" && tracking.status !== "active") {
-        if (tracking.status === "pending_manual" && tracking.reason === "bot_invite_permission_missing") {
-          await rejectEntityWithPolicy({ entityType: "channel", entityId: channel.id,
-            ruleKey: "publisher.channel.missing-permissions", publicRuleNumber: 5,
-            internalNote: "Ads Galaxy bot needs invite/add-member permission for private tracking onboarding.",
-            adminId: Number(admin?.id || 0) });
-          missingPermission.push({ channel_id: channel.id, rule: 5, reason: "Invite/add-member permission is missing." });
-          await notifyChannelRejected(channel.telegram_id, channel.id, channel.title).catch(() => notificationFailures.push(channel.id));
+      const conn = await pool.getConnection();
+      try {
+        await conn.beginTransaction();
+        const [lockedRows] = await conn.query<RowDataPacket[]>(
+          `SELECT c.id, c.status, c.is_deleted, c.under_review, c.marketplace_admin_status,
+                  c.channel_type, c.chat_id, c.tracking_account, c.tracking_account_status, c.tracking_account_member_status,
+                  c.subscriber_count, c.paused_by_actor, c.admin_paused_at, c.publisher_paused_at,
+                  c.monetization_paused_reason, c.below_minimum_review_required,
+                  c.settlement_excluded_until, c.automation_suspension_status,
+                  c.automation_suspended_until, c.revenue_protection_status,
+                  c.telegram_access_version,
+                  u.status AS publisher_status, COALESCE(u.is_banned, 0) AS publisher_is_banned
+           FROM channels c
+           JOIN users u ON u.id = c.user_id
+           WHERE c.id = ? FOR UPDATE`,
+          [channel.id],
+        );
+        const locked = lockedRows[0];
+        if (!locked || locked.status !== "pending" || Boolean(locked.is_deleted)) {
+          await conn.rollback();
           continue;
         }
-        trackingOnboardingFailures.push({
-          channel_id: channel.id,
-          reason: tracking.status === "pending_manual"
-            ? tracking.reason
-            : "Private-channel tracking membership could not be verified.",
+        if (channel.channel_type === "private" && (locked.channel_type !== "private" || String(locked.chat_id) !== String(channel.chat_id)
+          || Number(locked.tracking_account) !== confirmedPrivateTracking || locked.tracking_account_status !== "active"
+          || !["member", "already_member"].includes(String(locked.tracking_account_member_status)))) {
+          await conn.rollback();
+          unresolved.push({ channel_id: channel.id, reason: "Private channel membership changed during approval; retry manually." });
+          continue;
+        }
+        if (locked.marketplace_admin_status === "rejected") {
+          await conn.rollback();
+          unresolved.push({ channel_id: channel.id, reason: "Channel was rejected during approval" });
+          continue;
+        }
+        if (locked.automation_suspended_until && new Date(String(locked.automation_suspended_until)) > new Date()) {
+          await conn.rollback();
+          unresolved.push({ channel_id: channel.id, reason: "Channel is suspended by automation controls" });
+          continue;
+        }
+        if (channel.channel_type === "public") {
+          const lockedEligibility = await getPublicChannelApprovalEligibility(channel.id, conn);
+          if (!lockedEligibility.eligible) {
+            await conn.rollback();
+            unresolved.push({ channel_id: channel.id, reason: lockedEligibility.reason });
+            continue;
+          }
+        }
+        if (Boolean(locked.publisher_is_banned) || locked.publisher_status !== "active") {
+          await conn.rollback();
+          unresolved.push({ channel_id: channel.id, reason: "Publisher account is not active" });
+          continue;
+        }
+        if (locked.subscriber_count === null || locked.subscriber_count === undefined || Number(locked.subscriber_count) < 100) {
+          await conn.rollback();
+          unresolved.push({ channel_id: channel.id, reason: "Subscriber count below minimum (100) or unknown" });
+          continue;
+        }
+        if (Boolean(locked.under_review)) {
+          await conn.rollback();
+          unresolved.push({ channel_id: channel.id, reason: "Channel is under manual review" });
+          continue;
+        }
+        if (locked.paused_by_actor === "admin" || Boolean(locked.admin_paused_at)) {
+          await conn.rollback();
+          unresolved.push({ channel_id: channel.id, reason: "Channel was paused by administrator" });
+          continue;
+        }
+        if (locked.paused_by_actor === "publisher" || Boolean(locked.publisher_paused_at)) {
+          await conn.rollback();
+          unresolved.push({ channel_id: channel.id, reason: "Channel was paused by publisher" });
+          continue;
+        }
+        if (locked.settlement_excluded_until && new Date(String(locked.settlement_excluded_until)) > new Date()) {
+          await conn.rollback();
+          unresolved.push({ channel_id: channel.id, reason: "Channel has active settlement hold" });
+          continue;
+        }
+        if (locked.automation_suspension_status && locked.automation_suspension_status !== "active") {
+          await conn.rollback();
+          unresolved.push({ channel_id: channel.id, reason: "Channel is suspended by automation controls" });
+          continue;
+        }
+        if (locked.revenue_protection_status && locked.revenue_protection_status !== "normal") {
+          await conn.rollback();
+          unresolved.push({ channel_id: channel.id, reason: "Channel is restricted by revenue protection" });
+          continue;
+        }
+        if (locked.monetization_paused_reason === "below_minimum" || Boolean(locked.below_minimum_review_required)) {
+          await conn.rollback();
+          unresolved.push({ channel_id: channel.id, reason: "Channel is marked below minimum subscribers" });
+          continue;
+        }
+
+        const newVersion = Number(locked.telegram_access_version || 0) + 1;
+        const [update] = await conn.query<ResultSetHeader>(
+          `UPDATE channels
+           SET status='active',
+               is_deleted=FALSE,
+               paused_reason=NULL,
+               failure_reason=NULL,
+               suggested_fix=NULL,
+               health_status=CASE WHEN channel_type='private' THEN 'healthy' ELSE 'warning' END,
+               health_checked_at=CASE WHEN channel_type='private' THEN NOW() ELSE NULL END,
+               reactivated_at=NOW(),
+               telegram_access_version=?
+           WHERE id=? AND status='pending' AND is_deleted=FALSE AND telegram_access_version=?`,
+          [newVersion, channel.id, locked.telegram_access_version],
+        );
+
+        if (update.affectedRows === 0) {
+          await conn.rollback();
+          continue;
+        }
+
+        await recordChannelStatusTransitionAudit(conn, {
+          channelId: Number(channel.id),
+          telegramChatId: channel.chat_id,
+          previousStatus: "pending",
+          newStatus: "active",
+          sourceWorker: "admin_bulk_approve",
+          reasonCode: "admin_bulk_approve_verified",
+          reasonText: channel.channel_type === "public" ? "Public channel approved using existing registration verification" : "Bulk-approved private channel after membership confirmation",
+          evidenceClassification: "manual",
+          actorType: "admin",
+          actorId: admin?.id || null,
+          transitionIntent: "manual",
+          verificationVersion: newVersion,
+          notificationGenerated: true,
+          requireTable: true,
         });
-        continue;
-      }
 
-      const [update] = await pool.query<ResultSetHeader>(
-        `UPDATE channels SET status='active',is_deleted=FALSE,paused_reason=NULL,
-           failure_reason=NULL,health_status='healthy',health_checked_at=NOW(),reactivated_at=NOW()
-         WHERE id=? AND status='pending' AND is_deleted=FALSE`,
-        [channel.id]
-      );
-
-      if (update.affectedRows === 0) continue;
-      approved += 1;
-
-      try {
-        await pool.query(
+        await conn.query(
           `INSERT INTO channel_admin_action_audits(admin_id,action,channel_id,publisher_id,old_value,new_value,reason)
            VALUES(?,?,?,?,?,?,?)`,
           [admin?.id || null, "bulk_approve", channel.id, channel.user_id,
@@ -165,24 +244,35 @@ export async function POST(request: Request) {
             hasSelection ? "admin_bulk_approve_selected" : "admin_bulk_approve_all_pending"]
         );
 
-        await recordAdminActionAudit({
-          adminId: admin?.id,
-          action: "channel_bulk_approve",
-          entityType: "channel",
-          entityId: channel.id,
-          reason: hasSelection ? "admin_bulk_approve_selected" : "admin_bulk_approve_all_pending",
-          metadata: { publisher_id: channel.user_id },
-        });
-      } catch (error) {
-        console.error("Bulk channel approval audit failed", {
-          channelId: channel.id,
-          error: error instanceof Error ? error.message : "audit_failed",
-        });
+        await conn.commit();
+        approved += 1;
+        try {
+          await recordAdminActionAudit({
+            adminId: admin?.id,
+            action: "channel_bulk_approve",
+            entityType: "channel",
+            entityId: channel.id,
+            reason: hasSelection ? "admin_bulk_approve_selected" : "admin_bulk_approve_all_pending",
+            metadata: { publisher_id: channel.user_id },
+          });
+        } catch (auditError) {
+          console.error("Bulk channel approval post-commit audit failed", {
+            channelId: channel.id,
+            error: auditError instanceof Error ? auditError.message : "audit_failed",
+          });
+        }
+      } catch (txErr) {
+        await conn.rollback().catch(() => undefined);
+        throw txErr;
+      } finally {
+        conn.release();
       }
 
-      await notifyChannelApproved(channel.telegram_id, channel.id, channel.title).catch(() => {
-        notificationFailures.push(channel.id);
-      });
+      const notification = channel.channel_type === "public"
+        ? enqueueAssetNotification(pool, { assetType: "channel", assetId: channel.id,
+            userId: channel.user_id, event: "approved", name: channel.title })
+        : notifyChannelApproved(channel.telegram_id, channel.id, channel.title);
+      await notification.catch(() => { notificationFailures.push(channel.id); });
     } catch (error) {
       approvalFailures.push({
         channel_id: channel.id,

@@ -17,6 +17,9 @@ const sidebar = readFileSync("src/components/layout/Sidebar.tsx", "utf8");
 const cpcMigration = readFileSync("db/migrations/20260708_0098_campaign_cpc_billing.sql", "utf8");
 const adminDeposits = readFileSync("src/app/api/admin/deposits/route.ts", "utf8");
 const emergencyPush = readFileSync("src/app/api/admin/campaigns/[id]/emergency-push/route.ts", "utf8");
+const emergencyPushHandler = readFileSync("src/lib/campaignEmergencyPushHandler.ts", "utf8");
+const campaignDetailsHandler = readFileSync("src/lib/campaignDetailsHandler.ts", "utf8");
+const dbResilience = readFileSync("src/lib/dbResilience.ts", "utf8");
 const modal = readFileSync("src/components/ui/Modal.tsx", "utf8");
 const discountSource = readFileSync("src/lib/advertiserDiscount.ts", "utf8");
 const discountMigration = readFileSync("db/migrations/20260905_0127_advertiser_rate_discounts.sql", "utf8");
@@ -54,7 +57,8 @@ test("per-user CPM and CPC discounts are absolute, expiring, and applied to live
   assert.match(adminUsersPage, /CPM\/CPC discount/);
   assert.match(advertiserWizard, /charged \$\{effectiveBid\.toFixed\(2\)\} \/ 1k/);
   assert.match(processBroadcast, /calculateBroadcastPayout\(campaign\.effective_cpm/);
-  assert.match(emergencyPush, /campaign\.effective_cpm \?\? campaign\.cpm/);
+  assert.match(emergencyPush, /handleCampaignEmergencyPush/);
+  assert.match(emergencyPushHandler, /campaign\.effective_cpm \?\? campaign\.cpm/);
 });
 
 test("channel budget exhaustion uses the next billable unit for CPM and CPC", () => {
@@ -73,7 +77,9 @@ test("channel budget exhaustion uses the next billable unit for CPM and CPC", ()
   assert.match(fastBilling, /remaining <= 0 \|\| remaining \+ 1e-10 < unitPrice/);
   assert.match(fastBilling, /SELECT id FROM channel_advertiser_debits WHERE source_key=\?/);
   assert.match(fastBilling, /const unbilledUnits = Math\.max\(0, confirmedUnits - alreadySettled\)/);
-  assert.match(fastBilling, /catch \(error\) \{ await conn\.rollback\(\)/);
+  assert.match(fastBilling, /withFinancialTransactionRetry\(/);
+  assert.match(dbResilience, /await connection\.beginTransaction\(\)/);
+  assert.match(dbResilience, /await connection\.rollback\(\)/);
 });
 
 test("CPC schema and campaign forms agree without opening financial counters", () => {
@@ -83,10 +89,12 @@ test("CPC schema and campaign forms agree without opening financial counters", (
   for (const column of ["budget", "total_budget", "cpm", "cpc", "category", "teaser_mode", "teaser_enabled", "teaser_cpm"]) {
     assert.match(campaignCreate, new RegExp(`\\b${column}\\b`));
   }
-  assert.match(adminCampaignRoute, /cpc: \{ type: "number", min: 0 \}/);
+  assert.match(adminCampaignRoute, /handleCampaignDetailsPatch/);
+  const editableFields = campaignDetailsHandler.match(/const EDITABLE_CAMPAIGN_FIELDS = \{[\s\S]*?\} as const;/)?.[0] || "";
+  assert.match(editableFields, /cpc: \{ type: "number", min: 0 \}/);
   assert.match(advertiserWizard, /bidField = formData\.type === "clicks" \? "cpc" : "cpm"/);
   for (const field of ["budget", "channel_spend", "settled_views", "settled_clicks", "status"]) {
-    assert.doesNotMatch(adminCampaignRoute, new RegExp(`${field}: \\{`));
+    assert.doesNotMatch(editableFields, new RegExp(`${field}: \\{`));
   }
 });
 
@@ -120,10 +128,13 @@ test("admin production blockers stay fixed", () => {
   assert.doesNotMatch(adminDeposits, /d\.tx_hash/);
   assert.match(adminDeposits, /d\.txn_id LIKE \?/);
   assert.match(adminDeposits, /d\.status LIKE \?/);
-  assert.match(emergencyPush, /hasActiveUndeletedCampaignPost/);
-  assert.match(emergencyPush, /mode === "fill_empty_slots" && followRules/);
-  assert.match(emergencyPush, /await hasRecentChannelPost\(channel\.id\)/);
-  assert.match(emergencyPush, /await hasCampaignPostWithin24Hours\(campaign\.id, channel\.id\)/);
-  assert.match(emergencyPush, /mode === "replace_everything" && await hasActiveUndeletedCampaignPost/);
-  assert.match(emergencyPush, /channelCampaignMatchesInventory\(\{/);
+  assert.match(emergencyPush, /handleCampaignEmergencyPush/);
+  assert.match(emergencyPushHandler, /mode === "fill_empty_slots" && followRules/);
+  assert.match(emergencyPushHandler, /daily_cp\.delivery_confirmed_at IS NOT NULL/);
+  assert.match(emergencyPushHandler, /same_campaign\.delivery_confirmed_at > DATE_SUB\(UTC_TIMESTAMP\(\), INTERVAL 24 HOUR\)/);
+  assert.match(emergencyPushHandler, /mode === "replace_everything" && body\.confirmation !== "CONFIRM"/);
+  assert.match(emergencyPushHandler, /reserveChannelPlacement\(reservationConnection/);
+  assert.match(emergencyPushHandler, /status IN \('active','posted','sent'\) AND deleted_at IS NULL AND delivery_confirmed_at IS NOT NULL FOR UPDATE/);
+  assert.match(emergencyPushHandler, /replacement_victim_settlement_failed/);
+  assert.match(emergencyPushHandler, /channelCampaignMatchesInventory\(\{/);
 });

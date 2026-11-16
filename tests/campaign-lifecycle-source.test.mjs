@@ -95,8 +95,9 @@ test("campaign status compatibility migration widens only legacy ENUM schemas wh
 });
 
 test("paused campaigns with live posts remain settlement eligible", () => {
-  assert.match(settlement, /campaignStatuses\?: Array<"active" \| "paused">/);
-  assert.match(settlement, /options\.campaignStatuses\?\.length \? options\.campaignStatuses : \["active", "paused"\]/);
+  assert.match(settlement, /campaignStatuses\?: Array<"active" \| "paused" \| "pending">/);
+  assert.match(settlement, /options\.campaignStatuses\?\.length \? options\.campaignStatuses : \["active", "paused", "pending"\]/);
+  assert.match(settlement, /campaignStatuses\.includes\(post\.campaign_status as "active" \| "paused"\)/);
   assert.match(settlement, /WHERE c\.status IN/);
   assert.match(settlement, /includePausedCampaign \? \["active", "paused"\] : \["active"\]/);
 });
@@ -119,7 +120,8 @@ test("paused cleanup finalizes once before deletion while generic retries remain
   assert.match(retryCleanupEndpoint, /retryCampaignPostCleanup/);
   assert.match(retryCleanupCron, /processPausedCampaignCleanup/);
   assert.match(retryCleanupCron, /settleCampaignEngagementBeforeDeletion/);
-  assert.match(retryCleanupCron, /if \(!campaign\.channel_settlement_finalized_at\)/);
+  assert.match(retryCleanupCron, /if \(campaign\.pause_reason === "moderation_cleanup" \|\| !campaign\.channel_settlement_finalized_at\)/);
+  assert.match(retryCleanupCron, /if \(campaign\.pause_reason !== "moderation_cleanup"\) await pool\.query/);
   assert.match(retryCleanupCron, /deleteActiveCampaignPosts\(campaign\.id\)/);
   assert.doesNotMatch(retryCleanupEndpoint, /settleChannelCampaigns|settlePendingChannelPublisherCredits|channelSettlement|channelFastBilling/);
 });
@@ -205,7 +207,7 @@ test("admin UI exposes Phase 2 controls and visibility cards", () => {
 });
 
 test("advertiser channel pause queues idempotent background finalization, locks resume for one hour, and keeps cleanup best-effort", () => {
-  assert.match(retryCleanupCron, /settleCampaignEngagementBeforeDeletion\(\s*Number\(campaign\.id\),\s*"advertiser_pause"/);
+  assert.match(retryCleanupCron, /settleCampaignEngagementBeforeDeletion\(\s*Number\(campaign\.id\),\s*campaign\.pause_reason === "moderation_cleanup" \? "moderation_cleanup" : "advertiser_pause"/);
   assert.match(advertiserCampaignRoute, /resume_locked_until = DATE_ADD\(NOW\(\), INTERVAL 1 HOUR\)/);
   assert.match(advertiserCampaignRoute, /pause_reason = 'user_paused'/);
   assert.match(advertiserCampaignRoute, /campaignKind === "channel"/);

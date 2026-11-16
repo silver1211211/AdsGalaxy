@@ -9,6 +9,7 @@ import { validateOptionalDailyBudget } from "@/lib/campaignBudget";
 import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByIds } from "@/lib/miniappCampaignMetrics";
 import type { ResultSetHeader } from "mysql2/promise";
 import { didSensitiveCampaignContentChange } from "@/lib/campaignModeration";
+import { captureMiniAppCreative, stageMiniAppCreativeRevision } from "@/lib/miniappCreativeRevision";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -76,7 +77,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (!id) return NextResponse.json({ error: "Invalid campaign ID" }, { status: 400 });
 
     const [rows]: any = await pool.query(
-      "SELECT id, advertiser_id, campaign_name, title, description, cta_text, landing_url, image_url, logo_url, budget, remaining_budget, status, pause_reason, advertiser_cpm_bid, approved_at FROM miniapp_rewarded_campaigns WHERE id = ?",
+      "SELECT * FROM miniapp_rewarded_campaigns WHERE id = ?",
       [id]
     );
     if (!rows.length) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
@@ -166,6 +167,8 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (body.image_url !== undefined) updates.image_url = str(body.image_url);
     if (body.logo_url !== undefined) updates.logo_url = str(body.logo_url) || null;
     if (body.landing_url !== undefined) updates.landing_url = str(body.landing_url);
+    if (body.title_color !== undefined) updates.title_color = str(body.title_color) || null;
+    if (body.body_color !== undefined) updates.body_color = str(body.body_color) || null;
     if (body.categories !== undefined) updates.categories = JSON.stringify(normalizeMiniAppCampaignCategories(body.categories));
     if (body.countries !== undefined) updates.countries = JSON.stringify(Array.isArray(body.countries) ? body.countries : (str(body.countries) ? str(body.countries).split(",").map((s: string) => s.trim()).filter(Boolean) : []));
     if (body.languages !== undefined) updates.languages = JSON.stringify(Array.isArray(body.languages) ? body.languages : (str(body.languages) ? str(body.languages).split(",").map((s: string) => s.trim()).filter(Boolean) : []));
@@ -205,20 +208,49 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     }
 
     const resubmitted=didSensitiveCampaignContentChange("miniapp",
-      {destinationUrl:prev.landing_url,cta:prev.cta_text,image:prev.image_url,logo:prev.logo_url,title:prev.title,text:prev.description},
-      {destinationUrl:nextLandingUrl,cta:updates.cta_text??prev.cta_text,image:updates.image_url??prev.image_url,logo:updates.logo_url??prev.logo_url,title:updates.title??prev.title,text:updates.description??prev.description},
+      {destinationUrl:prev.landing_url,cta:prev.cta_text,image:prev.image_url,logo:prev.logo_url,title:prev.title,text:prev.description,titleColor:prev.title_color,bodyColor:prev.body_color},
+      {destinationUrl:nextLandingUrl,cta:updates.cta_text??prev.cta_text,image:updates.image_url??prev.image_url,logo:updates.logo_url??prev.logo_url,title:updates.title??prev.title,text:updates.description??prev.description,titleColor:updates.title_color??prev.title_color,bodyColor:updates.body_color??prev.body_color},
     );
 
-    if (resubmitted) {
+    const stageReview = resubmitted && Boolean(prev.approved_at || prev.approved_creative_revision_id);
+    if (resubmitted && !stageReview) {
       updates.creative_review_status = "pending";
       updates.status = "pending";
       updates.requires_re_moderation = 1;
       updates.previously_approved_at = prev.approved_at || null;
     }
 
-    const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(", ");
-    const values = [...Object.values(updates), id];
-    await pool.query(`UPDATE miniapp_rewarded_campaigns SET ${setClauses}, updated_at = NOW() WHERE id = ?`, values);
+    if (stageReview) {
+      const creative = captureMiniAppCreative({ ...prev, ...updates });
+      const conn = await pool.getConnection();
+      try {
+        await conn.beginTransaction();
+        const [lockedRows]: any = await conn.query(
+          "SELECT * FROM miniapp_rewarded_campaigns WHERE id=? AND advertiser_id=? FOR UPDATE", [id, user.id],
+        );
+        const locked = lockedRows[0];
+        if (!locked || String(locked.status) !== String(prev.status) ||
+            String(locked.landing_url) !== String(prev.landing_url)) {
+          await conn.rollback();
+          return NextResponse.json({ error: "Campaign changed during edit. Reload and retry." }, { status: 409 });
+        }
+        await stageMiniAppCreativeRevision(conn, id, locked, creative);
+        for (const field of ["title","description","cta_text","title_color","body_color",
+          "image_url","logo_url","landing_url"]) delete updates[field];
+        if (Object.keys(updates).length) await conn.query(
+          `UPDATE miniapp_rewarded_campaigns SET ${Object.keys(updates).map(k => `${k}=?`).join(",")},updated_at=UTC_TIMESTAMP() WHERE id=?`,
+          [...Object.values(updates),id],
+        );
+        await conn.commit();
+      } catch (error) {
+        await conn.rollback();
+        throw error;
+      } finally { conn.release(); }
+    } else {
+      const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(", ");
+      const values = [...Object.values(updates), id];
+      await pool.query(`UPDATE miniapp_rewarded_campaigns SET ${setClauses}, updated_at = NOW() WHERE id = ?`, values);
+    }
 
     return NextResponse.json({ success: true, resubmitted });
   } catch (error: any) {

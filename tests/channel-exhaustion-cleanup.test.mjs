@@ -24,9 +24,10 @@ test("fast billing commits exhaustion before invoking channel cleanup", () => {
 });
 
 test("settlement exhaustion commits before cleanup and cleanup failures cannot roll it back", () => {
-  const transactionCommit = settlement.indexOf("await connection.commit()");
+  const transactionEnd = settlement.indexOf("}, { operation: \"channel_campaign_settlement\" });");
   const cleanupLoop = settlement.indexOf("for (const [campaignId, campaign] of exhausted)");
-  assert.ok(transactionCommit >= 0 && cleanupLoop > transactionCommit);
+  assert.ok(transactionEnd >= 0 && cleanupLoop > transactionEnd);
+  assert.match(readFileSync("src/lib/dbResilience.ts", "utf8"), /await connection\.commit\(\)/);
   assert.match(settlement, /deleteExhaustedChannelCampaignPosts\(campaignId\)/);
   assert.match(settlement, /catch \(error\)[\s\S]*Post-commit channel exhaustion cleanup failed/);
   assert.doesNotMatch(settlement, /Skipping exhausted campaign post deletion because unsettled engagement remains/);
@@ -64,15 +65,16 @@ test("multiple cleanup failures remain independent and retryable", () => {
 });
 
 test("stale process-ads placement rechecks active status under lock before insertion", () => {
-  const lock = processAds.indexOf("const [[lockedCampaign]]");
-  const statusCheck = processAds.indexOf('lockedCampaign?.status !== "active"', lock);
-  const reservation = processAds.indexOf("reserveChannelPlacement", statusCheck);
-  assert.ok(lock >= 0 && statusCheck > lock && reservation > statusCheck);
+  const affordability = readFileSync("src/lib/channelPlacementAffordability.ts", "utf8");
+  assert.match(processAds, /checkChannelPlacementAffordability\(conn, Number\(campaign\.id\)\)/);
+  assert.match(affordability, /WHERE c\.id=\? FOR UPDATE/);
+  assert.match(affordability, /campaign\.status !== "active"/);
+  assert.match(processAds, /if \(!affordability\.allowed\)[\s\S]*reserveChannelPlacement/);
 });
 
 test("pause cleanup remains distinct from exhaustion cleanup", () => {
   assert.match(advertiserRoute, /cleanup_queued: true/);
-  assert.match(pauseCleanupWorker, /settleCampaignEngagementBeforeDeletion\(\s*Number\(campaign\.id\),\s*"advertiser_pause"/);
+  assert.match(pauseCleanupWorker, /settleCampaignEngagementBeforeDeletion\(\s*Number\(campaign\.id\),\s*campaign\.pause_reason === "moderation_cleanup" \? "moderation_cleanup" : "advertiser_pause"/);
   assert.match(pauseCleanupWorker, /deleteActiveCampaignPosts\(campaign\.id\)/);
   assert.doesNotMatch(deletion, /resume_locked_until|paused_at/);
 });

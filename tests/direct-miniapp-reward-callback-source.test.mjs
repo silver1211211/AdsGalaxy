@@ -52,10 +52,11 @@ test("direct callback enqueue defaults enabled, supports an explicit kill switch
   assert.match(internal, /await conn\.commit\(\)/);
 });
 
-test("disabled direct delivery rows remain unleased while Developer deliveries continue", () => {
-  assert.match(outbox, /AND \(\? = 1 OR miniapp_reward_callback_id IS NULL\)/);
-  assert.match(outbox, /claimWebhookDeliveryBatch\(directCallbacksEnabled\)/);
-  assert.match(outbox, /directMiniappRewardCallbacksEnabled\(\)/);
+test("direct reward callbacks are delivered after commit and excluded from scheduled claims", () => {
+  assert.match(outbox, /AND miniapp_reward_callback_id IS NULL/);
+  assert.match(internal, /await conn\.commit\(\);[\s\S]*deliverDirectMiniappRewardCallbackNow\(miniappId, rewardEvent\.event_id\)/);
+  assert.match(direct, /for \(let attempt = 1; attempt <= 2; attempt\+\+\)/);
+  assert.match(direct, /status = 'failed', attempts = \?/);
 });
 
 test("callback payload contains only approved fields and verified user identity", () => {
@@ -71,7 +72,8 @@ test("outbox preserves body and event id while signing each attempt timestamp", 
   assert.match(outbox, /const body = isV2[\s\S]*JSON\.stringify\(payload\)/);
   assert.match(outbox, /`\$\{timestamp\}\.\$\{delivery\.event_id\}\.\$\{body\}`/);
   assert.match(outbox, /response\.ok/);
-  assert.match(outbox, /V2_RETRY_DELAYS_MINUTES = \[1, 5, 15, 60, 360\]/);
+  assert.match(direct, /\$\{timestamp\}\.\$\{delivery\.event_id\}\.\$\{body\}/);
+  assert.match(direct, /response\.ok/);
 });
 
 test("configuration enforces ownership and safe HTTPS URLs", () => {
@@ -100,10 +102,8 @@ test("API and UI distinguish configured, platform, and effective callback status
   assert.match(route, /configured_status/);
   assert.match(route, /platform_enabled/);
   assert.match(route, /effective_status/);
-  assert.match(route, /failed_attention/);
-  assert.match(route, /CALLBACK_CONTRACT/);
-  assert.match(panel, /FAILED \/ ATTENTION/);
-  assert.match(panel, /Latest callback attempt/);
+  assert.doesNotMatch(panel, /pending ·|delivery_summary|Latest callback attempt|Recent delivery history/);
+  assert.doesNotMatch(route, /delivery_summary|latest_attempt/);
   assert.doesNotMatch(route, /MINIAPP_DIRECT_REWARD_CALLBACKS_ENABLED/);
 });
 

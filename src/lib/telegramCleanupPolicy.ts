@@ -32,7 +32,12 @@ export function classifyTelegramCleanupResult(input: CleanupFailureInput): Teleg
   const description = String(input.description || errorText || "Telegram cleanup failed");
   const text = description.toLowerCase();
   const status = Number(input.httpStatus || input.errorCode || 0);
-  const retryAfterSeconds = Math.max(0, Number(input.retryAfterSeconds || 0)) || null;
+  const parsedRetryAfter = (() => {
+    if (Number(input.retryAfterSeconds || 0) > 0) return Math.max(0, Number(input.retryAfterSeconds));
+    const match = text.match(/retry after\s+(\d+)|flood[_ ]?wait[_ ]?(\d+)/i);
+    return match ? Math.max(0, Number(match[1] || match[2] || 0)) : 0;
+  })();
+  const retryAfterSeconds = parsedRetryAfter || null;
   const make = (category: TelegramCleanupCategory, code: string, retryable: boolean, terminal: boolean, localSuccess: boolean): TelegramCleanupClassification => ({
     category, code, retryable, terminal, localSuccess, retryAfterSeconds,
     safeReason: `${code}: ${status ? `HTTP ${status}: ` : ""}${description}`.slice(0, 1000),
@@ -41,8 +46,8 @@ export function classifyTelegramCleanupResult(input: CleanupFailureInput): Teleg
   if (/message can'?t be deleted|message cannot be deleted|can'?t delete/.test(text)) return make("CANNOT_DELETE_TERMINAL", "MESSAGE_CANT_BE_DELETED", false, true, false);
   if (/bot is not a member|bot is not member/.test(text)) return make("CHANNEL_ACCESS_LOST", "BOT_IS_NOT_MEMBER", false, true, false);
   if (/bot was kicked|bot was blocked|bot removed/.test(text)) return make("CHANNEL_ACCESS_LOST", "BOT_REMOVED", false, true, false);
-  if (/chat not found|channel not found|channel_invalid|peer_id_invalid/.test(text)) return make("CHANNEL_ACCESS_LOST", "CHANNEL_ACCESS_LOST", false, true, false);
-  if (/not enough rights|not an administrator|administrator rights|chat_admin_required/.test(text) || status === 403) return make("CHANNEL_ACCESS_LOST", "CHAT_ADMIN_REQUIRED", false, true, false);
+  if (/member list is inaccessible|chat not found|channel not found|channel_invalid|peer_id_invalid|chat_id_invalid/.test(text)) return make("TEMPORARY", "TELEGRAM_ACCESS_UNCERTAIN", true, false, false);
+  if (/not enough rights|not an administrator|administrator rights|chat_admin_required/.test(text)) return make("CHANNEL_ACCESS_LOST", "CHAT_ADMIN_REQUIRED", false, true, false);
   if (status === 429 || retryAfterSeconds || /too many requests|retry after|flood[_ ]?wait|rate.?limit/.test(text)) return make("TEMPORARY", "RATE_LIMITED", true, false, false);
   if (status >= 500 || /timeout|timed out|aborterror|econnreset|eai_again|enotfound|network|socket|fetch failed|temporar|internal server error|bad gateway/.test(text)) return make("TEMPORARY", "TELEGRAM_TEMPORARY_ERROR", true, false, false);
   return make("CANNOT_DELETE_TERMINAL", "TELEGRAM_DELETE_TERMINAL", false, true, false);
@@ -61,7 +66,7 @@ export async function persistCleanupAccessLoss(channelId: number | string | null
     checkedAt: new Date(), telegramChatId: null, username: null, title: null, channelType: null,
     botRole: null, canPostMessages: false,
   };
-  return persistTelegramChannelAccess({ channelId, source: "telegram_cleanup", autoPauseActive: true }, result);
+  return persistTelegramChannelAccess({ channelId, source: "telegram_cleanup", autoPauseActive: Boolean(access.permanent) }, result);
 }
 
 export async function mapWithBoundedConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<R>) {

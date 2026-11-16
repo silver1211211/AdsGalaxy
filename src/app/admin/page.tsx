@@ -64,7 +64,7 @@ export default function AdminDashboard() {
   }, []);
 
   const viewStats = stats || {
-    users: { total: summary?.users?.total || 0, today: summary?.users?.today || 0, week: 0, month: 0 },
+    users: { total: summary?.users?.total || 0, today: summary?.users?.today || 0, week: 0, month: 0, monthly_users: summary?.users?.monthly_users ?? null },
     financials: { totalDeposits: "0", totalWithdrawals: "0" },
     channels: { totalSubscribers: 0, pending: 0, approved: 0, deliveryEligible: 0, rejected: 0, approvedSubscribers: 0 },
     bots: { total: 0, deliveryEligible: 0, activeUsers: 0, deliveryEligibleUsers: 0, totalUsers: 0 },
@@ -112,9 +112,24 @@ export default function AdminDashboard() {
 
   return (
     <AdminLayout>
-      <div className="mb-6">
-        <h1 className="text-2xl font-black text-slate-900">Platform Overview</h1>
-        <p className="text-sm text-slate-500 font-medium">Real-time statistics and pending actions.</p>
+      <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-black text-slate-900">Platform Overview</h1>
+          <p className="text-sm text-slate-500 font-medium">Real-time statistics and pending actions.</p>
+        </div>
+        <div className="flex items-center gap-3.5 bg-white border border-slate-200 shadow-sm rounded-xl px-4 py-2.5 shrink-0 self-start sm:self-auto">
+          <div className="w-10 h-10 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600 shrink-0">
+            <Users size={20} />
+          </div>
+          <div>
+            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
+              Monthly Users
+            </span>
+            <span className="text-2xl font-black text-slate-900 leading-tight block">
+              {viewStats.users?.monthly_users != null ? Number(viewStats.users.monthly_users).toLocaleString() : "..."}
+            </span>
+          </div>
+        </div>
       </div>
 
       {error && (

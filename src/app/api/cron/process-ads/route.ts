@@ -12,9 +12,12 @@ import {
   recordChannelPostFailure,
   recordChannelPostSuccess,
 } from "@/lib/channelLifecycle";
-import { verifyTelegramChannelAccess } from "@/lib/telegramChannelAccess";
+import { classifyTelegramAccessFailure, persistTelegramChannelAccess, verifyTelegramChannelAccess } from "@/lib/telegramChannelAccess";
 import { channelCampaignMatchesInventory } from "@/lib/channelAudience";
-import { calculateCampaignScore, getWindowDominanceCap } from "@/lib/campaignPlacement";
+import { evaluateUnifiedChannelEligibility } from "@/lib/channelEligibility";
+import { calculateCampaignScore, expectedCampaignEcpm, getWindowDominanceCap } from "@/lib/campaignPlacement";
+import { checkSmartReachDeliveryReadiness } from "@/lib/channelSmartReachDeliveryReadiness";
+import { SMART_REACH_POLICY_VERSION } from "@/lib/channelSmartReachConfiguration";
 import { getAdvertiserTrustMultipliers } from "@/lib/advertiserTrust";
 import {
   calculateAdvertiserPerformanceScore,
@@ -40,6 +43,7 @@ import {
   trackedGrowthCtaUrl,
 } from "@/lib/channelDelivery";
 import { channelSchedulerGraceMinutes, evaluateChannelPostingSlot } from "@/lib/channelScheduleSlots";
+import { checkPendingChannelPostEligibility } from "@/lib/channelPostingEligibility";
 import { reconcileChannelDailyCapLifecycle } from "@/lib/channelDailyCap";
 import { outstandingViewsSql } from "@/lib/channelViewWaivers";
 import { checkChannelPlacementAffordability } from "@/lib/channelPlacementAffordability";
@@ -56,6 +60,7 @@ export const dynamic = 'force-dynamic';
 
 interface CampaignRow {
   id: number;
+  approved_creative_revision_id?: number | null;
   public_id?: number;
   user_id: number;
   name: string;
@@ -71,6 +76,10 @@ interface CampaignRow {
   parse_mode: string;
   type: string;
   campaign_kind?: string;
+  financial_policy_version?: string | null;
+  smart_reach_effective_cpm?: string | number | null;
+  smart_reach_max_cpm?: string | number | null;
+  verified_ctr?: number;
   cost_per_subscriber?: string | number | null;
   destination_chat_id?: string | number | null;
   destination_channel_id?: string | number | null;
@@ -95,6 +104,7 @@ interface ChannelRow extends Record<string, unknown> {
   user_id: number;
   chat_id: string;
   username: string;
+  channel_type: "public" | "private";
   invite_link_hash?: string | null;
   title?: string;
   categories: string | string[] | null;
@@ -160,21 +170,45 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function sendTelegramMessageWithRetries(chatId: string | number, text: string, options: any) {
+async function sendTelegramMessageWithRetries(chatId: string | number, text: string, options: any, beforeRetry?: () => Promise<{ allowed: true } | { allowed: false; reason: string }>) {
   let lastResult: any = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
+    if (attempt > 1 && beforeRetry) {
+      const eligibility = await beforeRetry();
+      if (!eligibility.allowed) {
+        return { ok: false as const, blockedReason: eligibility.reason, result: null, permanent: null, classified: null, attempts: attempt - 1 };
+      }
+    }
     try {
       lastResult = await sendTelegramMessage(chatId, text, options);
     } catch (error: any) {
-      lastResult = { ok: false, description: String(error?.message || "Telegram send threw an error") };
+      lastResult = { ok: false, description: String(error?.message || "Telegram send threw an error"), httpStatus: 503 };
     }
     if (lastResult?.ok) {
       return { ok: true, result: lastResult, attempts: attempt };
     }
 
-    const permanent = classifyTelegramSendFailure(lastResult?.description || "");
+    const classified = classifyTelegramAccessFailure({
+      description: lastResult?.description || "",
+      httpStatus: lastResult?.httpStatus ?? null,
+      errorCode: lastResult?.error_code ?? null,
+      retryAfterSeconds: lastResult?.parameters?.retry_after ?? null,
+    });
+    const permanent = classifyTelegramSendFailure(lastResult?.description || "", {
+      httpStatus: lastResult?.httpStatus ?? null,
+      errorCode: lastResult?.error_code ?? null,
+      retryAfterSeconds: lastResult?.parameters?.retry_after ?? null,
+    });
     if (permanent) {
-      return { ok: false, result: lastResult, attempts: attempt, permanent };
+      return { ok: false, result: lastResult, attempts: attempt, permanent, classified };
+    }
+
+    if (classified.reasonCode === "telegram_rate_limited" && Number(classified.retryAfterSeconds || 0) > 0) {
+      if (Number(classified.retryAfterSeconds || 0) > 10 || attempt >= 3) {
+        return { ok: false, result: lastResult, attempts: attempt, permanent: null, classified };
+      }
+      await sleep(Number(classified.retryAfterSeconds || 0) * 1000);
+      continue;
     }
 
     if (attempt < 3) {
@@ -182,7 +216,13 @@ async function sendTelegramMessageWithRetries(chatId: string | number, text: str
     }
   }
 
-  return { ok: false, result: lastResult, attempts: 3, permanent: null };
+  const classified = classifyTelegramAccessFailure({
+    description: lastResult?.description || "",
+    httpStatus: lastResult?.httpStatus ?? null,
+    errorCode: lastResult?.error_code ?? null,
+    retryAfterSeconds: lastResult?.parameters?.retry_after ?? null,
+  });
+  return { ok: false, result: lastResult, attempts: 3, permanent: null, classified };
 }
 
 function buildPostMaps(posts: RecentPostRow[]) {
@@ -283,15 +323,31 @@ async function loadDueChannelSlots(input: {
       const upperSql = upperBound === null ? "" : "AND c.id<=?";
       const params = upperBound === null ? [cursor, limit] : [cursor, upperBound, limit];
       const [rows]: any = await pool.query(`
-        SELECT c.*,g.authoritative_country_code,g.authoritative_language_code
-        FROM channels c LEFT JOIN channel_geo_classifications g ON g.channel_id=c.id
+        SELECT c.*,g.authoritative_country_code,g.authoritative_language_code,
+               ti.next_retry_at AS identity_next_retry_at,
+               ti.last_failure_code AS identity_last_failure_code,
+               ti.bot_member_status, ti.bot_can_post, ti.verification_state,
+               ti.telegram_chat_id AS identity_telegram_chat_id,
+               u.status AS publisher_status, u.is_banned AS publisher_is_banned
+        FROM channels c
+        JOIN users u ON u.id=c.user_id
+        LEFT JOIN channel_geo_classifications g ON g.channel_id=c.id
+        LEFT JOIN channel_telegram_identities ti ON ti.channel_id=c.id
         WHERE c.status='active' AND c.is_deleted=FALSE AND c.id>? ${upperSql}
+          AND u.status='active' AND COALESCE(u.is_banned,0)=0
+          AND (ti.next_retry_at IS NULL OR ti.next_retry_at <= UTC_TIMESTAMP(6))
         ORDER BY c.id ASC LIMIT ?
       `, params);
       if (!rows.length) break;
       scanned += rows.length;
       cursor = Number(rows[rows.length - 1].id);
       for (const row of rows as ChannelRow[]) {
+        const eligibility = evaluateUnifiedChannelEligibility({
+          ...row,
+          context: "ad_delivery",
+        });
+        if (!eligibility.eligible) continue;
+
         const slot = evaluateChannelPostingSlot(row, input.now, input.graceMinutes);
         if (slot.due && slot.slotDate && slot.slotTime && slot.scheduledFor && slot.windowExpiresAt) {
           due.push({
@@ -444,6 +500,20 @@ export async function GET(req: NextRequest) {
       maxScan: campaignScanLimit,
     });
     let campaigns = campaignScan.rows;
+    const deliveryReady: CampaignRow[]=[];
+    for(const campaign of campaigns){
+      if(campaign.financial_policy_version!==SMART_REACH_POLICY_VERSION){deliveryReady.push(campaign);continue;}
+      const readiness=await checkSmartReachDeliveryReadiness(pool,campaign.id);
+      if(!readiness.ready)continue;
+      const [[engagement]]: any=await pool.query(`SELECT
+        (SELECT COALESCE(SUM(billable_views),0) FROM channel_smart_reach_impression_billings WHERE campaign_id=?) views,
+        (SELECT COALESCE(SUM(settled_clicks),0) FROM campaign_posts WHERE campaign_id=?) clicks`,
+        [campaign.id,campaign.id]);
+      // A small prior prevents a handful of clicks from dominating placement.
+      campaign.verified_ctr=(Number(engagement?.clicks||0)+3)/(Number(engagement?.views||0)+600);
+      deliveryReady.push(campaign);
+    }
+    campaigns=deliveryReady;
     const [silverExemptionRows]: any = campaigns.length ? await pool.query(
       `SELECT cai.campaign_id,seu.user_id FROM campaign_admin_isolation cai JOIN silver_ad_exempt_users seu ON seu.active=1 WHERE cai.management_scope='silver' AND cai.campaign_id IN (?)`,
       [campaigns.map((campaign) => campaign.id)]
@@ -736,19 +806,30 @@ export async function GET(req: NextRequest) {
 
     for (const channel of channels as DueChannelRow[]) {
       dueSlotsProcessed++;
-      const health = await verifyTelegramChannelAccess({
-        channelId: channel.id,
-        chatId: channel.chat_id,
-        username: channel.username,
-        source: "process_ads",
-        persist: true,
-        autoPauseActive: true,
-      });
-      if (!health.ok) {
-        failedPosts++;
-        incrementSkip(`health_${health.state}`);
-        if (health.permanent) autoPausedChannels++;
+      const retryNotBeforeMs = (channel as any).identity_next_retry_at
+        ? new Date((channel as any).identity_next_retry_at).getTime()
+        : 0;
+      if (Number.isFinite(retryNotBeforeMs) && retryNotBeforeMs > schedulerNow.getTime()) {
+        incrementSkip("health_temporarily_unavailable");
         continue;
+      }
+      // Public approval is independent of Telegram. For delivery, attempt the
+      // actual post and persist its real message ID or failure.
+      if (channel.channel_type === "private" || channel.telegram_access_state === "temporarily_unavailable") {
+        const health = await verifyTelegramChannelAccess({
+          channelId: channel.id,
+          chatId: channel.chat_id,
+          username: channel.username,
+          source: "process_ads",
+          persist: true,
+          autoPauseActive: true,
+        });
+        if (!health.ok) {
+          failedPosts++;
+          incrementSkip(`health_${health.state}`);
+          if (health.permanent) autoPausedChannels++;
+          continue;
+        }
       }
 
       const eligibleCampaigns: CampaignRow[] = [];
@@ -807,6 +888,7 @@ export async function GET(req: NextRequest) {
         return Math.max(0, (budgetWeight * totalPlacementsToday) - actual);
       });
       const maxUnderDelivery = Math.max(0, ...underDeliveries);
+      const maxExpectedEcpm=Math.max(0,...eligibleCampaigns.map(expectedCampaignEcpm));
 
       const scoredCampaigns = eligibleCampaigns.map((campaign) => {
         const scoreDetail = calculateCampaignScore(campaign, {
@@ -817,6 +899,7 @@ export async function GET(req: NextRequest) {
             trustMultipliers,
             inventoryScore: Number(channel.inventory_score || 50),
             normalizedAllocationBid: normalizedCampaignAllocationBid(campaign, allocationBidMaxima),
+            maxExpectedEcpm,
             randomization: deterministicAllocationTieBreaker(allocationSeed, channel.id, campaign.id),
         });
         return {
@@ -866,6 +949,36 @@ export async function GET(req: NextRequest) {
         const conn = await pool.getConnection();
         try {
           await conn.beginTransaction();
+
+          // Defect C10: Re-evaluate unified channel eligibility on the locked channel row immediately before reservation/send boundary
+          const [freshChanRows]: any = await conn.query(
+            `SELECT c.*, u.status AS publisher_status, u.is_banned AS publisher_is_banned,
+                    ti.next_retry_at AS identity_next_retry_at, ti.last_failure_code AS identity_last_failure_code,
+                    ti.bot_member_status, ti.bot_can_post, ti.verification_state, ti.telegram_chat_id AS identity_telegram_chat_id
+             FROM channels c
+             JOIN users u ON u.id = c.user_id
+             LEFT JOIN channel_telegram_identities ti ON ti.channel_id = c.id
+             WHERE c.id = ? FOR UPDATE`,
+            [channel.id]
+          );
+          const freshChan = freshChanRows?.[0];
+          if (!freshChan || freshChan.status !== 'active' || freshChan.is_deleted) {
+            await conn.rollback();
+            incrementSkip("channel_no_longer_active");
+            preSendCandidateFallbacks++;
+            continue;
+          }
+          const preSendEligibility = evaluateUnifiedChannelEligibility({
+            ...freshChan,
+            context: "ad_delivery",
+          });
+          if (!preSendEligibility.eligible) {
+            await conn.rollback();
+            incrementSkip(preSendEligibility.code || "channel_delivery_ineligible");
+            preSendCandidateFallbacks++;
+            continue;
+          }
+
           const affordability = await checkChannelPlacementAffordability(conn, Number(campaign.id));
           if (!affordability.allowed) {
             await conn.rollback();
@@ -933,6 +1046,28 @@ export async function GET(req: NextRequest) {
       }
       const botUsername = process.env.TELEGRAM_BOT_USERNAME || process.env.NEXT_PUBLIC_BOT_USERNAME || "Ads_Galaxy_bot";
 
+      const [[preSendCampaign]]: any = await pool.query(
+        "SELECT status,approved_creative_revision_id FROM campaigns WHERE id=?",[campaign.id]);
+      if (preSendCampaign?.status !== 'active' ||
+          Number(preSendCampaign.approved_creative_revision_id || 0) !== Number(campaign.approved_creative_revision_id || 0)) {
+        if (slotClaimId) await markScheduledPlacementFailed({postId,claimId:slotClaimId,
+          channelId:channel.id,slotDate:channel.postingSlotDate,slotTime:`${channel.postingSlotTime}:00`,
+          reason:'campaign_changed_before_send'});
+        failedPosts++; incrementSkip('campaign_changed_before_send'); continue;
+      }
+
+      const finalChannelEligibility = await checkPendingChannelPostEligibility(pool, {
+        postId, campaignId: Number(campaign.id), channelId: Number(channel.id),
+      });
+      if (!finalChannelEligibility.allowed) {
+        await markScheduledPlacementFailed({
+          postId, claimId: slotClaimId, channelId: channel.id,
+          slotDate: channel.postingSlotDate, slotTime: `${channel.postingSlotTime}:00`,
+          reason: finalChannelEligibility.reason,
+        });
+        failedPosts++; incrementSkip(finalChannelEligibility.reason); continue;
+      }
+
       const replyMarkup = {
         inline_keyboard: [
           [{ text: campaign.button_text, url: buttonUrl }],
@@ -946,7 +1081,18 @@ export async function GET(req: NextRequest) {
         photo: campaign.image_url,
         parse_mode: "HTML",
         reply_markup: replyMarkup
-      });
+      }, () => checkPendingChannelPostEligibility(pool, {
+        postId, campaignId: Number(campaign.id), channelId: Number(channel.id),
+      }));
+
+      if ("blockedReason" in result && result.blockedReason) {
+        await markScheduledPlacementFailed({
+          postId, claimId: slotClaimId, channelId: channel.id,
+          slotDate: channel.postingSlotDate, slotTime: `${channel.postingSlotTime}:00`,
+          reason: result.blockedReason,
+        });
+        failedPosts++; incrementSkip(result.blockedReason); continue;
+      }
 
       if (result.ok) {
         telegramSuccesses++;
@@ -961,6 +1107,10 @@ export async function GET(req: NextRequest) {
           incrementSkip("delivery_confirmation_not_persisted");
           continue;
         }
+        await pool.query(`UPDATE campaign_posts cp JOIN campaigns c ON c.id=cp.campaign_id
+          SET cp.status='cleanup_pending',cp.cleanup_status='pending'
+          WHERE cp.id=? AND c.status='paused' AND c.pause_reason='moderation_cleanup'
+            AND cp.status='active' AND cp.deleted_at IS NULL`,[postId]);
         await recordChannelPostSuccess(channel.id);
         console.info("process-ads scheduled placement delivered", {
           run_id: runId,
@@ -1008,6 +1158,34 @@ export async function GET(req: NextRequest) {
           });
         } else {
           await recordChannelPostFailure(channel.id, failureReason);
+          const failureClassification = (result as any).classified || classifyTelegramAccessFailure({
+            description: failureReason,
+            httpStatus: result.result?.httpStatus ?? null,
+            errorCode: result.result?.error_code ?? null,
+            retryAfterSeconds: result.result?.parameters?.retry_after ?? null,
+          });
+          await persistTelegramChannelAccess(
+            {
+              channelId: Number(channel.id),
+              source: "telegram_send",
+              autoPauseActive: false,
+            },
+            {
+              ...failureClassification,
+              ok: false,
+              state: "temporarily_unavailable",
+              reason: failureReason,
+              permanent: false,
+              retryable: true,
+              checkedAt: new Date(),
+              telegramChatId: String(channel.chat_id || "") || null,
+              username: channel.username || null,
+              title: channel.title || null,
+              channelType: channel.channel_type || null,
+              botRole: null,
+              canPostMessages: false,
+            },
+          );
         }
         incrementSkip("telegram_send_failed");
         await recordDeliveryEvent(

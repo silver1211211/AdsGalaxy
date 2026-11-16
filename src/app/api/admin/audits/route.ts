@@ -6,6 +6,7 @@ import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { escapeTelegramHtml, sendTelegramMessage } from "@/lib/telegram";
 import { parseAdminPagination } from "@/lib/adminPagination";
 import { mainCampaignScopeSql } from "@/lib/silverCampaignControl";
+import { withFinancialPostingContext } from "@/lib/financialPostingContext";
 
 export async function GET(request: Request) {
   if (!(await checkAdminAuth())) {
@@ -130,13 +131,13 @@ export async function PATCH(request: Request) {
       throw new Error("Post is still active. Please wait for it to complete.");
     }
 
-    const [settlements]: any = await conn.query("SELECT * FROM ad_settlements_views WHERE post_id = ?", [post_id]);
+    const [settlements]: any = await conn.query("SELECT * FROM ad_settlements_views WHERE post_id = ? FOR UPDATE", [post_id]);
     
     if (settlements.length === 0) {
       throw new Error("Invalidating is not possible because the campaign has not had any settlement yet. Both the publisher and advertiser are safe (no payments made or deducted).");
     }
 
-    if (settlements.some((s: any) => s.status === 'unlocked')) {
+    if (settlements.some((s: any) => s.status === 'unlocked' || s.fraud_adjusted_at)) {
       throw new Error("Balance already released. Cannot invalidate.");
     }
 
@@ -154,11 +155,24 @@ export async function PATCH(request: Request) {
       }
     }
     if (totalPubReward > 0) {
-      await conn.query("UPDATE users SET balance_locked = balance_locked - ? WHERE id = ?", [totalPubReward, post.publisher_id]);
+      const result: any = await withFinancialPostingContext(conn, {
+        sourceKey: `admin:view-invalidation:${post_id}:publisher`,
+        sourceSystem: "admin_view_invalidation",
+        sourceRecordId: String(post_id),
+        policyVersion: "view-invalidation-v1",
+      }, () => conn.query(
+        "UPDATE users SET balance_locked = balance_locked - ? WHERE id = ? AND balance_locked >= ?",
+        [totalPubReward, post.publisher_id, totalPubReward]
+      ));
+      if (result[0].affectedRows !== 1) throw new Error("Publisher locked balance cannot support this reversal.");
     }
 
-    // Delete settlements
-    await conn.query("DELETE FROM ad_settlements_views WHERE post_id = ?", [post_id]);
+    // Preserve the source rows; adjusted rows cannot be unlocked or refunded again.
+    const [marked]: any = await conn.query(
+      "UPDATE ad_settlements_views SET fraud_adjusted_at=NOW() WHERE post_id=? AND status='locked' AND fraud_adjusted_at IS NULL",
+      [post_id]
+    );
+    if (marked.affectedRows !== settlements.length) throw new Error("Settlement reversal race detected.");
 
     // Mark audits as invalid
     await conn.query("UPDATE campaign_views_audit SET status = 'invalid' WHERE post_id = ?", [post_id]);

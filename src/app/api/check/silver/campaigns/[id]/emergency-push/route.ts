@@ -1,4 +1,4 @@
-import { handleCampaignEmergencyPush } from "@/app/api/admin/campaigns/[id]/emergency-push/route";
+import { handleCampaignEmergencyPush } from "@/lib/campaignEmergencyPushHandler";
 import { handleSilverApiRequest } from "@/lib/silverCampaignControl";
 
 export async function POST(

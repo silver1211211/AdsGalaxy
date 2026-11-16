@@ -25,6 +25,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sliders,
+  Sparkles,
   Smartphone,
   Trophy,
   Tv,
@@ -51,6 +52,7 @@ const menuSections = [
       { href: "/admin/miniapps", icon: Smartphone, label: "Mini Apps" },
       { href: "/admin/campaigns", icon: Megaphone, label: "Campaigns" },
       { href: "/admin/miniapp-rewarded", icon: Zap, label: "Rewarded Ads" },
+      { href: "/admin/ai-promotion-studio", icon: Sparkles, label: "AI Promotion Studio" },
     ],
   },
   {

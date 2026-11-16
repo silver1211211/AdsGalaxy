@@ -34,7 +34,7 @@ function validReferralToken(value: unknown) {
 async function finalizeReferral(
   referralId: number,
   signals: ReferralSecuritySignals,
-  notify: { userId: number; firstName: string } | null,
+  notify: { userId: number; referralName: string } | null,
 ) {
   await markReferralJoinSignals(referralId, signals);
   const selfDevice = await blockReferralIfSelfDevice(referralId);
@@ -45,7 +45,7 @@ async function finalizeReferral(
     await sendLocalizedTelegramMessage(
       notify.userId,
       "bot.referral.joined.message",
-      { name: escapeTelegramHtml(notify.firstName) },
+      { name: escapeTelegramHtml(notify.referralName) },
       { parse_mode: "HTML" },
     );
   }
@@ -155,7 +155,11 @@ export async function attributeReferral(input: {
     created = true;
     referralId = Number(inserted.insertId);
     referrerUserId = Number(referrer.id);
-    referrerFirstName = referrer.first_name || "User";
+    const [referredRows]: any = await conn.query(
+      "SELECT first_name, username FROM users WHERE id = ? LIMIT 1",
+      [input.userId],
+    );
+    referrerFirstName = referredRows[0]?.first_name || (referredRows[0]?.username ? `@${referredRows[0].username}` : "Someone");
     if (promotionLinks.length) {
       await conn.query(
         `INSERT IGNORE INTO publisher_promotion_link_attributions
@@ -176,7 +180,7 @@ export async function attributeReferral(input: {
     await finalizeReferral(
       referralId,
       input.signals || EMPTY_SIGNALS,
-      { userId: referrerUserId, firstName: referrerFirstName },
+      { userId: referrerUserId, referralName: referrerFirstName },
     );
   }
   return { status: "attributed", referralId };

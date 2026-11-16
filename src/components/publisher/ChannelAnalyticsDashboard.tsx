@@ -76,7 +76,8 @@ function formatMoney(value: number) {
 
 function formatRate(value: number, sample: number, kind: "cpm" | "cpc") {
   const confident = kind === "cpm" ? hasMinimumCpmSample(sample) : hasMinimumCpcSample(sample);
-  return confident ? formatMoney(value) : "--";
+  if (!confident) return "--";
+  return kind === "cpm" ? "$" + value.toFixed(value > 0 && value < 0.01 ? 6 : 2) : formatMoney(value);
 }
 
 function formatNumber(value: number) {

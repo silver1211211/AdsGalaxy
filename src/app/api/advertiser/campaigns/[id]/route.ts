@@ -21,6 +21,8 @@ import { normalizeTeaserVariants,validateTeaserCpm,validateTeaserCta } from "@/l
 import { GROWTH_MIN_TOTAL_BUDGET, validateGrowthBudgets, validateGrowthMessageText } from "@/lib/channelGrowth";
 import { reactivateCampaignAfterDailyCapIncrease } from "@/lib/channelDailyCap";
 import { campaignCreativeKind, didSensitiveCampaignContentChange } from "@/lib/campaignModeration";
+import { captureCampaignCreative, stageCampaignCreativeRevision } from "@/lib/campaignCreativeRevision";
+import {checkSmartReachDeliveryReadiness} from "@/lib/channelSmartReachDeliveryReadiness";
 
 async function campaignMutationSuccess(userId: number, payload: Record<string, unknown>) {
   // Cache invalidation is fail-open and happens only after the authoritative DB write.
@@ -91,7 +93,8 @@ export async function GET(
              budget, total_budget, channel_spend, cpm, cpc, category, continents, countries, languages, vpn_policy,
              device_policy, os_policy, start_at, end_at, daily_budget_limit,
              frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,teaser_mode,teaser_enabled,teaser_cta_key,teaser_cpm,teaser_paused_at,teaser_resume_locked_until,
-             direct_inventory_metadata, status, paused_at, resume_locked_until,
+             direct_inventory_metadata, financial_billing_mode,smart_reach_max_cpm,smart_reach_effective_cpm,
+             status, paused_at, resume_locked_until,
              completed_at, budget_exhausted_at, pause_reason, auto_reactivate,
              created_at, updated_at
            FROM campaigns WHERE id = ? AND user_id = ?`,
@@ -288,11 +291,17 @@ export async function PATCH(
     const isMultipart = contentType.includes("multipart/form-data");
     const formData = isMultipart ? await request.formData() : null;
     const body = formData ? Object.fromEntries(formData.entries()) : await request.json();
+    const forbiddenFinancialFields=["financial_policy_version","financial_billing_mode","smart_reach_effective_cpm",
+      "smart_reach_last_evaluated_at","current_effective_cpm","last_dynamic_cpm_evaluated_at",
+      "smart_reach_max_cpm","billing_mode"];
+    if(body && forbiddenFinancialFields.some(field=>Object.prototype.hasOwnProperty.call(body,field)))
+      return NextResponse.json({error:"Campaign financial configuration cannot be edited here."},{status:400});
     const { action } = body;
 
     const [campaignRows]: any = await pool.query(
       `SELECT c.id, c.user_id, c.name, c.campaign_title, c.status, c.budget, c.total_budget, c.cpm, c.cpc,
-          c.pause_reason, c.resume_locked_until, c.auto_reactivate, c.type, c.campaign_kind, c.cost_per_subscriber, c.message_text, c.image_url,
+          c.pause_reason, c.resume_locked_until, c.auto_reactivate, c.type, c.campaign_kind, c.financial_policy_version, c.cost_per_subscriber, c.message_text, c.image_url,
+          c.approved_creative_revision_id, c.pending_creative_revision_id, c.status_before_creative_review,
           c.link, c.button_text, c.category, c.continents, c.countries, c.languages,
           c.vpn_policy, c.device_policy, c.os_policy, c.start_at, c.end_at, c.daily_budget_limit,
           c.frequency_cap_per_user,c.teaser_mode,c.teaser_enabled,c.teaser_cta_key,c.teaser_cpm,c.teaser_paused_at,c.teaser_resume_locked_until,u.telegram_id
@@ -405,14 +414,14 @@ export async function PATCH(
         {destinationUrl:nextLink,cta:teaserCta,title:nextTitle,text:nextMessage,variants:teaserVariants||previousTeaserVariants},
       );
       const sensitiveChanged=baseSensitiveChanged||teaserSensitiveChanged;
+      const hasApprovedCreative = campaign.status === "active" ||
+        Boolean(campaign.approved_creative_revision_id) ||
+        (campaign.status === "paused" && Boolean(campaign.pause_reason));
+      const stageReview = sensitiveChanged && hasApprovedCreative;
 
       const updates = [
         "name = ?",
-        "campaign_title = ?",
-        "message_text = ?",
-        "image_url = ?",
-        "link = ?",
-        "button_text = ?",
+        ...(!stageReview ? ["campaign_title = ?", "message_text = ?", "image_url = ?", "link = ?", "button_text = ?"] : []),
         "category = ?",
         "continents = ?",
         "countries = ?",
@@ -428,52 +437,67 @@ export async function PATCH(
       ];
       const values: unknown[] = [
         nextName,
-        nextTitle,
-        nextMessage,
-        nextImageUrl || null,
-        nextLink,
-        nextButtonText,
+        ...(!stageReview ? [nextTitle, nextMessage, nextImageUrl || null, nextLink, nextButtonText] : []),
         nextCategory,
         nextContinents,
         ...targetingDbParams(targeting),
       ];
 
-      if (sensitiveChanged) {
+      if (sensitiveChanged && !stageReview) {
         updates.push("status = 'pending'", "rejection_reason = NULL");
       }
 
-      values.push(id, user.id);
-      await pool.query(`UPDATE campaigns SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`, values);
-      if (Number(targeting.daily_budget_limit || 0) > Number(campaign.daily_budget_limit || 0)) {
-        await reactivateCampaignAfterDailyCapIncrease(Number(id), Number(user.id));
-      }
-      if(teaserVariants){
-        // Preserve existing creative IDs for positions that remain in use.
-        for(const [position,copy] of teaserVariants.entries()){
-          await pool.query(
-            "INSERT INTO teaser_creatives(campaign_id,copy_text,position,active) VALUES(?,?,?,1) ON DUPLICATE KEY UPDATE copy_text=VALUES(copy_text),active=1",
-            [id,copy,position+1]
+      const conn = await pool.getConnection();
+      try {
+        await conn.beginTransaction();
+        const [lockedRows] = await conn.query<Array<RowDataPacket & Record<string, unknown>>>(
+          "SELECT * FROM campaigns WHERE id=? AND user_id=? FOR UPDATE", [id, user.id],
+        );
+        const locked = lockedRows[0];
+        if (!locked || String(locked.status) !== String(campaign.status) ||
+            String(locked.link) !== String(campaign.link) ||
+            String(locked.message_text) !== String(campaign.message_text)) {
+          await conn.rollback();
+          return NextResponse.json({ error: "Campaign changed during this edit. Reload and retry." }, { status: 409 });
+        }
+        if (stageReview) {
+          // Historical placement URLs have no reliable source snapshot. Do not
+          // infer them from today's campaign row; old links fail closed.
+          const pendingCreative = captureCampaignCreative({
+            ...campaign, campaign_title: nextTitle, message_text: nextMessage,
+            image_url: nextImageUrl || null, link: nextLink, button_text: nextButtonText,
+            teaser_mode: requestedTeaserMode, teaser_cta_key: teaserCta ?? campaign.teaser_cta_key,
+            teaser_cpm: teaserCpm ?? campaign.teaser_cpm,
+          });
+          await stageCampaignCreativeRevision(conn, {
+            campaignId: Number(id), campaign: locked, approvedVariants: previousTeaserVariants,
+            pendingCreative, pendingVariants: teaserVariants || previousTeaserVariants,
+          });
+        }
+        values.push(id, user.id);
+        await conn.query(`UPDATE campaigns SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`, values);
+        if (teaserVariants && !stageReview) {
+          for (const [position, copy] of teaserVariants.entries()) {
+            await conn.query(
+              "INSERT INTO teaser_creatives(campaign_id,copy_text,position,active) VALUES(?,?,?,1) ON DUPLICATE KEY UPDATE copy_text=VALUES(copy_text),active=1",
+              [id, copy, position + 1],
+            );
+          }
+          await conn.query("UPDATE teaser_creatives SET active=0 WHERE campaign_id=? AND position>?", [id, teaserVariants.length]);
+          await conn.query(
+            "UPDATE campaigns SET teaser_enabled=1,teaser_mode=?,teaser_cta_key=?,teaser_cpm=?,message_text=? WHERE id=? AND user_id=?",
+            [requestedTeaserMode, teaserCta, teaserCpm, teaserVariants[0], id, user.id],
           );
         }
-
-        // Only deactivate positions removed from the campaign.
-        await pool.query(
-          "UPDATE teaser_creatives SET active=0 WHERE campaign_id=? AND position>?",
-          [id,teaserVariants.length]
-        );
-
-        // Keep legacy compatibility message synchronized to Teaser Message 1.
-        await pool.query(
-          "UPDATE campaigns SET teaser_enabled=1,teaser_mode=?,teaser_cta_key=?,teaser_cpm=?,message_text=? WHERE id=? AND user_id=?",
-          [
-            String(body.teaser_mode||campaign.teaser_mode),
-            teaserCta,
-            teaserCpm,
-            teaserVariants[0],
-            id,
-            user.id
-          ]
-        );
+        await conn.commit();
+      } catch (error) {
+        await conn.rollback();
+        throw error;
+      } finally {
+        conn.release();
+      }
+      if (!stageReview && Number(targeting.daily_budget_limit || 0) > Number(campaign.daily_budget_limit || 0)) {
+        await reactivateCampaignAfterDailyCapIncrease(Number(id), Number(user.id));
       }
       if(body.excluded_inventory!==undefined)await replaceCampaignExclusions(pool, {
           campaignType: "campaign",
@@ -543,7 +567,14 @@ export async function PATCH(
       }
 
       if (campaign.status === "paused") {
+        if(campaign.financial_policy_version==="adsgalaxy-smart-reach-v1"){
+          const readiness=await checkSmartReachDeliveryReadiness(pool,Number(id),{explicitManualResume:true});
+          if(!readiness.ready)return NextResponse.json(
+            {error:"Smart Reach delivery is not ready.",reasons:readiness.reasons},{status:409});
+        }
         await assertCampaignLifecycleColumns();
+        if(campaign.pause_reason==='moderation_cleanup' || campaign.pending_creative_revision_id) return NextResponse.json(
+          {error:'This campaign requires completed moderation cleanup and an administrator resume decision.'},{status:409});
 
         if (campaignKind === "channel" && campaign.pause_reason === "user_paused" && campaign.resume_locked_until) {
           const lockedUntil = new Date(campaign.resume_locked_until);
@@ -586,7 +617,8 @@ export async function PATCH(
             pause_reason = NULL,
             paused_at = NULL,
             resume_locked_until = NULL
-          WHERE id = ? AND user_id = ?
+          WHERE id = ? AND user_id = ? AND status='paused'
+            AND COALESCE(pause_reason,'')<>'moderation_cleanup'
         `, [id, user.id]);
 
         return campaignMutationSuccess(Number(user.id), { success: true, status: "active" });

@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import ts from "typescript";
 
 const source = fs.readFileSync(new URL("../src/lib/channelAllocationLedger.ts", import.meta.url), "utf8");
 const migration = fs.readFileSync(new URL("../db/migrations/20260801_0108_canonical_channel_allocation_ledger.sql", import.meta.url), "utf8");
 const fast = fs.readFileSync(new URL("../src/lib/channelFastBilling.ts", import.meta.url), "utf8");
 const legacy = fs.readFileSync(new URL("../src/lib/channelSettlement.ts", import.meta.url), "utf8");
-const math = await import(new URL("../src/lib/channelAllocationMath.ts", import.meta.url));
+const mathModule = { exports: {} };
+const mathSource = fs.readFileSync(new URL("../src/lib/channelAllocationMath.ts", import.meta.url), "utf8");
+const mathJavaScript = ts.transpileModule(mathSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+new Function("module", "exports", mathJavaScript)(mathModule, mathModule.exports);
+const math = mathModule.exports;
 
 test("canonical ledger is additive, immutable-keyed, and fixed point", () => {
   assert.match(migration, /CREATE TABLE IF NOT EXISTS channel_allocation_ledger/);
@@ -73,7 +78,7 @@ test("canonical reporting covers all allocation components and reversals", () =>
 test("canonical code cannot mutate balances or create duplicate legacy financial events", () => {
   assert.doesNotMatch(source, /UPDATE\s+(users|campaigns|campaign_posts)|INSERT\s+INTO\s+(channel_advertiser_debits|ad_settlements|ad_settlements_views)/i);
   assert.equal((fast.match(/INSERT INTO channel_advertiser_debits/g) || []).length, 1);
-  assert.equal((fast.match(/creditUserLockedBalance\(/g) || []).length, 1);
-  assert.equal((legacy.match(/creditUserLockedBalance\(/g) || []).length, 1);
+  assert.equal((fast.match(/creditSettledPublisherBalance\(/g) || []).length, 1);
+  assert.equal((legacy.match(/creditSettledPublisherBalance\(/g) || []).length, 1);
   for (const kind of ["view", "click", "reversal", "adjustment"]) assert.match(source, new RegExp(`\\"${kind}\\"`));
 });

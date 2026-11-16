@@ -3,12 +3,9 @@ import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 import { refreshSubscriberChannel } from "@/lib/channelSubscriberRefresh";
-import { CHANNEL_REFRESH_ELIGIBILITY_SQL, SUBSCRIBER_REFRESH_HOURS } from "@/lib/channelRefreshPolicy";
+import { CHANNEL_REFRESH_ELIGIBILITY_SQL, SUBSCRIBER_REFRESH_HOURS, SUBSCRIBER_REFRESH_BATCH_SIZE, SUBSCRIBER_REFRESH_MAX_BATCHES, SUBSCRIBER_REFRESH_MAX_PER_RUN } from "@/lib/channelRefreshPolicy";
 export const dynamic = "force-dynamic";
 /** Exact operational contract: 20 logical requests x 100 script batches = 2,000/run. */
-export const SUBSCRIBER_REFRESH_BATCH_SIZE = 20;
-export const SUBSCRIBER_REFRESH_MAX_BATCHES = 100;
-export const SUBSCRIBER_REFRESH_MAX_PER_RUN = SUBSCRIBER_REFRESH_BATCH_SIZE * SUBSCRIBER_REFRESH_MAX_BATCHES;
 const CURSOR_KEY = "subscriber_refresh_cursor";
 type Channel = RowDataPacket & Record<string, any>;
 const eligibleWhere = `WHERE ${CHANNEL_REFRESH_ELIGIBILITY_SQL} AND (c.subscribers_last_attempt_at IS NULL OR c.subscribers_last_attempt_at<=DATE_SUB(UTC_TIMESTAMP(),INTERVAL ${SUBSCRIBER_REFRESH_HOURS} HOUR)) AND (c.subscribers_next_retry_at IS NULL OR c.subscribers_next_retry_at<=UTC_TIMESTAMP())`;

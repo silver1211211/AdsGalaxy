@@ -37,3 +37,23 @@ export function hasMinimumCpmSample(impressions: unknown) {
 export function hasMinimumCpcSample(clicks: unknown) {
   return metricNumber(clicks) >= MIN_CPC_SAMPLE_SIZE;
 }
+
+/**
+ * AdsGalaxy V1.01 Dynamic Effective CPM helper.
+ * Derives effective CPM dynamically from legitimate cumulative publisher earnings and valid views.
+ * Reusable across publisher statistics, channel reports, and analytics endpoints.
+ */
+export function calculateEffectivePublisherCpm(cumulativeEarnings: unknown, validViews: unknown, digits = 8) {
+  const earnings = metricNumber(cumulativeEarnings);
+  const views = metricNumber(validViews);
+  return views > 0 ? fixedMetric((earnings / views) * 1000, digits) : 0;
+}
+
+/**
+ * Formats a monetary balance to 6 decimal places for publisher UI display,
+ * ensuring small balances (such as 0.001200 USDT from 1 view) are clearly visible.
+ */
+export function formatPublisherEarningsDisplay(amount: unknown, digits = 6): string {
+  const val = metricNumber(amount);
+  return val.toFixed(digits);
+}

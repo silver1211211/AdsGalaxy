@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { 
   X, 
   Search, 
@@ -39,13 +39,36 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
   const [postsPerDay, setPostsPerDay] = useState(1);
   const [selectedContinents, setSelectedContinents] = useState<string[]>([]);
 
+  const verificationInFlight = useRef(false);
+  const verificationRetryUntil = useRef(0);
+  const [verificationRetryAt, setVerificationRetryAt] = useState(0);
+  useEffect(() => {
+    if (!verificationRetryAt) return;
+    let timer: number | undefined;
+    const checkExpiry = () => {
+      const remaining = verificationRetryAt - Date.now();
+      if (remaining <= 0) { setVerificationRetryAt(0); return; }
+      timer = window.setTimeout(checkExpiry, Math.min(remaining, 2147483647));
+    };
+    checkExpiry();
+    return () => { if (timer !== undefined) window.clearTimeout(timer); };
+  }, [verificationRetryAt]);
+
   const handleFetchInfo = async () => {
-    if (!username) return;
+    if (!username || verificationInFlight.current || Date.now() < verificationRetryUntil.current) return;
+    verificationInFlight.current = true;
     setIsLoading(true);
     setError("");
     try {
       const res = await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(username)}`, { timeoutMs: 60000 });
       const data: unknown = await res.json();
+      if (res.status === 429 && (data as {code?: string}).code === "TELEGRAM_RATE_LIMITED") {
+        const retry = Number(res.headers.get("Retry-After"));
+        if (Number.isFinite(retry) && retry > 0) {
+          verificationRetryUntil.current = Date.now() + retry * 1000;
+          setVerificationRetryAt(verificationRetryUntil.current);
+        }
+      }
       if (!res.ok) throw new Error(getApiErrorMessage(data, "Failed to fetch channel info"));
       const details = data as TelegramChannelInfo;
       const canonicalUsername = normalizePublicChannelUsername(details.username);
@@ -57,6 +80,7 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to fetch channel info");
     } finally {
+      verificationInFlight.current = false;
       setIsLoading(false);
     }
   };
@@ -66,7 +90,7 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
   };
 
   const handleSubmit = async () => {
-    if (isLoading) return;
+    if (isLoading || verificationInFlight.current || Date.now() < verificationRetryUntil.current) return;
     if (!channelInfo) {
       setError("Fetch the channel information before registering it.");
       return;
@@ -81,6 +105,7 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
       return;
     }
 
+    verificationInFlight.current = true;
     setIsLoading(true);
     setError("");
     try {
@@ -100,6 +125,10 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
       
       if (!res.ok) {
         const data = await res.json();
+        if (res.status === 429 && data.code === "TELEGRAM_RATE_LIMITED") {
+          const retry = Number(res.headers.get("Retry-After"));
+          if (Number.isFinite(retry) && retry > 0) { verificationRetryUntil.current = Date.now() + retry * 1000; setVerificationRetryAt(verificationRetryUntil.current); }
+        }
         throw new Error(getApiErrorMessage(data, "Failed to add channel"));
       }
       
@@ -108,6 +137,7 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to add channel");
     } finally {
+      verificationInFlight.current = false;
       setIsLoading(false);
     }
   };
@@ -160,7 +190,7 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
 
             <button
               onClick={handleFetchInfo}
-              disabled={!username || isLoading}
+              disabled={!username || isLoading || verificationRetryAt > Date.now()}
               className="w-full py-4 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-all flex items-center justify-center gap-2"
             >
               {isLoading ? <Loader2 className="animate-spin" size={20} /> : <Search size={20} />}
@@ -261,7 +291,7 @@ export default function AddChannelForm({ onClose, onSuccess }: AddChannelFormPro
               </button>
               <button
                 onClick={handleSubmit}
-                disabled={isLoading || selectedContinents.length === 0}
+                disabled={isLoading || verificationRetryAt > Date.now() || selectedContinents.length === 0}
                 className="flex-[2] py-4 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 text-white font-bold rounded-xl transition-all flex items-center justify-center gap-2"
               >
                 {isLoading && <Loader2 className="animate-spin" size={20} />}

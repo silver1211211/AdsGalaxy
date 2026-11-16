@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedUserStatus, getAuthErrorStatus } from "@/lib/auth";
+import {
+  isChannelV101UnifiedSettlementEnabled,
+  isChannelV101UnifiedSettlementSchemaReady,
+} from "@/lib/channelUnifiedSettlement";
 
 export async function GET(request: Request) {
   try {
@@ -85,9 +89,34 @@ export async function GET(request: Request) {
       ORDER BY created_at DESC
     `, [user.id]);
 
+    let cpcAdvances: any[] = [];
+    if (isChannelV101UnifiedSettlementEnabled()) {
+      const schemaReady = await isChannelV101UnifiedSettlementSchemaReady(pool);
+      if (schemaReady) {
+        const [advRows]: any = await pool.query(`
+          SELECT 
+            a.id, 
+            a.post_id, 
+            a.entitled_views as count, 
+            a.advanced_amount as amount, 
+            a.created_at, 
+            'locked' as status,
+            'cpc_advance' as type,
+            c.name as campaign_name,
+            ch.username as channel_username
+          FROM channel_cpc_reserve_advances a
+          LEFT JOIN campaigns c ON a.campaign_id = c.id
+          LEFT JOIN channels ch ON a.channel_id = ch.id
+          WHERE a.publisher_id = ? AND a.advanced_amount > 0
+          ORDER BY a.created_at DESC
+        `, [user.id]);
+        cpcAdvances = advRows || [];
+      }
+    }
+
     // Merge and sort. Deposits, manual credits, refunds, and admin balance
     // adjustments are intentionally not included here.
-    const allEarnings = [...clickSettlements, ...viewSettlements, ...miniappSettlements, ...botBroadcastEarnings].sort((a, b) => {
+    const allEarnings = [...clickSettlements, ...viewSettlements, ...miniappSettlements, ...botBroadcastEarnings, ...cpcAdvances].sort((a, b) => {
       return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
     });
 

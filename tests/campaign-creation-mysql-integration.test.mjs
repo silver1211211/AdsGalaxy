@@ -71,10 +71,10 @@ async function createAttempt({ userId, objective, budget = 10, suffix = objectiv
       createCampaign: async (db) => {
         const [result] = await db.query(
           `INSERT INTO campaigns
-            (user_id, name, campaign_title, message_text, type, budget, total_budget, cpm, cpc, category,
+            (user_id, name, campaign_title, message_text, link, button_text, type, budget, total_budget, cpm, cpc, category,
              countries, languages, direct_placement_mode, direct_inventory_scope, direct_inventory_metadata, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'all', ?, ?, 'network', 'network', ?, 'pending')`,
-          [userId, `${prefix}_${suffix}`, "Integration campaign", "Integration message", type, budget, budget,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'all', ?, ?, 'network', 'network', ?, 'pending')`,
+          [userId, `${prefix}_${suffix}`, "Integration campaign", "Integration message", "https://example.invalid/ad", "Open", type, budget, budget,
             type === "clicks" ? 5 : 2, type === "clicks" ? 5 : 0, JSON.stringify(["US"]), JSON.stringify(["en"]),
             JSON.stringify({ inventory_type: type === "broadcast" ? "bot" : "channel" })],
         );

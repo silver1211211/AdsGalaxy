@@ -141,7 +141,8 @@ test("V27 active CPM Views placements are prioritized", () => {
   assert.match(route, /c\.status IN \('active','daily_cap_reached'\)/);
 });
 test("V28 delivered historical deletion is handled outside the hot active queue", () => {
-  assert.match(route, /cp\.status = 'active'/);
+  assert.match(route, /cp\.status IN \('active','cleanup_pending','delete_failed'\)/);
+  assert.match(route, /cp\.deleted_at IS NULL/);
   assert.match(read("src/lib/channelAdminViewRefresh.ts"), /pre-deletion|pre_deletion/i);
 });
 test("V29 never-delivered deleted row is never fetched", () => {

@@ -133,7 +133,9 @@ test("publisher channel inputs expose and accept only the six specific regions",
 
 test("normal and Emergency delivery call the same shared eligibility helper", () => {
   const normal = fs.readFileSync(path.join(root, "src/app/api/cron/process-ads/route.ts"), "utf8");
-  const emergency = fs.readFileSync(path.join(root, "src/app/api/admin/campaigns/[id]/emergency-push/route.ts"), "utf8");
+  const emergencyRoute = fs.readFileSync(path.join(root, "src/app/api/admin/campaigns/[id]/emergency-push/route.ts"), "utf8");
+  const emergency = fs.readFileSync(path.join(root, "src/lib/campaignEmergencyPushHandler.ts"), "utf8");
+  assert.match(emergencyRoute, /handleCampaignEmergencyPush/);
   assert.match(normal, /channelCampaignMatchesInventory\(\{/);
   assert.match(emergency, /channelCampaignMatchesInventory\(\{/);
   assert.match(emergency, /campaignCategory: campaign\.category/);

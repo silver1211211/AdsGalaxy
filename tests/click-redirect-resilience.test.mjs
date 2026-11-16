@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-test("click redirect fallback is server-authoritative and tracking failures preserve its destination", () => {
- const route=readFileSync("src/app/api/clicks/[id]/[postId]/route.ts","utf8"); const cache=readFileSync("src/lib/clickDestinationCache.ts","utf8");
- assert.match(route,/cachedClickDestination/); assert.match(route,/Click tracking failed; redirect preserved/); assert.match(route,/safeCampaignDestination/);
- assert.match(cache,/Never accepts a request URL/); assert.match(cache,/safeCampaignDestination/); assert.doesNotMatch(cache,/searchParams.*url/i);
+test("click redirect uses a placement-approved URL and fails closed when placement lookup fails", () => {
+ const route=readFileSync("src/app/api/clicks/[id]/[postId]/route.ts","utf8");
+ assert.match(route,/cp\.approved_destination_url/);
+ assert.match(route,/!campaignPost\.approved_creative_revision_id/);
+ assert.match(route,/Click destination resolution failed/);
+ assert.match(route,/Click acceptance failed/);
+ assert.match(route,/Click billing or tracking failed; accepted redirect preserved/);
+ assert.match(route,/safeCampaignDestination/);
+ assert.doesNotMatch(route,/cachedClickDestination/);
 });

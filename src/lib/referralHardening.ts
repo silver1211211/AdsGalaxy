@@ -1,7 +1,7 @@
 export const REFERRAL_REWARDS = {
-  registration: "0.00500000",
-  verification: "0.01000000",
-  ordinaryMaximum: "0.01500000",
+  registration: "0.00000000",
+  verification: "0.00000000",
+  ordinaryMaximum: "0.00000000",
 } as const;
 
 export const SPRINT_PRIZES = ["1.00000000", "0.50000000", "0.25000000"] as const;

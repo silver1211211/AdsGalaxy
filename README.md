@@ -11,9 +11,9 @@ The platform handles automated placements, click/view auditing, financial settle
 * **Dual-Role Platform**: Users can act as Publishers (monetizing channels) or Advertisers (creating ad campaigns).
 * **Automated Telegram Integration**: Ads are posted to Telegram channels automatically based on budget and CPM rules.
 * **Smart Placement Logic**: Dynamic rules limit ad frequency based on campaign budgets to ensure fair distribution.
-* **Views & Click Auditing**: Built-in verification logic locks funds for a 30-day period. Admins can audit and invalidate suspected fake/bot views, automatically refunding the advertiser and penalizing the publisher.
+* **Views & Click Auditing**: Verified and funded publisher earnings become available after successful settlement and fraud checks. Pending withdrawal amounts remain reserved, and historical locked balances are preserved for separate review.
 * **Comprehensive Admin Panel**: A Cloudflare-style administrative interface for tracking user growth, managing withdrawals, invalidating views, setting up placement logic, and configuring system-wide variables.
-* **Cron-based Automation**: Automated endpoints scan for active campaigns, settle locked views, and clean up expired posts continuously.
+* **Cron-based Automation**: Automated endpoints scan active campaigns, settle verified views, and clean up expired posts. Legacy unlock jobs do not release historical balances under the current immediate-availability policy.
 
 ---
 
@@ -86,7 +86,7 @@ To access the admin panel, navigate to `/admin/login` and use the default creden
 
 ### Admin Capabilities
 * **Dashboard**: View real-time platform statistics (Users, Campaigns, Channels, Financials).
-* **System Settings**: Dynamically update reward percentages, minimum withdrawal limits, and referral bonuses.
+* **System Settings**: Manage approved revenue settings and referral configuration. The publisher withdrawal minimum is fixed at 50 USDT in the shared withdrawal flow.
 * **Placement Logic**: Set rules for how frequently campaigns are posted based on their budget.
 * **Views Audit**: Review flagged posts, calculate time-velocity of views, and invalidate fraudulent bot activity.
 * **Manage FAQs**: Update Publisher and Advertiser help content directly from the UI.

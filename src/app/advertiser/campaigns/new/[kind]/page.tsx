@@ -89,21 +89,25 @@ export default function NewCampaignWizardPage() {
   const editId = searchParams.get("edit");
   const isEditMode = Boolean(editId);
   const defaultType = isBotCampaign ? "broadcast" : (presetType === "clicks" ? "clicks" : "views");
+  const smartReachAvailable = process.env.NEXT_PUBLIC_CHANNEL_SMART_REACH_ENABLED === "true";
+  const [billingMode,setBillingMode] = useState<"standard_cpc"|"smart_reach">(
+    smartReachAvailable && !isBotCampaign && !isGrowthCampaign ? "smart_reach" : "standard_cpc");
+  const [smartReachMaximum,setSmartReachMaximum] = useState("0.20");
 
   const [step, setStep] = useState(1);
   const [isLoading, setIsLoading] = useState(false);
   const [showAdPreview, setShowAdPreview] = useState(false);
   const [error, setError] = useState("");
   const [limits, setLimits] = useState({
-    min_cpm_views: 0.5,
-    max_cpm_views: 5.0,
-    min_cpm_clicks: 2,
-    max_cpm_clicks: 20.0,
+    min_cpm_views: 3.0,
+    max_cpm_views: 20.0,
+    min_cpm_clicks: 65.0,
+    max_cpm_clicks: 300.0,
     min_cpm_broadcast: 1.0,
     max_cpm_broadcast: 10.0,
     min_budget: 10,
-    recommended_cpm_views: 1.5,
-    recommended_cpm_clicks: 5.0,
+    recommended_cpm_views: 5.0,
+    recommended_cpm_clicks: 76.0,
     recommended_cpm_broadcast: 3.0,
     min_cps: 0.25, recommended_cps: 0.56, max_cps: 5,
     teaser_min_cpm:0.5,teaser_recommended_cpm:0.89,teaser_max_cpm:6.5,
@@ -184,14 +188,14 @@ export default function NewCampaignWizardPage() {
       .then((res) => res.json().then((data) => ({ data, ok: res.ok })))
       .then(({ data, ok }) => {
         if (!ok || cancelled) return;
-        const recViews = parseFloat(data.recommended_cpm_views || "1.5");
-        const recClicks = parseFloat(data.recommended_cpm_clicks || "5.0");
+        const recViews = parseFloat(data.recommended_cpm_views || "5.0");
+        const recClicks = parseFloat(data.recommended_cpm_clicks || "76.0");
         const recBroadcast = parseFloat(data.recommended_cpm_broadcast || "3.0");
         setLimits({
-          min_cpm_views: parseFloat(data.min_cpm_views || "0.5"),
-          max_cpm_views: parseFloat(data.max_cpm_views || "5.0"),
-          min_cpm_clicks: parseFloat(data.min_cpm_clicks || "2.0"),
-          max_cpm_clicks: parseFloat(data.max_cpm_clicks || "20.0"),
+          min_cpm_views: parseFloat(data.min_cpm_views || "3.0"),
+          max_cpm_views: parseFloat(data.max_cpm_views || "20.0"),
+          min_cpm_clicks: parseFloat(data.min_cpm_clicks || "65.0"),
+          max_cpm_clicks: parseFloat(data.max_cpm_clicks || "300.0"),
           min_cpm_broadcast: parseFloat(data.min_cpm_broadcast || "1.0"),
           max_cpm_broadcast: parseFloat(data.max_cpm_broadcast || "10.0"),
           min_budget: parseFloat(data.min_campaign_budget || "10.0"),
@@ -273,6 +277,8 @@ export default function NewCampaignWizardPage() {
           teaser_cta: data.teaser_cta_key || "learn_more",
           teaser_cpm: String(data.teaser_cpm || "0.89"),
         }));
+        setBillingMode(data.financial_billing_mode === "smart_reach" ? "smart_reach" : "standard_cpc");
+        if(data.smart_reach_max_cpm)setSmartReachMaximum(String(data.smart_reach_max_cpm));
         if (Array.isArray(data.teaser_creatives) && data.teaser_creatives.length >= 2) setTeaserVariants(data.teaser_creatives.filter((item:{active?:number|boolean})=>item.active).map((item:{copy_text:string})=>String(item.copy_text)).slice(0,5));
         setImagePreview(data.image_url || null);
       })
@@ -394,6 +400,12 @@ export default function NewCampaignWizardPage() {
       setError(isBotCampaign ? "Bot campaign format is required" : "Please select View Campaign or Click Campaign");
       return;
     }
+    if(smartReachAvailable && !isEditMode && !isBotCampaign && !isGrowthCampaign &&
+      formData.type==="clicks" && billingMode==="smart_reach" &&
+      (!/^(?:0\.[1-4]\d{0,2}|0\.50)$/.test(smartReachMaximum)||
+       Number(smartReachMaximum)<0.10||Number(smartReachMaximum)>0.50)){
+      setError("Choose a Smart Reach maximum CPM from $0.10 to $0.50.");return;
+    }
     if (!isTeaserOnly && !formData.button_text) {
       setError("Please select a button text");
       return;
@@ -454,6 +466,10 @@ export default function NewCampaignWizardPage() {
         submitData.append(key, value.toString());
       }
     });
+    if(!isEditMode && smartReachAvailable && !isBotCampaign && !isGrowthCampaign && formData.type==="clicks"){
+      submitData.set("billing_mode",billingMode);
+      if(billingMode==="smart_reach")submitData.set("smart_reach_max_cpm",smartReachMaximum);
+    }
     if (isTeaserOnly) {
       submitData.set("campaign_title", trimmedName);
       submitData.set("message_text", teaserVariants[0]?.trim() || trimmedName);
@@ -1018,6 +1034,34 @@ export default function NewCampaignWizardPage() {
             : Math.floor(parseFloat(formData.budget || "0") / Math.max(0.001, isTeaserOnly ? Number(pricingValue) : effectiveBid) * 1000);
           return (
           <div className="space-y-4 animate-in fade-in slide-in-from-right-4">
+
+            {smartReachAvailable && !isBotCampaign && !isGrowthCampaign && formData.type==="clicks" && !isTeaserOnly && (
+              <section aria-label="Channel CPC billing mode" className="rounded-2xl border border-sky-100 bg-white p-4 shadow-sm">
+                <p className="mb-3 text-xs font-black uppercase tracking-widest text-sky-700">Choose how your campaign reaches publishers</p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {(["smart_reach","standard_cpc"] as const).map(mode=>(
+                    <button key={mode} type="button" disabled={isEditMode} onClick={()=>setBillingMode(mode)}
+                      aria-pressed={billingMode===mode}
+                      className={cn("rounded-xl border p-3 text-left transition disabled:cursor-not-allowed",
+                        billingMode===mode?"border-sky-500 bg-sky-50 ring-2 ring-sky-100":"border-slate-200 bg-white hover:border-sky-200")}>
+                      <span className="block text-sm font-black text-slate-900">{mode==="standard_cpc"?"Standard CPC":"Smart CPC (Recommended)"}</span>
+                      <span className="mt-1 block text-xs leading-5 text-slate-600">{mode==="standard_cpc"
+                        ?"Pay only for valid clicks."
+                        :"Pay for valid clicks and eligible impressions. Impression CPM adjusts with performance."}</span>
+                    </button>
+                  ))}
+                </div>
+                {billingMode==="smart_reach"&&<div className="mt-4 rounded-xl bg-blue-50 p-3 text-xs text-slate-700">
+                  <label htmlFor="smart-reach-maximum" className="block font-bold text-sky-800">Maximum impression CPM</label>
+                  <select id="smart-reach-maximum" value={smartReachMaximum} disabled={isEditMode}
+                    onChange={event=>setSmartReachMaximum(event.target.value)}
+                    className="mt-2 w-full rounded-lg border border-sky-200 bg-white px-3 py-2.5 font-bold text-slate-900">
+                    {["0.10","0.20","0.30","0.40","0.50"].map(value=><option key={value} value={value}>${value} per 1,000 eligible views{value==="0.20"?" — Recommended":""}</option>)}
+                  </select>
+                  <p className="mt-2">Active CPM starts at <strong>$0.10</strong>. Impression charges are up to the active CPM and never exceed your ${Number(smartReachMaximum).toFixed(2)} maximum. Actual spend can be lower when a publisher reaches their earnings cap.</p>
+                </div>}
+              </section>
+            )}
 
             {/* ── CPM Slider card ── */}
             <div className="rounded-2xl border border-slate-100 bg-white shadow-sm overflow-hidden">

@@ -1,8 +1,10 @@
 import mysql from "mysql2/promise";
 import "dotenv/config";
+import { installTelegramFetchCoordinator } from '../src/lib/telegramRequestCoordinatorCore.mjs';
 import {
   classifyRejectionHistory,
   classifyTelegramFailure,
+  isIntentionalPauseOrHold,
   nextFailureState,
   recoveryDecision,
   retryDelayMs,
@@ -11,6 +13,9 @@ import {
 } from "./channel-recovery-policy.mjs";
 
 const db = await mysql.createPool({ host: process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306), user: process.env.DB_USER, password: process.env.DB_PASS, database: process.env.DB_NAME, charset: "utf8mb4", connectionLimit: 2 });
+// Scheduled broad sync remains disabled. Explicit maintenance must not bypass coordination.
+if (process.env.CHANNEL_IDENTITY_EXPLICIT_MAINTENANCE !== '1') throw new Error('Routine identity synchronization is disabled; use targeted recovery.');
+globalThis.fetch = installTelegramFetchCoordinator({pool:db,token:process.env.BOT_TOKEN});
 if (!process.env.BOT_TOKEN) throw new Error("BOT_TOKEN_missing");
 const limit = Math.min(5000, Math.max(1, Number(process.env.CHANNEL_IDENTITY_SYNC_LIMIT || 100)));
 const gap = Math.min(2000, Math.max(80, Number(process.env.CHANNEL_IDENTITY_REQUEST_GAP_MS || 300)));
@@ -45,6 +50,9 @@ const me = await telegram("getMe", {});
 if (!me?.ok || !me.result?.id) throw new Error(`getMe_failed: ${me?.description || "unknown"}`);
 
 const selectSql = `SELECT c.id,c.user_id,c.chat_id,c.username,c.title,c.channel_type,c.status,c.is_deleted,c.under_review,
+  c.marketplace_admin_status,c.paused_reason,c.paused_by_actor,c.admin_paused_at,c.publisher_paused_at,
+  c.monetization_paused_reason,c.below_minimum_review_required,c.subscriber_count,c.telegram_access_version,
+  c.settlement_excluded_until,c.automation_suspension_status,c.automation_suspended_until,c.revenue_protection_status,
   u.status publisher_status,u.is_banned,i.last_failure_code,i.consecutive_failure_count,
   i.last_failure_at identity_last_failure_at,i.last_checked_at,i.next_retry_at
   FROM channels c JOIN users u ON u.id=c.user_id
@@ -77,7 +85,7 @@ if (reconcileAll) {
 const ids = channels.map(({ id }) => Number(id));
 const [auditRows] = ids.length ? await db.query(`SELECT channel_id,action,old_value,created_at
   FROM channel_admin_action_audits
-  WHERE channel_id IN (?) AND action IN ('reject','resume','bulk_approve','reinstate')
+  WHERE channel_id IN (?) AND action IN ('reject','resume','bulk_approve','reinstate','pause')
   ORDER BY channel_id,created_at`, [ids]) : [[]];
 const history = new Map();
 for (const audit of auditRows) {
@@ -94,8 +102,14 @@ async function processChannel(channel) {
     console.log(JSON.stringify({ progress: totals.checked, total: channels.length, channel_id: Number(channel.id) }));
   }
   const original = { status: channel.status, chat_id: channel.chat_id == null ? null : String(channel.chat_id), username: channel.username, title: channel.title };
-  const rejectionKind = classifyRejectionHistory(channel.status, history.get(Number(channel.id)) || []);
-  const independentPolicyBlock = Boolean(channel.under_review || channel.is_banned || channel.publisher_status !== "active");
+  const channelAudits = history.get(Number(channel.id)) || [];
+  const rejectionKind = classifyRejectionHistory(channel.status, channelAudits);
+  const pausedReasonLower = String(channel.paused_reason || "").trim().toLowerCase();
+  const publisherPaused = pausedReasonLower === "paused by publisher" || pausedReasonLower.startsWith("publisher_") || channel.paused_by_actor === "publisher" || Boolean(channel.publisher_paused_at);
+  const adminPaused = pausedReasonLower === "paused by admin" || pausedReasonLower.startsWith("admin_") || channel.paused_by_actor === "admin" || Boolean(channel.admin_paused_at);
+  const previouslyApproved = !channel.marketplace_admin_status || channel.marketplace_admin_status === "approved";
+  const belowMinimumHold = channel.monetization_paused_reason === "below_minimum" || Boolean(channel.below_minimum_review_required) || Number(channel.subscriber_count || 0) < 100;
+  const independentPolicyBlock = isIntentionalPauseOrHold(channel);
   let target = channel.chat_id && String(channel.chat_id) !== "0" ? String(channel.chat_id) : null;
   const storedUsername = normalizeUsername(channel.username);
   let chat = null;
@@ -114,9 +128,9 @@ async function processChannel(channel) {
         if (!collision) { target = migrated; response = await telegram("getChat", { chat_id: target }); }
         else health = { code: "migrated_chat_id_collision", reason: "Migrated Telegram chat ID belongs to another stored channel.", permanent: false };
       }
-      if (!response?.ok && target && storedUsername) {
+      if (!response?.ok && target && storedUsername && response.error_code !== 429 && !response.parameters?.retry_after) {
         const usernameResponse = await telegram("getChat", { chat_id: "@" + storedUsername });
-        if (usernameResponse?.ok) {
+        if (usernameResponse?.ok && String(usernameResponse.result?.id) === String(target)) {
           response = usernameResponse;
         }
       }
@@ -135,16 +149,22 @@ async function processChannel(channel) {
         if (!response?.ok) health = classifyTelegramFailure(response);
         else {
           member = response.result;
-          const status = String(member.status || "unknown");
-          const canPost = status === "creator" || (status === "administrator" && member.can_post_messages !== false);
+          const status = String(member?.status || "").trim().toLowerCase() || "unknown";
+          const canPost = status === "creator" || (status === "administrator" && member.can_post_messages === true);
           if (status === "left" || status === "kicked") health = { code: "bot_removed", reason: "Ads Galaxy bot membership is " + status + ".", permanent: true };
-          else if (!canPost) health = { code: "permission_missing", reason: "Ads Galaxy bot status is " + status + " without posting permission.", permanent: true };
-          else { healthy = true; health = { code: "healthy", reason: null, permanent: false }; }
+          else if (status === "member" || status === "restricted" || (status === "administrator" && member.can_post_messages === false)) {
+            health = { code: "permission_missing", reason: "Ads Galaxy bot status is " + status + " without posting permission.", permanent: true };
+          } else if (!canPost) {
+            health = { code: "temporary_error", reason: "Incomplete Telegram membership payload.", permanent: false };
+          } else {
+            healthy = true;
+            health = { code: "healthy", reason: null, permanent: false };
+          }
         }
       }
     }
   } else {
-    health = { code: "missing_chat_id", reason: "No Telegram chat_id or username is stored.", permanent: true };
+    health = { code: "missing_chat_id", reason: "No Telegram chat_id or username is stored.", permanent: false };
   }
 
   const failureState = nextFailureState({
@@ -153,7 +173,17 @@ async function processChannel(channel) {
     previousFailureAt: channel.identity_last_failure_at,
     health,
   });
-  const desired = recoveryDecision({ currentStatus: channel.status, telegramHealthy: healthy, rejectionKind, independentPolicyBlock });
+  const desired = recoveryDecision({
+    currentStatus: channel.status,
+    telegramHealthy: healthy,
+    rejectionKind,
+    independentPolicyBlock,
+    publisherPaused,
+    adminPaused,
+    previouslyApproved,
+    isDeleted: Boolean(channel.is_deleted),
+    belowMinimumHold,
+  });
   if (!healthy && failureState.demote && !["rejected", "pending", "paused"].includes(desired.status) && rejectionKind === "none" && !independentPolicyBlock) {
     desired.status = technicalStatusForHealth(health.code);
     desired.reason = health.code + "_confirmed_after_" + failureState.count + "_independent_failures";
@@ -170,6 +200,7 @@ async function processChannel(channel) {
   if (manualReview) totals.manual_review += 1;
   if (healthy) totals.healthy += 1; else if (health.code === "temporary_error") totals.temporary += 1; else totals.failed += 1;
 
+  const confirmedMembership = healthy || Boolean(health.permanent && ["bot_removed", "permission_missing"].includes(health.code));
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
@@ -184,7 +215,9 @@ async function processChannel(channel) {
       ON DUPLICATE KEY UPDATE telegram_chat_id=VALUES(telegram_chat_id),channel_type=VALUES(channel_type),
       previous_username=IF(NOT(current_username<=>VALUES(current_username)),current_username,previous_username),
       last_username_changed_at=IF(NOT(current_username<=>VALUES(current_username)),UTC_TIMESTAMP(6),last_username_changed_at),
-      current_username=VALUES(current_username),bot_member_status=VALUES(bot_member_status),bot_can_post=VALUES(bot_can_post),
+      current_username=COALESCE(VALUES(current_username),current_username),
+      bot_member_status=IF(VALUES(bot_can_post)=1,VALUES(bot_member_status),IF(?=1,COALESCE(VALUES(bot_member_status),bot_member_status),bot_member_status)),
+      bot_can_post=IF(VALUES(bot_can_post)=1,1,IF(?=1,0,bot_can_post)),
       last_checked_at=VALUES(last_checked_at),verification_state=VALUES(verification_state),last_check_source=VALUES(last_check_source),
       last_verified_at=IF(VALUES(bot_can_post)=1,UTC_TIMESTAMP(6),last_verified_at),
       last_success_at=IF(VALUES(bot_can_post)=1,UTC_TIMESTAMP(6),last_success_at),
@@ -200,17 +233,48 @@ async function processChannel(channel) {
         healthy ? 0 : failureState.count, healthy ? 0 : failureState.count > Number(channel.consecutive_failure_count || 0),
         failureState.nextRetryAt, healthy ? null : health.code,
         healthy ? null : String(health.reason || health.code).slice(0, 500),
-        chat ? (String(chat.id) === String(channel.chat_id || "") ? "chat_id" : "username") : "unresolved"]);
+        chat ? (String(chat.id) === String(channel.chat_id || "") ? "chat_id" : "username") : "unresolved",
+        confirmedMembership ? 1 : 0, confirmedMembership ? 1 : 0]);
     const recovered = desired.status === "active" && channel.status !== "active";
     const permanent = failureState.demote;
+    const canBindChatId = Boolean(chat && healthy && String(chat.id) !== String(channel.chat_id || ""));
+    const statusChanged = String(desired.status) !== String(channel.status);
     await conn.query(`UPDATE channels SET status=?,chat_id=IF(?,?,chat_id),username=IF(?,?,username),title=IF(?,?,title),under_review=IF(?,1,under_review),health_checked_at=UTC_TIMESTAMP(6),
+      telegram_access_version=IF(?,COALESCE(telegram_access_version,0)+1,telegram_access_version),
       health_status=CASE WHEN ? THEN 'healthy' WHEN status='rejected' THEN 'disabled' WHEN ? THEN 'critical' ELSE health_status END,
       health_failure_reason=CASE WHEN ? THEN NULL ELSE ? END,failure_reason=CASE WHEN ? THEN NULL WHEN ? THEN ? ELSE failure_reason END,
       paused_reason=CASE WHEN ? THEN NULL WHEN ? THEN ? ELSE paused_reason END,reactivated_at=CASE WHEN ? THEN UTC_TIMESTAMP(6) ELSE reactivated_at END,
       last_failure_at=CASE WHEN ? THEN NULL WHEN ? THEN UTC_TIMESTAMP(6) ELSE last_failure_at END WHERE id=?`,
-      [desired.status, Boolean(chat && String(chat.id) !== String(channel.chat_id)), chat?.id || channel.chat_id, usernameChanged, username, titleChanged, title, manualReview,
+      [desired.status, canBindChatId, chat?.id || channel.chat_id, usernameChanged, username, titleChanged, title, manualReview,
+        statusChanged,
         healthy && desired.status === "active", permanent, healthy, String(health.reason || health.code).slice(0, 500), healthy, permanent, String(health.reason || health.code).slice(0, 255),
         recovered, permanent, String(health.reason || health.code).slice(0, 255), recovered, healthy, permanent, channel.id]);
+    if (statusChanged) {
+      const nextVer = Number(channel.telegram_access_version || 0) + 1;
+      const auditKey = `ch_status_audit|${channel.id}|${channel.status}|${desired.status}|sync_channel_identities|${desired.reason}|v:${nextVer}`.slice(0, 191);
+      await conn.query(
+        `INSERT IGNORE INTO channel_status_transition_audits
+          (idempotency_key,channel_id,telegram_chat_id,previous_status,new_status,transitioned_at,source_worker,
+           reason_code,reason_text,evidence_classification,verification_attempt_ref,actor_type,actor_id,
+           transition_intent,verification_version,recovery_action,recovery_outcome,notification_generated)
+         VALUES (?,?,?,?,?,UTC_TIMESTAMP(6),'sync_channel_identities',?,?,?,?,?,NULL,'automatic',?,?,?,0)`,
+        [
+          auditKey,
+          channel.id,
+          target || channel.chat_id || null,
+          String(channel.status),
+          String(desired.status),
+          String(desired.reason || health.code || "identity_sync").slice(0, 80),
+          String(health.reason || desired.reason || "Identity sync transition").slice(0, 500),
+          recovered ? "recovery" : permanent ? "permanent" : "none",
+          `streak:${failureState.count || 0}`,
+          recovered ? "recovery" : "system",
+          nextVer,
+          recovered ? "identity_sync_recover" : null,
+          recovered ? "recovered" : null,
+        ]
+      ).catch(() => undefined);
+    }
     if (recovered || desired.status !== channel.status || usernameChanged || titleChanged || String(target) !== String(channel.chat_id)) {
       await conn.query(`INSERT INTO channel_admin_action_audits(admin_id,action,channel_id,publisher_id,old_value,new_value,reason) VALUES(NULL,'telegram_identity_sync',?,?,?,?,?)`,
         [channel.id, channel.user_id, JSON.stringify(original), JSON.stringify({ status: desired.status, chat_id: target,

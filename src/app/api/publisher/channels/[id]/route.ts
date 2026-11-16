@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy channel payloads are not schema-generated */
+import { recordChannelStatusTransitionAudit } from "@/lib/channelStatusAudit";
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
@@ -6,6 +7,7 @@ import { getAuthenticatedUser, getAuthErrorStatus } from "@/lib/auth";
 import { logPublisherChannelError, publisherChannelError } from "@/lib/publisherChannelErrors";
 import { normalizePostingTimes, normalizePostsPerDay } from "@/lib/postingTimes";
 import { reactivateChannelAfterHealthCheck } from "@/lib/channelLifecycle";
+import { evaluateUnifiedChannelEligibility } from "@/lib/channelEligibility";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import { clearPrivateTrackingAssignment } from "@/lib/privateChannelTrackingOnboarding";
 import { notifyChannelRemoved } from "@/lib/publisherNotifications";
@@ -72,7 +74,18 @@ export async function PATCH(
     // If it's a status toggle action
     if (action === "toggle_status") {
       const [rows]: any = await pool.query(
-        "SELECT status, chat_id FROM channels WHERE id = ? AND user_id = ? AND is_deleted = FALSE",
+        `SELECT c.id, c.status, c.is_deleted, c.channel_type, c.chat_id, c.username,
+                c.paused_reason, c.under_review, c.marketplace_admin_status,
+                c.monetization_paused_reason, c.below_minimum_review_required,
+                c.settlement_excluded_until, c.automation_suspension_status,
+                c.automation_suspended_until, c.revenue_protection_status,
+                u.status AS publisher_status, COALESCE(u.is_banned, 0) AS publisher_is_banned,
+                (SELECT a.action FROM channel_admin_action_audits a
+                 WHERE a.channel_id = c.id AND a.action IN ('pause', 'resume', 'approve', 'reject', 'delete')
+                 ORDER BY a.created_at DESC, a.id DESC LIMIT 1) AS latest_admin_pause_action
+         FROM channels c
+         LEFT JOIN users u ON u.id = c.user_id
+         WHERE c.id = ? AND c.user_id = ? AND c.is_deleted = FALSE`,
         [id, user.id]
       );
 
@@ -80,7 +93,8 @@ export async function PATCH(
         return publisherChannelError("CHANNEL_NOT_ACCESSIBLE", 404);
       }
 
-      const currentStatus = rows[0].status;
+      const channelRow = rows[0];
+      const currentStatus = channelRow.status;
       const publisherResumableStatuses = ["paused", "bot_removed", "channel_not_found", "permission_missing"];
       if (currentStatus !== "active" && !publisherResumableStatuses.includes(currentStatus)) {
         return publisherChannelError("PERMISSION_REQUIRED", 403);
@@ -89,14 +103,52 @@ export async function PATCH(
       const newStatus = currentStatus === "active" ? "paused" : "active";
 
       if (newStatus === "active") {
-        await reactivateChannelAfterHealthCheck(id, rows[0].chat_id);
+        const preGate = evaluateUnifiedChannelEligibility({
+          ...channelRow,
+          context: "publisher_resume",
+          live_verification_confirmed: true,
+        });
+        if (!preGate.eligible) {
+          return NextResponse.json(
+            {
+              error: preGate.reason || "Channel cannot be resumed due to an active restriction.",
+              code: preGate.code,
+              blocking_dimension: preGate.blockingDimension,
+            },
+            { status: 403 }
+          );
+        }
+        try {
+          await reactivateChannelAfterHealthCheck(id, channelRow.chat_id);
+        } catch (err: any) {
+          return NextResponse.json(
+            {
+              error: err instanceof Error ? err.message : "Channel verification failed.",
+              code: "TELEGRAM_VERIFICATION_FAILED",
+            },
+            { status: 409 }
+          );
+        }
         return NextResponse.json({ success: true, status: "active" });
       }
 
       await pool.query(
-        "UPDATE channels SET status = ?, paused_reason = ?, suggested_fix = ? WHERE id = ? AND user_id = ?",
+        "UPDATE channels SET status = ?, paused_reason = ?, suggested_fix = ?, paused_by_actor = 'publisher', publisher_paused_at = UTC_TIMESTAMP(6), telegram_access_version = COALESCE(telegram_access_version, 0) + 1 WHERE id = ? AND user_id = ?",
         [newStatus, "Paused by publisher.", "Reactivate when you want AdsGalaxy to resume posting.", id, user.id]
       );
+      await recordChannelStatusTransitionAudit(pool, {
+        channelId: Number(id),
+        telegramChatId: channelRow.chat_id,
+        previousStatus: String(currentStatus),
+        newStatus,
+        sourceWorker: "publisher_channel_toggle",
+        reasonCode: "publisher_manual_pause",
+        reasonText: "Paused by publisher.",
+        evidenceClassification: "manual",
+        actorType: "publisher",
+        actorId: user.id,
+        transitionIntent: "manual",
+      });
       return NextResponse.json({ success: true, status: newStatus });
     }
 
@@ -182,14 +234,30 @@ export async function DELETE(
     const { id } = await params;
 
     const [titleRows] = await pool.query<RowDataPacket[]>(
-      "SELECT title FROM channels WHERE id = ? AND user_id = ?",
+      "SELECT title, status, chat_id, telegram_access_version FROM channels WHERE id = ? AND user_id = ?",
       [id, user.id]
     );
 
     await pool.query(
-      "UPDATE channels SET is_deleted = TRUE, status = 'deleted', paused_reason = 'Channel removed by publisher.', suggested_fix = NULL WHERE id = ? AND user_id = ?",
+      "UPDATE channels SET is_deleted = TRUE, status = 'deleted', paused_reason = 'Channel removed by publisher.', suggested_fix = NULL, telegram_access_version = COALESCE(telegram_access_version, 0) + 1 WHERE id = ? AND user_id = ?",
       [id, user.id]
     );
+    if (titleRows[0] && String(titleRows[0].status) !== "deleted") {
+      await recordChannelStatusTransitionAudit(pool, {
+        channelId: Number(id),
+        telegramChatId: titleRows[0].chat_id,
+        previousStatus: String(titleRows[0].status || "unknown"),
+        newStatus: "deleted",
+        sourceWorker: "publisher_channel_delete",
+        reasonCode: "publisher_manual_delete",
+        reasonText: "Channel removed by publisher.",
+        evidenceClassification: "manual",
+        actorType: "publisher",
+        actorId: user.id,
+        transitionIntent: "manual",
+        verificationVersion: Number(titleRows[0].telegram_access_version || 0) + 1,
+      });
+    }
     await clearPrivateTrackingAssignment(id, await getChannelPrivacySchema());
 
     if (titleRows[0]?.title) {

@@ -6,6 +6,11 @@ import { refreshCampaignViews } from "@/lib/channelAdminViewRefresh";
 import { retryCampaignPostCleanup } from "@/lib/campaignPostDeletion";
 import { settlePendingChannelPublisherCredits } from "@/lib/channelFastBilling";
 import { settleChannelCampaigns, type ChannelSettlementResult } from "@/lib/channelSettlement";
+import {
+  isChannelV101UnifiedSettlementEnabled,
+  isChannelV101UnifiedSettlementSchemaReady,
+  inspectUnifiedChannelFinancialReconciliation,
+} from "@/lib/channelUnifiedSettlement";
 
 function numberValue(value: unknown) {
   const parsed = Number(value || 0);
@@ -155,6 +160,19 @@ export async function getCampaignSettlementSummary(campaignId: number) {
 
   const canonical = row && isStandardChannelReport(row) ? (await getChannelReportingMetrics(pool, [campaignId])).get(campaignId) : undefined;
   const metrics = canonical ? channelMetricPayload(canonical, row?.campaign_kind === "channel_growth") : undefined;
+
+  let v101Reconciliation = null;
+  if (isChannelV101UnifiedSettlementEnabled()) {
+    const schemaReady = await isChannelV101UnifiedSettlementSchemaReady(pool);
+    if (schemaReady) {
+      try {
+        v101Reconciliation = await inspectUnifiedChannelFinancialReconciliation(pool, campaignId);
+      } catch (err) {
+        console.error("V1.01 reconciliation probe failed", { campaignId, err });
+      }
+    }
+  }
+
   return {
     totalPosts: numberValue(row?.total_posts),
     activePosts: numberValue(row?.active_posts),
@@ -176,6 +194,7 @@ export async function getCampaignSettlementSummary(campaignId: number) {
     campaignBudgetRemaining: numberValue(row?.campaign_budget_remaining),
     lastSettlementTime: row?.last_settlement_time || null,
     failedSettlementDetails: [],
+    v101Reconciliation: v101Reconciliation || null,
   };
 }
 

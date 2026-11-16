@@ -4,13 +4,65 @@ export const SUBSCRIBER_STALE_HOURS=48;
 export const BELOW_MINIMUM_GRACE_HOURS=48;
 export const BELOW_MINIMUM_REVIEW_DAYS=7;
 export const MAX_FLOOD_WAIT_SECONDS=24*60*60;
-export const CHANNEL_REFRESH_ELIGIBILITY_SQL=`c.is_deleted=FALSE AND c.marketplace_admin_status='approved' AND u.status='active' AND COALESCE(u.is_banned,0)=0 AND ((c.status IN ('active','monetized') AND c.paused_reason IS NULL) OR (c.status='paused' AND c.monetization_paused_reason='below_minimum')) AND COALESCE(c.under_review,0)=0 AND (c.settlement_excluded_until IS NULL OR c.settlement_excluded_until<=NOW()) AND COALESCE(c.automation_suspension_status,'active')='active' AND (c.automation_suspended_until IS NULL OR c.automation_suspended_until<=NOW()) AND COALESCE(c.revenue_protection_status,'normal')='normal'`;
+export const CHANNEL_REFRESH_ELIGIBILITY_SQL=`c.is_deleted=FALSE AND c.marketplace_admin_status='approved' AND u.status='active' AND COALESCE(u.is_banned,0)=0 AND c.chat_id IS NOT NULL AND TRIM(CAST(c.chat_id AS CHAR))<>'' AND CAST(c.chat_id AS CHAR)<>'0' AND ((c.status IN ('active','monetized') AND c.paused_reason IS NULL) OR (c.status='paused' AND c.monetization_paused_reason='below_minimum' AND COALESCE(c.paused_by_actor,'') NOT IN ('admin','publisher','system_policy'))) AND COALESCE(c.under_review,0)=0 AND COALESCE(c.below_minimum_review_required,0)=0 AND (c.settlement_excluded_until IS NULL OR c.settlement_excluded_until<=NOW()) AND COALESCE(c.automation_suspension_status,'active')='active' AND (c.automation_suspended_until IS NULL OR c.automation_suspended_until<=NOW()) AND COALESCE(c.revenue_protection_status,'normal')='normal' AND COALESCE(c.telegram_access_state,'healthy') NOT IN ('bot_removed','channel_not_found','permission_missing','identity_mismatch')`;
 
-export type ChannelRestriction={status?:string;is_deleted?:boolean|number;marketplace_admin_status?:string;paused_reason?:string|null;monetization_paused_reason?:string|null;automation_suspension_status?:string|null;automation_suspended_until?:Date|string|null;revenue_protection_status?:string|null;under_review?:boolean|number;settlement_excluded_until?:Date|string|null;publisher_status?:string|null;publisher_is_banned?:boolean|number};
-export function isBelowMinimumRecovery(c:ChannelRestriction){return c.status==="paused"&&c.monetization_paused_reason==="below_minimum";}
-export function hasBlockingRestriction(c:ChannelRestriction,now=new Date()){return Boolean(c.is_deleted)||c.marketplace_admin_status!=="approved"||c.publisher_status!=="active"||Boolean(c.publisher_is_banned)||["rejected","channel_not_found","permission_missing"].includes(String(c.status))||Boolean(c.under_review)||(c.settlement_excluded_until&&new Date(c.settlement_excluded_until)>now)||!([null,"active"].includes(c.automation_suspension_status??null))||(c.automation_suspended_until&&new Date(c.automation_suspended_until)>now)||!([null,"normal"].includes(c.revenue_protection_status??null))||Boolean(c.paused_reason&&c.paused_reason!=="below_minimum");}
-export function isScheduledSubscriberCandidate(c:ChannelRestriction,now=new Date()){if(hasBlockingRestriction(c,now))return false;return ["active","monetized"].includes(String(c.status))||isBelowMinimumRecovery(c);}
-export function canAutoRestore(c:ChannelRestriction,now=new Date()){return isBelowMinimumRecovery(c)&&!hasBlockingRestriction({...c,status:"active"},now);}
+export type ChannelRestriction={
+  status?:string;
+  is_deleted?:boolean|number;
+  chat_id?:string|number|null;
+  marketplace_admin_status?:string;
+  paused_by_actor?:string|null;
+  admin_paused_at?:Date|string|null;
+  publisher_paused_at?:Date|string|null;
+  paused_reason?:string|null;
+  monetization_paused_reason?:string|null;
+  below_minimum_review_required?:boolean|number|null;
+  telegram_access_state?:string|null;
+  automation_suspension_status?:string|null;
+  automation_suspended_until?:Date|string|null;
+  revenue_protection_status?:string|null;
+  under_review?:boolean|number;
+  settlement_excluded_until?:Date|string|null;
+  publisher_status?:string|null;
+  publisher_is_banned?:boolean|number;
+};
+
+export function isBelowMinimumRecovery(c:ChannelRestriction){
+  return c.status==="paused"&&c.monetization_paused_reason==="below_minimum"&&!Boolean(c.below_minimum_review_required);
+}
+
+export function hasBlockingRestriction(c:ChannelRestriction,now=new Date()){
+  const hasInvalidExplicitChatId=c.chat_id!==undefined&&(c.chat_id===null||String(c.chat_id).trim()===""||String(c.chat_id).trim()==="0"||!/^-[1-9]\d*$/.test(String(c.chat_id).trim()));
+  const actor=String(c.paused_by_actor||"").trim().toLowerCase();
+  const accessState=String(c.telegram_access_state||"").trim().toLowerCase();
+  return Boolean(c.is_deleted)
+    ||hasInvalidExplicitChatId
+    ||c.marketplace_admin_status!=="approved"
+    ||c.publisher_status!=="active"
+    ||Boolean(c.publisher_is_banned)
+    ||["rejected","deleted","pending","bot_removed","channel_not_found","permission_missing"].includes(String(c.status))
+    ||["bot_removed","channel_not_found","permission_missing","identity_mismatch"].includes(accessState)
+    ||["admin","publisher","system_policy"].includes(actor)
+    ||Boolean(c.admin_paused_at)
+    ||Boolean(c.publisher_paused_at)
+    ||Boolean(c.under_review)
+    ||Boolean(c.below_minimum_review_required)
+    ||Boolean(c.settlement_excluded_until&&new Date(c.settlement_excluded_until)>now)
+    ||!([null,"active"].includes(c.automation_suspension_status??null))
+    ||Boolean(c.automation_suspended_until&&new Date(c.automation_suspended_until)>now)
+    ||!([null,"normal"].includes(c.revenue_protection_status??null))
+    ||Boolean(c.paused_reason&&c.paused_reason!=="below_minimum");
+}
+
+export function isScheduledSubscriberCandidate(c:ChannelRestriction,now=new Date()){
+  if(hasBlockingRestriction(c,now))return false;
+  return ["active","monetized"].includes(String(c.status))||isBelowMinimumRecovery(c);
+}
+
+export function canAutoRestore(c:ChannelRestriction,now=new Date()){
+  return isBelowMinimumRecovery(c)&&!hasBlockingRestriction({...c,status:"active"},now);
+}
+
 export function subscriberFreshness(lastSuccess:Date|string|null,now=new Date()){if(!lastSuccess)return"pending" as const;const hours=(now.getTime()-new Date(lastSuccess).getTime())/3600000;return hours<=SUBSCRIBER_FRESH_HOURS?"fresh" as const:hours<=SUBSCRIBER_STALE_HOURS?"delayed" as const:"stale" as const;}
 export function isSubscriberRefreshDue(lastAttempt:Date|string|null,nextRetry:Date|string|null,now=new Date()){return(!lastAttempt||now.getTime()-new Date(lastAttempt).getTime()>=SUBSCRIBER_REFRESH_HOURS*3600000)&&(!nextRetry||new Date(nextRetry)<=now);}
 export function compareRefreshCandidates(a:{id:number;subscribers_last_attempt_at?:Date|string|null},b:{id:number;subscribers_last_attempt_at?:Date|string|null}){const av=a.subscribers_last_attempt_at?new Date(a.subscribers_last_attempt_at).getTime():0,bv=b.subscribers_last_attempt_at?new Date(b.subscribers_last_attempt_at).getTime():0;return av-bv||a.id-b.id;}
@@ -20,3 +72,7 @@ export function sanitizePublisherChannel<T extends Record<string,unknown>>(row:T
 export function parseFloodWait(error:unknown){const value=error as {seconds?:unknown;errorMessage?:unknown;message?:unknown};const structured=Number(value?.seconds);const text=String(value?.errorMessage??value?.message??error??"");const match=text.match(/FLOOD_WAIT_?(\d+)/i);const seconds=Number.isFinite(structured)&&structured>0?structured:Number(match?.[1]||0);return seconds>0?Math.min(MAX_FLOOD_WAIT_SECONDS,Math.floor(seconds)):null;}
 export function authoritativeMemberCount(value:unknown){return typeof value==="number"&&Number.isFinite(value)&&value>=0&&Number.isInteger(value)?{ok:true as const,count:value}:{ok:false as const,code:"member_count_unavailable"};}
 export function thresholdTransition(input:{count:number;minimum:number;belowSince:Date|null;lowChecks:number;now:Date;canRestore:boolean}){if(input.count>=input.minimum)return{action:input.canRestore?"restore":"clear_only",lowChecks:0,belowSince:null,reviewRequired:false};const since=input.belowSince??input.now,elapsed=input.now.getTime()-since.getTime(),checks=input.lowChecks+1,reviewRequired=elapsed>=BELOW_MINIMUM_REVIEW_DAYS*86400000;return{action:reviewRequired?"review":checks>=2&&elapsed>=BELOW_MINIMUM_GRACE_HOURS*3600000?"pause":"grace",lowChecks:checks,belowSince:since,reviewRequired};}
+
+export const SUBSCRIBER_REFRESH_BATCH_SIZE = 20;
+export const SUBSCRIBER_REFRESH_MAX_BATCHES = 100;
+export const SUBSCRIBER_REFRESH_MAX_PER_RUN = SUBSCRIBER_REFRESH_BATCH_SIZE * SUBSCRIBER_REFRESH_MAX_BATCHES;

@@ -450,12 +450,24 @@ export async function recordInternalAdImpression(input: {
   if (Number(cooldownLock?.acquired || 0) !== 1) throw new Error("internal_cooldown_lock_unavailable");
 
   const [campaignRows] = await input.conn.query<CampaignRow[]>(
-    `SELECT id, advertiser_id, advertiser_cpm_bid, cpm_mode, fixed_publisher_cpm, fixed_cpm_override_reason, fixed_cpm_override_expires_at,
-       remaining_budget, daily_budget_limit
-     FROM miniapp_rewarded_campaigns
-     WHERE id = ? AND status IN ('approved', 'active')
+    `SELECT c.id, c.advertiser_id,
+       COALESCE(mr.advertiser_cpm_snapshot,c.advertiser_cpm_bid) advertiser_cpm_bid,
+       COALESCE(mr.cpm_mode_snapshot,c.cpm_mode) cpm_mode,
+       COALESCE(mr.fixed_publisher_cpm_snapshot,c.fixed_publisher_cpm) fixed_publisher_cpm,
+       c.fixed_cpm_override_reason,c.fixed_cpm_override_expires_at,
+       c.remaining_budget,c.daily_budget_limit
+     FROM miniapp_rewarded_campaigns c
+     LEFT JOIN miniapp_mediation_requests mr ON mr.request_id=? AND mr.internal_campaign_id=c.id
+       AND mr.selected_network='AdsGalaxyInternal'
+     WHERE c.id = ? AND (c.status IN ('approved','active') OR (
+       c.creative_review_status IN ('pending','rejected','changes_required')
+       AND c.creative_review_started_at IS NOT NULL
+       AND mr.approved_landing_url_snapshot IS NOT NULL
+       AND mr.advertiser_cpm_snapshot IS NOT NULL
+       AND mr.created_at<c.creative_review_started_at
+       AND mr.created_at>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 120 SECOND)))
      FOR UPDATE`,
-    [input.campaignId]
+    [input.requestId,input.campaignId]
   );
 
   if (campaignRows.length === 0) {
@@ -620,15 +632,23 @@ export async function recordInternalAdImpression(input: {
   );
 
   const [campaignUpdate] = await input.conn.query<ResultSetHeader>(
-    `UPDATE miniapp_rewarded_campaigns
-     SET total_spend = total_spend + ?, impressions = impressions + 1,
-         remaining_budget = GREATEST(remaining_budget - ?, 0),
-         budget_exhaustion_cycle = budget_exhaustion_cycle
-           + CASE WHEN remaining_budget - ? < ? AND COALESCE(pause_reason, '') != 'budget_exhausted' THEN 1 ELSE 0 END,
-         pause_reason = CASE WHEN remaining_budget - ? < ? THEN 'budget_exhausted' ELSE NULL END,
-         status = CASE WHEN remaining_budget - ? < ? THEN 'paused' ELSE status END
-     WHERE id = ? AND status IN ('approved', 'active') AND remaining_budget >= ?`,
-    [cost, cost, cost, cost, cost, cost, cost, cost, input.campaignId, cost]
+    `UPDATE miniapp_rewarded_campaigns c
+     LEFT JOIN miniapp_mediation_requests mr ON mr.request_id=? AND mr.internal_campaign_id=c.id
+       AND mr.selected_network='AdsGalaxyInternal'
+     SET c.total_spend = c.total_spend + ?, c.impressions = c.impressions + 1,
+         c.remaining_budget = GREATEST(c.remaining_budget - ?, 0),
+         c.budget_exhaustion_cycle = c.budget_exhaustion_cycle
+           + CASE WHEN c.remaining_budget - ? < ? AND COALESCE(c.pause_reason, '') != 'budget_exhausted' THEN 1 ELSE 0 END,
+         c.pause_reason = CASE WHEN c.remaining_budget - ? < ? AND c.status IN ('approved','active') THEN 'budget_exhausted' ELSE c.pause_reason END,
+         c.status = CASE WHEN c.remaining_budget - ? < ? AND c.status IN ('approved','active') THEN 'paused' ELSE c.status END
+     WHERE c.id = ? AND c.remaining_budget >= ? AND (c.status IN ('approved','active') OR (
+       c.creative_review_status IN ('pending','rejected','changes_required')
+       AND c.creative_review_started_at IS NOT NULL
+       AND mr.approved_landing_url_snapshot IS NOT NULL
+       AND mr.advertiser_cpm_snapshot IS NOT NULL
+       AND mr.created_at<c.creative_review_started_at
+       AND mr.created_at>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 120 SECOND)))`,
+    [input.requestId,cost,cost,cost,cost,cost,cost,cost,cost,input.campaignId,cost]
   );
   if (campaignUpdate.affectedRows !== 1) throw new Error("campaign_budget_exhausted");
   const budgetExhausted = toNumber(campaign.remaining_budget) - cost + 1e-10 < cost;

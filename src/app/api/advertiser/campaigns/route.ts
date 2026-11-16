@@ -31,6 +31,9 @@ import { CACHE_TTL_SECONDS, cacheGetOrSet, invalidateAdvertiserCaches, redisKeys
 import { getGrowthSettings, validateGrowthBudgets, validateGrowthMessageText, verifyGrowthDestination } from "@/lib/channelGrowth";
 import { getAdvertiserDiscount } from "@/lib/advertiserDiscount";
 import { getChannelUnitPrice } from "@/lib/channelBilling";
+import { isPhase1FinancialBackendEnabled, STANDARD_CPC_CLICK_POLICY_VERSION } from "@/lib/channelPhase1FinancialPolicy";
+import { decimalToUnits } from "@/lib/channelAllocationMath";
+import {resolveSmartReachCreationConfiguration,SMART_REACH_INTERNAL_FIELDS} from "@/lib/channelSmartReachConfiguration";
 import { normalizeTeaserVariants,validateTeaserCpm,validateTeaserCta } from "@/lib/teaser";
 import { allocateCampaignPublicId } from "@/lib/campaignIdentity";
 import { displayedClicksSql } from "@/lib/campaignAnalyticsAdjustments";
@@ -80,6 +83,17 @@ export async function POST(request: Request) {
     const teaserMode=requestedTeaserMode==="teaser_only"?"teaser_only":"none";
     if(type==="clicks"&&teaserMode!=="none")throw new CampaignCreatePublicError("TEASER_VIEWS_ONLY","Teaser is available for Views campaigns only.");
     const teaserEnabled=teaserMode!=="none";
+    let smartReach;
+    try {
+      smartReach=resolveSmartReachCreationConfiguration({
+        requestedMode:formData.get("billing_mode"),maximumCpm:formData.get("smart_reach_max_cpm"),
+        campaignType:type,campaignKind,teaserMode,
+        clientInternalFields:SMART_REACH_INTERNAL_FIELDS.filter(field=>formData.has(field)),
+      });
+    } catch (error) {
+      throw new CampaignCreatePublicError("INVALID_SMART_REACH_CONFIGURATION",
+        error instanceof Error?error.message:"Invalid Smart Reach configuration.",400);
+    }
     let teaserVariants:string[]=[];let teaserCta:string|null=null;let teaserCpm:number|null=null;
     if(teaserEnabled){
       teaserVariants=normalizeTeaserVariants(JSON.parse(String(formData.get("teaser_variants")||"[]")));
@@ -90,8 +104,9 @@ export async function POST(request: Request) {
     const budget = validateTotalBudget(formData.get("budget"));
     const submittedCpm = parseFloat(String(formData.get("cpm") || "0"));
     const submittedCpc = parseFloat(String(formData.get("cpc") || formData.get("cpm") || "0"));
+    // Smart Reach still bills accepted CPC clicks at the campaign's own bid.
     const cpc = type === "clicks" ? submittedCpc : 0;
-    const cpm = type === "clicks" ? cpc : submittedCpm;
+    const cpm = smartReach.smartReach ? Number(smartReach.maxCpm) : type === "clicks" ? cpc : submittedCpm;
     const category = serializeCampaignCategories(formData.get("category"), 3);
     let continents = String(formData.get("continents") || "");
     if (type !== "broadcast") {
@@ -160,7 +175,7 @@ export async function POST(request: Request) {
     }
 
     const discount = await getAdvertiserDiscount(pool, user.id);
-    const nextBillableUnit = campaignKind === "channel_growth"
+    const nextBillableUnit = smartReach.smartReach ? Number(smartReach.effectiveCpm)/1000 : campaignKind === "channel_growth"
       ? Number(costPerSubscriber || 0)
       : teaserMode === "teaser_only"
         ? Number(teaserCpm || 0) / 1000
@@ -170,11 +185,24 @@ export async function POST(request: Request) {
             cpc,
             discount: type === "clicks" ? discount.cpc_discount : discount.cpm_discount,
           });
+    const selectStandardCpcClickPolicy = isPhase1FinancialBackendEnabled() &&
+      process.env.CHANNEL_V101_UNIFIED_SETTLEMENT_ENABLED === "true" &&
+      campaignKind === "channel" && type === "clicks" && !smartReach.smartReach;
+    if (selectStandardCpcClickPolicy && decimalToUnits(nextBillableUnit.toFixed(8)) < decimalToUnits("0.065")) {
+      throw new CampaignCreatePublicError("CPC_BELOW_NEW_POLICY_MINIMUM",
+        "This CPC campaign's discounted click price must be at least $0.065.", 400);
+    }
+    if (smartReach.smartReach && decimalToUnits(getChannelUnitPrice({
+      type: "clicks", cpc, discount: discount.cpc_discount,
+    }).toFixed(8)) < decimalToUnits("0.065")) {
+      throw new CampaignCreatePublicError("SMART_REACH_CPC_BELOW_MINIMUM",
+        "Smart Reach's discounted click price must be at least $0.065.", 400);
+    }
     const [walletRows] = await pool.query<Array<RowDataPacket & { ad_balance: string | number }>>(
       "SELECT ad_balance FROM users WHERE id=? LIMIT 1",
       [user.id],
     );
-    if (!(nextBillableUnit > 0) || Number(walletRows[0]?.ad_balance || 0) + 1e-10 < nextBillableUnit) {
+    if (!(nextBillableUnit > 0) || (!smartReach.smartReach && Number(walletRows[0]?.ad_balance || 0) + 1e-10 < nextBillableUnit)) {
       throw new CampaignCreatePublicError("INSUFFICIENT_AD_BALANCE", "Ad Balance cannot cover the next billable event.");
     }
 
@@ -280,9 +308,10 @@ export async function POST(request: Request) {
           continents, countries, languages, vpn_policy,
           device_policy, os_policy, start_at, end_at, daily_budget_limit,
           frequency_cap_per_user, direct_placement_mode, direct_inventory_scope,
-          direct_inventory_metadata, status
+          direct_inventory_metadata, financial_policy_version, financial_billing_mode,
+          smart_reach_max_cpm, smart_reach_effective_cpm, smart_reach_last_evaluated_at, status
         )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'direct_debit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'direct_debit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
         [
           user.id,
           name,
@@ -319,6 +348,11 @@ export async function POST(request: Request) {
             inventory_type: directInventoryType,
             required_cpm: directTargets.requiredCpm,
           }),
+          smartReach.policyVersion || (selectStandardCpcClickPolicy ? STANDARD_CPC_CLICK_POLICY_VERSION : null),
+          smartReach.billingMode || (selectStandardCpcClickPolicy ? "standard_cpc" : null),
+          smartReach.maxCpm,
+          smartReach.effectiveCpm,
+          smartReach.lastEvaluatedAt,
         ]
           );
 
@@ -345,7 +379,7 @@ export async function POST(request: Request) {
         identifiers: formData.get("excluded_inventory"),
           });
 
-          await evaluateCampaignAutomation({
+          if (!smartReach.smartReach) await evaluateCampaignAutomation({
         campaignType: "campaign",
         campaignId: result.insertId,
         advertiserId: user.id,

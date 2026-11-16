@@ -24,7 +24,7 @@ APP_DIR="$APP_DIR" MANIFEST="$MANIFEST" node <<'NODE' > "$desired_file"
 const fs=require("fs");
 const m=JSON.parse(fs.readFileSync(process.env.MANIFEST,"utf8"));
 console.log(m.managed_begin);
-for(const j of m.jobs){
+for(const j of m.jobs.filter(job => job.enabled !== false)){
   const target=j.kind==="http"?j.route:j.command;
   console.log(`${j.schedule} ${process.env.APP_DIR}/scripts/run-cron-job.sh ${j.id} ${target} ${j.timeout_seconds} ${j.lock} ${j.offset_seconds||0} ${j.log}`);
 }
@@ -41,7 +41,7 @@ const current=fs.readFileSync(currentPath,"utf8");
 const counts=new Map();
 for(const match of current.matchAll(/\/api\/cron\/([a-z0-9-]+)/g)) counts.set(match[1],(counts.get(match[1])||0)+1);
 let missing=0,duplicate=0,routeMissing=0;
-for(const j of m.jobs){
+for(const j of m.jobs.filter(job => job.enabled !== false)){
   const count=(current.match(new RegExp(`run-cron-job\\.sh\\s+${j.id}(?:\\s|$)`,"g"))||[]).length;
   if(!count){ console.log(`MISSING ${j.id}`); missing++; }
   if(count>1){ console.log(`DUPLICATE ${j.id} count=${count}`); duplicate++; }

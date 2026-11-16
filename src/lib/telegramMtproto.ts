@@ -29,11 +29,11 @@ export type ChannelMemberCountResult = { ok: true; count: number; account: Mtpro
 
 type PrivateInviteResolveResult =
   | { ok: true; chatId: string; title: string; participantsCount: number | null; account: MtprotoAccountKey }
-  | { ok: false; code: string };
+  | { ok: false; code: string; retryAfterSeconds?: number };
 
 type PrivateInviteJoinResult =
   | { ok: true; account: MtprotoAccountKey; accountNumber: MtprotoAccountNumber; memberStatus: "member" | "already_member" }
-  | { ok: false; code: string };
+  | { ok: false; code: string; retryAfterSeconds?: number };
 
 type MtprotoAccountConfig = {
   key: MtprotoAccountKey;
@@ -131,10 +131,10 @@ async function getMtprotoClient(account: MtprotoAccountConfig, apiId: number, ap
 }
 
 export function safeMtprotoErrorCode(error: unknown) {
-  const structured = error as { code?: unknown } | null;
+  const structured = error as { code?: unknown; errorMessage?: unknown; message?: unknown } | null;
   if (structured?.code === 'rate_limited') return 'rate_limited';
   if (parseFloodWait(error)) return "rate_limited";
-  const message = error instanceof Error ? error.message : String(error || "unknown_error");
+  const message = String(structured?.errorMessage || structured?.message || error || "unknown_error");
   const upper = message.toUpperCase();
 
   if (message === "missing_api_id" || message === "missing_api_hash" || message === "missing_account_sessions") return message;
@@ -152,13 +152,17 @@ export function safeMtprotoErrorCode(error: unknown) {
   if (upper.includes("INVITE_HASH_EXPIRED")) return "invite_hash_expired";
   if (upper.includes("INVITE_HASH_INVALID")) return "invite_hash_invalid";
   if (upper.includes("USER_ALREADY_PARTICIPANT")) return "already_participant";
+  if (upper.includes("INVITE_REQUEST_SENT")) return "join_request_pending";
   if (upper.includes("CHAT_ADMIN_REQUIRED")) return "chat_admin_required";
+  if (message === "confirmed_message_not_found" || upper.includes("CONFIRMED_MESSAGE_NOT_FOUND")) return "confirmed_message_not_found";
+  if (message === "uncertain_view_response" || upper.includes("UNCERTAIN_VIEW_RESPONSE")) return "uncertain_view_response";
+  if (message === "invalid_view_observation" || upper.includes("INVALID_VIEW_OBSERVATION")) return "invalid_view_observation";
   if (upper.includes("MESSAGE_ID_INVALID")) return "message_id_invalid";
   if (upper.includes("PEER_ID_INVALID")) return "peer_id_invalid";
   if (upper.includes("AUTH_KEY")) return "session_auth_error";
   if (upper.includes("FLOOD")) return "rate_limited";
   if (upper.includes("ENOTFOUND") || upper.includes("EAI_AGAIN") || upper.includes("ECONNREFUSED")) return "network_error";
-  if (upper.includes("TIMEOUT") || upper.includes("ECONNRESET") || upper.includes("ETIMEDOUT")) return "network_error";
+  if (upper.includes("TIMEOUT") || upper.includes("TIMED OUT") || upper.includes("NETWORK") || upper.includes("CONNECTION CLOSED") || upper.includes("ECONNRESET") || upper.includes("ETIMEDOUT")) return "network_error";
   if (upper.includes("RPC_CALL_FAIL")) return "telegram_rpc_error";
 
   return "mtproto_error";
@@ -173,13 +177,27 @@ export function classifyMtprotoError(error: unknown) {
   return { code: retryAfterSeconds ? "rate_limited" : safeMtprotoErrorCode(error), retryAfterSeconds };
 }
 
+function membershipFloodWaitSeconds(error: unknown): number | undefined {
+  const value = error as {seconds?: unknown; retryAfterSeconds?: unknown; errorMessage?: unknown; message?: unknown} | null;
+  const text = String(value?.errorMessage ?? value?.message ?? error ?? "");
+  const match = text.match(/FLOOD_WAIT_?(\d+)/i);
+  const candidates = [Number(value?.seconds), Number(value?.retryAfterSeconds), Number(match?.[1])].filter(n => Number.isFinite(n) && n > 0);
+  return candidates.length ? Math.ceil(Math.max(...candidates)) : undefined;
+}
+
+function classifyMembershipError(error: unknown) {
+  const classified = classifyMtprotoError(error);
+  const wait = membershipFloodWaitSeconds(error);
+  return wait ? {code: "rate_limited", retryAfterSeconds: wait} : classified;
+}
+
 function markMtprotoAccountFailure(
   account: MtprotoAccountKey,
   error: unknown,
   operation: MtprotoOperation,
   code = safeMtprotoErrorCode(error),
 ) {
-  const floodWait = parseFloodWait(error);
+  const floodWait = operation === "membership" ? membershipFloodWaitSeconds(error) || parseFloodWait(error) : parseFloodWait(error);
   if (floodWait && floodWait > 0) {
     accountCooldownUntil.set(account, Date.now() + floodWait * 1000);
   }
@@ -442,7 +460,31 @@ async function getViewsWithAccount(
     })
   );
 
-  return Number(result.views[0]?.views || 0);
+  const rawViews = result?.views?.[0]?.views;
+  if (rawViews === undefined || rawViews === null) {
+    // An empty GetMessagesViews entry is ambiguous (deleted message, no public counter, stale peer access).
+    // Only an independent getMessages lookup that returns no message proves the post is gone.
+    let independentlyMissing = false;
+    try {
+      const lookup = await (client as unknown as {
+        getMessages: (peer: unknown, params: { ids: number[] }) => Promise<unknown[] | undefined>;
+      }).getMessages(peer, { ids: [messageId] });
+      const first = Array.isArray(lookup) ? lookup[0] : undefined;
+      const className = String((first as { className?: string } | undefined)?.className || "");
+      independentlyMissing = Array.isArray(lookup) && (first === undefined || first === null || className === "MessageEmpty");
+    } catch {
+      independentlyMissing = false;
+    }
+    if (independentlyMissing) {
+      throw new Error("confirmed_message_not_found");
+    }
+    throw new Error("uncertain_view_response");
+  }
+  const parsedViews = Number(rawViews);
+  if (!Number.isFinite(parsedViews) || parsedViews < 0) {
+    throw new Error("invalid_view_observation");
+  }
+  return Math.floor(parsedViews);
 }
 
 export function orderMtprotoViewAccounts(
@@ -537,7 +579,7 @@ export async function runMtprotoViewAttempts(input: {
       failures.push({ account, ...classified });
       retryAfterSeconds = minimumRetryAfter(retryAfterSeconds, classified.retryAfterSeconds);
       input.onFailure?.(account, error, classified.code);
-      if (classified.code === "message_id_invalid") break;
+      if (classified.code === "message_id_invalid" || classified.code === "confirmed_message_not_found") break;
     }
   }
 
@@ -563,6 +605,7 @@ export async function runMtprotoViewAttempts(input: {
   if (input.privateChannel && actualFailureCodes.length > 0 && actualFailureCodes.every((code) => PRIVATE_ACCESS_FAILURE_CODES.has(code))) {
     return { ok: false, code: "no_verified_private_member", ...diagnostics };
   }
+  if (actualFailureCodes.includes("confirmed_message_not_found")) return { ok: false, code: "confirmed_message_not_found", ...diagnostics };
   if (actualFailureCodes.includes("message_id_invalid")) return { ok: false, code: "message_id_invalid", ...diagnostics };
   if (actualFailureCodes.length > 0 && actualFailureCodes.every((code) => code === actualFailureCodes[0])) {
     return { ok: false, code: actualFailureCodes[0], ...diagnostics };
@@ -677,7 +720,10 @@ export async function resolvePrivateInviteLink(inviteLink: string): Promise<Priv
   let failureCode = "all_accounts_failed";
   for (const account of pool.accounts) {
     const availability = mtprotoAccountAvailability(account.key, "membership");
-    if (!availability.available) { failureCode = availability.code; continue; }
+    if (!availability.available) {
+      if (availability.code === "rate_limited") return { ok: false, code: "rate_limited", retryAfterSeconds: availability.retryAfterSeconds };
+      failureCode = availability.code; continue;
+    }
     try {
       return await Promise.race([
         runMtprotoAccountRequest(account.key, 'membership', () => resolveInviteWithAccount(account, pool.apiId, pool.apiHash, inviteLink)),
@@ -688,6 +734,10 @@ export async function resolvePrivateInviteLink(inviteLink: string): Promise<Priv
     } catch (error) {
       const code = safeMtprotoErrorCode(error);
       failureCode = code;
+      if (code === "rate_limited") {
+        markMtprotoAccountFailure(account.key, error, "membership", code);
+        return { ok: false, code, retryAfterSeconds: classifyMembershipError(error).retryAfterSeconds };
+      }
       if (code === "already_participant") {
         try {
           const chat = await runMtprotoAccountRequest(account.key, 'membership', async () => {
@@ -716,15 +766,42 @@ export async function resolvePrivateInviteLink(inviteLink: string): Promise<Priv
   return { ok: false, code: failureCode };
 }
 
+/** Confirm the configured tracking account is a current participant in the exact channel. */
+export async function confirmPrivateChannelMembership(accountNumber: MtprotoAccountNumber, chatId: string | number): Promise<{ok: true} | {ok: false; code: string; retryAfterSeconds?: number}> {
+  const key = mtprotoAccountKey(accountNumber);
+  if (!key) return {ok: false, code: "invalid_account"};
+  const availability = mtprotoAccountAvailability(key, "membership");
+  if (!availability.available) return {ok: false, code: availability.code, retryAfterSeconds: availability.retryAfterSeconds};
+  const pool = getMtprotoAccountPool();
+  if (!pool.ok) return {ok: false, code: pool.code};
+  const account = pool.accounts.find(candidate => candidate.key === key);
+  if (!account) return {ok: false, code: "missing_account_session"};
+  try {
+    await runMtprotoAccountRequest(key, "membership", async () => {
+      const client = await getMtprotoClient(account, pool.apiId, pool.apiHash);
+      const channel = await client.getInputEntity(String(chatId));
+      const result = await client.invoke(new Api.channels.GetParticipant({channel, participant: "me"}));
+      const participant = result.participant as {className?: string; left?: boolean};
+      if (!participant || participant.left || !["ChannelParticipant", "ChannelParticipantSelf", "ChannelParticipantCreator", "ChannelParticipantAdmin"].includes(String(participant.className))) throw new Error("USER_NOT_PARTICIPANT");
+    });
+    return {ok: true};
+  } catch (error) {
+    const { code, retryAfterSeconds } = classifyMembershipError(error);
+    markMtprotoAccountFailure(key, error, "membership", code);
+    return {ok: false, code, retryAfterSeconds};
+  }
+}
+
 export async function joinPrivateInviteWithAccount(
   accountNumber: MtprotoAccountNumber,
-  inviteLink: string
+  inviteLink: string,
+  expectedChatId: string | number
 ): Promise<PrivateInviteJoinResult> {
   const accountKey = mtprotoAccountKey(accountNumber);
   if (!accountKey) return { ok: false, code: "invalid_account" };
 
   const availability = mtprotoAccountAvailability(accountKey, "membership");
-  if (!availability.available) return { ok: false, code: availability.code };
+  if (!availability.available) return { ok: false, code: availability.code, retryAfterSeconds: availability.retryAfterSeconds };
 
   const pool = getMtprotoAccountPool();
   if (!pool.ok) return { ok: false, code: pool.code };
@@ -735,23 +812,33 @@ export async function joinPrivateInviteWithAccount(
   const hash = privateInviteHash(inviteLink);
   if (!hash) return { ok: false, code: "invalid_invite_link" };
 
+  let alreadyMember = false;
   try {
     await runMtprotoAccountRequest(account.key, 'membership', async () => {
       const client = await getMtprotoClient(account, pool.apiId, pool.apiHash);
       await client.invoke(new Api.messages.ImportChatInvite({ hash }));
     });
-    accountCooldownUntil.delete(account.key);
-    return { ok: true, account: account.key, accountNumber, memberStatus: "member" };
   } catch (error) {
-    const code = safeMtprotoErrorCode(error);
+    const { code, retryAfterSeconds } = classifyMembershipError(error);
     if (code === "already_participant") {
-      accountCooldownUntil.delete(account.key);
-      return { ok: true, account: account.key, accountNumber, memberStatus: "already_member" };
+      alreadyMember = true;
+    } else {
+      markMtprotoAccountFailure(account.key, error, "membership", code);
+      if (["network_error", "verification_timeout", "telegram_rpc_error"].includes(code)) {
+        // A lost response does not establish whether Telegram applied the join.
+        // One read-only participation lookup reconciles it; never repeat the join here.
+        const reconciled = await confirmPrivateChannelMembership(accountNumber, expectedChatId);
+        if (reconciled.ok) return { ok: true, account: account.key, accountNumber, memberStatus: "member" };
+        return { ok: false, code: reconciled.code === "rate_limited" ? "rate_limited" : "membership_unconfirmed", retryAfterSeconds: reconciled.retryAfterSeconds };
+      }
+      console.error(`Private tracking join MTProto ${account.key} failed: ${code}`);
+      return { ok: false, code, retryAfterSeconds };
     }
-    markMtprotoAccountFailure(account.key, error, "membership", code);
-    console.error(`Private tracking join MTProto ${account.key} failed: ${code}`);
-    return { ok: false, code };
   }
+  const confirmation = await confirmPrivateChannelMembership(accountNumber, expectedChatId);
+  if (!confirmation.ok) return confirmation;
+  accountCooldownUntil.delete(account.key);
+  return { ok: true, account: account.key, accountNumber, memberStatus: alreadyMember ? "already_member" : "member" };
 }
 
 export async function getPrivatePostViews(

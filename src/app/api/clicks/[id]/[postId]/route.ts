@@ -2,13 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import crypto from "crypto";
 import { appendClickId, recordAdClick } from "@/lib/conversionTracking";
-import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import type { RowDataPacket } from "mysql2/promise";
 import { debitChannelClick } from "@/lib/channelFastBilling";
+import { acceptChannelCampaignClick } from "@/lib/channelAcceptedEngagement";
 import { parsePositiveIntegerId } from "@/lib/routeIds";
 import { recordChannelTrafficEvent, telemetryCountry } from "@/lib/channelTrafficTelemetry";
 import { safeCampaignDestination } from "@/lib/clickDestination";
 import { decryptPrivateInviteLink } from "@/lib/privateInviteLinkVault";
-import { cachedClickDestination, rememberClickDestination } from "@/lib/clickDestinationCache";
+import { isBillablePublishedPlacement } from "@/lib/campaignCreativeRevision";
 
 type CampaignPostRow = RowDataPacket & {
   id: number;
@@ -19,30 +20,16 @@ type CampaignPostRow = RowDataPacket & {
   campaign_kind: string | null;
   post_id: number;
   channel_id: number | null;
+  approved_destination_url: string | null;
+  campaign_status: string;
+  post_status: string;
+  pause_reason: string | null;
+  status_before_creative_review: string | null;
+  approved_creative_revision_id: number | null;
+  pending_creative_revision_id: number | null;
+  delivery_confirmed_at: Date | null;
+  deleted_at: Date | null;
 };
-
-async function recordLegacyCampaignClick(input: {
-  campaignId: number;
-  postId: number;
-  ip: string;
-  userAgent: string;
-  fingerprint: string;
-  isBot: boolean;
-}): Promise<{ id: number; isNew: boolean } | null> {
-  if (input.isBot) return null;
-
-  // campaign_clicks is a canonical deployed schema. Never perform INFORMATION_SCHEMA discovery on redirects.
-  const [existing] = await pool.query<RowDataPacket[]>(
-    "SELECT id FROM campaign_clicks WHERE post_id = ? AND fingerprint = ? AND created_at > NOW() - INTERVAL 1 DAY",
-    [input.postId, input.fingerprint]
-  );
-  if (existing.length > 0) return { id: Number(existing[0].id), isNew: false };
-  const [result] = await pool.query<ResultSetHeader>(
-    "INSERT INTO campaign_clicks (campaign_id,post_id,ip_address,user_agent,fingerprint,is_bot) VALUES (?,?,?,?,?,?)",
-    [input.campaignId, input.postId, input.ip, input.userAgent, input.fingerprint, input.isBot]
-  );
-  return { id: Number(result.insertId), isNew: true };
-}
 
 export async function GET(
   req: NextRequest,
@@ -72,18 +59,37 @@ export async function GET(
   let targetUrl: string;
   try {
     const [rows] = await pool.query<CampaignPostRow[]>(
-      `SELECT c.id, c.user_id, c.link, c.image_url, c.category, c.campaign_kind, cp.id as post_id, cp.channel_id
+      `SELECT c.id, c.user_id, c.link, c.image_url, c.category, c.campaign_kind,
+         c.status campaign_status,c.pause_reason,c.status_before_creative_review,
+         c.approved_creative_revision_id,c.pending_creative_revision_id,
+         cp.id as post_id, cp.channel_id,cp.status post_status,cp.delivery_confirmed_at,
+         cp.deleted_at,cp.approved_destination_url
        FROM campaigns c 
        JOIN campaign_posts cp ON cp.campaign_id = c.id
-       WHERE COALESCE(c.public_id,c.id) = ? AND cp.id = ?`,
+       WHERE COALESCE(c.public_id,c.id) = ? AND cp.id = ?
+         AND cp.delivery_confirmed_at IS NOT NULL AND cp.delivery_failed_at IS NULL
+         AND cp.deleted_at IS NULL
+         AND cp.delivery_confirmed_at>DATE_SUB(UTC_TIMESTAMP(),INTERVAL 24 HOUR)`,
       [campaignId, postId]
     );
 
     if (rows.length > 0) {
       campaignPost = rows[0];
-      targetUrl = safeCampaignDestination(rows[0].link) || fallbackUrl();
-      // Do not cache private invite destinations; cache is server-authoritative normal campaign metadata only.
-      if (campaignPost.campaign_kind !== "channel_growth") rememberClickDestination(campaignId, postId, campaignPost.id, targetUrl);
+      if (!isBillablePublishedPlacement({
+        campaignStatus: campaignPost.campaign_status, pauseReason: campaignPost.pause_reason,
+        priorStatus: campaignPost.status_before_creative_review,
+        approvedRevisionId: campaignPost.approved_creative_revision_id,
+        pendingRevisionId: campaignPost.pending_creative_revision_id,
+        placementStatus: campaignPost.post_status,
+        deliveryConfirmed: Boolean(campaignPost.delivery_confirmed_at),
+        deleted: Boolean(campaignPost.deleted_at),
+      }) && campaignPost.campaign_kind !== "channel_growth") return redirectToFallback();
+      const approvedUrl = campaignPost.approved_destination_url ||
+        (campaignPost.campaign_status === "active" && !campaignPost.pending_creative_revision_id
+          && !campaignPost.approved_creative_revision_id
+          ? campaignPost.link : null);
+      targetUrl = safeCampaignDestination(approvedUrl) || fallbackUrl();
+      if (campaignPost.campaign_kind !== "channel_growth" && (!approvedUrl || targetUrl === fallbackUrl())) return redirectToFallback();
       if (campaignPost.campaign_kind === "channel_growth" && req.nextUrl.searchParams.get("growth") === "1") {
         const [invites] = await pool.query<Array<RowDataPacket & { invite_link_encrypted: string }>>(
           "SELECT invite_link_encrypted FROM channel_growth_invites WHERE campaign_post_id=? AND campaign_id=? AND status='active' LIMIT 1",
@@ -93,31 +99,23 @@ export async function GET(
         if (inviteUrl) targetUrl = inviteUrl;
       }
     } else {
-      const [campOnly] = await pool.query<Array<RowDataPacket & { link: string }>>("SELECT link FROM campaigns WHERE COALESCE(public_id,id) = ?", [campaignId]);
-      return NextResponse.redirect(safeCampaignDestination(campOnly[0]?.link) || fallbackUrl(), 302);
+      return redirectToFallback();
     }
   } catch (error) {
     console.error("Click destination resolution failed", { campaign_id: campaignId, post_id: postId, error: error instanceof Error ? error.message : "unknown_error" });
-    const cached = cachedClickDestination(campaignId, postId);
-    if (cached) {
-      console.warn("click_redirect_cached_destination", { campaign_id: campaignId, post_id: postId, destination_lookup_ms: Date.now() - destinationStartedAt, failure_class: "destination_db_failure" });
-      return NextResponse.redirect(cached.targetUrl, 302);
-    }
-    try {
-      const [campaignRows] = await pool.query<Array<RowDataPacket & { link: string }>>("SELECT link FROM campaigns WHERE COALESCE(public_id,id) = ?", [campaignId]);
-      const destination = safeCampaignDestination(campaignRows[0]?.link);
-      if (destination) return NextResponse.redirect(destination, 302);
-    } catch (fallbackError) {
-      console.error("Click destination fallback failed", { campaign_id: campaignId, error: fallbackError instanceof Error ? fallbackError.message : "unknown_error" });
-    }
     return redirectToFallback();
   }
 
   let clickRecorded: { id: number; isNew: boolean } | null = null;
+  const isBot = /bot|spider|crawl|slurp|github-camo|googlebot|bingbot|yandex|baidu/i.test(userAgent);
   try {
-    const isBot = /bot|spider|crawl|slurp|github-camo|googlebot|bingbot|yandex|baidu/i.test(userAgent);
-    clickRecorded = await recordLegacyCampaignClick({ campaignId:Number(campaignPost?.id||0), postId, ip, userAgent, fingerprint, isBot });
-
+    clickRecorded = await acceptChannelCampaignClick(pool, { campaignId:Number(campaignPost?.id||0), postId, ip, userAgent, fingerprint, isBot });
+    if (!clickRecorded && !isBot) return redirectToFallback();
+  } catch (error) {
+    console.error("Click acceptance failed", { campaign_id: campaignId, post_id: postId, error: error instanceof Error ? error.message : "unknown_error" });
+    return redirectToFallback();
+  }
+  try {
     if (clickRecorded && campaignPost && campaignPost.campaign_kind !== "channel_growth") {
       await debitChannelClick(Number(postId), clickRecorded.id);
     }
@@ -138,7 +136,7 @@ export async function GET(
       if (campaignPost.campaign_kind !== "channel_growth") targetUrl = appendClickId(targetUrl, clickId);
     }
   } catch (error) {
-    console.error("Click tracking failed; redirect preserved", { campaign_id: campaignId, post_id: postId, error: error instanceof Error ? error.message : "unknown_error" });
+    console.error("Click billing or tracking failed; accepted redirect preserved", { campaign_id: campaignId, post_id: postId, error: error instanceof Error ? error.message : "unknown_error" });
   }
   if (campaignPost?.channel_id) {
     try {

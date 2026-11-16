@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy Developer Platform query results are not schema-generated */
 import crypto from "crypto";
-import { directMiniappRewardCallbacksEnabled } from "@/lib/miniappDirectRewardCallbacks";
 import { dispatchPinnedHttpsCallback, validateDirectCallbackUrl } from "@/lib/directCallbackTransport.mjs";
 import type { PoolConnection } from "mysql2/promise";
 import pool from "@/lib/db";
@@ -495,9 +494,7 @@ export async function resetDeveloperApiKey(keyId: number, userId: number) {
 const V2_RETRY_DELAYS_MINUTES = [1, 5, 15, 60, 360] as const;
 const MAX_WEBHOOK_RESPONSE_BYTES = 64 * 1024;
 
-export async function claimWebhookDeliveryBatch(
-  directCallbacksEnabled = directMiniappRewardCallbacksEnabled()
-) {
+export async function claimWebhookDeliveryBatch() {
   const conn = await pool.getConnection();
   const token = crypto.randomBytes(24).toString("hex");
   try {
@@ -506,13 +503,12 @@ export async function claimWebhookDeliveryBatch(
       `SELECT id
        FROM developer_webhook_deliveries
        WHERE status IN ('pending', 'retrying')
-         AND (? = 1 OR miniapp_reward_callback_id IS NULL)
+         AND miniapp_reward_callback_id IS NULL
          AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
          AND (claim_expires_at IS NULL OR claim_expires_at <= NOW())
        ORDER BY created_at ASC
        LIMIT 25
-       FOR UPDATE`,
-      [directCallbacksEnabled ? 1 : 0]
+       FOR UPDATE`
     );
     const ids = rows.map((row: any) => Number(row.id)).filter(Boolean);
     if (ids.length > 0) {
@@ -609,6 +605,13 @@ function safeWebhookDeliveryError(error: unknown) {
   if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
     return "Webhook request timed out";
   }
+  const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") return "Callback DNS resolution failed";
+  if (code === "ECONNREFUSED") return "Callback connection refused";
+  if (code === "ECONNRESET" || code === "EPIPE") return "Callback connection closed";
+  if (code === "ETIMEDOUT") return "Webhook request timed out";
+  if (code.startsWith("CERT_") || code.startsWith("ERR_TLS_") || code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE") return "Callback TLS verification failed";
+  if (code === "UNSAFE_CALLBACK_DESTINATION") return "Callback URL is unsafe or no longer public";
   return "Webhook request failed";
 }
 
@@ -616,10 +619,8 @@ export async function processPendingWebhookDeliveries() {
   const settings = await getSettings();
   const maxAttempts = settingNumber(settings, "webhook_retry_max_attempts", 5);
   const retryDelay = settingNumber(settings, "webhook_retry_delay_minutes", 10);
-  // When the platform flag is off, direct rows are deliberately left pending
-  // and unleased. Developer webhook rows continue through the same worker.
-  const directCallbacksEnabled = directMiniappRewardCallbacksEnabled();
-  const { token, deliveries } = await claimWebhookDeliveryBatch(directCallbacksEnabled);
+  // Direct reward callbacks are sent immediately by the verified completion route.
+  const { token, deliveries } = await claimWebhookDeliveryBatch();
 
   let delivered = 0;
   let failed = 0;
@@ -636,6 +637,8 @@ export async function processPendingWebhookDeliveries() {
     const timestamp = String(Math.floor(Date.now() / 1000));
     const signingInput = isV2 ? `${timestamp}.${delivery.event_id}.${body}` : body;
     const signature = crypto.createHmac("sha256", deliverySecret(delivery)).update(signingInput).digest("hex");
+    let attemptedResponseStatus: number | null = null;
+    let attemptedResponseHash: string | null = null;
     try {
       const headers = {
         "Content-Type": "application/json",
@@ -653,6 +656,8 @@ export async function processPendingWebhookDeliveries() {
       const responseStatus = response.status;
       const responseHash = response.responseHash;
       const responseOk = response.ok;
+      attemptedResponseStatus = responseStatus;
+      attemptedResponseHash = responseHash;
       if (responseOk) {
         await pool.query(
           `UPDATE developer_webhook_deliveries
@@ -678,7 +683,8 @@ export async function processPendingWebhookDeliveries() {
       await pool.query(
         `UPDATE developer_webhook_deliveries
          SET status = ?, attempts = ?, next_attempt_at = ?,
-             error_message = ?, last_attempt_at = NOW(), terminal_at = ?,
+             error_message = ?, response_status = ?, response_body = ?,
+             last_attempt_at = NOW(), terminal_at = ?,
              claim_token = NULL, claimed_at = NULL, claim_expires_at = NULL
          WHERE id = ? AND claim_token = ?`,
         [
@@ -686,6 +692,8 @@ export async function processPendingWebhookDeliveries() {
           attempts,
           terminal ? null : new Date(Date.now() + delay * 60_000),
           safeWebhookDeliveryError(error),
+          attemptedResponseStatus,
+          attemptedResponseHash,
           terminal ? new Date() : null,
           delivery.id,
           token,

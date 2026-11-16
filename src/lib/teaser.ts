@@ -2,7 +2,8 @@ import "server-only";
 import { createHash, randomBytes } from "node:crypto";
 import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { claimAdvertiserDirectDebit } from "@/lib/advertiserDirectDebit";
-import { creditUserLockedBalance } from "@/lib/earnings";
+import { creditSettledPublisherBalance } from "@/lib/earnings";
+import { recordReferralCommission } from "@/lib/referralCommission";
 import { getPrivatePostViews } from "@/lib/telegramMtproto";
 import { getPublisherQuality } from "@/lib/publisherQuality";
 
@@ -83,14 +84,31 @@ export async function fetchTeaserViews(input:{chatId:number;messageId:number;use
   return getPrivatePostViews(peer,input.messageId,{preferredAccount:input.trackingAccount,rotationSeed:input.rotationSeed,requirePreferredAccount:privateChannel});
 }
 export async function settleTeaserViews(conn:PoolConnection,placementId:number,currentViews:number){
-  const [rows]=await conn.query<Array<RowDataPacket & Record<string,unknown>>>(`SELECT tp.*,c.user_id advertiser_id,c.budget campaign_remaining,c.status campaign_status,c.teaser_enabled campaign_teaser_enabled,ch.user_id publisher_id FROM teaser_placements tp JOIN campaigns c ON c.id=tp.campaign_id JOIN channels ch ON ch.id=tp.channel_id WHERE tp.id=? FOR UPDATE`,[placementId]);
+  const [rows]=await conn.query<Array<RowDataPacket & Record<string,unknown>>>(`SELECT tp.*,c.user_id advertiser_id,c.budget campaign_remaining,c.status campaign_status,c.pause_reason,c.approved_creative_revision_id,c.pending_creative_revision_id,c.status_before_creative_review,c.teaser_enabled campaign_teaser_enabled,ch.user_id publisher_id FROM teaser_placements tp JOIN campaigns c ON c.id=tp.campaign_id JOIN channels ch ON ch.id=tp.channel_id WHERE tp.id=? FOR UPDATE`,[placementId]);
   const row=rows[0]; if(!row||row.baseline_views===null) return {ok:false,reason:"BASELINE_UNAVAILABLE"};
-  if(!["active","removal_pending"].includes(String(row.status)))return{ok:false,reason:"PLACEMENT_NOT_SETTLEABLE"};
-  if(String(row.campaign_status)!=="active"||!Boolean(row.campaign_teaser_enabled))return{ok:false,reason:"CAMPAIGN_INACTIVE"};
+  if(!["active","removal_pending","removing","failed"].includes(String(row.status))||row.removed_at)return{ok:false,reason:"PLACEMENT_NOT_SETTLEABLE"};
+  if(row.expires_at&&new Date(String(row.expires_at)).getTime()<=Date.now())return{ok:false,reason:"PLACEMENT_EXPIRED"};
+  const approvedPending=row.campaign_status==="pending"&&Boolean(row.approved_creative_revision_id)&&
+    Boolean(row.pending_creative_revision_id)&&row.status_before_creative_review==="active";
+  const rejectedCleanup=row.campaign_status==="paused"&&row.pause_reason==="moderation_cleanup"&&
+    Boolean(row.approved_creative_revision_id);
+  if(!["active"].includes(String(row.campaign_status))&&!approvedPending&&!rejectedCleanup||
+      !Boolean(row.campaign_teaser_enabled))return{ok:false,reason:"CAMPAIGN_INACTIVE"};
   const delta=teaserDelta(Number(row.baseline_views),Number(row.last_seen_views??row.baseline_views),currentViews); if(delta===0){if(currentViews>=Number(row.last_seen_views??0))await conn.query("UPDATE teaser_placements SET last_seen_views=? WHERE id=?",[currentViews,placementId]);return{ok:true,delta:0};}
   const units=BigInt(delta)*BigInt(Math.round(Number(row.teaser_cpm_snapshot)*1e8))/BigInt(1000); const amount=(Number(units)/1e8).toFixed(8);
   const [cap]=await conn.query<ResultSetHeader>("UPDATE campaigns SET budget=budget-?,channel_spend=channel_spend+? WHERE id=? AND budget>=?",[amount,amount,row.campaign_id,amount]); if(cap.affectedRows!==1)return{ok:false,reason:"CAMPAIGN_BUDGET_EXHAUSTED"};
   const sourceKey=`teaser:${placementId}:${currentViews}`; const debit=await claimAdvertiserDirectDebit(conn,{sourceKey,advertiserId:Number(row.advertiser_id),campaignId:Number(row.campaign_id),campaignTable:"campaigns",billingType:"teaser_impression",amount,description:`Teaser impressions placement #${placementId}`}); if(!debit.ok)return{ok:false,reason:debit.duplicate?"DUPLICATE":"INSUFFICIENT_AD_BALANCE"};
   const [settings]=await conn.query<Array<RowDataPacket & {key:string;value:string}>>("SELECT `key`,value FROM settings WHERE `key` IN ('teaser_publisher_share','teaser_platform_share','teaser_reserve_share')");const map=new Map(settings.map(r=>[r.key,Number(r.value)]));const publisherBase=Number(amount)*(map.get("teaser_publisher_share")??60)/100;const platform=Number(amount)*(map.get("teaser_platform_share")??30)/100;const quality=await getPublisherQuality(Number(row.channel_id),conn);const publisher=publisherBase*quality.qualityWeight;const holdback=publisherBase-publisher;const reserve=Number(amount)-publisher-platform;
-  await creditUserLockedBalance(conn,Number(row.publisher_id),publisher);await conn.query("INSERT INTO teaser_settlements(placement_id,checkpoint_views,impression_delta,gross_amount,publisher_amount,platform_amount,reserve_amount,publisher_quality_score,publisher_quality_weight,quality_holdback,direct_debit_source_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)",[placementId,currentViews,delta,amount,publisher,platform,reserve,quality.qualityScore,quality.qualityWeight,holdback,sourceKey]);await conn.query("UPDATE teaser_placements SET last_seen_views=?,settled_impressions=settled_impressions+? WHERE id=?",[currentViews,delta,placementId]);return{ok:true,delta,amount};
+  await creditSettledPublisherBalance(conn,Number(row.publisher_id),publisher,{
+    sourceKey:sourceKey+":publisher",
+    sourceSystem:"teaser",
+    sourceRecordId:String(placementId)+":"+String(currentViews),
+    policyVersion:"teaser-settlement-v1",
+  });
+  await recordReferralCommission(conn, {
+    monetizingUserId: Number(row.publisher_id),
+    monetizedAmount: publisher,
+    productType: "channel",
+    sourceEventKey: `channel:teaser:${placementId}:${currentViews}`,
+  });await conn.query("INSERT INTO teaser_settlements(placement_id,checkpoint_views,impression_delta,gross_amount,publisher_amount,platform_amount,reserve_amount,publisher_quality_score,publisher_quality_weight,quality_holdback,direct_debit_source_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)",[placementId,currentViews,delta,amount,publisher,platform,reserve,quality.qualityScore,quality.qualityWeight,holdback,sourceKey]);await conn.query("UPDATE teaser_placements SET last_seen_views=?,settled_impressions=settled_impressions+? WHERE id=?",[currentViews,delta,placementId]);return{ok:true,delta,amount};
 }

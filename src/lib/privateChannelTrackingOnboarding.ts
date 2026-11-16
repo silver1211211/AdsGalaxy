@@ -6,6 +6,7 @@ import {
   getMtprotoAccountAvailability,
   getTrackingAccountUsernames,
   joinPrivateInviteWithAccount,
+  confirmPrivateChannelMembership,
   type MtprotoAccountNumber,
 } from "@/lib/telegramMtproto";
 
@@ -13,11 +14,8 @@ type TelegramResponse<T = unknown> = {
   ok: boolean;
   result?: T;
   description?: string;
-};
-
-type BotMember = {
-  status?: string;
-  can_invite_users?: boolean;
+  error_code?: number;
+  parameters?: { retry_after?: number };
 };
 
 type InviteLink = {
@@ -38,18 +36,22 @@ type ExistingTrackingRow = RowDataPacket & {
   tracking_account: number | string | null;
   tracking_account_status: string | null;
   tracking_account_member_status: string | null;
+  tracking_account_failure_reason: string | null;
+  failure_age_seconds: number | string | null;
 };
 
 type ExistingTrackingAssignment = {
   account: MtprotoAccountNumber | null;
   status: string;
   memberStatus: string;
+  failureReason: string;
+  failureAgeSeconds: number | null;
 };
 
 export type TrackingOnboardingResult =
   | { status: "not_required"; manual_usernames: ReturnType<typeof getTrackingAccountUsernames> }
   | { status: "active"; tracking_account: MtprotoAccountNumber; member_status: string; manual_usernames: ReturnType<typeof getTrackingAccountUsernames> }
-  | { status: "pending_manual"; reason: string; manual_usernames: ReturnType<typeof getTrackingAccountUsernames> };
+  | { status: "pending_manual"; reason: string; retryAfterSeconds?: number; manual_usernames: ReturnType<typeof getTrackingAccountUsernames> };
 
 const TRACKING_ASSIGNMENT_LOCK = "adsgalaxy_private_tracking_assignment_v1";
 const TRACKING_ASSIGNMENT_LOCK_TIMEOUT_SECONDS = 20;
@@ -58,6 +60,34 @@ function safeReason(value: unknown) {
   return String(value || "unknown")
     .replace(/https:\/\/t\.me\/(?:\+|joinchat\/)[A-Za-z0-9_-]+/g, "[invite_link]")
     .slice(0, 255);
+}
+
+export function privateTrackingFailureMessage(reason: string) {
+  switch (reason) {
+    case "rate_limited": return "Telegram is rate-limited. Retry private channel approval manually after the wait.";
+    case "bot_token_missing": case "bot_auth_failed": return "AdsGalaxy bot credentials are unavailable or unauthorized. Restore bot access and retry.";
+    case "chat_admin_required": return "Give the AdsGalaxy bot invite/add-member administrator permission.";
+    case "join_request_pending": return "The tracking account's join request is awaiting approval; approve it and retry.";
+    case "membership_unconfirmed": return "Telegram did not confirm the join. Check the tracking account's membership or pending join request, then retry manually.";
+    case "invite_creation_unconfirmed": return "Telegram did not confirm invite creation. Wait for the possible invitation to expire, then retry manually.";
+    case "invite_hash_invalid": case "invite_hash_expired": case "invite_hash_empty": case "invalid_invite_link": return "The private channel invitation is invalid or expired. Create a valid invite and retry.";
+    case "session_unauthorized": case "session_revoked": case "session_password_needed": case "session_auth_error": case "auth_key_duplicated": case "account_deactivated": case "missing_account_sessions": return "The configured tracking account is not authorized. Restore its session and retry.";
+    case "channel_private": case "peer_entity_unavailable": case "not_channel_member": return "The tracking account cannot access the private channel. Check membership and retry.";
+    case "network_error": case "telegram_network_error": case "verification_timeout": case "telegram_rpc_error": return "Telegram could not be reached or did not complete the request. Retry manually later.";
+    default: return "Private channel membership could not be confirmed. Review the reported tracking error and retry.";
+  }
+}
+
+function classifyInviteFailure(response: TelegramResponse<unknown>): string {
+  if (response.error_code === 429) return "rate_limited";
+  if (Number(response.error_code) >= 500 || response.description === "telegram_network_error") return "invite_creation_unconfirmed";
+  const description = String(response.description || "").toLowerCase();
+  if (/not enough rights|insufficient rights|administrator rights|chat_admin_required|need administrator|need admin|not an administrator|not a chat administrator/.test(description)) return "chat_admin_required";
+  if (/chat not found|channel_private|channel is private|bot was kicked|bot is not a member/.test(description)) return "channel_private";
+  if (description === "bot_token_missing") return "bot_token_missing";
+  if (response.error_code === 401 || /unauthorized|invalid token/.test(description)) return "bot_auth_failed";
+  if (/network|timed? ?out|timeout/.test(description)) return "telegram_network_error";
+  return "telegram_request_failed";
 }
 
 function hasTrackingColumns(schema: ChannelPrivacySchema) {
@@ -79,28 +109,15 @@ async function telegram<T = unknown>(method: string, body: Record<string, unknow
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
     });
-    return response.json();
+    const data: TelegramResponse<T> = await response.json();
+    if (response.status >= 500 && !data.error_code) data.error_code = response.status;
+    if (response.status === 429 && !data.error_code) data.error_code = 429;
+    return data;
   } catch {
     return { ok: false, description: "telegram_network_error" };
   }
-}
-
-async function botCanInvite(chatId: string | number) {
-  const me = await telegram<{ id: number }>("getMe", {});
-  if (!me.ok || !me.result?.id) return { ok: false as const, reason: safeReason(me.description || "bot_identity_unavailable") };
-
-  const member = await telegram<BotMember>("getChatMember", { chat_id: chatId, user_id: me.result.id });
-  if (!member.ok) return { ok: false as const, reason: safeReason(member.description || "bot_member_check_failed") };
-
-  const status = member.result?.status;
-  const isAdmin = status === "administrator" || status === "creator";
-  const canInvite = status === "creator" || member.result?.can_invite_users === true;
-
-  if (!isAdmin) return { ok: false as const, reason: "bot_not_admin" };
-  if (!canInvite) return { ok: false as const, reason: "bot_invite_permission_missing" };
-
-  return { ok: true as const };
 }
 
 async function markActive(
@@ -125,20 +142,20 @@ async function markActive(
   );
 }
 
-async function markPendingManual(channelId: number | string, reason: string, schema: ChannelPrivacySchema) {
+async function markPendingManual(channelId: number | string, reason: string, schema: ChannelPrivacySchema, preserveAccount?: MtprotoAccountNumber | null) {
   if (!hasTrackingColumns(schema)) return;
 
   const viewTrackingUpdate = schema.hasViewTrackingStatus ? ", view_tracking_status = 'limited'" : "";
   await pool.query(
     `UPDATE channels
      SET tracking_account_status = 'pending_manual',
-         tracking_account = NULL,
+         tracking_account = ?,
          tracking_account_member_status = NULL,
          tracking_account_last_failure_at = NOW(),
          tracking_account_failure_reason = ?
          ${viewTrackingUpdate}
      WHERE id = ?`,
-    [safeReason(reason), channelId]
+    [preserveAccount || null, safeReason(reason), channelId]
   );
 }
 
@@ -178,7 +195,8 @@ async function withTrackingAssignmentLock<T>(run: () => Promise<T>): Promise<T> 
 
 async function getExistingTrackingAssignment(channelId: number | string): Promise<ExistingTrackingAssignment> {
   const [rows] = await pool.query<ExistingTrackingRow[]>(
-    `SELECT tracking_account, tracking_account_status, tracking_account_member_status
+    `SELECT tracking_account, tracking_account_status, tracking_account_member_status, tracking_account_failure_reason,
+            TIMESTAMPDIFF(SECOND, tracking_account_last_failure_at, NOW()) AS failure_age_seconds
      FROM channels
      WHERE id = ?
      LIMIT 1`,
@@ -191,6 +209,8 @@ async function getExistingTrackingAssignment(channelId: number | string): Promis
     account: account === 1 || account === 2 ? account as MtprotoAccountNumber : null,
     status: String(row?.tracking_account_status || ""),
     memberStatus: String(row?.tracking_account_member_status || ""),
+    failureReason: String(row?.tracking_account_failure_reason || ""),
+    failureAgeSeconds: row?.failure_age_seconds == null ? null : Math.max(0, Number(row.failure_age_seconds)),
   };
 }
 
@@ -287,58 +307,98 @@ export async function onboardPrivateChannelTracking(input: {
     return { status: "pending_manual", reason: "tracking_columns_missing", manual_usernames };
   }
 
-  const invitePermission = await botCanInvite(input.chatId);
-  if (!invitePermission.ok) {
-    await markPendingManual(input.channelId, invitePermission.reason, input.schema);
-    return { status: "pending_manual", reason: invitePermission.reason, manual_usernames };
-  }
-
   const configuredAccounts = getConfiguredMtprotoAccountNumbers();
-  if (configuredAccounts.length === 0) {
-    await markPendingManual(input.channelId, "missing_account_sessions", input.schema);
-    return { status: "pending_manual", reason: "missing_account_sessions", manual_usernames };
-  }
-
+  let recoveryAccount: MtprotoAccountNumber | null = null;
+  let recoveryGuardReason: string | null = null;
+  let recoveryExistingGuard = false;
   try {
     return await withTrackingAssignmentLock(async () => {
+      try {
+      if (configuredAccounts.length === 0) {
+        await markPendingManual(input.channelId, "missing_account_sessions", input.schema);
+        return { status: "pending_manual" as const, reason: "missing_account_sessions", manual_usernames };
+      }
       const existing = await getExistingTrackingAssignment(input.channelId);
+      recoveryAccount = existing.account;
       const existingIsActive = existing.status === "active"
         && (existing.memberStatus === "member" || existing.memberStatus === "already_member");
+      const pendingJoinRequest = existing.status === "pending_manual" && existing.failureReason === "join_request_pending";
+      // An uncertain join may be a still-pending request, even after its invite expires.
+      const uncertainMembership = existing.status === "pending_manual" && existing.failureReason === "membership_unconfirmed";
+      const uncertainInvite = existing.status === "pending_manual" && existing.failureReason === "invite_creation_unconfirmed"
+        && (existing.failureAgeSeconds === null || existing.failureAgeSeconds < 600);
+      const guardedReason = pendingJoinRequest || uncertainMembership || uncertainInvite ? existing.failureReason : null;
+      recoveryGuardReason = guardedReason;
+      recoveryExistingGuard = Boolean(guardedReason);
+      if (guardedReason && (!existing.account || !configuredAccounts.includes(existing.account))) {
+        return { status: "pending_manual" as const, reason: "missing_account_sessions", manual_usernames };
+      }
+      let alreadyCheckedWithoutAccess: MtprotoAccountNumber | null = null;
 
       if (existing.account && existingIsActive && configuredAccounts.includes(existing.account)) {
-        return {
-          status: "active" as const,
-          tracking_account: existing.account,
-          member_status: "member",
-          manual_usernames,
-        };
+        const verified = await confirmPrivateChannelMembership(existing.account, input.chatId);
+        if (verified.ok) return { status: "active" as const, tracking_account: existing.account, member_status: "member", manual_usernames };
+        await markPendingManual(input.channelId, verified.code, input.schema, existing.account);
+        if (!["not_channel_member", "peer_entity_unavailable", "channel_private"].includes(verified.code)) {
+          return {status: "pending_manual" as const, reason: verified.code, retryAfterSeconds: verified.retryAfterSeconds, manual_usernames};
+        }
+        alreadyCheckedWithoutAccess = existing.account;
       }
 
-      if (existing.account && existingIsActive) {
+      if (existing.account && existingIsActive && !configuredAccounts.includes(existing.account)) {
+        await markPendingManual(input.channelId, "missing_account_sessions", input.schema);
         return {
           status: "pending_manual" as const,
-          reason: `account_${existing.account}:missing_account_session`,
+          reason: "missing_account_sessions",
           manual_usernames,
         };
       }
 
       const balancedOrder = await chooseTrackingAccountOrder(configuredAccounts);
-      const accountOrder = existing.account && configuredAccounts.includes(existing.account)
-        ? [existing.account, ...balancedOrder.filter((account) => account !== existing.account)]
-        : balancedOrder;
+      const accountOrder = guardedReason && existing.account
+        ? [existing.account]
+        : existing.account && configuredAccounts.includes(existing.account)
+          ? [existing.account, ...balancedOrder.filter((account) => account !== existing.account)]
+          : balancedOrder;
       const errors: string[] = [];
 
       for (const account of accountOrder) {
+        recoveryAccount = account;
         const availability = getMtprotoAccountAvailability(account);
         if (!availability.available) {
+          if (availability.code === "rate_limited") {
+            if (!guardedReason) await markPendingManual(input.channelId, availability.code, input.schema, account);
+            return {status: "pending_manual" as const, reason: availability.code, retryAfterSeconds: availability.retryAfterSeconds, manual_usernames};
+          }
           errors.push(`account_${account}:${safeReason(availability.code)}`);
           continue;
         }
 
+        const currentMembership = account === alreadyCheckedWithoutAccess
+          ? { ok: false as const, code: "not_channel_member" }
+          : await confirmPrivateChannelMembership(account, input.chatId);
+        if (currentMembership.ok) {
+          await markActive(input.channelId, account, "already_member", input.schema);
+          return { status: "active" as const, tracking_account: account, member_status: "already_member", manual_usernames };
+        }
+        if (currentMembership.code !== "not_channel_member" && currentMembership.code !== "peer_entity_unavailable" && currentMembership.code !== "channel_private") {
+          if (!guardedReason) await markPendingManual(input.channelId, currentMembership.code, input.schema, account);
+          return { status: "pending_manual" as const, reason: currentMembership.code, retryAfterSeconds: currentMembership.retryAfterSeconds, manual_usernames };
+        }
+        if (guardedReason) {
+          // Pending requests and uncertain invitations must not be duplicated.
+          const wait = uncertainInvite && existing.failureAgeSeconds !== null ? Math.max(1, 600 - existing.failureAgeSeconds) : undefined;
+          return { status: "pending_manual" as const, reason: guardedReason, retryAfterSeconds: wait, manual_usernames };
+        }
+
         let createdInvite: string | null = null;
+        let keepInviteUntilExpiry = false;
 
         try {
           await reserveTrackingAccount(input.channelId, account);
+          // Persist uncertainty before each external mutation so a process crash cannot duplicate it.
+          recoveryGuardReason = "invite_creation_unconfirmed";
+          await markPendingManual(input.channelId, recoveryGuardReason, input.schema, account);
           const invite = await telegram<InviteLink>("createChatInviteLink", {
             chat_id: input.chatId,
             name: `AdsGalaxy Tracking ${account}`,
@@ -348,14 +408,19 @@ export async function onboardPrivateChannelTracking(input: {
           });
 
           if (!invite.ok || !invite.result?.invite_link) {
-            errors.push(`account_${account}:${safeReason(invite.description || "invite_create_failed")}`);
+            const reason = classifyInviteFailure(invite);
+            if (reason === "invite_creation_unconfirmed") recoveryGuardReason = reason;
+            const retry = reason === "invite_creation_unconfirmed" ? 600 : Number(invite.parameters?.retry_after);
             await clearTrackingReservation(input.channelId, account);
-            continue;
+            await markPendingManual(input.channelId, reason, input.schema, account);
+            return { status: "pending_manual" as const, reason, retryAfterSeconds: Number.isFinite(retry) && retry > 0 ? retry : undefined, manual_usernames };
           }
 
           createdInvite = invite.result.invite_link;
-          const joined = await joinPrivateInviteWithAccount(account, createdInvite);
-          if (joined.ok) {
+          recoveryGuardReason = "membership_unconfirmed";
+          await markPendingManual(input.channelId, recoveryGuardReason, input.schema, account);
+          const joined = await joinPrivateInviteWithAccount(account, createdInvite, input.chatId);
+          if (joined.ok && ["member", "already_member"].includes(joined.memberStatus)) {
             await markActive(input.channelId, account, joined.memberStatus, input.schema);
             return {
               status: "active" as const,
@@ -365,10 +430,17 @@ export async function onboardPrivateChannelTracking(input: {
             };
           }
 
-          errors.push(`account_${account}:${safeReason(joined.code)}`);
+          const reason = joined.ok ? "membership_unconfirmed" : joined.code;
+          if (reason === "membership_unconfirmed" || reason === "join_request_pending") {
+            recoveryGuardReason = reason;
+            keepInviteUntilExpiry = true;
+          }
+          const retryAfterSeconds = joined.ok ? undefined : joined.retryAfterSeconds;
           await clearTrackingReservation(input.channelId, account);
+          await markPendingManual(input.channelId, reason, input.schema, account);
+          return { status: "pending_manual" as const, reason, retryAfterSeconds, manual_usernames };
         } finally {
-          if (createdInvite) {
+          if (createdInvite && !keepInviteUntilExpiry) {
             await telegram("revokeChatInviteLink", { chat_id: input.chatId, invite_link: createdInvite }).catch(() => null);
           }
         }
@@ -377,13 +449,15 @@ export async function onboardPrivateChannelTracking(input: {
       const reason = safeReason(errors.join(";") || "tracking_join_failed");
       await markPendingManual(input.channelId, reason, input.schema);
       return { status: "pending_manual" as const, reason, manual_usernames };
+      } catch (error) {
+        const reason = safeReason(error instanceof Error ? error.message : error);
+        if (!recoveryExistingGuard) await markPendingManual(input.channelId, recoveryGuardReason || reason, input.schema, recoveryAccount);
+        return { status: "pending_manual" as const, reason, manual_usernames };
+      }
     });
   } catch (error) {
+    // Never write tracking state without holding the assignment lock.
     const reason = safeReason(error instanceof Error ? error.message : error);
-    if (reason === "tracking_assignment_busy") {
-      return { status: "pending_manual", reason, manual_usernames };
-    }
-    await markPendingManual(input.channelId, reason, input.schema);
     return { status: "pending_manual", reason, manual_usernames };
   }
 }

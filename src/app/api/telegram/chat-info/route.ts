@@ -40,8 +40,8 @@ function privateInviteError(code: string) {
     join_request_required: "This invite requires manual approval. Use an invite link that lets AdsGalaxy access the channel.",
     channel_private: "Unable to access this private channel. Add AdsGalaxy Bot as administrator and use a valid invite link.",
     all_accounts_failed: "Unable to access this private channel. Add AdsGalaxy Bot as administrator and use a valid invite link.",
-    verification_timeout: "Private channel verification timed out. We will retry automatically.",
-    network_error: "Telegram is temporarily unreachable. We will retry automatically.",
+    verification_timeout: "Private channel verification timed out. Please try again.",
+    network_error: "Telegram is temporarily unreachable. Please try again.",
   };
 
   return messageByCode[code] || "Unable to verify private channel.";
@@ -95,7 +95,7 @@ async function verifyChatInfo(request: Request, input: ChatInfoInput) {
     if (normalizedInviteLink) {
       const resolved = await resolvePrivateInviteLink(normalizedInviteLink);
       if (!resolved.ok) {
-        throwIfPrivateVerificationUnavailable(resolved.code);
+        throwIfPrivateVerificationUnavailable(resolved.code, resolved.retryAfterSeconds);
         logPrivateChannelDiagnostic("chat_info_rejected", {
           token_received: false,
           token_valid: false,

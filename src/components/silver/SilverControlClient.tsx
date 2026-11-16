@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Pause, Play, ShieldCheck } from "lucide-react";
-import { AdminCampaignsView } from "@/app/admin/campaigns/page";
+import { AdminCampaignsView } from "@/components/admin/AdminCampaignsView";
 
 type Exempt = { user_id: number; username?: string; channel_count: number };
 

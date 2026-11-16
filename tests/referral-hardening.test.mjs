@@ -90,8 +90,9 @@ test("deployment migration preserves history and targets only unsettled sprint",
   assert.match(migration, /Historical paid[\s\S]+not imported/i);
 });
 
-test("publisher UI explains prices, eligibility, fraud, prizes, and caps", () => {
-  for (const text of ["$0.005", "$0.010", "$0.015", "meaningful platform activity", "Individual prizes", "team pools", "caps apply", "suspicious referrals"]) assert.ok(publisherUi.includes(text));
+test("publisher UI explains the active 10% revenue commission without retired fixed bonuses", () => {
+  for (const text of ["10% Lifetime Referral Commission", "Invite Friends. Earn 10%.", "Cumulative 10% earned", "Direct to available balance"]) assert.ok(publisherUi.includes(text));
+  assert.doesNotMatch(publisherUi, /Individual prizes|team pools|\$0\.005 signup/);
 });
 
 test("campaign creation continues to use supported HTML parse mode", () => {

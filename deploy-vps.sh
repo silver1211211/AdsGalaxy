@@ -317,7 +317,10 @@ do
   run_migration "$FILE"
 done
 
-echo "    All migrations applied."
+# Legacy catch-up above ends at the verified baseline. Use the checksum-verified
+# procedure for the approved V1.01 release migrations before any build.
+node "$APP_DIR/scripts/run-verified-migrations.mjs"
+echo "    Verified migrations applied."
 
 BUILD_DIR=".next-build"
 
@@ -349,6 +352,17 @@ for PM2_PROCESS in "$PM2_APP" "$PM2_CRON"; do
     || { echo "    WARNING: $PM2_PROCESS restart failed — trying reload..."; pm2 reload "$PM2_PROCESS"; }
 done
 
+if [ -f "/www/wwwroot/bots/adsFusionBot/bot.js" ]; then
+  BOT_TOKEN_VAL=$(grep '^BOT_TOKEN=' "$ENV_FILE" | cut -d'=' -f2-)
+  if pm2 describe adsFusionBot >/dev/null 2>&1; then
+    echo "    Ensuring adsFusionBot is online..."
+    BOT_TOKEN="$BOT_TOKEN_VAL" pm2 restart adsFusionBot --update-env >/dev/null 2>&1 || true
+  elif [ -n "$BOT_TOKEN_VAL" ]; then
+    echo "    Starting missing adsFusionBot process..."
+    BOT_TOKEN="$BOT_TOKEN_VAL" pm2 start /www/wwwroot/bots/adsFusionBot/bot.js --name adsFusionBot --cwd /www/wwwroot/bots/adsFusionBot >/dev/null 2>&1 || true
+  fi
+fi
+
 pm2 save
 
 # Install one managed, idempotent production cron block.
@@ -366,7 +380,7 @@ else
     $0 == begin { managed=1; next }
     $0 == end { managed=0; next }
     !managed
-  ' | grep -Ev '/api/cron/(process-ads|channel-growth|channel-targeting-classification|teaser|process-broadcast|platform-broadcasts|process-miniapp-internal-ads|miniapp-external-delivery-sync|notifications|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|process-support-messages|system-logs-cleanup|developer-webhooks|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|retry-telegram-cleanup|verify-bot-users|referral-sprint|promote-ads-galaxy)([[:space:]?]|$)' | grep -v 'scripts/sync-channel-identities\.sh' || true)
+  ' | grep -Ev '/api/cron/(process-ads|channel-growth|channel-targeting-classification|teaser|process-broadcast|platform-broadcasts|process-miniapp-internal-ads|miniapp-external-delivery-sync|notifications|update-views|channel-settlement|settle-views|settle-clicks|settle-broadcast-publishers|external-network-revenue-sync|publisher-trust-enforcement|channel-fraud-detection|channel-health-monitor|unlock-balances|unlock-miniapp|settle-miniapp|update-subscribers|traffic-quality|inventory-optimization|miniapp-revenue-optimizer|process-support-messages|system-logs-cleanup|developer-webhooks|process-withdrawal-verifications|delete-expired-posts|cleanup-posts|cleanup-expired-posts|cleanup-expired-channel-views|retry-telegram-cleanup|verify-bot-users|referral-sprint|promote-ads-galaxy)([[:space:]?]|$)' | grep -v 'scripts/sync-channel-identities\.sh' || true)
 
   {
     printf '%s\n' "$CLEAN_CRONTAB"
@@ -399,14 +413,15 @@ else
     echo "*/10 * * * * $CRON_BASE/process-support-messages >/dev/null 2>&1"
     echo "45 3 * * * $CRON_BASE/system-logs-cleanup >/dev/null 2>&1"
     echo "*/15 * * * * $CRON_BASE/developer-webhooks >/dev/null 2>&1"
+    echo "*/2 * * * * sleep 41; $CRON_BASE/process-withdrawal-verifications >/dev/null 2>&1"
     echo "*/30 * * * * $CRON_BASE/cleanup-expired-posts >/dev/null 2>&1"
     echo "*/30 * * * * $CRON_BASE/cleanup-expired-channel-views >/dev/null 2>&1"
     echo "* * * * * $CRON_BASE/retry-telegram-cleanup >/dev/null 2>&1"
     echo "*/5 * * * * $CRON_BASE/verify-bot-users >/dev/null 2>&1"
     echo "2 0 * * * $CRON_BASE/referral-sprint >/dev/null 2>&1"
     echo "*/10 * * * * $CRON_BASE/promote-ads-galaxy >/dev/null 2>&1"
-    echo "3-59/10 * * * * $APP_DIR/scripts/sync-channel-identities.sh >> $APP_DIR/tmp/channel-identity-sync.log 2>&1"
-    echo "43 3 * * * CHANNEL_IDENTITY_REPAIR_ONLY=1 CHANNEL_IDENTITY_SYNC_LIMIT=500 $APP_DIR/scripts/sync-channel-identities.sh >> $APP_DIR/tmp/channel-identity-repair.log 2>&1"
+    echo "# PAUSED_USERNAME_SYNC 3-59/10 * * * * $APP_DIR/scripts/sync-channel-identities.sh >> $APP_DIR/tmp/channel-identity-sync.log 2>&1"
+    echo "# PAUSED_USERNAME_SYNC 43 3 * * * CHANNEL_IDENTITY_REPAIR_ONLY=1 CHANNEL_IDENTITY_SYNC_LIMIT=500 $APP_DIR/scripts/sync-channel-identities.sh >> $APP_DIR/tmp/channel-identity-repair.log 2>&1"
     echo "$CRON_END"
   } | sed '/^[[:space:]]*$/d' | crontab -
   echo "    Production crons installed without duplicate routes."

@@ -51,7 +51,7 @@ export async function GET() {
       },
     );
 
-    return NextResponse.json(settings);
+    return NextResponse.json({ ...settings, min_withdraw: "50" });
   } catch (error: unknown) {
     console.error("Settings Fetch Error:", error);
     return NextResponse.json({ error: "Failed to fetch settings" }, { status: 500 });

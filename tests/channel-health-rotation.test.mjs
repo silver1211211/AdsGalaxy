@@ -10,8 +10,9 @@ test("health monitor rotates across eligible channels instead of repeating oldes
   assert.match(monitor, /channels\[channels\.length - 1\]\.id/);
 });
 
-test("permanent Telegram access failures leave the active population", () => {
-  assert.match(monitor, /const autoPaused = false/);
-  assert.match(monitor, /status_mutation_enabled: false/);
+test("private channel access failure uses the verified access pause path", () => {
+  assert.match(monitor, /autoPauseActive: channel.channel_type === "private"/);
+  assert.match(monitor, /const autoPaused = telegramAutoPaused/);
+  assert.match(monitor, /status_mutation_enabled: true/);
   assert.doesNotMatch(monitor, /UPDATE channels SET status=/);
 });

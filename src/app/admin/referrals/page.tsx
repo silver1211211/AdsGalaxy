@@ -83,7 +83,7 @@ const SETTING_DESCRIPTIONS: Record<string, string> = {
   referral_sprint_enabled: "Controls Referral Sprint, sprint popup, leaderboard, teams, and growth UI.",
   referral_join_reward_amount: "Paid when a referred user first joins AdsGalaxy.",
   referral_verification_reward_amount: "Paid after the referred user joins and verifies the required Telegram channel.",
-  referral_reward_amount: "Displayed total reward amount. It should equal join reward plus verification bonus.",
+  referral_reward_amount: "Legacy fixed reward display amount; new referrals earn 10% commissions.",
   referral_sprint_popup_interval_seconds: "Seconds to wait before the Referral Sprint popup can appear again.",
   referral_sprint_popup_interval_hours: "Legacy fallback interval in hours.",
   required_channel_url: "Telegram channel users must join before the verification bonus is paid.",
@@ -210,7 +210,7 @@ export default function AdminReferralsPage() {
   const [data, setData] = useState<AdminReferralData>(emptyData);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
-  const [setting, setSetting] = useState({ key: "referral_reward_amount", value: "0.015", description: "" });
+  const [setting, setSetting] = useState({ key: "referral_reward_amount", value: "0", description: "" });
   const [sprint, setSprint] = useState({ name: "Referral Sprint", duration_days: "14", first_place_reward: "1.00", second_place_reward: "0.50", third_place_reward: "0.25", best_team_reward: "1.50", second_team_reward: "0.75", third_team_reward: "0.25", auto_restart: true });
   const defaultMilestone = { id: "", scope: "user", threshold_count: "10", reward_type: "withdrawable_balance", reward_amount: "0.25", reward_label: "10 verified referrals", status: "active" };
   const [milestone, setMilestone] = useState(defaultMilestone);
@@ -398,7 +398,7 @@ export default function AdminReferralsPage() {
 
             <Section title="Payout Verification" subtitle="Server-authoritative prices, caps, live monthly budget, pending liabilities, and source consistency." icon={ShieldCheck}>
               <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
-                <StatCard label="Ordinary Reward" value="$0.005 + $0.010 = $0.015" icon={Gift} tone="green" />
+                <StatCard label="Referral Commission" value="10% of eligible earnings and deposits" icon={Gift} tone="green" />
                 <StatCard label="Individual Prizes" value="$1 / $0.50 / $0.25" icon={Trophy} tone="amber" />
                 <StatCard label="Team Pools" value="$1.50 / $0.75 / $0.25" icon={Users} />
                 <StatCard label="User Caps" value="$0.50 day / $5 month" icon={ShieldCheck} />
@@ -415,11 +415,11 @@ export default function AdminReferralsPage() {
             <Section title="Core Referral Controls" subtitle="User-facing reward amounts, popup frequency, required channel, and sprint state." icon={Settings2}>
               <div className="grid gap-4 xl:grid-cols-4">
                 <div className="rounded-2xl bg-slate-50 p-4">
-                  <Input label="Join Reward" value={getSettingValue("referral_join_reward_amount", "0.005")} onChange={(value) => setSettingValue("referral_join_reward_amount", value)} hint="Paid when a referral first joins." />
+                  <Input label="Join Reward" value={getSettingValue("referral_join_reward_amount", "0")} onChange={(value) => setSettingValue("referral_join_reward_amount", value)} hint="New fixed join rewards are disabled; commissions pay 10%." />
                   <button onClick={() => saveSetting("referral_join_reward_amount", "Join reward saved.")} className="mt-3 h-11 w-full rounded-xl bg-[#0c9de8] text-xs font-black uppercase tracking-widest text-white">Save</button>
                 </div>
                 <div className="rounded-2xl bg-slate-50 p-4">
-                  <Input label="Verification Bonus" value={getSettingValue("referral_verification_reward_amount", "0.010")} onChange={(value) => setSettingValue("referral_verification_reward_amount", value)} hint="Paid after channel verification." />
+                  <Input label="Verification Bonus" value={getSettingValue("referral_verification_reward_amount", "0")} onChange={(value) => setSettingValue("referral_verification_reward_amount", value)} hint="New fixed verification rewards are disabled; commissions pay 10%." />
                   <button onClick={() => saveSetting("referral_verification_reward_amount", "Verification bonus saved.")} className="mt-3 h-11 w-full rounded-xl bg-[#0c9de8] text-xs font-black uppercase tracking-widest text-white">Save</button>
                 </div>
                 <div className="rounded-2xl bg-slate-50 p-4 xl:col-span-2">
@@ -434,7 +434,7 @@ export default function AdminReferralsPage() {
                   <button onClick={savePopupInterval} className="mt-3 h-11 w-full rounded-xl bg-[#0c9de8] text-xs font-black uppercase tracking-widest text-white">Save Popup Interval</button>
                 </div>
                 <div className="rounded-2xl bg-slate-50 p-4 xl:col-span-2">
-                  <Input label="Required Channel URL" value={getSettingValue("required_channel_url", "https://t.me/AdsGalaxy_News")} onChange={(value) => setSettingValue("required_channel_url", value)} hint="Used for the verification bonus." />
+                  <Input label="Required Channel URL" value={getSettingValue("required_channel_url", "https://t.me/AdsGalaxy_News")} onChange={(value) => setSettingValue("required_channel_url", value)} hint="Used for referral verification." />
                   <button onClick={() => saveSetting("required_channel_url", "Required channel saved.")} className="mt-3 h-11 w-full rounded-xl bg-[#0c9de8] text-xs font-black uppercase tracking-widest text-white">Save Required Channel</button>
                 </div>
                 <div className="rounded-2xl bg-slate-50 p-4 xl:col-span-2">

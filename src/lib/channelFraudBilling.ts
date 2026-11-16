@@ -1,6 +1,8 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { withFinancialTransactionRetry } from "@/lib/dbResilience";
+import { isFinancialReversalAuthorized } from "@/lib/channelTrustFraudStability";
+import { withFinancialPostingContext } from "@/lib/financialPostingContext";
 
 export type ChannelFraudBillingState = "clean" | "low_quality" | "suspicious" | "confirmed_fraud" | "critical_fraud";
 
@@ -30,8 +32,15 @@ async function reverseSettlement(connection: PoolConnection, post: FraudPost, le
     "SELECT balance_locked, balance_available FROM users WHERE id = ? FOR UPDATE", [post.publisher_id]
   );
   const publisherCredit = money(ledger.publisher_credit);
-  const lockedRecovery = Math.min(publisherCredit, money(balances?.balance_locked));
-  const availableRecovery = Math.min(publisherCredit - lockedRecovery, money(balances?.balance_available));
+  // Pending withdrawal requests already reserve locked funds. Fraud recovery
+  // must not consume that reservation or the withdrawal would be underfunded.
+  const [[reservation]] = await connection.query<Array<RowDataPacket & { pending_amount: string | number }>>(
+    "SELECT COALESCE(SUM(amount),0) pending_amount FROM withdrawals WHERE user_id=? AND status='pending' AND COALESCE(refunded,0)=0",
+    [post.publisher_id]
+  );
+  const availableRecovery = Math.min(publisherCredit, money(balances?.balance_available));
+  const ordinaryLocked = Math.max(0, money(balances?.balance_locked) - money(reservation?.pending_amount));
+  const lockedRecovery = Math.min(publisherCredit - availableRecovery, money(ordinaryLocked));
   const recovered = money(lockedRecovery + availableRecovery);
   const shortfall = money(publisherCredit - recovered);
   const advertiserCredit = money(ledger.advertiser_debit);
@@ -52,10 +61,18 @@ async function reverseSettlement(connection: PoolConnection, post: FraudPost, le
     "UPDATE users SET ad_balance = ad_balance + ? WHERE id = ?",
     [advertiserCredit, post.advertiser_id]
   );
-  await connection.query(
-    "UPDATE users SET balance_locked = GREATEST(0,balance_locked-?), balance_available = GREATEST(0,balance_available-?) WHERE id = ?",
-    [lockedRecovery, availableRecovery, post.publisher_id]
-  );
+  if (recovered > 0) {
+    const [result] = await withFinancialPostingContext(connection, {
+      sourceKey: `channel:fraud-reversal:${ledger.id}:publisher`,
+      sourceSystem: "channel_fraud_reversal",
+      sourceRecordId: String(ledger.id),
+      policyVersion: "channel-fraud-reversal-v1",
+    }, () => connection.query(
+      "UPDATE users SET balance_locked = balance_locked - ?, balance_available = balance_available - ? WHERE id = ? AND balance_locked >= ? AND balance_available >= ?",
+      [lockedRecovery, availableRecovery, post.publisher_id, lockedRecovery, availableRecovery]
+    ));
+    if (!("affectedRows" in result) || result.affectedRows !== 1) throw new Error("publisher_fraud_recovery_race");
+  }
   await connection.query(
     `UPDATE campaigns SET budget=IF(funding_model='direct_debit',LEAST(total_budget,budget+?),budget),
        channel_spend=GREATEST(0,channel_spend-?),
@@ -81,7 +98,13 @@ async function reverseSettlement(connection: PoolConnection, post: FraudPost, le
   return true;
 }
 
-export async function applyChannelFraudBillingPolicy() {
+export async function applyChannelFraudBillingPolicy(options?: { allowHeuristicReversals?: boolean }) {
+  // AdsGalaxy V1.01: ONLY verified 'confirmed_fraud' authorizes financial reversals against settled ledgers.
+  // Heuristic 'critical_fraud' alone does NOT independently authorize irreversible clawbacks without explicit administrative confirmation.
+  const authorizedStates = options?.allowHeuristicReversals
+    ? "('confirmed_fraud','critical_fraud')"
+    : "('confirmed_fraud')";
+
   const [posts] = await pool.query<FraudPost[]>(
     `SELECT MAX(fe.id) fraud_event_id,
        CASE WHEN MAX(fe.billing_state='critical_fraud')=1 THEN 'critical_fraud' ELSE 'confirmed_fraud' END billing_state,
@@ -95,7 +118,7 @@ export async function applyChannelFraudBillingPolicy() {
      JOIN campaign_posts cp ON cp.id=fe.post_id
      JOIN campaigns c ON c.id=cp.campaign_id
      JOIN channels ch ON ch.id=cp.channel_id
-     WHERE fe.billing_state IN ('confirmed_fraud','critical_fraud') AND fe.false_positive_at IS NULL
+     WHERE fe.billing_state IN ${authorizedStates} AND fe.false_positive_at IS NULL
      GROUP BY cp.id,cp.campaign_id,cp.channel_id,ch.user_id,c.user_id,c.type,c.funding_model,cp.views,cp.settled_views,cp.settled_clicks,
        cp.fraud_excluded_views,cp.fraud_excluded_clicks`
   );
@@ -104,6 +127,18 @@ export async function applyChannelFraudBillingPolicy() {
   let excludedUnits = 0;
 
   for (const post of posts) {
+    // V1.01 Authorization guard check
+    const auth = isFinancialReversalAuthorized(post.billing_state, { isHeuristicOnly: post.billing_state !== "confirmed_fraud" });
+    if (!auth.isAuthorized) {
+      console.warn("Skipping automatic financial reversal for unconfirmed heuristic alert", {
+        post_id: post.post_id,
+        billing_state: post.billing_state,
+        action: auth.action,
+        reason: auth.reason,
+      });
+      continue;
+    }
+
     try {
       const result = await withFinancialTransactionRetry(async (connection) => {
         // Canonical lock order: campaign -> post -> account ids -> ledgers.

@@ -59,7 +59,14 @@ test("every private activation path onboards before setting active", () => {
     assert.notEqual(onboarding, -1, `${file} must onboard private tracking`);
     assert.notEqual(activation, -1, `${file} must contain activation after onboarding`);
     assert.ok(onboarding < activation, `${file} must verify MTProto membership before activation`);
-    assert.match(source, /channel_type === "private" && tracking\.status !== "active"|channelType === "private" && tracking\.status !== "active"/);
+    if (file === "src/lib/channelLifecycle.ts") {
+      assert.match(source, /channel_type === "private" && tracking\.status !== "active"|channelType === "private" && tracking\.status !== "active"/);
+    } else {
+      const privateBranch = source.lastIndexOf('if (channel.channel_type === "private")', onboarding);
+      const trackingGuard = source.indexOf('if (tracking.status !== "active")', onboarding);
+      assert.ok(privateBranch >= 0 && privateBranch < onboarding, `${file} must scope onboarding to a private channel`);
+      assert.ok(trackingGuard > onboarding && trackingGuard < activation, `${file} must block unconfirmed membership before activation`);
+    }
   }
 });
 

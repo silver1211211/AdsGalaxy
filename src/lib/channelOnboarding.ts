@@ -39,7 +39,7 @@ export async function channelTelegram<T = TelegramChannelResult>(token: string, 
     throw new ChannelOnboardingError("TELEGRAM_TEMPORARILY_UNAVAILABLE", "Telegram is temporarily unavailable. Try again shortly.", 503);
   }
   if (response.status === 429 || data.error_code === 429) {
-    throw new ChannelOnboardingError("TELEGRAM_RATE_LIMITED", "Telegram is busy. Please wait before trying again.", 429, Math.min(3600, Math.max(1, Number(data.parameters?.retry_after) || 30)));
+    throw new ChannelOnboardingError("TELEGRAM_RATE_LIMITED", "Telegram is busy. Please wait before trying again.", 429, Math.max(1, Number(data.parameters?.retry_after) || 30));
   }
   if (response.status >= 500 || Number(data.error_code) >= 500) throw new ChannelOnboardingError("TELEGRAM_TEMPORARILY_UNAVAILABLE", "Telegram is temporarily unavailable. Try again shortly.", 503);
   if (data.ok && (data.result === undefined || data.result === null)) throw new ChannelOnboardingError("TELEGRAM_INVALID_RESPONSE", "Telegram returned an incomplete response. Please try again shortly.", 503);
@@ -53,8 +53,8 @@ export function requireStableChannelId(value: unknown): string {
 }
 
 /** MTProto infrastructure/configuration failures must never reject a channel permanently. */
-export function throwIfPrivateVerificationUnavailable(code: string) {
-  if (code === "rate_limited") throw new ChannelOnboardingError("TELEGRAM_RATE_LIMITED", "Telegram is busy. Please try again later.", 429, 60);
+export function throwIfPrivateVerificationUnavailable(code: string, retryAfterSeconds?: number) {
+  if (code === "rate_limited") throw new ChannelOnboardingError("TELEGRAM_RATE_LIMITED", "Telegram is busy. Please try again later.", 429, Math.max(1, Number(retryAfterSeconds) || 60));
   if (["verification_timeout", "network_error", "telegram_rpc_error", "all_accounts_failed", "missing_api_id", "missing_api_hash", "missing_account_sessions", "session_unauthorized", "session_auth_error", "auth_key_duplicated", "all_accounts_unhealthy"].includes(code)) {
     throw new ChannelOnboardingError("TELEGRAM_TEMPORARILY_UNAVAILABLE", "Private channel verification is temporarily unavailable. Try again shortly.", 503);
   }

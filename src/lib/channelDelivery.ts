@@ -124,6 +124,16 @@ export async function reserveChannelPlacement(conn: PoolConnection, input: {
   replacesPostId?: number | null;
   capacityLimit?: number;
 }) {
+  const [approvedRows] = await conn.query<Array<RowDataPacket & {
+    status: string; link: string; approved_creative_revision_id: number | null;
+  }>>(
+    "SELECT status,link,approved_creative_revision_id FROM campaigns WHERE id=?",
+    [input.campaignId],
+  );
+  const approved = approvedRows[0];
+  if (!approved || approved.status !== "active" || !/^https?:\/\//i.test(String(approved.link))) {
+    return {claimed:false,postId:0,claimKey:channelDeliveryClaimKey(input.campaignId,input.channelId,input.generation),slotClaimId:0,reason:"approved_creative_unavailable"};
+  }
   if (input.capacityLimit && !input.replacesPostId) {
     await conn.query("SELECT id FROM channels WHERE id=? FOR UPDATE", [input.channelId]);
     const [[usage]] = await conn.query<Array<RowDataPacket & { used_capacity: number }>>(
@@ -142,8 +152,8 @@ export async function reserveChannelPlacement(conn: PoolConnection, input: {
     }
   }
   const claimKey=channelDeliveryClaimKey(input.campaignId,input.channelId,input.generation);
-  const columns=["campaign_id","delivery_generation","delivery_claim_key","channel_id","channel_username","status","delivery_attempted_at","posting_mode"];
-  const values: Array<string|number|Date|null>=[input.campaignId,input.generation,claimKey,input.channelId,input.channelUsername,"pending_delivery",new Date(),input.mode];
+  const columns=["campaign_id","delivery_generation","delivery_claim_key","channel_id","channel_username","status","delivery_attempted_at","posting_mode","creative_revision_id","approved_destination_url","approved_destination_source"];
+  const values: Array<string|number|Date|null>=[input.campaignId,input.generation,claimKey,input.channelId,input.channelUsername,"pending_delivery",new Date(),input.mode,approved.approved_creative_revision_id,approved.link,"placement_claim"];
   if(input.postingSlotDate&&input.postingSlotTime){columns.push("posting_slot_date","posting_slot_time");values.push(input.postingSlotDate,input.postingSlotTime);}
   let slotClaimId = 0;
   let slotClaimCreated = false;

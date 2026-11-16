@@ -96,7 +96,7 @@ export default function WithdrawalPage() {
                 <p className="mt-1 text-xl font-black">${parseFloat(data.balance.balance_available).toFixed(2)}</p>
               </div>
               <div className="rounded-2xl border border-white/10 bg-white/10 p-3">
-                <p className="text-[10px] font-black uppercase tracking-widest text-blue-100/70">{t("publisher.withdrawals.locked")}</p>
+                <p className="text-[10px] font-black uppercase tracking-widest text-blue-100/70">Locked balance</p>
                 <p className="mt-1 text-xl font-black">${parseFloat(data.balance.balance_locked).toFixed(2)}</p>
               </div>
             </div>
@@ -114,15 +114,6 @@ export default function WithdrawalPage() {
               <h2 className="text-4xl font-black text-slate-900 tracking-tight">
                 ${parseFloat(data.balance.balance_available).toFixed(2)}
               </h2>
-            </div>
-            <div className="text-right space-y-1">
-              <div className="flex items-center justify-end gap-2 text-slate-400">
-                <Lock size={12} />
-                <span className="text-[10px] font-black uppercase tracking-widest">{t("publisher.withdrawals.locked")}</span>
-              </div>
-              <p className="text-sm font-black text-amber-600 bg-amber-50 px-3 py-1 rounded-lg inline-block">
-                ${parseFloat(data.balance.balance_locked).toFixed(2)}
-              </p>
             </div>
           </div>
 

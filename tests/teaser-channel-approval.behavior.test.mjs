@@ -1,0 +1,11 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import vm from "node:vm";
+import ts from "typescript";
+const text=fs.readFileSync("src/app/api/cron/teaser/route.ts","utf8");
+const start=text.indexOf("function placementStillAllowed(");const end=text.indexOf("\nasync function settle",start);assert.ok(start>=0&&end>start);
+const exports={};vm.runInNewContext(ts.transpileModule(text.slice(start,end)+"\nexports.check=placementStillAllowed;",{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,{exports});
+const approved={campaign_status:"active",channel_status:"active",channel_deleted:0,channel_approval_status:"approved",channel_type:"public",campaign_teaser_enabled:1,channel_teaser_enabled:1,channel_teaser_status:"active"};
+test("teaser insertion requires an approved active channel",()=>{assert.equal(exports.check(approved),true);assert.equal(exports.check({...approved,channel_status:"approved"}),true);for(const status of ["pending","rejected","paused"])assert.equal(exports.check({...approved,channel_status:status}),false);assert.equal(exports.check({...approved,channel_deleted:1}),false)});
+test("private teaser insertion requires confirmed tracking membership",()=>{const row={...approved,channel_type:"private",tracking_account_status:"pending_manual",tracking_account_member_status:null};assert.equal(exports.check(row),false);assert.equal(exports.check({...row,tracking_account_status:"active",tracking_account_member_status:"member"}),true)});

@@ -614,6 +614,20 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
   // channel-1 bot-admin pre-check ("idle"|"checking"|"ok"|"failed")
   const [botAdminCheck, setBotAdminCheck] = useState<"idle" | "checking" | "ok" | "failed">("idle");
   const [botAdminError, setBotAdminError] = useState("");
+  const channelVerifyInFlight = useRef(false);
+  const channelRetryUntil = useRef(0);
+  const [channelRetryAt, setChannelRetryAt] = useState(0);
+  useEffect(() => {
+    if (!channelRetryAt) return;
+    let timer: number | undefined;
+    const checkExpiry = () => {
+      const remaining = channelRetryAt - Date.now();
+      if (remaining <= 0) { setChannelRetryAt(0); return; }
+      timer = window.setTimeout(checkExpiry, Math.min(remaining, 2147483647));
+    };
+    checkExpiry();
+    return () => { if (timer !== undefined) window.clearTimeout(timer); };
+  }, [channelRetryAt]);
   const [botPermissions, setBotPermissions] = useState<{
     is_admin?: boolean;
     can_post_messages?: boolean;
@@ -653,85 +667,12 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
     return () => { if (tokenVerifyTimer.current) clearTimeout(tokenVerifyTimer.current); };
   }, [botToken]);
 
-  // Auto-verify bot admin status in channel-1 step.
-  // Starts polling (8 s interval) as soon as the user provides valid input.
-  // Stops automatically when the bot is confirmed as admin.
+  // Reset the checklist when the channel identity changes; verification is manual.
   useEffect(() => {
-    if (step !== "channel-1") {
-      setBotAdminCheck("idle");
-      setBotAdminError("");
-      setBotPermissions(null);
-      return;
-    }
-
-    const rawInput = chIsPrivate ? normalizedChInviteLink : normalizedChUsername;
-    const inputValid = Boolean(rawInput);
-
-    if (!rawInput || !inputValid) {
-      setBotAdminCheck("idle");
-      setBotAdminError("");
-      setBotPermissions(null);
-      return;
-    }
-
-    let cancelled = false;
-    let pollTimer: number | null = null;
-
-    const checkBotAdmin = async () => {
-      if (cancelled) return;
-      setBotAdminCheck("checking");
-      setBotAdminError("");
-      try {
-        const res = chIsPrivate
-          ? await apiFetch("/api/telegram/chat-info", {
-              method: "POST",
-              body: JSON.stringify({ invite_link: rawInput }),
-              timeoutMs: 60000,
-            })
-          : await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(rawInput)}`, { timeoutMs: 60000 });
-        const data = await res.json();
-        if (cancelled) return;
-        setBotPermissions(data.permissions || null);
-        if (res.ok) {
-          if (chIsPrivate && data.verification_token) {
-            setPrivateVerificationToken(data.verification_token);
-          }
-          if (chIsPrivate) {
-            logPrivateChannelDiagnostic("frontend_poll_response", {
-              token_received: Boolean(data.verification_token),
-              token_valid: Boolean(data.verification_token),
-              token_error_code: data.verification_token ? "none" : "token_missing_from_response",
-              token_has_chat_id: Boolean(data.id),
-              digest_match: Boolean(data.verification_token),
-              submit_channel_type: "private",
-              normalized_input_type: normalizedChInviteLink ? "private_invite" : "invalid_private_invite",
-              final_reject_reason: data.verification_token ? "none" : "token_missing_from_response",
-            });
-          }
-          setBotAdminCheck("ok");
-          setBotAdminError("");
-        } else {
-          setBotAdminCheck("failed");
-          setBotAdminError(data.message || data.error || "Could not verify the channel setup.");
-          if (!cancelled) pollTimer = window.setTimeout(checkBotAdmin, 8000);
-        }
-      } catch {
-        if (!cancelled) {
-          setBotAdminCheck("failed");
-          setBotAdminError("Verification request failed. Retrying automatically.");
-          pollTimer = window.setTimeout(checkBotAdmin, 8000);
-        }
-      }
-    };
-
-    // Debounce initial trigger (1.2 s after the last input change)
-    pollTimer = window.setTimeout(checkBotAdmin, 1200);
-
-    return () => {
-      cancelled = true;
-      if (pollTimer) window.clearTimeout(pollTimer);
-    };
-  }, [step, chIsPrivate, normalizedChInviteLink, normalizedChUsername]);
+    setBotAdminCheck("idle");
+    setBotAdminError("");
+    setBotPermissions(null);
+  }, [chIsPrivate, normalizedChInviteLink, normalizedChUsername]);
 
   const isSelect = step === "select";
 
@@ -756,14 +697,17 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
 
   async function handleChFetch() {
     const canFetch = chIsPrivate ? normalizedChInviteLink : normalizedChUsername;
-    if (!canFetch || isLoading) return;
+    if (!canFetch || isLoading || channelVerifyInFlight.current || Date.now() < channelRetryUntil.current) return;
+    channelVerifyInFlight.current = true;
     if (chIsPrivate && !normalizedChInviteLink) {
       setChVerifyState("error");
       setChVerifyError("Invalid private invite link");
       setToast({ type: "error", title: "Invalid Invite Link", message: "Use a valid Telegram invite link like https://t.me/+xxxxxxxxxxxx." });
+      channelVerifyInFlight.current = false;
       return;
     }
     setIsLoading(true);
+    setBotAdminCheck("checking");
     setToast(null);
     setChVerifyState("checking");
     setChVerifyError("");
@@ -778,6 +722,15 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
         : await apiFetch(`/api/telegram/chat-info?username=${encodeURIComponent(normalizedChUsername!)}`, { timeoutMs: 60000 });
       const data = await res.json();
       if (!res.ok) {
+        setBotAdminCheck("failed");
+        setBotPermissions(data.permissions || null);
+        if (res.status === 429 && data.code === "TELEGRAM_RATE_LIMITED") {
+          const retry = Number(res.headers.get("Retry-After"));
+          if (Number.isFinite(retry) && retry > 0) {
+            channelRetryUntil.current = Date.now() + retry * 1000;
+            setChannelRetryAt(channelRetryUntil.current);
+          }
+        }
         if (data.error === "PERMISSION_REQUIRED") {
           setChVerifyState("error");
           setChVerifyError(data.message || "Bot is not an administrator");
@@ -786,6 +739,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
         }
         throw new Error(data.error || "Failed to fetch channel info");
       }
+      setBotAdminCheck("ok");
       setChInfo(data);
       setBotPermissions(data.permissions || null);
       if (chIsPrivate && data.verification_token) {
@@ -812,6 +766,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
       setChVerifyError(message);
       setToast({ type: "error", title: "Verification Failed", message });
     } finally {
+      channelVerifyInFlight.current = false;
       setIsLoading(false);
     }
   }
@@ -864,11 +819,12 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
   }
 
   async function handleChSubmit() {
-    if (isLoading || !chInfo) return;
+    if (isLoading || !chInfo || channelVerifyInFlight.current || Date.now() < channelRetryUntil.current) return;
     const title = chTitle.trim();
     if (title.length < 3)  { setToast({ type: "error", title: t("publisher.channels.registrationFailed"), message: t("publisher.channels.nameMin") }); return; }
     if (title.length > 128) { setToast({ type: "error", title: t("publisher.channels.registrationFailed"), message: "Channel name must be at most 128 characters." }); return; }
     const verifiedChannelType = chInfo?.channel_type === "private" ? "private" : chIsPrivate ? "private" : "public";
+    channelVerifyInFlight.current = true;
     setIsLoading(true);
     setToast(null);
     try {
@@ -908,12 +864,17 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
       });
       if (!res.ok) {
         const data: unknown = await res.json();
+        if (res.status === 429 && (data as {code?: string}).code === "TELEGRAM_RATE_LIMITED") {
+          const retry = Number(res.headers.get("Retry-After"));
+          if (Number.isFinite(retry) && retry > 0) { channelRetryUntil.current = Date.now() + retry * 1000; setChannelRetryAt(channelRetryUntil.current); }
+        }
         throw new Error(getApiErrorMessage(data, "Failed to add channel"));
       }
       onSuccess();
     } catch (err: any) {
       setToast({ type: "error", title: t("publisher.channels.registrationFailed"), message: err.message });
     } finally {
+      channelVerifyInFlight.current = false;
       setIsLoading(false);
     }
   }
@@ -1306,7 +1267,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                                   Setup Checklist
                                 </p>
                                 <p className="mt-1 text-sm text-slate-500 leading-relaxed">
-                                  Add AdsGalaxy Bot as admin. Permissions are verified automatically.
+                                  Add AdsGalaxy Bot as admin, then press Verify Channel.
                                 </p>
                               </div>
 
@@ -1341,7 +1302,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                               )}
                               {botAdminCheck === "failed" && (
                                 <p className="text-[11px] font-bold text-red-500">
-                                  {botAdminError || "Could not verify the channel setup."} We&apos;ll recheck automatically every 8 seconds.
+                                  {botAdminError || "Could not verify the channel setup."} Press Verify Channel to try again.
                                 </p>
                               )}
                               {botAdminCheck === "ok" && (
@@ -1367,13 +1328,15 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                           const inputMissing = chIsPrivate
                             ? !chInviteLink.trim() || !!chInviteLinkErr
                             : !chUsername.trim() || !!chUsernameErr;
-                          const isDisabled = isLoading || inputMissing || botAdminCheck !== "ok";
-                          const label = isLoading
+                          const isDisabled = isLoading || inputMissing || channelRetryAt > Date.now();
+                          const label = channelRetryAt > Date.now()
+                            ? "Telegram asked us to wait before retrying"
+                            : isLoading
                             ? "Verifying…"
                             : botAdminCheck === "checking"
                               ? "Checking Bot Admin…"
                               : botAdminCheck === "failed"
-                                ? "Fix Channel Setup"
+                                ? "Verify Channel Again"
                                 : chIsPrivate
                                   ? "Verify Private Channel"
                                   : "Verify Public Channel";
@@ -1678,7 +1641,7 @@ function FlowModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () 
                         <button
                           onClick={handleChSubmit}
                           disabled={
-                            isLoading ||
+                            isLoading || channelRetryAt > Date.now() ||
                             chConts.length === 0 ||
                             chCats.length === 0 ||
                             chTimes.length === 0 ||

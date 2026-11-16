@@ -1,3 +1,4 @@
+import { recordChannelStatusTransitionAudit } from "@/lib/channelStatusAudit";
 import { NextResponse, after } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
 import pool from "@/lib/db";
@@ -30,7 +31,6 @@ import { sanitizePublisherChannel } from "@/lib/channelRefreshPolicy";
 import { logPublisherChannelError, publisherChannelError } from "@/lib/publisherChannelErrors";
 import { isTransientDatabaseError, queryWithRetry } from "@/lib/dbResilience";
 import { validateTeaserDailyLimit } from "@/lib/teaser";
-import { verifyTelegramChannelAccess } from "@/lib/telegramChannelAccess";
 
 type ExistingChannelRow = RowDataPacket & { id: number; user_id: number; is_deleted: boolean | number };
 
@@ -72,12 +72,11 @@ async function columnExists(tableName: string, columnName: string) {
 const telegram = channelTelegram;
 
 /** The committed registration is authoritative; auxiliary failures cannot undo API success. */
-function scheduleSubmissionFollowUp(channelId: number, chatId: string, username: string | null, publisherId: number, telegramId: string, title: string) {
+function scheduleSubmissionFollowUp(channelId: number, chatId: string, publisherId: number, telegramId: string, title: string) {
   try {
     after(async () => {
       try {
-        const access = await verifyTelegramChannelAccess({ channelId, chatId, username, source: "submission", persist: true, autoPauseActive: false });
-        if (access.ok) await sendChannelWelcomePostIfNeeded(channelId, chatId);
+        await sendChannelWelcomePostIfNeeded(channelId, chatId);
       } catch (error) { logPublisherChannelError("submission_health", error); }
       try { await notifyChannelSubmitted(telegramId, channelId, title); }
       catch (error) { logPublisherChannelError("submission_notification", error); }
@@ -318,7 +317,7 @@ async function registerChannel(request: Request, requestId: string) {
       } else {
         const resolved = await resolvePrivateInviteLink(normalizedPrivateInviteLink!);
         if (!resolved.ok) {
-          throwIfPrivateVerificationUnavailable(resolved.code);
+          throwIfPrivateVerificationUnavailable(resolved.code, resolved.retryAfterSeconds);
           logPrivateChannelDiagnostic("channel_submit_rejected", {
             token_received: tokenInspection.tokenReceived,
             token_valid: tokenInspection.valid,
@@ -529,6 +528,20 @@ async function registerChannel(request: Request, requestId: string) {
         if (claims.some(claim => Number(claim.channel_id) !== Number(channel.id) || (claim.telegram_chat_id && claim.telegram_chat_id !== resolvedChatId))) throw new ChannelOnboardingError("CHANNEL_IDENTITY_CONFLICT", "This channel has a conflicting existing registration. Please contact support.", 409);
         if (locked[0].is_deleted) {
           await connection.query(`UPDATE channels SET ${updateColumns.join(", ")} WHERE id = ?`, updateParams);
+          await recordChannelStatusTransitionAudit(connection, {
+            channelId: Number(channel.id),
+            telegramChatId: String(resolvedChatId),
+            previousStatus: "deleted",
+            newStatus: "pending",
+            sourceWorker: "publisher_channel_onboarding",
+            reasonCode: "publisher_resubmitted_deleted_channel",
+            reasonText: "Publisher re-submitted previously deleted channel for moderation",
+            evidenceClassification: "manual",
+            verificationAttemptRef: `chat:${resolvedChatId}`,
+            actorType: "publisher",
+            actorId: user.id,
+            transitionIntent: "manual",
+          });
           if (!claims.length) {
             await connection.query("INSERT INTO channel_telegram_identities (channel_id,telegram_chat_id,channel_type,current_username,verification_state,last_check_source) VALUES (?,?,?,?,'unknown','submission_claim')", [channel.id,resolvedChatId,normalizedChannelType,normalizedUsername]);
           } else {
@@ -554,7 +567,7 @@ async function registerChannel(request: Request, requestId: string) {
         });
       }
 
-      scheduleSubmissionFollowUp(channel.id, resolvedChatId, normalizedUsername, Number(user.id), String(user.telegram_id), normalizedTitle);
+      scheduleSubmissionFollowUp(channel.id, resolvedChatId, Number(user.id), String(user.telegram_id), normalizedTitle);
       channelOnboardingTelemetry({ requestId, publisherId, chatId: resolvedChatId, stage: "persist", result: "reactivated" });
 
       return NextResponse.json({
@@ -633,6 +646,20 @@ async function registerChannel(request: Request, requestId: string) {
         `INSERT INTO channels (${insertColumns.join(", ")}) VALUES (${placeholders})`,
         insertParams
       ) as [ResultSetHeader, unknown];
+      await recordChannelStatusTransitionAudit(writeConn, {
+        channelId: Number(result.insertId),
+        telegramChatId: String(resolvedChatId),
+        previousStatus: "none",
+        newStatus: "pending",
+        sourceWorker: "publisher_channel_onboarding",
+        reasonCode: "publisher_channel_submitted",
+        reasonText: "Publisher submitted new channel for moderation",
+        evidenceClassification: "manual",
+        verificationAttemptRef: `chat:${resolvedChatId}`,
+        actorType: "publisher",
+        actorId: user.id,
+        transitionIntent: "manual",
+      });
       await writeConn.query(
         `INSERT INTO channel_telegram_identities
           (channel_id,telegram_chat_id,channel_type,current_username,bot_member_status,bot_can_post,
@@ -675,7 +702,7 @@ async function registerChannel(request: Request, requestId: string) {
       });
     }
 
-    scheduleSubmissionFollowUp(result.insertId, resolvedChatId, normalizedUsername, Number(user.id), String(user.telegram_id), normalizedTitle);
+    scheduleSubmissionFollowUp(result.insertId, resolvedChatId, Number(user.id), String(user.telegram_id), normalizedTitle);
     channelOnboardingTelemetry({ requestId, publisherId, chatId: resolvedChatId, stage: "persist", result: "success" });
     return NextResponse.json({ success: true, id: result.insertId, telegram_access_state: "unknown" });
   } catch (error: unknown) {

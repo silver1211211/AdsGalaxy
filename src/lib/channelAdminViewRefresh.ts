@@ -1,6 +1,10 @@
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
-import { persistSuccessfulChannelViews } from "@/lib/channelViewPersistence";
+import {
+  normalizedLastViewsUpdateDatetimeSql,
+  persistFailedChannelViewFetch,
+  persistSuccessfulChannelViews,
+} from "@/lib/channelViewPersistence";
 import { getPrivatePostViews } from "@/lib/telegramMtproto";
 
 type PostRow = RowDataPacket & {
@@ -26,24 +30,49 @@ async function publicViews(username: string, messageId: number | string) {
   return Math.floor(views);
 }
 
-export async function refreshChannelViews(channelId: number, limit = 25) {
-  const [posts] = await pool.query<PostRow[]>(
-    `SELECT cp.id,cp.message_id,cp.views,ch.chat_id,ch.username,ch.channel_type,ch.tracking_account,
-       ch.tracking_account_status,ch.tracking_account_member_status
-     FROM campaign_posts cp JOIN channels ch ON ch.id=cp.channel_id
-     WHERE cp.channel_id=? AND cp.status='active' AND cp.deleted_at IS NULL
-       AND cp.delivery_failed_at IS NULL AND cp.delivery_confirmed_at IS NOT NULL
-       AND cp.message_id IS NOT NULL AND ch.is_deleted=FALSE
-     ORDER BY cp.last_views_update IS NULL DESC,cp.last_views_update ASC LIMIT ?`,
-    [channelId, Math.min(50, Math.max(1, limit))]
-  );
+export async function refreshChannelViews(channelId: number, limit = 25, options: { force?: boolean } = {}) {
+  const retryCooldownCondition = options?.force
+    ? "(cp.view_next_retry_at IS NULL OR cp.view_next_retry_at <= UTC_TIMESTAMP(6) OR COALESCE(cp.view_fetch_error, '') NOT LIKE '%rate_limited%')"
+    : "(cp.view_next_retry_at IS NULL OR cp.view_next_retry_at <= UTC_TIMESTAMP(6))";
+
+  let posts: PostRow[];
+  try {
+    const [rows] = await pool.query<PostRow[]>(
+      `SELECT cp.id,cp.message_id,cp.views,ch.chat_id,ch.username,ch.channel_type,ch.tracking_account,
+         ch.tracking_account_status,ch.tracking_account_member_status
+       FROM campaign_posts cp JOIN channels ch ON ch.id=cp.channel_id
+       WHERE cp.channel_id=? AND cp.status IN ('active','cleanup_pending','delete_failed') AND cp.deleted_at IS NULL
+         AND cp.delivery_failed_at IS NULL AND cp.delivery_confirmed_at IS NOT NULL
+         AND cp.message_id IS NOT NULL AND ch.is_deleted=FALSE
+         AND ${retryCooldownCondition}
+       ORDER BY (cp.last_views_update IS NULL OR cp.last_views_update=0) DESC,${normalizedLastViewsUpdateDatetimeSql("cp.last_views_update")} ASC LIMIT ?`,
+      [channelId, Math.min(50, Math.max(1, limit))]
+    );
+    posts = rows;
+  } catch (err: unknown) {
+    if ((err as { code?: string })?.code === "ER_BAD_FIELD_ERROR") {
+      const [rows] = await pool.query<PostRow[]>(
+        `SELECT cp.id,cp.message_id,cp.views,ch.chat_id,ch.username,ch.channel_type,ch.tracking_account,
+           ch.tracking_account_status,ch.tracking_account_member_status
+         FROM campaign_posts cp JOIN channels ch ON ch.id=cp.channel_id
+         WHERE cp.channel_id=? AND cp.status IN ('active','cleanup_pending','delete_failed') AND cp.deleted_at IS NULL
+           AND cp.delivery_failed_at IS NULL AND cp.delivery_confirmed_at IS NOT NULL
+           AND cp.message_id IS NOT NULL AND ch.is_deleted=FALSE
+         ORDER BY (cp.last_views_update IS NULL OR cp.last_views_update=0) DESC,${normalizedLastViewsUpdateDatetimeSql("cp.last_views_update")} ASC LIMIT ?`,
+        [channelId, Math.min(50, Math.max(1, limit))]
+      );
+      posts = rows;
+    } else {
+      throw err;
+    }
+  }
   let updated = 0;
   let failed = 0;
   const errors: Array<{ post_id: number; error: string }> = [];
   for (const post of posts) {
+    let source = post.channel_type === "private" ? "admin_mtproto_private" : "admin_public_api";
     try {
       let fetched: number;
-      let source: string;
       if (post.channel_type === "private") {
         const result = await getPrivatePostViews(post.chat_id, post.message_id, {
           preferredAccount: post.tracking_account,
@@ -65,7 +94,11 @@ export async function refreshChannelViews(channelId: number, limit = 25) {
           source = "admin_mtproto_public_fallback";
         }
       }
-      await persistSuccessfulChannelViews(pool, post.id, Math.max(Number(post.views || 0), fetched), source);
+      const persisted = await persistSuccessfulChannelViews(
+        pool, post.id, Math.max(Number(post.views || 0), fetched), source, Date.now()
+      );
+      // Stale/equal/deleted: not an update. Keep the per-post pacing before skipping.
+      if (!persisted.updated) { await wait(350); continue; }
       await pool.query("UPDATE channels SET last_successful_view_fetch_at=NOW() WHERE id=?", [channelId])
         .catch(error => console.error("channel_view_diagnostic_failed", { channelId, error }));
       updated++;
@@ -73,7 +106,7 @@ export async function refreshChannelViews(channelId: number, limit = 25) {
       const message = error instanceof Error ? error.message : "view_refresh_failed";
       failed++;
       errors.push({ post_id: post.id, error: message });
-      await pool.query("UPDATE campaign_posts SET last_views_update=NOW(),view_fetch_status='failed',view_fetch_error=? WHERE id=?", [message.slice(0, 500), post.id]);
+      await persistFailedChannelViewFetch(pool, post.id, message.slice(0, 500), source, Date.now());
     }
     await wait(350);
   }
@@ -90,19 +123,19 @@ export async function refreshCampaignViews(campaignId: number, limit = 50) {
     `SELECT cp.id,cp.message_id,cp.views,cp.channel_id,ch.chat_id,ch.username,ch.channel_type,ch.tracking_account,
        ch.tracking_account_status,ch.tracking_account_member_status
      FROM campaign_posts cp JOIN channels ch ON ch.id=cp.channel_id
-     WHERE cp.campaign_id=? AND cp.status='active' AND cp.deleted_at IS NULL
+     WHERE cp.campaign_id=? AND cp.status IN ('active','cleanup_pending','delete_failed') AND cp.deleted_at IS NULL
        AND cp.delivery_failed_at IS NULL AND cp.delivery_confirmed_at IS NOT NULL
        AND cp.message_id IS NOT NULL AND ch.is_deleted=FALSE
-     ORDER BY cp.last_views_update IS NULL DESC,cp.last_views_update ASC LIMIT ?`,
+     ORDER BY (cp.last_views_update IS NULL OR cp.last_views_update=0) DESC,${normalizedLastViewsUpdateDatetimeSql("cp.last_views_update")} ASC LIMIT ?`,
     [campaignId, Math.min(500, Math.max(1, limit))]
   );
   let updated = 0;
   let failed = 0;
   const errors: Array<{ post_id: number; error: string }> = [];
   for (const post of posts) {
+    let source = post.channel_type === "private" ? "pre_deletion_mtproto_private" : "pre_deletion_public_api";
     try {
       let fetched: number;
-      let source: string;
       if (post.channel_type === "private") {
         const result = await getPrivatePostViews(post.chat_id, post.message_id, {
           preferredAccount: post.tracking_account,
@@ -124,7 +157,11 @@ export async function refreshCampaignViews(campaignId: number, limit = 50) {
           source = "pre_deletion_mtproto_public_fallback";
         }
       }
-      await persistSuccessfulChannelViews(pool, post.id, Math.max(Number(post.views || 0), fetched), source);
+      const persisted = await persistSuccessfulChannelViews(
+        pool, post.id, Math.max(Number(post.views || 0), fetched), source, Date.now()
+      );
+      // Stale/equal/deleted: not an update. Keep the per-post pacing before skipping.
+      if (!persisted.updated) { await wait(350); continue; }
       await pool.query("UPDATE channels SET last_successful_view_fetch_at=NOW() WHERE id=?", [post.channel_id])
         .catch(error => console.error("channel_view_diagnostic_failed", { channelId: post.channel_id, error }));
       updated++;
@@ -132,7 +169,7 @@ export async function refreshCampaignViews(campaignId: number, limit = 50) {
       const message = error instanceof Error ? error.message : "view_refresh_failed";
       failed++;
       errors.push({ post_id: post.id, error: message });
-      await pool.query("UPDATE campaign_posts SET last_views_update=NOW(),view_fetch_status='failed',view_fetch_error=? WHERE id=?", [message.slice(0, 500), post.id]);
+      await persistFailedChannelViewFetch(pool, post.id, message.slice(0, 500), source, Date.now());
     }
     await wait(350);
   }

@@ -1,8 +1,11 @@
+import { recordChannelStatusTransitionAudit } from "@/lib/channelStatusAudit";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { POSTING_TIME_OPTIONS } from "@/lib/postingTimes";
 import { getChannelPrivacySchema } from "@/lib/channelPrivacy";
 import { onboardPrivateChannelTracking } from "@/lib/privateChannelTrackingOnboarding";
+import { getPublicChannelApprovalEligibility } from "@/lib/publicChannelApproval";
+import { evaluateUnifiedChannelEligibility } from "@/lib/channelEligibility";
 import {
   classifyTelegramAccessFailure,
   persistTelegramChannelAccess,
@@ -148,15 +151,28 @@ export async function markChannelHealthSuccess(channelId: number | string, db: D
 }
 
 export async function autoPauseChannel(channelId: number | string, health: HealthResult, db: Db = pool) {
-  const state: TelegramAccessState = health.status === "bot_removed" || health.status === "permission_missing"
-    || health.status === "channel_not_found" || health.status === "restricted"
-    ? health.status
-    : "temporarily_unavailable";
+  const classified = classifyTelegramAccessFailure({
+    description: health.reason,
+    httpStatus: health.permanent ? 403 : 503,
+  });
+  const isAmbiguous =
+    classified.reasonCode === "chat_not_found_unconfirmed" ||
+    classified.reasonCode === "member_list_inaccessible" ||
+    classified.reasonCode === "telegram_rate_limited" ||
+    classified.reasonCode === "telegram_temporarily_unavailable" ||
+    classified.reasonCode === "telegram_unclassified_error";
+  const state: TelegramAccessState = isAmbiguous
+    ? "temporarily_unavailable"
+    : health.status === "bot_removed" || health.status === "permission_missing"
+      || health.status === "channel_not_found" || health.status === "restricted"
+      ? health.status
+      : "temporarily_unavailable";
+  const permanent = isAmbiguous ? false : Boolean(health.permanent && classified.permanent);
   await persistTelegramChannelAccess({ channelId, source: "legacy_auto_pause", autoPauseActive: true }, {
-    ok: false, state, reason: health.reason, reasonCode: state, checkedAt: new Date(),
+    ok: false, state, reason: health.reason, reasonCode: classified.reasonCode || state, checkedAt: new Date(),
     telegramChatId: null, username: null, title: null, channelType: null, botRole: null,
-    canPostMessages: false, permanent: health.permanent, retryable: !health.permanent,
-    retryAfterSeconds: health.retryAfterMs ? Math.ceil(health.retryAfterMs / 1000) : null,
+    canPostMessages: false, permanent, retryable: !permanent,
+    retryAfterSeconds: health.retryAfterMs ? Math.ceil(health.retryAfterMs / 1000) : classified.retryAfterSeconds,
   }, db);
 }
 
@@ -166,9 +182,21 @@ export async function recordChannelPostSuccess(channelId: number | string, db: D
      SET last_successful_post_at = NOW(),
          last_failure_at = NULL,
          failure_reason = NULL,
+         telegram_access_state = 'healthy',
          health_status = CASE WHEN health_status IS NULL OR health_status NOT IN ('warning','critical','disabled') THEN 'healthy' ELSE health_status END,
          health_checked_at = NOW()
      WHERE id = ?`,
+    [channelId]
+  );
+  await db.query(
+    `UPDATE channel_telegram_identities
+     SET verification_state = 'healthy',
+         consecutive_failure_count = 0,
+         next_retry_at = NULL,
+         last_failure_code = NULL,
+         last_failure_reason = NULL,
+         last_success_at = UTC_TIMESTAMP(6)
+     WHERE channel_id = ?`,
     [channelId]
   );
 }
@@ -185,51 +213,200 @@ export async function recordChannelPostFailure(channelId: number | string, reaso
 }
 
 export async function reactivateChannelAfterHealthCheck(channelId: number | string, chatId: string | number, db: Db = pool) {
-  const access = await verifyTelegramChannelAccess({
-    channelId, chatId, source: "publisher_reactivate", persist: true, autoPauseActive: false,
-  }, db);
-  const health = legacyHealth(access);
-  if (!access.ok) throw new Error(access.reason || "Channel health check failed");
-
   const [channelRows] = await db.query<RowDataPacket[]>(
-    "SELECT channel_type FROM channels WHERE id = ? LIMIT 1",
+    `SELECT c.id, c.status, c.is_deleted, c.channel_type, c.chat_id, c.username,
+            c.paused_reason, c.under_review, c.marketplace_admin_status,
+            c.monetization_paused_reason, c.below_minimum_review_required,
+            c.settlement_excluded_until, c.automation_suspension_status,
+            c.automation_suspended_until, c.revenue_protection_status
+     FROM channels c WHERE c.id = ? LIMIT 1`,
     [channelId]
   );
-  const channelType = channelRows[0]?.channel_type === "private" ? "private" : "public";
-  const tracking = await onboardPrivateChannelTracking({
-    channelId,
-    chatId,
-    channelType,
-    schema: await getChannelPrivacySchema(),
-  });
-  if (channelType === "private" && tracking.status !== "active") {
-    throw new Error(`Private channel MTProto membership is not verified: ${tracking.status === "pending_manual" ? tracking.reason : "tracking_not_active"}`);
+  const row = channelRows[0];
+  if (row) {
+    const pausedReasonLower = String(row.paused_reason || "").trim().toLowerCase();
+    if (Boolean(row.is_deleted) || row.status === "deleted") {
+      throw new Error("Deleted channels cannot be reactivated.");
+    }
+    if (row.status === "rejected" || row.marketplace_admin_status === "rejected") {
+      throw new Error("Rejected channels cannot be reactivated without administrator approval.");
+    }
+    if (row.status === "pending" || (row.marketplace_admin_status && row.marketplace_admin_status !== "approved")) {
+      throw new Error("Pending channels require administrator approval before activation.");
+    }
+    if (pausedReasonLower.startsWith("paused by admin") || pausedReasonLower.includes("platform operations")) {
+      throw new Error("Channel was paused by an administrator and cannot be resumed by the publisher.");
+    }
+    if (Boolean(row.under_review)) {
+      throw new Error("Channel is currently under manual moderation review.");
+    }
+    if (row.monetization_paused_reason === "below_minimum" || Boolean(row.below_minimum_review_required)) {
+      throw new Error("Channel cannot be reactivated while below the minimum subscriber threshold.");
+    }
+    if (row.settlement_excluded_until && new Date(String(row.settlement_excluded_until)) > new Date()) {
+      throw new Error("Channel has an active settlement hold.");
+    }
+    if (
+      (row.automation_suspension_status && row.automation_suspension_status !== "active") ||
+      (row.automation_suspended_until && new Date(String(row.automation_suspended_until)) > new Date())
+    ) {
+      throw new Error("Channel is suspended by automation safety controls.");
+    }
+    if (row.revenue_protection_status && row.revenue_protection_status !== "normal") {
+      throw new Error("Channel is restricted by revenue protection controls.");
+    }
+    if (
+      row.paused_reason === "fraudulent_or_low_quality_traffic" ||
+      row.paused_reason === "Low Trust Score with Withdrawable Balance Threshold Reached"
+    ) {
+      throw new Error("Channel is paused due to traffic quality or trust enforcement.");
+    }
   }
 
-  await db.query(
-    `UPDATE channels
-     SET status = 'active',
-         is_deleted = FALSE,
-         paused_reason = NULL,
-         suggested_fix = NULL,
-         failure_reason = NULL,
-         health_status = 'healthy',
-         health_checked_at = NOW(),
-         reactivated_at = NOW()
-     WHERE id = ?`,
-    [channelId]
-  );
+  const channelType = row?.channel_type === "private" ? "private" : "public";
+  const effectiveChatId = row?.chat_id ?? chatId;
+  let health: HealthResult;
+  let verifiedAccess: TelegramAccessResult;
+  if (channelType === "public") {
+    verifiedAccess = await verifyTelegramChannelAccess({
+      channelId,
+      chatId: effectiveChatId,
+      username: row?.username ?? null,
+      source: "publisher_reactivate",
+      persist: true,
+      autoPauseActive: false,
+    }, db);
+    health = legacyHealth(verifiedAccess);
+    if (!verifiedAccess.ok) throw new Error(verifiedAccess.reason || "Public channel Telegram access verification failed");
+  } else {
+    verifiedAccess = await verifyTelegramChannelAccess({
+      channelId, chatId: effectiveChatId, source: "publisher_reactivate", persist: true, autoPauseActive: false,
+    }, db);
+    health = legacyHealth(verifiedAccess);
+    if (!verifiedAccess.ok) throw new Error(verifiedAccess.reason || "Private channel access check failed");
+    const tracking = await onboardPrivateChannelTracking({
+      channelId,
+      chatId: verifiedAccess.telegramChatId || effectiveChatId,
+      channelType: "private",
+      schema: await getChannelPrivacySchema(),
+    });
+    if (row.channel_type === "private" && tracking.status !== "active") {
+      throw new Error(`Private channel MTProto membership is not verified: ${tracking.status === "pending_manual" ? tracking.reason : "tracking_not_active"}`);
+    }
+  }
+
+  const isPool = typeof (db as unknown as { getConnection?: () => Promise<PoolConnection> }).getConnection === "function";
+  const conn: Db = isPool ? await (db as unknown as { getConnection: () => Promise<PoolConnection> }).getConnection() : db;
+  const inTx = typeof (conn as PoolConnection).beginTransaction === "function";
+
+  if (inTx) await (conn as PoolConnection).beginTransaction();
+  try {
+    const [freshRows]: any = await conn.query(
+      `SELECT c.*, u.status AS publisher_status, u.is_banned AS publisher_is_banned
+       FROM channels c
+       JOIN users u ON u.id = c.user_id
+       WHERE c.id = ? ${inTx ? "FOR UPDATE" : ""}`,
+      [channelId]
+    );
+    const fresh = freshRows?.[0] || row;
+    if (!fresh || fresh.is_deleted) {
+      throw new Error("Channel not found or deleted");
+    }
+
+    if (
+      fresh.paused_by_actor === "admin" ||
+      fresh.admin_paused_at != null ||
+      (fresh.paused_reason && fresh.paused_reason.toLowerCase().includes("admin"))
+    ) {
+      throw new Error("Channel was paused by an administrator and cannot be resumed by the publisher.");
+    }
+
+    const eligibility = evaluateUnifiedChannelEligibility({
+      ...fresh,
+      context: "publisher_resume",
+      live_verification_confirmed: true,
+      bot_member_status: verifiedAccess.botRole || "administrator",
+      bot_can_post: verifiedAccess.canPostMessages !== false,
+      telegram_access_state: "healthy",
+      verification_state: "healthy",
+    });
+
+    if (!eligibility.eligible) {
+      throw new Error(`Channel cannot be resumed: ${eligibility.reason || eligibility.code}`);
+    }
+
+    const expectedVersion = Number(fresh.telegram_access_version || 0);
+    const [reactivateRes]: any = await conn.query(
+      `UPDATE channels
+       SET status = 'active',
+           is_deleted = FALSE,
+           paused_reason = NULL,
+           paused_by_actor = NULL,
+           publisher_paused_at = NULL,
+           suggested_fix = NULL,
+           failure_reason = NULL,
+           health_status = 'healthy',
+           health_checked_at = NOW(),
+           telegram_access_state = 'healthy',
+           telegram_access_version = telegram_access_version + 1,
+           reactivated_at = NOW()
+       WHERE id = ?
+         AND is_deleted = FALSE
+         AND status NOT IN ('rejected', 'deleted', 'pending')
+         AND COALESCE(paused_reason, '') NOT LIKE 'Paused by admin%'
+         AND COALESCE(paused_by_actor, '') != 'admin'
+         AND admin_paused_at IS NULL
+         AND telegram_access_version = ?`,
+      [channelId, expectedVersion]
+    );
+
+    if (Number(reactivateRes?.affectedRows || 0) === 1 && fresh && String(fresh.status) !== "active") {
+      await recordChannelStatusTransitionAudit(conn, {
+        channelId: Number(channelId),
+        telegramChatId: effectiveChatId,
+        previousStatus: String(fresh.status),
+        newStatus: "active",
+        sourceWorker: "publisher_manual_reactivate",
+        reasonCode: "publisher_reactivated_after_telegram_check",
+        reasonText: "Publisher reactivated channel after live Telegram health check",
+        evidenceClassification: "recovery",
+        verificationAttemptRef: effectiveChatId ? `chat:${effectiveChatId}` : null,
+        actorType: "publisher",
+        transitionIntent: "manual",
+        recoveryAction: "manual_reactivate",
+        recoveryOutcome: "reactivated",
+        verificationVersion: expectedVersion + 1,
+      });
+    }
+
+    if (inTx) await (conn as PoolConnection).commit();
+  } catch (err) {
+    if (inTx) await (conn as PoolConnection).rollback().catch(() => undefined);
+    throw err;
+  } finally {
+    if (isPool && typeof (conn as PoolConnection).release === "function") {
+      (conn as PoolConnection).release();
+    }
+  }
 
   await ensureDefaultChannelDistribution(db);
   return health;
 }
 
-export function classifyTelegramSendFailure(description?: string): {
+export function classifyTelegramSendFailure(
+  description?: string,
+  options?: { httpStatus?: number | null; errorCode?: number | null; retryAfterSeconds?: number | null },
+): {
   status: ChannelStatusType;
   reason: string | null;
   suggestedFix: string;
 } | null {
-  const failure = classifyTelegramAccessFailure({ description });
+  const failure = classifyTelegramAccessFailure({
+    description,
+    httpStatus: options?.httpStatus,
+    errorCode: options?.errorCode,
+    retryAfterSeconds: options?.retryAfterSeconds,
+  });
   if (!failure.permanent) return null;
   let status: ChannelStatusType = "paused";
   if (failure.state === "bot_removed" || failure.state === "permission_missing"

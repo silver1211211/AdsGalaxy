@@ -19,7 +19,12 @@ export async function GET(request: Request) {
       pool.query(`SELECT COUNT(*) AS total,
         SUM(created_at >= CURDATE()) AS today,
         SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)) AS week,
-        SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)) AS month FROM users`),
+        SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)) AS month,
+        COUNT(DISTINCT CASE 
+          WHEN (official_bot_started_at >= DATE_SUB(NOW(), INTERVAL 30 DAY))
+            OR (last_active_at >= DATE_SUB(NOW(), INTERVAL 30 DAY))
+            OR (created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY))
+          THEN id END) AS monthly_users FROM users`),
       pool.query(`SELECT c.status, COUNT(*) AS count FROM campaigns c WHERE ${mainCampaignScopeSql("c")} GROUP BY c.status`),
       pool.query("SELECT status, COUNT(*) AS count FROM withdrawals GROUP BY status"),
       pool.query("SELECT status, COUNT(*) AS count FROM deposits GROUP BY status"),
@@ -36,6 +41,7 @@ export async function GET(request: Request) {
         today: Number(user.today || 0),
         week: Number(user.week || 0),
         month: Number(user.month || 0),
+        monthly_users: Number(user.monthly_users || 0),
       },
       campaigns: toStatusMap(campaignsResult[0]),
       withdrawals: toStatusMap(withdrawalsResult[0]),

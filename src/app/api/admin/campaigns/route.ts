@@ -10,7 +10,10 @@ import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByIds } from "@/l
 import { parseAdminPagination } from "@/lib/adminPagination";
 import { mainCampaignDisplayNumberSql, mainCampaignScopeSql } from "@/lib/silverCampaignControl";
 import { enqueueCampaignNotification } from "@/lib/platformNotifications";
-import type { ResultSetHeader } from "mysql2/promise";
+import { getAiStudioSettings } from "@/lib/aiPromotionStudio/config";
+import type { RowDataPacket } from "mysql2/promise";
+import { createApprovedCampaignCreativeRevision, loadPendingCampaignCreativeRevision } from "@/lib/campaignCreativeRevision";
+import {SMART_REACH_POLICY_VERSION} from "@/lib/channelSmartReachConfiguration";
 
 async function safeNotify(telegramId: unknown, message: string) {
   if (!telegramId) return;
@@ -31,8 +34,17 @@ export async function GET(request: Request) {
   const statusFilter = searchParams.get("status") || "all";
   const trustFilter = searchParams.get("trust") || "all";
   const search = searchParams.get("search") || "";
+  const userIdFilter = searchParams.get("userId") || searchParams.get("user_id") || "";
+  const aiOnly = searchParams.get("aiOnly") === "true" || searchParams.get("ai_only") === "1";
 
   try {
+    let aiAdvertiserId: number | null = null;
+    if (aiOnly) {
+      const studioSettings = await getAiStudioSettings().catch(() => null);
+      if (studioSettings?.advertiserUserId) {
+        aiAdvertiserId = Number(studioSettings.advertiserUserId);
+      }
+    }
     const innerQuery = `
       SELECT
         c.id, ${mainCampaignDisplayNumberSql("c")} AS main_display_number, 'campaign' AS campaign_kind, c.campaign_kind AS source_campaign_kind, c.teaser_mode, c.teaser_enabled, c.user_id, c.name, c.type,
@@ -93,6 +105,18 @@ export async function GET(request: Request) {
       queryParams.push(trustFilter);
     }
 
+    if (aiOnly) {
+      if (aiAdvertiserId) {
+        whereClause += " AND campaign_kind = 'campaign' AND (user_id = ? OR id IN (SELECT campaign_id FROM ai_creative_memory WHERE campaign_id IS NOT NULL))";
+        queryParams.push(aiAdvertiserId);
+      } else {
+        whereClause += " AND campaign_kind = 'campaign' AND id IN (SELECT campaign_id FROM ai_creative_memory WHERE campaign_id IS NOT NULL)";
+      }
+    } else if (userIdFilter) {
+      whereClause += " AND user_id = ?";
+      queryParams.push(userIdFilter);
+    }
+
     if (search) {
       whereClause += ` AND (name LIKE ? OR message_text LIKE ? OR first_name LIKE ? OR last_name LIKE ? OR username LIKE ? OR telegram_id LIKE ?)`;
       const s = `%${search}%`;
@@ -103,13 +127,17 @@ export async function GET(request: Request) {
     // Counting must not execute the expensive delivery, impression, click and
     // advertiser-history subqueries used by the ten visible result rows.
     const countInnerQuery = `
-      SELECT c.status,c.name,c.message_text,u.first_name,u.last_name,u.username,u.telegram_id,
-        COALESCE(u.advertiser_trust_level,'new') advertiser_trust_level
+      SELECT c.id, c.status,c.name,c.message_text,u.first_name,u.last_name,u.username,u.telegram_id,
+        COALESCE(u.advertiser_trust_level,'new') advertiser_trust_level,
+        c.user_id,
+        'campaign' AS campaign_kind
       FROM campaigns c LEFT JOIN users u ON u.id=c.user_id WHERE ${mainCampaignScopeSql("c")}
       UNION ALL
-      SELECT CASE WHEN m.status='approved' THEN 'active' ELSE m.status END status,
+      SELECT m.id, CASE WHEN m.status='approved' THEN 'active' ELSE m.status END status,
         m.campaign_name name,m.description message_text,u.first_name,u.last_name,u.username,u.telegram_id,
-        COALESCE(u.advertiser_trust_level,'new') advertiser_trust_level
+        COALESCE(u.advertiser_trust_level,'new') advertiser_trust_level,
+        m.advertiser_id AS user_id,
+        'miniapp' AS campaign_kind
       FROM miniapp_rewarded_campaigns m LEFT JOIN users u ON u.id=m.advertiser_id
     `;
     const countQuery = `SELECT COUNT(*) AS total FROM (${countInnerQuery}) AS combined${whereClause}`;
@@ -226,7 +254,7 @@ export async function PATCH(request: Request) {
   try {
     const { id, action, moderation_notes } = await request.json();
     const rejectionReason = String(moderation_notes || "").trim();
-    if (action === "reject") return NextResponse.json({ error: "MODERATION_REASON_REQUIRED", code: "MODERATION_REASON_REQUIRED" }, { status: 400 });
+    if (action === "reject" && rejectionReason.length < 8) return NextResponse.json({ error: "A rejection reason of at least 8 characters is required", code: "MODERATION_REASON_REQUIRED" }, { status: 400 });
     const [campaignRows]: any = await pool.query(
       `SELECT c.name,c.user_id,c.status,u.telegram_id FROM campaigns c LEFT JOIN users u ON u.id = c.user_id WHERE c.id = ? AND ${mainCampaignScopeSql("c")}`,
       [id]
@@ -235,24 +263,157 @@ export async function PATCH(request: Request) {
     if (!campaign) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
 
     if (action === "reject") {
-      await pool.query("UPDATE campaigns SET status = 'rejected', rejection_reason = ? WHERE id = ?", [rejectionReason || null, id]);
+      const conn = await pool.getConnection();
+      let cleanupQueued = false;
+      try {
+        await conn.beginTransaction();
+        const [rows] = await conn.query<Array<RowDataPacket & Record<string, unknown>>>(
+          `SELECT c.* FROM campaigns c WHERE c.id=? AND ${mainCampaignScopeSql("c")} FOR UPDATE`, [id],
+        );
+        const current = rows[0];
+        if (!current) throw new Error("campaign_not_found");
+        const pendingId = Number(current.pending_creative_revision_id || 0);
+        const previouslyApproved = Boolean(current.approved_creative_revision_id) || current.status === "active";
+        if (pendingId) await conn.query(
+          "UPDATE campaign_creative_revisions SET review_status='rejected',reviewed_at=UTC_TIMESTAMP(6),review_reason=? WHERE id=? AND campaign_id=? AND review_status='pending'",
+          [rejectionReason, pendingId, id],
+        );
+        if (previouslyApproved) {
+          if (!current.approved_creative_revision_id) {
+            const [approvedCopies] = await conn.query<Array<RowDataPacket & {copy_text:string}>>(
+              "SELECT copy_text FROM teaser_creatives WHERE campaign_id=? AND active=1 ORDER BY position",[id]);
+            const approvedId = await createApprovedCampaignCreativeRevision(conn,{
+              campaignId:Number(id),campaign:current,teaserVariants:approvedCopies.map(row=>row.copy_text),
+            });
+            await conn.query("UPDATE campaigns SET approved_creative_revision_id=? WHERE id=?",[approvedId,id]);
+          }
+          // New delivery stops in this transaction. Published placements retain
+          // billing eligibility until their deletion is authoritatively confirmed.
+          await conn.query(
+            `UPDATE campaigns SET status='paused',pause_reason='moderation_cleanup',
+               rejection_reason=?,pending_creative_revision_id=NULL,status_before_creative_review=NULL,
+               telegram_cleanup_status='pending',updated_at=UTC_TIMESTAMP()
+             WHERE id=?`, [rejectionReason, id],
+          );
+          await conn.query(
+            `UPDATE campaign_posts SET status='cleanup_pending',cleanup_status='pending'
+             WHERE campaign_id=? AND status IN ('active','posted','sent','delete_failed')
+               AND delivery_confirmed_at IS NOT NULL AND deleted_at IS NULL`, [id],
+          );
+          await conn.query(
+            `UPDATE teaser_placements SET status='removal_pending',
+               removal_requested_at=COALESCE(removal_requested_at,UTC_TIMESTAMP()),
+               removal_reason='moderation_rejected'
+             WHERE campaign_id=? AND status IN ('active','awaiting_baseline')`, [id],
+          );
+          await conn.query(
+            `UPDATE broadcast_deliveries SET cleanup_status='pending',cleanup_next_retry_at=UTC_TIMESTAMP(6)
+             WHERE campaign_id=? AND status='sent' AND telegram_message_id IS NOT NULL
+               AND deleted_at IS NULL AND cleanup_status IS NULL`,[id],
+          );
+          cleanupQueued = true;
+        } else {
+          await conn.query(
+            `UPDATE campaigns SET status='rejected',rejection_reason=?,
+               pending_creative_revision_id=NULL,status_before_creative_review=NULL,updated_at=UTC_TIMESTAMP()
+             WHERE id=?`, [rejectionReason, id],
+          );
+        }
+        await conn.commit();
+      } catch (error) {
+        await conn.rollback();
+        throw error;
+      } finally {
+        conn.release();
+      }
       await safeNotify(campaign?.telegram_id, `❌ Your campaign "${campaign.name}" was rejected after review.${rejectionReason ? `\n\n${rejectionReason}` : ""}`);
       await recordAutomationAudit({ actorType: "admin", action: "manual_campaign_reject", entityType: "campaign", entityId: id, decision: "reject", reason: rejectionReason || "admin_manual_review" });
       await recordAdminActionAudit({ adminId: admin?.id, action: "campaign_reject", entityType: "campaign", entityId: id, reason: rejectionReason || "admin_manual_review" });
-      return NextResponse.json({ success: true });
+      return NextResponse.json({ success: true, status: cleanupQueued ? "paused" : "rejected", cleanup_queued: cleanupQueued });
     }
 
     if (action === "approve") {
-      const [update] = await pool.query<ResultSetHeader>("UPDATE campaigns SET status = 'active' WHERE id = ? AND status<>'active'", [id]);
-      if (update.affectedRows > 0) await enqueueCampaignNotification(pool, {
+      const conn = await pool.getConnection();
+      let approvedStatus = "active";
+      try {
+        await conn.beginTransaction();
+        const [rows] = await conn.query<Array<RowDataPacket & Record<string, unknown>>>(
+          `SELECT c.* FROM campaigns c WHERE c.id=? AND ${mainCampaignScopeSql("c")} FOR UPDATE`, [id],
+        );
+        const current = rows[0];
+        if (!current) throw new Error("campaign_not_found");
+        const pendingId = Number(current.pending_creative_revision_id || 0);
+        if (pendingId) {
+          const revision = await loadPendingCampaignCreativeRevision(conn, Number(id), pendingId);
+          approvedStatus = current.status === "pending" && current.status_before_creative_review === "active" ? "active" : "paused";
+          const creative = revision.creative;
+          await conn.query(
+            `UPDATE campaigns SET campaign_title=?,message_text=?,image_url=?,link=?,button_text=?,
+               teaser_mode=?,teaser_cta_key=?,teaser_cpm=?,
+               approved_creative_revision_id=?,pending_creative_revision_id=NULL,
+               status_before_creative_review=NULL,status=?,
+               pause_reason=IF(?='active',NULL,pause_reason),rejection_reason=NULL,updated_at=UTC_TIMESTAMP()
+             WHERE id=?`,
+            [creative.campaign_title,creative.message_text,creative.image_url,creative.link,creative.button_text,
+              creative.teaser_mode,creative.teaser_cta_key,creative.teaser_cpm,pendingId,approvedStatus,approvedStatus,id],
+          );
+          if (creative.teaser_mode !== "none") {
+            for (const [index, copy] of revision.teaserVariants.entries()) await conn.query(
+              `INSERT INTO teaser_creatives(campaign_id,copy_text,position,active)
+               VALUES(?,?,?,1) ON DUPLICATE KEY UPDATE copy_text=VALUES(copy_text),active=1`,
+              [id, copy, index + 1],
+            );
+            await conn.query("UPDATE teaser_creatives SET active=0 WHERE campaign_id=? AND position>?", [id, revision.teaserVariants.length]);
+          }
+          await conn.query(
+            "UPDATE campaign_creative_revisions SET review_status='approved',reviewed_at=UTC_TIMESTAMP(6) WHERE id=? AND campaign_id=? AND review_status='pending'",
+            [pendingId, id],
+          );
+        } else if (current.status === "pending" && !current.approved_creative_revision_id) {
+          const [variants] = await conn.query<Array<RowDataPacket & { copy_text: string }>>(
+            "SELECT copy_text FROM teaser_creatives WHERE campaign_id=? AND active=1 ORDER BY position", [id],
+          );
+          const approvedId = await createApprovedCampaignCreativeRevision(conn, {
+            campaignId: Number(id), campaign: current,
+            teaserVariants: variants.map(row => row.copy_text),
+          });
+          await conn.query(
+            "UPDATE campaigns SET status='active',approved_creative_revision_id=?,rejection_reason=NULL,updated_at=UTC_TIMESTAMP() WHERE id=? AND status='pending'",
+            [approvedId, id],
+          );
+        } else {
+          await conn.rollback();
+          return NextResponse.json({ error: "Only a pending creative can be approved. Paused campaigns need a separate resume decision." }, { status: 409 });
+        }
+        if (current.financial_policy_version === SMART_REACH_POLICY_VERSION) {
+          await conn.query(
+            "UPDATE campaigns SET status='paused',pause_reason='smart_reach_billing_pending' WHERE id=?",
+            [id],
+          );
+          approvedStatus = "paused";
+        }
+        await conn.commit();
+      } catch (error) {
+        await conn.rollback();
+        throw error;
+      } finally {
+        conn.release();
+      }
+      if (approvedStatus === "active") await enqueueCampaignNotification(pool, {
         campaignId: Number(id), userId: Number(campaign.user_id), event: "approved", name: campaign.name,
       });
       await recordAutomationAudit({ actorType: "admin", action: "manual_campaign_approve", entityType: "campaign", entityId: id, decision: "approve", reason: "admin_manual_review" });
       await recordAdminActionAudit({ adminId: admin?.id, action: "campaign_approve", entityType: "campaign", entityId: id, reason: "admin_manual_review" });
-      return NextResponse.json({ success: true });
+      return NextResponse.json({ success: true, status: approvedStatus });
     }
 
     if (action === "resume") {
+      const [[state]]: any = await pool.query(
+        "SELECT status,pause_reason,pending_creative_revision_id,approved_creative_revision_id,telegram_cleanup_status,rejection_reason FROM campaigns WHERE id=?",[id]);
+      const cleanupStillBlocked=state?.pause_reason==='moderation_cleanup' &&
+        !(state?.telegram_cleanup_status==='success' && !state?.rejection_reason && state?.approved_creative_revision_id);
+      if (cleanupStillBlocked || state?.pending_creative_revision_id) return NextResponse.json(
+        {error:"A rejected or pending creative needs a new approved edit before delivery can resume."},{status:409});
       await adminResumeCampaign(id);
       await recordAdminActionAudit({
         adminId: admin?.id,

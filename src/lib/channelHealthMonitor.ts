@@ -2,6 +2,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { TELEGRAM_ACCESS_STALE_HOURS, verifyTelegramChannelAccess } from "@/lib/telegramChannelAccess";
 import { createSystemLog } from "@/lib/systemLogs";
+import { normalizedLastViewsUpdateDatetimeSql, normalizeViewTimestamp } from "@/lib/channelViewPersistence";
 
 export type OperationalHealthStatus = "healthy" | "warning" | "critical" | "disabled";
 type ChannelHealthRow = RowDataPacket & {
@@ -15,12 +16,25 @@ type ChannelHealthRow = RowDataPacket & {
   latest_view_success: Date | null; latest_settlement: Date | null;
   ledger_mismatches: number | string; negative_balance: number | string; critical_fraud_events: number | string;
   invalid_audits: number | string; total_audits: number | string;
+  paused_by_actor?: string | null; admin_paused_at?: Date | null; publisher_paused_at?: Date | null;
+  paused_reason?: string | null; suggested_fix?: string | null; health_failure_reason?: string | null;
+  under_review?: number | boolean | null; settlement_excluded_until?: Date | null;
+  automation_suspension_status?: string | null; revenue_protection_status?: string | null;
 };
 type HealthIssue = { area: "posting" | "views" | "settlement" | "quality" | "access"; severity: "warning" | "critical"; code: string; message: string; fix: string };
 export type ChannelHealthResult = { channel_id: number; status: OperationalHealthStatus; health_score: number; auto_paused: boolean; issues: HealthIssue[] };
 
 const count = (value: unknown) => Math.max(0, Number(value || 0));
-const stale = (value: unknown, hours: number) => !value || Date.now() - new Date(String(value)).getTime() > hours * 3_600_000;
+const stale = (value: unknown, hours: number) => {
+  if (!value) return true;
+  try {
+    const ts = value instanceof Date ? value.getTime() : normalizeViewTimestamp(value as string | number).epochMs;
+    return Date.now() - ts > hours * 3_600_000;
+  } catch {
+    const fallback = new Date(String(value)).getTime();
+    return !Number.isFinite(fallback) || Date.now() - fallback > hours * 3_600_000;
+  }
+};
 
 function add(issues: HealthIssue[], area: HealthIssue["area"], severity: HealthIssue["severity"], code: string, message: string, fix: string) {
   issues.push({ area, severity, code, message, fix });
@@ -44,17 +58,20 @@ export async function runChannelHealthMonitor(limit = 200) {
   );
   const duplicateSettlementsByChannel = new Map(duplicateRows.map((row) => [Number(row.channel_id), count(row.duplicate_settlements)]));
   const globalLedgerHasDuplicates = duplicateRows.length > 0;
+  const normalizedTsExpr = normalizedLastViewsUpdateDatetimeSql("cp.last_views_update");
   const [channels] = await pool.query<ChannelHealthRow[]>(
     `SELECT ch.id,ch.status,ch.is_deleted,ch.chat_id,ch.username,ch.channel_type,ch.tracking_account_member_status,
        ch.publisher_trust_score,ch.channel_fraud_risk_score,ch.publisher_quality_index,ch.traffic_quality_score,
        ch.last_successful_post_at,ch.last_successful_view_fetch_at,ch.last_successful_settlement_at,
+       ch.paused_by_actor,ch.admin_paused_at,ch.publisher_paused_at,ch.paused_reason,ch.suggested_fix,
+       ch.health_failure_reason,ch.under_review,ch.settlement_excluded_until,ch.automation_suspension_status,ch.revenue_protection_status,
        (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id=ch.id AND cp.delivery_failed_at>=DATE_SUB(NOW(),INTERVAL 24 HOUR)
          AND (cp.delivery_failure_reason LIKE '%telegram%' OR cp.status='delivery_failed')) send_failures,
        (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id=ch.id AND cp.status='active' AND cp.deleted_at IS NULL) active_posts,
-       (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id=ch.id AND cp.view_fetch_status='failed' AND cp.last_views_update>=DATE_SUB(NOW(),INTERVAL 6 HOUR)) fetch_failures,
-       (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id=ch.id AND cp.view_fetch_status='failed' AND cp.last_views_update>=DATE_SUB(NOW(),INTERVAL 24 HOUR)
+       (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id=ch.id AND cp.view_fetch_status='failed' AND (${normalizedTsExpr})>=DATE_SUB(NOW(),INTERVAL 6 HOUR)) fetch_failures,
+       (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id=ch.id AND cp.view_fetch_status='failed' AND (${normalizedTsExpr})>=DATE_SUB(NOW(),INTERVAL 24 HOUR)
          AND (cp.view_fetch_error LIKE '%AUTH_KEY_DUPLICATED%' OR cp.view_fetch_error LIKE '%session%')) session_failures,
-       (SELECT MAX(cp.last_views_update) FROM campaign_posts cp WHERE cp.channel_id=ch.id AND cp.view_fetch_status='success') latest_view_success,
+       (SELECT MAX(${normalizedTsExpr}) FROM campaign_posts cp WHERE cp.channel_id=ch.id AND cp.view_fetch_status IN ('success','ok')) latest_view_success,
        (SELECT MAX(sl.created_at) FROM channel_settlement_ledger sl WHERE sl.channel_id=ch.id) latest_settlement,
        (SELECT COUNT(*) FROM channel_settlement_ledger sl WHERE sl.channel_id=ch.id AND ABS(sl.advertiser_debit-sl.publisher_credit-sl.platform_revenue-sl.reserve_amount)>0.00000001) ledger_mismatches,
        (u.balance_locked<0 OR u.balance_available<0) negative_balance,
@@ -65,6 +82,7 @@ export async function runChannelHealthMonitor(limit = 200) {
      LEFT JOIN channel_telegram_identities ti ON ti.channel_id=ch.id
      WHERE ch.is_deleted=FALSE AND ch.status NOT IN ('rejected','deleted')
        AND (ti.last_checked_at IS NULL OR ti.last_checked_at<=DATE_SUB(UTC_TIMESTAMP(6),INTERVAL ${TELEGRAM_ACCESS_STALE_HOURS} HOUR))
+       AND (ti.next_retry_at IS NULL OR ti.next_retry_at<=UTC_TIMESTAMP(6))
      ORDER BY (ch.id>${cursor}) DESC,ch.id ASC LIMIT ${boundedLimit}`
   );
   const results: ChannelHealthResult[] = [];
@@ -84,7 +102,7 @@ export async function runChannelHealthMonitor(limit = 200) {
         username: channel.username,
         source: "periodic_health",
         persist: true,
-        autoPauseActive: true,
+        autoPauseActive: channel.channel_type === "private",
       });
       if (!telegramHealth.ok) {
         telegramAutoPaused = channel.status === "active" && telegramHealth.permanent;
@@ -121,12 +139,38 @@ export async function runChannelHealthMonitor(limit = 200) {
     const status: OperationalHealthStatus = disabled ? "disabled" : critical || score < 60 ? "critical" : score < 85 ? "warning" : "healthy";
     const autoPaused = telegramAutoPaused;
     const primary = issues[0];
+
+    // Defect C12.A: For intentional holds (paused, pending, rejected, deleted, or admin/publisher/policy held),
+    // preserve existing status-owned reason and suggested action instead of overwriting with health check warnings.
+    const isIntentionalHold =
+      ["paused", "pending", "rejected", "deleted"].includes(channel.status) ||
+      channel.paused_by_actor === "admin" ||
+      channel.paused_by_actor === "publisher" ||
+      channel.paused_by_actor === "system_policy" ||
+      channel.admin_paused_at != null ||
+      channel.publisher_paused_at != null ||
+      Boolean(channel.under_review) ||
+      (channel.paused_reason && (
+        channel.paused_reason.toLowerCase().includes("admin") ||
+        channel.paused_reason.toLowerCase().includes("publisher") ||
+        channel.paused_reason.toLowerCase().includes("policy") ||
+        channel.paused_reason.toLowerCase().includes("fraud") ||
+        channel.paused_reason.toLowerCase().includes("trust")
+      ));
+
+    const finalSuggestedFix = (isIntentionalHold && channel.suggested_fix)
+      ? channel.suggested_fix
+      : (primary?.fix || null);
+    const finalHealthFailureReason = (isIntentionalHold && channel.health_failure_reason)
+      ? channel.health_failure_reason
+      : (primary?.message || null);
+
     await pool.query(
       `UPDATE channels SET health_status=?,health_score=?,health_checked_at=NOW(),health_failure_reason=?,
        suggested_fix=?,health_details=?,last_successful_view_fetch_at=COALESCE(last_successful_view_fetch_at,?),
        last_successful_settlement_at=COALESCE(last_successful_settlement_at,?)
        WHERE id=?`,
-      [status, score, primary?.message || null, primary?.fix || null, JSON.stringify({ scores, issues }), channel.latest_view_success, channel.latest_settlement,
+      [status, score, finalHealthFailureReason, finalSuggestedFix, JSON.stringify({ scores, issues }), channel.latest_view_success, channel.latest_settlement,
         channel.id]
     );
     await pool.query(

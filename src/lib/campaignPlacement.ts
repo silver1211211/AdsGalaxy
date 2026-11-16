@@ -8,6 +8,10 @@ export interface PlacementCampaign {
   quality_score?: string | number;
   advertiser_trust_level?: string;
   campaign_priority_score?: string | number;
+  financial_policy_version?: string | null;
+  smart_reach_effective_cpm?: string | number | null;
+  smart_reach_max_cpm?: string | number | null;
+  verified_ctr?: number;
 }
 
 export interface CampaignScoreContext {
@@ -19,6 +23,18 @@ export interface CampaignScoreContext {
   randomization?: number;
   inventoryScore?: number;
   normalizedAllocationBid?: number;
+  maxExpectedEcpm?: number;
+}
+
+/** Ranking only: CPC bid is per thousand clicks, so bid * CTR is per thousand views. */
+export function expectedCampaignEcpm(campaign: PlacementCampaign) {
+  const bid = Math.max(0,Number(campaign.cpc||0));
+  const ctr = Math.max(0,Math.min(0.20,Number(campaign.verified_ctr ?? 0.005)));
+  const clickValue = bid * ctr;
+  if(campaign.financial_policy_version!=="adsgalaxy-smart-reach-v1")return clickValue;
+  const maximum = Math.max(0.10,Math.min(0.50,Number(campaign.smart_reach_max_cpm||0.10)));
+  const effective = Math.max(0.10,Math.min(maximum,Number(campaign.smart_reach_effective_cpm||0.10)));
+  return clickValue + effective + (maximum-effective)*0.15;
 }
 
 export function calculateCampaignScore(campaign: PlacementCampaign, context: CampaignScoreContext) {
@@ -40,9 +56,13 @@ export function calculateCampaignScore(campaign: PlacementCampaign, context: Cam
   const priorityBoost = 0.7 + (campaignPriority / 100) * 0.6;
   const matchBoost = 0.8 + qualityMatch * 0.4;
   const baseScore = (remainingBudgetWeight * 0.48) + (underDeliveryScore * 0.22) + (allocationBidBoost * 0.10) + (qualityMatch * 0.12) + (randomization * 0.08);
+  const expectedValue = expectedCampaignEcpm(campaign);
+  const valueBoost = context.maxExpectedEcpm && context.maxExpectedEcpm>0
+    ? 0.90 + Math.min(1,expectedValue/context.maxExpectedEcpm)*0.25 : 1;
 
   return {
-    score: baseScore * trustMultiplier * qualityBoost * priorityBoost * matchBoost,
+    score: baseScore * trustMultiplier * qualityBoost * priorityBoost * matchBoost * valueBoost,
+    expectedEcpm: expectedValue,
     remainingBudgetWeight,
     expectedPlacementsToday,
     actualPlacementsToday: context.actualPlacementsToday,

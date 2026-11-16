@@ -18,7 +18,7 @@ import {
   productionRewardCallbacksEnabled,
 } from "@/lib/miniappRewardEvents";
 import { enqueueProductionRewardWebhook } from "@/lib/developerPlatform";
-import { enqueueDirectMiniappRewardCallback } from "@/lib/miniappDirectRewardCallbacks";
+import { enqueueDirectMiniappRewardCallback, deliverDirectMiniappRewardCallbackNow } from "@/lib/miniappDirectRewardCallbacks";
 import { dispatchMiniAppCampaignNotifications } from "@/lib/miniappCampaignNotifications";
 import { miniAppEconomicIdentity, trustedMiniAppCountry } from "@/lib/miniappEconomicTelemetry";
 
@@ -234,6 +234,10 @@ export async function POST(request: Request) {
         ? await createInternalRewardEvent(conn, { requestId, miniappId, publisherId: Number(mediationRequest.publisher_id), telegramUserId })
         : null;
       await conn.commit();
+      if (rewardEvent) {
+        await deliverDirectMiniappRewardCallbackNow(miniappId, rewardEvent.event_id)
+          .catch((error) => console.error("Direct Mini App callback failed", { code: (error as { code?: string })?.code || "UNKNOWN" }));
+      }
       return NextResponse.json({
         success: true,
         duplicate: true,
@@ -341,6 +345,10 @@ export async function POST(request: Request) {
       : null;
 
     await conn.commit();
+    if (rewardEvent) {
+      await deliverDirectMiniappRewardCallbackNow(miniappId, rewardEvent.event_id)
+        .catch((error) => console.error("Direct Mini App callback failed", { code: (error as { code?: string })?.code || "UNKNOWN" }));
+    }
     if ("budget_exhausted" in result && result.budget_exhausted) {
       void dispatchMiniAppCampaignNotifications(5).catch(() => undefined);
     }

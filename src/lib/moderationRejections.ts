@@ -1,11 +1,14 @@
+import { recordChannelStatusTransitionAudit } from "@/lib/channelStatusAudit";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { applicablePolicyScopes, getPolicyDefinition, getPolicyRule, policyRuleHref, policyRuleReference, publicPolicyUrl, type PolicyRule } from "@/lib/policyRegistry";
+import { createApprovedCampaignCreativeRevision } from "@/lib/campaignCreativeRevision";
+import { createApprovedMiniAppCreativeRevision } from "@/lib/miniappCreativeRevision";
 
 export type ModerationEntityType = "channel" | "bot" | "miniapp" | "campaign" | "miniapp_rewarded_campaign";
 type EntityConfig = { table: string; owner: string; name: string; classifierSql: string; rejectSql: string };
 const ENTITIES: Record<ModerationEntityType, EntityConfig> = {
-  channel: { table: "channels", owner: "user_id", name: "title", classifierSql: "NULL campaign_kind,NULL type", rejectSql: "UPDATE channels SET status='rejected',paused_reason='Policy rejection',suggested_fix=NULL WHERE id=?" },
+  channel: { table: "channels", owner: "user_id", name: "title", classifierSql: "NULL campaign_kind,NULL type", rejectSql: "UPDATE channels SET status='rejected',paused_reason='Policy rejection',suggested_fix=NULL,telegram_access_version=COALESCE(telegram_access_version,0)+1 WHERE id=?" },
   bot: { table: "bots", owner: "user_id", name: "bot_name", classifierSql: "NULL campaign_kind,NULL type", rejectSql: "UPDATE bots SET status='rejected',paused_reason='Policy rejection',suggested_fix=NULL WHERE id=?" },
   miniapp: { table: "miniapps", owner: "user_id", name: "miniapp_name", classifierSql: "NULL campaign_kind,NULL type", rejectSql: "UPDATE miniapps SET status='rejected' WHERE id=?" },
   campaign: { table: "campaigns", owner: "user_id", name: "name", classifierSql: "e.campaign_kind,e.type,e.teaser_mode,e.teaser_enabled", rejectSql: "UPDATE campaigns SET status='rejected',rejection_reason=? WHERE id=?" },
@@ -52,8 +55,68 @@ export async function rejectEntityWithPolicy(input: { entityType: unknown; entit
     const scopes = applicablePolicyScopes(type, row);
     if (!scopes.includes(rule.scope)) throw new ModerationError("MODERATION_REASON_WRONG_SCOPE", 400);
     const reference = policyRuleReference(rule);
-    if (type === "campaign" || type === "miniapp_rewarded_campaign") await conn.query(cfg.rejectSql, [reference, id]);
-    else await conn.query(cfg.rejectSql, [id]);
+    if (type === "campaign") {
+      const [[campaign]] = await conn.query<Array<RowDataPacket & Record<string,unknown>>>(
+        "SELECT * FROM campaigns WHERE id=? FOR UPDATE",[id]);
+      const hadApproval=Boolean(campaign.approved_creative_revision_id)||campaign.status==='active';
+      if(campaign.pending_creative_revision_id)await conn.query(
+        "UPDATE campaign_creative_revisions SET review_status='rejected',review_reason=?,reviewed_at=UTC_TIMESTAMP(6) WHERE id=? AND campaign_id=? AND review_status='pending'",
+        [reference,campaign.pending_creative_revision_id,id]);
+      if(hadApproval){
+        if(!campaign.approved_creative_revision_id){
+          const [copies]=await conn.query<Array<RowDataPacket & {copy_text:string}>>(
+            "SELECT copy_text FROM teaser_creatives WHERE campaign_id=? AND active=1 ORDER BY position",[id]);
+          const approvedId=await createApprovedCampaignCreativeRevision(conn,{
+            campaignId:id,campaign,teaserVariants:copies.map(copy=>copy.copy_text)});
+          await conn.query("UPDATE campaigns SET approved_creative_revision_id=? WHERE id=?",[approvedId,id]);
+        }
+        await conn.query(`UPDATE campaigns SET status='paused',pause_reason='moderation_cleanup',
+          rejection_reason=?,pending_creative_revision_id=NULL,status_before_creative_review=NULL,
+          telegram_cleanup_status='pending',updated_at=UTC_TIMESTAMP(6) WHERE id=?`,[reference,id]);
+        await conn.query(`UPDATE campaign_posts SET status='cleanup_pending',cleanup_status='pending'
+          WHERE campaign_id=? AND status IN ('active','posted','sent','delete_failed')
+            AND delivery_confirmed_at IS NOT NULL AND deleted_at IS NULL`,[id]);
+        await conn.query(`UPDATE teaser_placements SET status='removal_pending',
+          removal_requested_at=COALESCE(removal_requested_at,UTC_TIMESTAMP(6)),
+          removal_reason='moderation_rejected' WHERE campaign_id=?
+          AND status IN ('active','awaiting_baseline')`,[id]);
+        await conn.query(`UPDATE broadcast_deliveries SET cleanup_status='pending',
+          cleanup_next_retry_at=UTC_TIMESTAMP(6) WHERE campaign_id=? AND status='sent'
+            AND telegram_message_id IS NOT NULL AND deleted_at IS NULL AND cleanup_status IS NULL`,[id]);
+      }else await conn.query(cfg.rejectSql,[reference,id]);
+    } else if(type === "miniapp_rewarded_campaign") {
+      const [[campaign]]=await conn.query<Array<RowDataPacket & Record<string,unknown>>>(
+        "SELECT * FROM miniapp_rewarded_campaigns WHERE id=? FOR UPDATE",[id]);
+      const hadApproval=Boolean(campaign.approved_creative_revision_id||campaign.approved_at);
+      if(campaign.pending_creative_revision_id)await conn.query(
+        "UPDATE miniapp_creative_revisions SET review_status='rejected',review_reason=?,reviewed_at=UTC_TIMESTAMP(6) WHERE id=? AND campaign_id=? AND review_status='pending'",
+        [reference,campaign.pending_creative_revision_id,id]);
+      let approvedId=Number(campaign.approved_creative_revision_id||0);
+      if(hadApproval&&!approvedId)approvedId=await createApprovedMiniAppCreativeRevision(conn,id,campaign);
+      await conn.query(`UPDATE miniapp_rewarded_campaigns SET status=?,pause_reason=?,
+        creative_review_status='rejected',creative_review_notes=?,
+        approved_creative_revision_id=?,pending_creative_revision_id=NULL,
+        status_before_creative_review=NULL,creative_review_started_at=UTC_TIMESTAMP(6),
+        updated_at=UTC_TIMESTAMP(6) WHERE id=?`,
+        [hadApproval?'paused':'rejected',hadApproval?'moderation_rejected':null,reference,
+          approvedId||null,id]);
+    } else await conn.query(cfg.rejectSql, [id]);
+    if (type === "channel") {
+      await recordChannelStatusTransitionAudit(conn, {
+        channelId: id,
+        previousStatus: String(row.status),
+        newStatus: "rejected",
+        sourceWorker: "admin_moderation_rejection",
+        reasonCode: `policy_rejection:${rule.rule_key}`,
+        reasonText: note || reference || "Policy rejection",
+        evidenceClassification: "manual",
+        actorType: "admin",
+        actorId: input.adminId || null,
+        transitionIntent: "manual",
+        notificationGenerated: true,
+        metadata: { rule_key: rule.rule_key, public_rule_number: rule.public_number },
+      });
+    }
     const [result] = await conn.query<import("mysql2/promise").ResultSetHeader>(
       `INSERT INTO moderation_rejections
        (entity_type,entity_id,owner_user_id,policy_scope,policy_rule_key,public_rule_number,policy_version,internal_note,rejected_by_admin_id,rejected_at)

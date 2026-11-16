@@ -39,7 +39,7 @@ test("CHANNEL pause queues one-time settlement and deletion while preserving the
   assert.equal(lifecycle.pausableCampaignKind("clicks"), "channel");
   assert.match(route, /resume_locked_until = DATE_ADD\(NOW\(\), INTERVAL 1 HOUR\)/);
   assert.match(route, /cleanup_queued: true/);
-  assert.match(cleanupWorker, /settleCampaignEngagementBeforeDeletion\(\s*Number\(campaign\.id\),\s*"advertiser_pause"/);
+  assert.match(cleanupWorker, /settleCampaignEngagementBeforeDeletion\(\s*Number\(campaign\.id\),\s*campaign\.pause_reason === "moderation_cleanup" \? "moderation_cleanup" : "advertiser_pause"/);
   assert.match(cleanupWorker, /deleteActiveCampaignPosts\(campaign\.id\)/);
 });
 

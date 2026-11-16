@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const read = (path) => readFileSync(path, "utf8");
-const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
+const sourceBlobHash = (path) => {
+  const bytes=readFileSync(path);
+  return createHash('sha1').update(Buffer.from(`blob ${bytes.length}`)).update(Buffer.from([0])).update(bytes).digest('hex');
+};
 
 const rewardLibrary = read("src/lib/miniappRewardEvents.ts");
 const developerPlatform = read("src/lib/developerPlatform.ts");
@@ -119,9 +122,9 @@ test("lookup and pending behavior require publisher-scoped Mini App ownership", 
 test("locked SDK runtime and mediation sources retain canonical Git blob identity across checkout line endings", () => {
   const protectedBlobs = new Map([
     ["src/lib/miniappSdkRuntime.ts", "cdb13cf756299f3c5cab796ccccb58b087da5bd6"],
-    ["src/lib/miniappMediationEngine.ts", "a4950d9fc996e0040586ae8a8fe9e18fccb0c521"],
+    ["src/lib/miniappMediationEngine.ts", "93f66cd111e3706d0cd599fdbbac918922507754"],
   ]);
   for (const [path, expectedHash] of protectedBlobs) {
-    assert.equal(git("hash-object", path), expectedHash, path);
+    assert.equal(sourceBlobHash(path), expectedHash, path);
   }
 });

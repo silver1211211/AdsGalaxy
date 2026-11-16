@@ -10,6 +10,7 @@ import { getMiniAppPublisherCpmSettings, maxPublisherCpm, normalizeMiniAppCpmMod
 import { validateOptionalDailyBudget } from "@/lib/campaignBudget";
 import { applyMiniAppCampaignMetrics, getMiniAppCampaignMetricsByIds } from "@/lib/miniappCampaignMetrics";
 import { parseAdminPagination } from "@/lib/adminPagination";
+import { createApprovedMiniAppCreativeRevision, loadPendingMiniAppCreativeRevision } from "@/lib/miniappCreativeRevision";
 
 function cleanText(value: unknown) {
   return String(value || "").trim();
@@ -110,8 +111,8 @@ export async function PATCH(request: Request) {
     const body = await request.json();
     const id = Number(body.id);
     const action = cleanText(body.action);
-    if (action === "reject") return NextResponse.json({ error: "MODERATION_REASON_REQUIRED", code: "MODERATION_REASON_REQUIRED" }, { status: 400 });
     const moderationNotes = cleanText(body.moderation_notes);
+    if (action === "reject" && moderationNotes.length < 8) return NextResponse.json({ error: "A rejection reason of at least 8 characters is required", code: "MODERATION_REASON_REQUIRED" }, { status: 400 });
     const adminCpm = body.admin_cpm === undefined ? null : Number(body.admin_cpm);
     const cpmMode = normalizeMiniAppCpmMode(body.cpm_mode);
     const fixedPublisherCpm = body.fixed_publisher_cpm === undefined || body.fixed_publisher_cpm === "" ? null : Number(body.fixed_publisher_cpm);
@@ -155,26 +156,67 @@ export async function PATCH(request: Request) {
           return NextResponse.json({ error: "Fixed Publisher CPM exceeds the publisher share ceiling" }, { status: 400 });
         }
       }
-      await pool.query(
-        `UPDATE miniapp_rewarded_campaigns
-         SET status = 'approved',
-           admin_cpm = ?,
-            advertiser_cpm_bid = ?,
-           cpm_mode = ?,
-           fixed_publisher_cpm = ?,
-           fixed_cpm_override_reason = ?,
-           fixed_cpm_override_expires_at = ?,
-           required_cpm = ?,
-           creative_review_status = 'approved',
-           requires_re_moderation = 0,
-           creative_review_notes = ?,
-           approved_at = COALESCE(approved_at, NOW())
-          WHERE id = ?`,
-        [approvalCpm, approvalCpm, cpmMode, cpmMode === "fixed" ? fixedPublisherCpm : null, cpmMode === "fixed" ? fixedCpmOverrideReason : null, cpmMode === "fixed" ? fixedCpmOverrideExpiresAt : null, cpmSettings.min_cpm, moderationNotes || null, id]
-      );
+      const conn=await pool.getConnection();
+      try {
+        await conn.beginTransaction();
+        const [rows]=await conn.query<RowDataPacket[]>("SELECT * FROM miniapp_rewarded_campaigns WHERE id=? FOR UPDATE",[id]);
+        const current=rows[0];
+        if(!current)throw new Error("miniapp_campaign_missing");
+        const pendingId=Number(current.pending_creative_revision_id||0);
+        let approvedId=Number(current.approved_creative_revision_id||0);
+        let approvedStatus="approved";
+        if(pendingId){
+          const creative=await loadPendingMiniAppCreativeRevision(conn,id,pendingId);
+          approvedStatus=current.status==="pending"&&["approved","active"].includes(String(current.status_before_creative_review))?"approved":"paused";
+          await conn.query(
+            `UPDATE miniapp_rewarded_campaigns SET title=?,description=?,cta_text=?,title_color=?,body_color=?,
+               image_url=?,logo_url=?,landing_url=? WHERE id=?`,
+            [creative.title,creative.description,creative.cta_text,creative.title_color,creative.body_color,
+              creative.image_url,creative.logo_url,creative.landing_url,id],
+          );
+          await conn.query("UPDATE miniapp_creative_revisions SET review_status='approved',reviewed_at=UTC_TIMESTAMP(6) WHERE id=? AND campaign_id=? AND review_status='pending'",[pendingId,id]);
+          approvedId=pendingId;
+        }else if(current.status==="pending"&&!approvedId){
+          approvedId=await createApprovedMiniAppCreativeRevision(conn,id,current);
+        }else{
+          await conn.rollback();
+          return NextResponse.json({error:"Only a pending Mini App creative can be approved. Paused campaigns need a separate resume decision."},{status:409});
+        }
+        await conn.query(
+          `UPDATE miniapp_rewarded_campaigns SET status=?,admin_cpm=?,advertiser_cpm_bid=?,cpm_mode=?,
+             fixed_publisher_cpm=?,fixed_cpm_override_reason=?,fixed_cpm_override_expires_at=?,
+             required_cpm=?,creative_review_status='approved',requires_re_moderation=0,
+             creative_review_notes=?,approved_at=COALESCE(approved_at,UTC_TIMESTAMP()),
+             approved_creative_revision_id=?,pending_creative_revision_id=NULL,
+             status_before_creative_review=NULL,
+             pause_reason=IF(?='approved',NULL,pause_reason),updated_at=UTC_TIMESTAMP()
+           WHERE id=?`,
+          [approvedStatus,approvalCpm,approvalCpm,cpmMode,cpmMode==="fixed"?fixedPublisherCpm:null,
+            cpmMode==="fixed"?fixedCpmOverrideReason:null,cpmMode==="fixed"?fixedCpmOverrideExpiresAt:null,
+            cpmSettings.min_cpm,moderationNotes||null,approvedId,approvedStatus,id],
+        );
+        await conn.commit();
+      }catch(error){await conn.rollback();throw error;}finally{conn.release();}
       await safeNotify(owner?.telegram_id, `✅ Your Mini App ad "${beforeRows[0].campaign_name}" was approved.`);
     } else if (action === "reject") {
-      await pool.query("UPDATE miniapp_rewarded_campaigns SET status = 'rejected', creative_review_status = 'rejected', creative_review_notes = ? WHERE id = ?", [moderationNotes || null, id]);
+      const conn=await pool.getConnection();
+      try{
+        await conn.beginTransaction();
+        const [rows]=await conn.query<RowDataPacket[]>("SELECT * FROM miniapp_rewarded_campaigns WHERE id=? FOR UPDATE",[id]);
+        const current=rows[0];
+        if(!current)throw new Error("miniapp_campaign_missing");
+        const pendingId=Number(current.pending_creative_revision_id||0);
+        if(pendingId)await conn.query("UPDATE miniapp_creative_revisions SET review_status='rejected',reviewed_at=UTC_TIMESTAMP(6),review_reason=? WHERE id=? AND campaign_id=? AND review_status='pending'",[moderationNotes,pendingId,id]);
+        const hadApproval=Boolean(current.approved_creative_revision_id||current.approved_at);
+        await conn.query(
+          `UPDATE miniapp_rewarded_campaigns SET status=?,pause_reason=?,creative_review_status='rejected',
+             creative_review_notes=?,pending_creative_revision_id=NULL,status_before_creative_review=NULL,
+             creative_review_started_at=COALESCE(creative_review_started_at,UTC_TIMESTAMP(6)),updated_at=UTC_TIMESTAMP()
+           WHERE id=?`,
+          [hadApproval?"paused":"rejected",hadApproval?"moderation_rejected":null,moderationNotes,id],
+        );
+        await conn.commit();
+      }catch(error){await conn.rollback();throw error;}finally{conn.release();}
       await safeNotify(owner?.telegram_id, `❌ Your Mini App ad "${beforeRows[0].campaign_name}" was rejected.`);
     } else if (action === "require_changes") {
       await pool.query("UPDATE miniapp_rewarded_campaigns SET status = 'changes_required', creative_review_status = 'changes_required', creative_review_notes = ? WHERE id = ?", [moderationNotes || "Creative changes required", id]);
@@ -193,6 +235,8 @@ export async function PATCH(request: Request) {
          JOIN users u ON u.id = c.advertiser_id
          SET c.status = 'approved', c.pause_reason = NULL
          WHERE c.id = ? AND c.status = 'paused'
+           AND COALESCE(c.pause_reason,'')<>'moderation_rejected'
+           AND c.pending_creative_revision_id IS NULL
            AND c.remaining_budget >= (c.advertiser_cpm_bid / 1000)
            AND u.ad_balance >= (c.advertiser_cpm_bid / 1000)`,
         [id]
@@ -228,6 +272,13 @@ export async function PATCH(request: Request) {
       const cta_text = cleanText(body.cta_text) || null;
       const title_color = cleanText(body.title_color) || null;
       const body_color = cleanText(body.body_color) || null;
+      if (beforeRows[0].approved_at || beforeRows[0].approved_creative_revision_id) {
+        const visible:Record<string,unknown>={title,description,image_url,landing_url,
+          cta_text,title_color,body_color};
+        if(Object.entries(visible).some(([key,value])=>String(value??'')!==String(beforeRows[0][key]??''))) {
+          return NextResponse.json({error:'Approved Mini App creative must be submitted for review before it changes.'},{status:409});
+        }
+      }
       const categories = Array.isArray(body.categories) && body.categories.length > 0 ? JSON.stringify(body.categories) : beforeRows[0].categories;
       const countries = Array.isArray(body.countries) && body.countries.length > 0 ? JSON.stringify(body.countries) : null;
       const languages = Array.isArray(body.languages) && body.languages.length > 0 ? JSON.stringify(body.languages) : null;

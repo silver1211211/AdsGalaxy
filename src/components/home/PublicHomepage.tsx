@@ -926,7 +926,7 @@ export default function PublicHomepage() {
             <FeatureCard
               icon={Gift}
               title="Referral Growth"
-              description="Earn rewards by referring publishers and advertisers. Compete in sprint leaderboards and team leagues."
+              description="Earn 10% of referred publishers’ eligible earnings and confirmed deposits from referred advertisers."
             />
           </div>
         </div>

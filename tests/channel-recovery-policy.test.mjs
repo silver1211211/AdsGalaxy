@@ -70,11 +70,11 @@ test("Telegram 429 obeys retry_after with a safety margin", () => {
   assert.equal(retryDelayMs({ parameters: { retry_after: 12 } }, 1), 13_000);
 });
 
-test("normal channel health checks cache getMe and honor retry_after", () => {
-  const source = readFileSync(new URL("../src/lib/channelLifecycle.ts", import.meta.url), "utf8");
+test("canonical Telegram verifier caches bot identity and honors retry_after", () => {
+  const source = readFileSync(new URL("../src/lib/telegramChannelAccess.ts", import.meta.url), "utf8");
   assert.match(source, /let botIdPromise/);
   assert.match(source, /parameters\?\.retry_after/);
-  assert.match(source, /Math\.max\(lastResult\.retryAfterMs/);
+  assert.match(source, /telegram_rate_limited/);
 });
 
 test("sync source mutates no financial table", () => {
@@ -83,10 +83,11 @@ test("sync source mutates no financial table", () => {
   assert.doesNotMatch(source, /INSERT\s+INTO\s+(withdrawals|channel_settlement_ledger|ad_settlements|ad_settlements_views)/i);
 });
 
-test("member-list inaccessible is access loss, not channel-not-found", () => {
+test("member-list inaccessible is temporary/uncertain, neither bot_removed nor channel_not_found", () => {
   const result = classifyTelegramFailure({ description: "Bad Request: member list is inaccessible" });
-  assert.equal(result.code, "bot_access_lost");
-  assert.equal(technicalStatusForHealth(result.code), "bot_removed");
+  assert.equal(result.code, "member_list_inaccessible");
+  assert.equal(result.permanent, false);
+  assert.equal(technicalStatusForHealth(result.code), null);
 });
 
 test("timeouts and rate limits are never permanent", () => {

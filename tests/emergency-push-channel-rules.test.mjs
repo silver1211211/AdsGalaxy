@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-const route = readFileSync("src/app/api/admin/campaigns/[id]/emergency-push/route.ts", "utf8");
+const mainRoute = readFileSync("src/app/api/admin/campaigns/[id]/emergency-push/route.ts", "utf8");
+const silverRoute = readFileSync("src/app/api/check/silver/campaigns/[id]/emergency-push/route.ts", "utf8");
+const route = readFileSync("src/lib/campaignEmergencyPushHandler.ts", "utf8");
+
+test("both emergency entry points delegate to the shared posting handler", () => {
+  assert.match(mainRoute, /handleCampaignEmergencyPush\(request, context, "main"\)/);
+  assert.match(silverRoute, /handleCampaignEmergencyPush\(request, context, "silver"\)/);
+});
 
 test("emergency push does not silently cap eligible channel inventory", () => {
   assert.doesNotMatch(route, /MAX_EMERGENCY_CHANNELS/);

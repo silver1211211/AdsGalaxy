@@ -1,4 +1,6 @@
+import { recordChannelStatusTransitionAudit } from "@/lib/channelStatusAudit";
 import { NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
 import type { RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
 import { checkAdminAuth, requireAdminPermission } from "@/lib/adminAuth";
@@ -6,6 +8,7 @@ import { ADVERTISER_TRUST_LEVELS, normalizeAdvertiserTrustLevel } from "@/lib/ad
 import { recordAdminActionAudit } from "@/lib/campaignLifecycle";
 import { setUserEnforcementExemption } from "@/lib/userEnforcementExemptions";
 import { parseAdminPagination } from "@/lib/adminPagination";
+import { withFinancialPostingContext } from "@/lib/financialPostingContext";
 import { mainCampaignScopeSql } from "@/lib/silverCampaignControl";
 
 type ColumnRow = RowDataPacket & {
@@ -223,11 +226,52 @@ export async function PATCH(request: Request) {
         expiresAt: disposition === "enforcement_exemption" ? exemption_expires_at || null : null,
         active: disposition === "enforcement_exemption",
       });
-      await conn.query(
-        `UPDATE channels SET status='active',paused_reason=NULL,auto_paused_at=NULL
-         WHERE user_id=? AND is_deleted=FALSE AND status='paused' AND paused_reason='fraudulent_or_low_quality_traffic'`,
+      const [eligibleUnbanChannels] = await conn.query<RowDataPacket[]>(
+        `SELECT id, chat_id, status, telegram_access_version
+         FROM channels
+         WHERE user_id=? AND is_deleted=FALSE AND status='paused' AND paused_reason='fraudulent_or_low_quality_traffic'
+           AND COALESCE(paused_by_actor,'system') NOT IN ('publisher','admin')
+           AND admin_paused_at IS NULL AND publisher_paused_at IS NULL
+           AND COALESCE(marketplace_admin_status,'approved')='approved'
+           AND COALESCE(under_review,0)=0
+           AND COALESCE(monetization_paused_reason,'')<>'below_minimum'
+           AND COALESCE(below_minimum_review_required,0)=0
+           AND COALESCE(subscriber_count,0)>=100
+           AND chat_id IS NOT NULL AND TRIM(CAST(chat_id AS CHAR))<>'' AND CAST(chat_id AS CHAR)<>'0'
+           AND COALESCE(telegram_access_state,'healthy') NOT IN ('bot_removed','channel_not_found','permission_missing','identity_mismatch')
+         FOR UPDATE`,
         [id]
       );
+      if (eligibleUnbanChannels.length > 0) {
+        const channelIds = eligibleUnbanChannels.map((ch) => Number(ch.id));
+        await conn.query(
+          `UPDATE channels
+           SET status='active',
+               paused_reason=NULL,
+               auto_paused_at=NULL,
+               telegram_access_version=COALESCE(telegram_access_version,0)+1
+           WHERE id IN (?)`,
+          [channelIds]
+        );
+        for (const ch of eligibleUnbanChannels) {
+          await recordChannelStatusTransitionAudit(conn, {
+            channelId: Number(ch.id),
+            telegramChatId: ch.chat_id,
+            previousStatus: String(ch.status),
+            newStatus: "active",
+            sourceWorker: "admin_publisher_unban",
+            reasonCode: "publisher_unban_channel_restore",
+            reasonText: String(reason || "Publisher unbanned; fraud-paused channel restored"),
+            evidenceClassification: "manual",
+            actorType: "admin",
+            actorId: admin?.id || null,
+            transitionIntent: "manual",
+            verificationVersion: Number(ch.telegram_access_version || 0) + 1,
+            recoveryAction: "publisher_unban_restore",
+            recoveryOutcome: "active",
+          });
+        }
+      }
       await conn.commit();
       await audit("publisher_unban", {
         previous_status: before.status,
@@ -304,13 +348,25 @@ export async function PATCH(request: Request) {
       return NextResponse.json({ error: "Balances must be finite, non-negative numbers" }, { status: 400 });
     }
 
-    await conn.query(
+    const adjustmentKey = `admin:balance:${id}:${randomUUID()}`;
+    await conn.beginTransaction();
+    const [[balanceBefore]] = await conn.query<RowDataPacket[]>(
+      "SELECT balance_locked,balance_available,ad_balance FROM users WHERE id=? FOR UPDATE", [id]
+    );
+    if (!balanceBefore) throw new Error("adjustment_user_missing");
+    await withFinancialPostingContext(conn, {
+      sourceKey: adjustmentKey,
+      sourceSystem: "admin_balance_adjustment",
+      sourceRecordId: String(id),
+      policyVersion: "admin-adjustment-v1",
+    }, () => conn.query(
       "UPDATE users SET balance_locked = ?, balance_available = ?, ad_balance = ? WHERE id = ?",
       [...nextBalances, id]
-    );
-
+    ));
+    await conn.commit();
     await audit("user_balance_adjustment", {
-      previous: { balance_locked: before.balance_locked, balance_available: before.balance_available, ad_balance: before.ad_balance },
+      source_event_key: adjustmentKey,
+      previous: { balance_locked: balanceBefore.balance_locked, balance_available: balanceBefore.balance_available, ad_balance: balanceBefore.ad_balance },
       next: { balance_locked: nextBalances[0], balance_available: nextBalances[1], ad_balance: nextBalances[2] },
     });
 

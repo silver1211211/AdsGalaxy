@@ -1,3 +1,4 @@
+import { recordChannelStatusTransitionAudit } from "@/lib/channelStatusAudit";
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { getAuthenticatedAdmin, requireAdminPermission } from "@/lib/adminAuth";
@@ -179,7 +180,38 @@ export async function PATCH(request: Request) {
       if (item.entity_type === "miniapp") {
         await pool.query("UPDATE miniapps SET status = 'paused' WHERE id = ?", [item.entity_id]);
       } else if (item.entity_type === "channel") {
-        await pool.query("UPDATE channels SET status = 'paused' WHERE id = ?", [item.entity_id]);
+        const [chRows]: any = await pool.query(
+          "SELECT id, chat_id, status, telegram_access_version FROM channels WHERE id = ? AND is_deleted = FALSE LIMIT 1",
+          [item.entity_id]
+        );
+        const chRow = chRows?.[0];
+        if (chRow && String(chRow.status) !== "paused") {
+          await pool.query(
+            `UPDATE channels
+             SET status = 'paused',
+                 paused_reason = COALESCE(paused_reason, 'Paused via traffic quality review queue'),
+                 paused_by_actor = 'admin',
+                 admin_paused_at = UTC_TIMESTAMP(6),
+                 telegram_access_version = COALESCE(telegram_access_version, 0) + 1
+             WHERE id = ? AND status <> 'paused'`,
+            [item.entity_id]
+          );
+          await recordChannelStatusTransitionAudit(pool, {
+            channelId: Number(item.entity_id),
+            telegramChatId: chRow.chat_id,
+            previousStatus: String(chRow.status),
+            newStatus: "paused",
+            sourceWorker: "admin_traffic_quality_review",
+            reasonCode: "traffic_quality_admin_pause",
+            reasonText: "Paused via traffic quality review queue",
+            evidenceClassification: "manual",
+            actorType: "admin",
+            actorId: admin.id,
+            transitionIntent: "manual",
+            verificationVersion: Number(chRow.telegram_access_version || 0) + 1,
+            metadata: { review_queue_id: id, risk_level: item.risk_level },
+          });
+        }
       } else if (item.entity_type === "bot") {
         await pool.query("UPDATE bots SET status = 'paused' WHERE id = ?", [item.entity_id]);
       }

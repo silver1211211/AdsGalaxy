@@ -8,8 +8,8 @@ type CampaignCpmType = "views" | "clicks" | "broadcast";
 type SettingRow = RowDataPacket & { key: string; value: string };
 
 const DEFAULTS: Record<CampaignCpmType, { min: number; recommended: number; max: number }> = {
-  views: { min: 0.5, recommended: 1.5, max: 5 },
-  clicks: { min: 2, recommended: 5, max: 20 },
+  views: { min: 3, recommended: 5, max: 20 },
+  clicks: { min: 65, recommended: 76, max: 300 },
   broadcast: { min: 1, recommended: 3, max: 10 },
 };
 

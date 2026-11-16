@@ -5,6 +5,13 @@ import { getPublisherQuality } from "@/lib/publisherQuality";
 import { fraudBillingStateForSeverity } from "@/lib/channelFraudBilling";
 import { getFraudCoverageMetrics, persistPublisherRiskAssessment } from "@/lib/channelSafety";
 import { purgeExpiredChannelTrafficEvents } from "@/lib/channelTrafficTelemetry";
+import { normalizedLastViewsUpdateDatetimeSql } from "@/lib/channelViewPersistence";
+import {
+  calculateRollingTrustAdjustment,
+  calculateRollingRiskAdjustment,
+  isZeroClickOrLowCtrHeuristic,
+  classifyV101Signal,
+} from "@/lib/channelTrustFraudStability";
 
 export type FraudSeverity = "low" | "medium" | "high" | "critical";
 
@@ -32,6 +39,7 @@ type DailyPatternRow = RowDataPacket & {
   average_daily_views: number | string;
   maximum_daily_views: number | string;
   previous_average_views: number | string;
+  active_days?: number | string;
 };
 
 type ClickPatternRow = RowDataPacket & {
@@ -70,8 +78,6 @@ export type ChannelFraudDetectionResult = {
 
 const SEVERITY_POINTS: Record<FraudSeverity, number> = { low: 3, medium: 8, high: 18, critical: 30 };
 const SEVERITY_ORDER: Record<FraudSeverity | "none", number> = { none: 0, low: 1, medium: 2, high: 3, critical: 4 };
-const MAX_TRUST_PENALTY_PER_EVALUATION = 10;
-const MAX_RISK_INCREASE_PER_EVALUATION = 15;
 
 function numberValue(input: unknown) {
   const parsed = Number(input);
@@ -132,20 +138,43 @@ function addPostSignals(signals: FraudSignal[], posts: PostSignalRow[], subscrib
     const views = numberValue(row.views);
     const clicks = numberValue(row.clicks);
     const ctr = views > 0 ? clicks / views : 0;
-    if (views >= 1_000 && clicks === 0) {
-      signals.push({ fraudType: "zero_engagement_1000", severity: "high", postId: row.post_id, campaignId: row.campaign_id, reason: `${views} views produced zero clicks`, metadata: { views, clicks } });
-    } else if (views >= 500 && clicks === 0) {
-      signals.push({ fraudType: "zero_engagement_500", severity: "medium", postId: row.post_id, campaignId: row.campaign_id, reason: `${views} views produced zero clicks`, metadata: { views, clicks } });
-    }
+
+    // AdsGalaxy V1.01: Zero clicks alone on valid views (e.g. 500, 1,000, 10,000 views)
+    // must NEVER establish fraud. Near-zero CTR is also decriminalized.
+    // They are supported by the Phase 3 Zero-Click CPC Curve and do not generate fraud penalties.
+
+    // Confirmed invalid interaction: clicks strictly exceed views (impossible physics)
     if (views >= 100 && clicks > views) {
-      signals.push({ fraudType: "clicks_above_views", severity: "critical", postId: row.post_id, campaignId: row.campaign_id, reason: `${clicks} clicks exceed ${views} views`, metadata: { views, clicks } });
-    } else if (views >= 100 && ctr >= 0.2) {
-      signals.push({ fraudType: "extreme_ctr", severity: ctr >= 0.5 ? "critical" : "high", postId: row.post_id, campaignId: row.campaign_id, reason: `CTR ${(ctr * 100).toFixed(2)}% is abnormally high`, metadata: { views, clicks, ctr } });
-    } else if (views >= 1_000 && ctr < 0.0005) {
-      signals.push({ fraudType: "near_zero_ctr", severity: "medium", postId: row.post_id, campaignId: row.campaign_id, reason: `CTR ${(ctr * 100).toFixed(4)}% is near zero at high volume`, metadata: { views, clicks, ctr } });
+      signals.push({
+        fraudType: "clicks_above_views",
+        severity: "critical",
+        postId: row.post_id,
+        campaignId: row.campaign_id,
+        reason: `${clicks} clicks exceed ${views} views`,
+        metadata: { views, clicks },
+      });
+    } else if (views >= 100 && ctr >= 0.5) {
+      // V1.01: Extreme CTR is capped as an informational review signal, not automatic critical fraud
+      signals.push({
+        fraudType: "extreme_ctr",
+        severity: "low",
+        postId: row.post_id,
+        campaignId: row.campaign_id,
+        reason: `CTR ${(ctr * 100).toFixed(2)}% is unusually high (investigation signal)`,
+        metadata: { views, clicks, ctr },
+      });
     }
-    if (subscribers > 0 && views >= 500 && views > subscribers * 2) {
-      signals.push({ fraudType: "views_above_subscribers", severity: views > subscribers * 5 ? "critical" : "high", postId: row.post_id, campaignId: row.campaign_id, reason: `${views} views greatly exceed ${subscribers} subscribers`, metadata: { views, subscribers } });
+
+    // Heavy view delivery beyond subscriber volume (genuine anomaly indicator)
+    if (subscribers > 0 && views >= 500 && views > subscribers * 5) {
+      signals.push({
+        fraudType: "views_above_subscribers",
+        severity: "high",
+        postId: row.post_id,
+        campaignId: row.campaign_id,
+        reason: `${views} views greatly exceed ${subscribers} subscribers`,
+        metadata: { views, subscribers },
+      });
     }
   }
 }
@@ -163,7 +192,8 @@ async function loadSignals(connection: PoolConnection, channel: ChannelRow): Pro
   const [dailyRows] = await connection.query<DailyPatternRow[]>(
     `SELECT COALESCE(SUM(views),0) total_views, COALESCE(SUM(clicks),0) total_clicks,
        COALESCE(AVG(views),0) average_daily_views, COALESCE(MAX(views),0) maximum_daily_views,
-       COALESCE(AVG(CASE WHEN stat_date<CURDATE() THEN views END),0) previous_average_views
+       COALESCE(AVG(CASE WHEN stat_date<CURDATE() THEN views END),0) previous_average_views,
+       COALESCE(COUNT(DISTINCT stat_date),0) active_days
      FROM channel_daily_stats WHERE channel_id=? AND stat_date>=DATE_SUB(CURDATE(), INTERVAL 30 DAY)`,
     [channel.id]
   );
@@ -172,21 +202,22 @@ async function loadSignals(connection: PoolConnection, channel: ChannelRow): Pro
        COALESCE((SELECT COUNT(*) FROM (SELECT fingerprint FROM campaign_clicks cc JOIN campaign_posts cp ON cp.id=cc.post_id
          WHERE cp.channel_id=? AND cc.created_at>=DATE_SUB(NOW(),INTERVAL 7 DAY) AND fingerprint IS NOT NULL
          GROUP BY fingerprint HAVING COUNT(*)>1) repeated),0) duplicate_fingerprints,
-       COALESCE((SELECT MAX(bucket_clicks) FROM (SELECT COUNT(*) bucket_clicks FROM campaign_clicks cc JOIN campaign_posts cp ON cp.id=cc.post_id
-         WHERE cp.channel_id=? AND cc.created_at>=DATE_SUB(NOW(),INTERVAL 1 DAY)
-         GROUP BY FLOOR(UNIX_TIMESTAMP(cc.created_at)/300)) bursts),0) maximum_five_minute_clicks,
-       SUM(cc.fingerprint IS NULL OR cc.fingerprint='') fingerprint_missing, COUNT(cc.id) clicks
-     FROM campaign_clicks cc JOIN campaign_posts cp ON cp.id=cc.post_id
-     WHERE cp.channel_id=? AND cc.created_at>=DATE_SUB(NOW(),INTERVAL 7 DAY)`,
-    [channel.id, channel.id, channel.id]
+       COALESCE((SELECT MAX(burst.cnt) FROM (SELECT COUNT(*) cnt FROM campaign_clicks cc JOIN campaign_posts cp ON cp.id=cc.post_id
+         WHERE cp.channel_id=? AND cc.created_at>=DATE_SUB(NOW(),INTERVAL 7 DAY)
+         GROUP BY UNIX_TIMESTAMP(cc.created_at) DIV 300) burst),0) maximum_five_minute_clicks,
+       COALESCE((SELECT COUNT(*) FROM campaign_clicks cc JOIN campaign_posts cp ON cp.id=cc.post_id
+         WHERE cp.channel_id=? AND cc.created_at>=DATE_SUB(NOW(),INTERVAL 7 DAY) AND (fingerprint IS NULL OR fingerprint='')),0) fingerprint_missing,
+       COALESCE((SELECT COUNT(*) FROM campaign_clicks cc JOIN campaign_posts cp ON cp.id=cc.post_id
+         WHERE cp.channel_id=? AND cc.created_at>=DATE_SUB(NOW(),INTERVAL 7 DAY)),0) clicks`,
+    [channel.id, channel.id, channel.id, channel.id]
   );
   const [behaviorRows] = await connection.query<BehaviorRow[]>(
     `SELECT
-       SUM(ch.is_deleted=1 OR ch.status='deleted') deleted_channels,
-       SUM(ch.status IN ('paused','inaccessible')) inaccessible_channels,
-       SUM(ch.failure_reason LIKE '%admin%' OR ch.failure_reason LIKE '%permission%') permission_failures,
-       (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id=? AND cp.view_fetch_status='failed' AND cp.last_views_update>=DATE_SUB(NOW(),INTERVAL 7 DAY)) fetch_failures,
-       (SELECT COUNT(DISTINCT cp.view_fetch_source) FROM campaign_posts cp WHERE cp.channel_id=? AND cp.last_views_update>=DATE_SUB(NOW(),INTERVAL 7 DAY)) fetch_sources
+       (SELECT COUNT(*) FROM channels c WHERE c.user_id=ch.user_id AND c.is_deleted=TRUE AND c.updated_at>=DATE_SUB(NOW(),INTERVAL 30 DAY)) deleted_channels,
+       (SELECT COUNT(*) FROM channels c WHERE c.user_id=ch.user_id AND c.status='inaccessible' AND c.updated_at>=DATE_SUB(NOW(),INTERVAL 30 DAY)) inaccessible_channels,
+       (SELECT COUNT(*) FROM channels c WHERE c.user_id=ch.user_id AND c.permission_state='missing_admin' AND c.updated_at>=DATE_SUB(NOW(),INTERVAL 30 DAY)) permission_failures,
+       (SELECT COUNT(*) FROM campaign_posts cp WHERE cp.channel_id=? AND cp.view_fetch_status='failed' AND (${normalizedLastViewsUpdateDatetimeSql("cp.last_views_update")})>=DATE_SUB(NOW(),INTERVAL 7 DAY)) fetch_failures,
+       (SELECT COUNT(DISTINCT cp.view_fetch_source) FROM campaign_posts cp WHERE cp.channel_id=? AND (${normalizedLastViewsUpdateDatetimeSql("cp.last_views_update")})>=DATE_SUB(NOW(),INTERVAL 7 DAY)) fetch_sources
      FROM channels ch WHERE ch.user_id=?`,
     [channel.id, channel.id, channel.user_id]
   );
@@ -252,20 +283,63 @@ export async function runChannelFraudDetection(limit = 200): Promise<ChannelFrau
       const evaluationId = insert.insertId;
       const observedSignals = await loadSignals(connection, channel);
       const signals = await recordIncidents(connection, channel, observedSignals);
+
+      // Load applied trust and risk adjustments in rolling 24-hour window
+      const [recentEvals] = await connection.query<Array<RowDataPacket & { old_trust: number; new_trust: number; old_risk: number; new_risk: number }>>(
+        `SELECT old_trust_score old_trust, new_trust_score new_trust, old_risk_score old_risk, new_risk_score new_risk
+         FROM channel_fraud_evaluations
+         WHERE channel_id = ? AND completed_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
+        [channel.id]
+      );
+      const appliedTrustDelta24h = recentEvals.reduce((sum, r) => sum + (numberValue(r.new_trust) - numberValue(r.old_trust)), 0);
+      const appliedRiskDelta24h = recentEvals.reduce((sum, r) => sum + (numberValue(r.new_risk) - numberValue(r.old_risk)), 0);
+
       const oldTrust = clamp(numberValue(channel.publisher_trust_score ?? channel.traffic_quality_score ?? 60), -100, 100);
       const oldRisk = clamp(numberValue(channel.channel_fraud_risk_score), 0, 100);
       const rawImpact = signals.reduce((sum, signal) => sum + SEVERITY_POINTS[signal.severity], 0);
-      const trustImpact = Math.min(MAX_TRUST_PENALTY_PER_EVALUATION, rawImpact);
-      const riskImpact = Math.min(MAX_RISK_INCREASE_PER_EVALUATION, rawImpact);
+
+      // Count distinct evaluated posts in 30 days for historical evidence check
+      const [postCountRows] = await connection.query<Array<RowDataPacket & { cnt: number }>>(
+        "SELECT COUNT(DISTINCT post_id) cnt FROM channel_post_daily_stats WHERE channel_id=? AND stat_date>=DATE_SUB(CURDATE(), INTERVAL 30 DAY)",
+        [channel.id]
+      );
+      const distinctPostsCount = numberValue(postCountRows[0]?.cnt);
+
       const trustFrozen = Boolean(channel.trust_score_frozen_until && new Date(channel.trust_score_frozen_until).getTime() > Date.now());
       const hasObservedRisk = observedSignals.length > 0;
-      const newTrust = trustFrozen ? oldTrust : rounded(signals.length
-        ? clamp(oldTrust - trustImpact, -100, 100)
-        : hasObservedRisk ? oldTrust : clamp(oldTrust + 2, -100, 100));
-      const newRisk = rounded(signals.length
-        ? clamp(oldRisk + riskImpact, 0, 100)
-        : hasObservedRisk ? oldRisk : clamp(oldRisk - 1.5, 0, 100));
-      const qualityDelta = signals.length ? -Math.min(8, trustImpact * 0.65) : hasObservedRisk ? 0 : 1;
+
+      // AdsGalaxy V1.01: Trust score adjustment bounded to +/- 1.0 point per rolling 24h
+      const proposedTrustDelta = signals.length
+        ? -Math.min(1.0, rawImpact * 0.1)
+        : hasObservedRisk ? 0 : 0.5;
+
+      const trustAdjustment = calculateRollingTrustAdjustment({
+        currentScore: oldTrust,
+        proposedDelta: proposedTrustDelta,
+        appliedDeltaIn24h: appliedTrustDelta24h,
+        historicalEvidence: {
+          postCount: distinctPostsCount,
+          activeDays: distinctPostsCount > 0 ? 7 : 0,
+          windowDays: 7,
+        },
+      });
+
+      const newTrust = trustFrozen ? oldTrust : trustAdjustment.newScore;
+
+      // AdsGalaxy V1.01: Fraud risk increase bounded to max +3.0 points per rolling 24h
+      const proposedRiskDelta = signals.length
+        ? Math.min(3.0, rawImpact * 0.2)
+        : hasObservedRisk ? 0 : -0.5;
+
+      const riskAdjustment = calculateRollingRiskAdjustment({
+        currentRiskScore: oldRisk,
+        proposedIncrease: proposedRiskDelta,
+        appliedIncreaseIn24h: appliedRiskDelta24h,
+      });
+
+      const newRisk = riskAdjustment.newRiskScore;
+
+      const qualityDelta = signals.length ? -Math.min(1.0, Math.abs(trustAdjustment.finalDelta)) : hasObservedRisk ? 0 : 0.5;
       const newTrafficQuality = rounded(clamp(numberValue(channel.traffic_quality_score ?? 60) + qualityDelta, 0, 100));
       const severity = highestSeverity(signals);
 

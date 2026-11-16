@@ -37,7 +37,8 @@ export async function POST(request: Request) {
       }
       const trackingUser = await requireMiniappTrackingUser(request, miniappId);
       const [requestRows]: any = await pool.query(
-        `SELECT miniapp_id, telegram_user_id, internal_campaign_id
+        `SELECT miniapp_id, telegram_user_id, internal_campaign_id,
+           approved_landing_url_snapshot,created_at
          FROM miniapp_mediation_requests WHERE request_id = ? LIMIT 1`,
         [requestId]
       );
@@ -45,14 +46,21 @@ export async function POST(request: Request) {
       if (!adRequest
         || Number(adRequest.miniapp_id) !== miniappId
         || Number(adRequest.internal_campaign_id) !== campaignId
-        || String(adRequest.telegram_user_id) !== trackingUser.telegramUserId) {
+        || String(adRequest.telegram_user_id) !== trackingUser.telegramUserId
+        || Date.now()-new Date(adRequest.created_at).getTime()>300_000) {
         return NextResponse.json({ error: "Click does not match the issued ad request" }, { status: 403 });
       }
       const [rows]: any = await pool.query(
-        "SELECT id, advertiser_id, image_url, categories, landing_url FROM miniapp_rewarded_campaigns WHERE id = ?",
+        "SELECT id, advertiser_id, image_url, categories, landing_url,status,approved_creative_revision_id FROM miniapp_rewarded_campaigns WHERE id = ?",
         [campaignId]
       );
       if (rows.length === 0) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
+      const approvedUrl=adRequest.approved_landing_url_snapshot ||
+        (rows[0].status==='approved' && !rows[0].approved_creative_revision_id ? rows[0].landing_url:null);
+      if (!approvedUrl) return NextResponse.json({error:'Approved destination unavailable'},{status:410});
+      let parsedDestination:URL;
+      try { parsedDestination=new URL(String(approvedUrl)); } catch { return NextResponse.json({error:'Approved destination unavailable'},{status:410}); }
+      if(!['http:','https:'].includes(parsedDestination.protocol)) return NextResponse.json({error:'Approved destination unavailable'},{status:410});
       const clickId = await recordAdClick({
         campaignType: "miniapp",
         campaignId,
@@ -67,16 +75,20 @@ export async function POST(request: Request) {
         userAgent,
         sessionId: sessionId || null,
       });
-      return NextResponse.json({ success: true, click_id: clickId, url: appendClickId(rows[0].landing_url, clickId) });
+      return NextResponse.json({ success: true, click_id: clickId, url: appendClickId(parsedDestination.toString(), clickId) });
     }
 
     if (initData) await getAuthenticatedUser(initData);
 
     const [rows]: any = await pool.query(
-      "SELECT id, user_id, image_url, category, link FROM campaigns WHERE id = ?",
+      "SELECT id,user_id,image_url,category,link,status,approved_creative_revision_id FROM campaigns WHERE id = ?",
       [campaignId]
     );
     if (rows.length === 0) return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
+    // This generic API has no placement proof. Versioned campaigns must use
+    // their placement-scoped click route and approved destination snapshot.
+    if(rows[0].status!=='active'||rows[0].approved_creative_revision_id) return NextResponse.json(
+      {error:'Use the issued placement link for this advertisement'},{status:410});
     const clickId = await recordAdClick({
       campaignType: "campaign",
       campaignId,

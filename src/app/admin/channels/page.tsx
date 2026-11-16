@@ -85,7 +85,11 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 function telegramState(channel: any) {
-  const access = String(channel.telegram_access_state || channel.telegram_verification_state || "unchecked");
+  // A stale healthy access snapshot must never hide a pending or failed verification.
+  const verification = String(channel.telegram_verification_state || "");
+  if (verification === "pending_verification") return { label: "Verification pending", tone: "border-amber-200 bg-amber-50 text-amber-800" };
+  if (verification === "verification_failed") return { label: "Verification failed", tone: "border-red-200 bg-red-50 text-red-700" };
+  const access = String(channel.telegram_access_state || verification || "unchecked");
   if (access === "healthy") return { label: "Telegram healthy", tone: "border-emerald-200 bg-emerald-50 text-emerald-700" };
   if (access === "permission_missing") return { label: "Bot permission missing", tone: "border-red-200 bg-red-50 text-red-700" };
   if (access === "bot_removed") return { label: "Bot removed", tone: "border-red-200 bg-red-50 text-red-700" };

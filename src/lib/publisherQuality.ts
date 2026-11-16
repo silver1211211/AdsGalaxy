@@ -1,5 +1,6 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { calculateV101BoundedQualityMultiplier } from "@/lib/channelTrustFraudStability";
 
 export const PUBLISHER_QUALITY_WEIGHTS = {
   trust: 0.4,
@@ -22,6 +23,11 @@ export type PublisherQualityMetrics = {
   sampleClicks: number;
   observedCtr: number;
   reachRatio: number;
+  // AdsGalaxy V1.01: Bounded +/- 5% financial quality multiplier (0.95000000 - 1.05000000)
+  v101QualityMultiplier?: string;
+  v101QualityMultiplierUnits?: bigint;
+  v101AdjustmentPercent?: string;
+  v101TrustContributionPercent?: string;
 };
 
 type QualitySourceRow = RowDataPacket & {
@@ -115,6 +121,14 @@ export function calculatePublisherQuality(input: {
     + historicalConsistencyScore * PUBLISHER_QUALITY_WEIGHTS.historicalConsistency
     + audienceRetentionScore * PUBLISHER_QUALITY_WEIGHTS.audienceRetention;
   const qualityScore = rounded(clamp(weightedScore));
+
+  // AdsGalaxy V1.01: Bounded financial multiplier [0.95000000, 1.05000000]
+  const v101Multiplier = calculateV101BoundedQualityMultiplier({
+    trustScore,
+    trafficQualityScore: viewAuthenticityScore,
+    ctrScore,
+  });
+
   return {
     channelId: input.channelId,
     trustScore: rounded(trustScore),
@@ -128,7 +142,19 @@ export function calculatePublisherQuality(input: {
     sampleClicks: input.clicks,
     observedCtr: input.views > 0 ? rounded((input.clicks / input.views) * 100, 6) : 0,
     reachRatio: input.posts > 0 && input.subscribers > 0 ? rounded((input.views / input.posts) / input.subscribers, 8) : 0,
+    v101QualityMultiplier: v101Multiplier.multiplierDecimal,
+    v101QualityMultiplierUnits: v101Multiplier.multiplierUnits,
+    v101AdjustmentPercent: v101Multiplier.adjustmentPercent,
+    v101TrustContributionPercent: v101Multiplier.trustContributionPercent,
   };
+}
+
+export function calculateV101PublisherQuality(scores: {
+  trustScore: number;
+  trafficQualityScore: number;
+  ctrScore: number;
+}) {
+  return calculateV101BoundedQualityMultiplier(scores);
 }
 
 export async function getPublisherQuality(channelId: number, connection?: PoolConnection) {

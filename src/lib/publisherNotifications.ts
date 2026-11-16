@@ -22,8 +22,58 @@ async function notify(
       entityId: event.entityId, messageHtml: message,
     });
     void dispatchPlatformNotifications(10).catch((error) => console.error("Notification dispatch failed", error));
+    return Number(user.id);
   } catch (error) {
     console.error(`Notification enqueue failed (${event.eventType}):`, error instanceof Error ? error.message : error);
+  }
+}
+
+/**
+ * Durable, idempotent notification to referrer when a referred user adds or verifies an asset.
+ * Notification B:
+ * ✅ <b>Referral {{ASSET_TYPE}} {{STATUS}}!</b>
+ *
+ * {{REFERRAL_NAME}} added a {{VERIFIED_PREFIX}}Telegram {{ASSET_TYPE}}.
+ */
+export async function notifyReferralAssetEvent(
+  userId: number | string,
+  assetType: "Channel" | "Mini App" | "Bot",
+  status: "Added" | "Verified",
+) {
+  try {
+    const [[referral]] = await pool.query<Array<import("mysql2/promise").RowDataPacket & { referrer_id: number; referred_name: string }>>(
+      `SELECT r.invited_by AS referrer_id,
+              COALESCE(NULLIF(TRIM(CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))), ''), u.username, 'A referral') AS referred_name
+       FROM referrals r
+       JOIN users u ON u.id = r.user_id
+       WHERE r.user_id = ?
+       LIMIT 1`,
+      [userId],
+    );
+    if (!referral?.referrer_id) return;
+
+    const verifiedPrefix = status === "Verified" ? "verified " : "";
+    const message =
+      `✅ <b>Referral ${assetType} ${status}!</b>\n\n` +
+      `${escapeTelegramHtml(referral.referred_name)} added a ${verifiedPrefix}Telegram ${assetType}.`;
+
+    const [[referrer]] = await pool.query<Array<import("mysql2/promise").RowDataPacket & { telegram_id: string }>>(
+      "SELECT telegram_id FROM users WHERE id = ? LIMIT 1",
+      [referral.referrer_id],
+    );
+    if (referrer?.telegram_id) {
+      await enqueuePlatformNotification(pool, {
+        eventKey: `ref_asset:${status.toLowerCase()}:${assetType.toLowerCase().replace(/\\s+/g, "")}:${userId}`,
+        userId: Number(referral.referrer_id),
+        eventType: `referral_asset_${status.toLowerCase()}`,
+        entityType: assetType.toLowerCase() === "mini app" ? "miniapp" : (assetType.toLowerCase() as any),
+        entityId: String(userId),
+        messageHtml: message,
+      });
+      void dispatchPlatformNotifications(10).catch(() => undefined);
+    }
+  } catch (error) {
+    console.error("notifyReferralAssetEvent failed:", error);
   }
 }
 
@@ -60,19 +110,21 @@ export async function notifyWithdrawalRejected(telegramId: unknown, input: { wit
 // ── Channels ──────────────────────────────────────────────────────────────
 
 export async function notifyChannelSubmitted(telegramId: unknown, channelId: number | string, title?: string) {
-  await notify(
+  const userId = await notify(
     telegramId,
     `🕒 <b>Channel Submitted for Review</b>\n\nYour channel "<b>${escapeTelegramHtml(title)}</b>" has been submitted and is now pending review.\n\nWe'll notify you as soon as it's approved.`,
     { entityType: "channel", entityId: channelId, eventType: "channel_submitted" }
   );
+  if (userId) void notifyReferralAssetEvent(userId, "Channel", "Added");
 }
 
 export async function notifyChannelApproved(telegramId: unknown, channelId: number | string, title?: string) {
-  await notify(
+  const userId = await notify(
     telegramId,
     `✅ <b>Channel Approved</b>\n\nYour channel "<b>${escapeTelegramHtml(title)}</b>" has been approved and is now active in the AdsGalaxy advertising network.\n\nYou can start receiving sponsored campaigns right away.`,
     { entityType: "channel", entityId: channelId, eventType: "channel_approved" }
   );
+  if (userId) void notifyReferralAssetEvent(userId, "Channel", "Verified");
 }
 
 export async function notifyChannelRejected(telegramId: unknown, channelId: number | string, title?: string) {
@@ -99,19 +151,21 @@ export async function notifyChannelPaused(telegramId: unknown, channelId: number
 // ── Mini Apps ─────────────────────────────────────────────────────────────
 
 export async function notifyMiniAppSubmitted(telegramId: unknown, miniAppId: number | string, name?: string) {
-  await notify(
+  const userId = await notify(
     telegramId,
     `🕒 <b>Mini App Submitted for Review</b>\n\nYour Mini App "<b>${escapeTelegramHtml(name)}</b>" has been submitted and is now pending review.\n\nWe'll notify you as soon as it's approved.`,
     { entityType: "miniapp", entityId: miniAppId, eventType: "miniapp_submitted" }
   );
+  if (userId) void notifyReferralAssetEvent(userId, "Mini App", "Added");
 }
 
 export async function notifyMiniAppApproved(telegramId: unknown, miniAppId: number | string, name?: string) {
-  await notify(
+  const userId = await notify(
     telegramId,
     `✅ <b>Mini App Approved</b>\n\nYour Mini App "<b>${escapeTelegramHtml(name)}</b>" has been approved and is now eligible to serve ads.\n\nMake sure the AdsGalaxy SDK is integrated to start earning.`,
     { entityType: "miniapp", entityId: miniAppId, eventType: "miniapp_approved" }
   );
+  if (userId) void notifyReferralAssetEvent(userId, "Mini App", "Verified");
 }
 
 export async function notifyMiniAppRejected(telegramId: unknown, miniAppId: number | string, name?: string) {
@@ -138,19 +192,21 @@ export async function notifyMiniAppPaused(telegramId: unknown, miniAppId: number
 // ── Bots ──────────────────────────────────────────────────────────────────
 
 export async function notifyBotSubmitted(telegramId: unknown, botId: number | string, botUsername?: string) {
-  await notify(
+  const userId = await notify(
     telegramId,
     `🕒 <b>Bot Submitted for Review</b>\n\nYour bot @${escapeTelegramHtml(botUsername)} has been submitted and is now pending review.\n\nWe'll notify you as soon as it's approved.`,
     { entityType: "bot", entityId: botId, eventType: "bot_submitted" }
   );
+  if (userId) void notifyReferralAssetEvent(userId, "Bot", "Added");
 }
 
 export async function notifyBotApproved(telegramId: unknown, botId: number | string, botUsername?: string) {
-  await notify(
+  const userId = await notify(
     telegramId,
     `🤖 <b>Bot Approved</b>\n\nYour bot @${escapeTelegramHtml(botUsername)} has been approved for monetization.\n\nYou can now start serving ads to your bot's users.`,
     { entityType: "bot", entityId: botId, eventType: "bot_approved" }
   );
+  if (userId) void notifyReferralAssetEvent(userId, "Bot", "Verified");
 }
 
 export async function notifyBotRejected(telegramId: unknown, botId: number | string, botUsername?: string) {

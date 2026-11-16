@@ -45,7 +45,10 @@ test("C1 configured CPC is per thousand clicks", () => assert.equal(billing.getC
 test("C2 one click costs CPC divided by 1000", () => assert.equal(billing.calculateChannelAdvertiserDebit({ type: "clicks", units: 1, cpc: 50 }), 0.05));
 test("C3 click source key is the durable click row id", () => assert.match(fast, /`click:\$\{clickId\}`/));
 test("C4 click attribution is written before debit", () => assert.ok(click.indexOf("clickRecorded = await recordLegacyCampaignClick") < click.indexOf("await debitChannelClick")));
-test("C5 redirect survives financial failure", () => assert.match(click, /Click tracking failed; redirect preserved/));
+test("C5 accepted redirect survives financial failure", () => {
+  assert.match(click, /Click billing or tracking failed; accepted redirect preserved/);
+  assert.match(click, /Click acceptance failed[\s\S]*return redirectToFallback\(\)/);
+});
 
 test("P1 requested pending drain limit is not silently clamped to 100", () => assert.match(fast, /Math\.min\(5000/));
 test("P2 each pending batch is bounded to 100", () => assert.match(fast, /Math\.min\(100, limit - candidates\)/));
@@ -53,7 +56,7 @@ test("P3 pending credits paginate by durable id", () => assert.match(fast, /id>\
 test("P4 pending credit uses retry helper", () => assert.match(fast, /channel_pending_publisher_credit/));
 test("P5 pending row is locked with skip locked", () => assert.match(fast, /FOR UPDATE SKIP LOCKED/));
 test("P6 settled update requires pending state", () => assert.match(fast, /WHERE id=\? AND publisher_status='pending'/));
-test("P7 drain reports failures", () => assert.match(fast, /failed, batches/));
+test("P7 drain reports failures", () => assert.match(fast, /failed, missingPolicy, batches/));
 test("P8 lifecycle verifies no pending rows remain", () => assert.match(settlement, /pending_fast_debit_publisher_credit_failed/));
 
 test("D1 canonical daily accounting uses UTC", () => { assert.match(fast, /getChannelDailySpend/); assert.match(dailySpend, /created_at>=UTC_DATE\(\)/); });
@@ -64,14 +67,18 @@ test("D5 direct-debit reactivation uses canonical SQL unit price", () => assert.
 test("D6 daily-cap state transitions retry", () => assert.match(daily, /channel_daily_cap_reconciliation/));
 
 test("B1 direct debit source key remains unique and deterministic", () => assert.match(fast, /sourceKey: `channel:\$\{input\.sourceKey\}`/));
-test("B2 budget update requires enough budget", () => assert.match(fast, /WHERE id=\? AND status='active' AND budget>=\?/));
+test("B2 budget update requires enough budget and a billable campaign state", () => {
+  assert.match(fast, /WHERE c\.id=\? AND \$\{CHANNEL_BILLABLE_CAMPAIGN_SQL\} AND c\.budget>=\?/);
+  const creative=read("src/lib/campaignCreativeRevision.ts");
+  assert.match(creative,/c\.status='paused' AND c\.pause_reason='moderation_cleanup'/);
+});
 test("B3 campaign is locked before post", () => assert.ok(fast.indexOf("SELECT id FROM campaigns WHERE id=? FOR UPDATE") < fast.indexOf("FROM campaign_posts cp JOIN campaigns")));
 test("B4 legacy settlement uses same campaign-first lock order", () => assert.match(settlement, /All channel money paths acquire campaign before post\/account rows/));
 
 test("PC1 Mini App internal settlement retries", () => assert.match(miniapp, /miniapp_internal_publisher_settlement/));
 test("PC2 Mini App external settlement retries", () => assert.match(miniapp, /miniapp_external_publisher_settlement/));
 test("PC3 internal settlement idempotency key remains impression id", () => assert.match(miniapp, /miniapp_internal_publisher_settlements[\s\S]*impression_id/));
-test("PC4 external settlement uses insert ignore before credit", () => assert.ok(miniapp.indexOf("INSERT IGNORE INTO miniapp_earnings_settlements") < miniapp.lastIndexOf("creditUserLockedBalance")));
+test("PC4 external settlement uses insert ignore before credit", () => assert.ok(miniapp.indexOf("INSERT IGNORE INTO miniapp_earnings_settlements") < miniapp.lastIndexOf("creditSettledPublisherBalance")));
 test("PC5 payout safety check uses the active transaction", () => assert.match(miniapp, /recordPayoutSafetyCheck\([\s\S]*\}, conn\)/));
 
 test("FR1 fraud adjustment retries", () => assert.match(fraud, /channel_fraud_billing_adjustment/));
@@ -80,7 +87,7 @@ test("FR3 fraud reversal is unique per settlement", () => assert.match(fraud, /I
 test("FR4 retry counters update only after commit", () => assert.ok(fraud.indexOf("adjustedSettlements += result.adjusted") > fraud.indexOf("withFinancialTransactionRetry")));
 
 test("I1 advertiser update route uses canonical unit pricing", () => assert.match(advertiserRoute, /getChannelUnitPrice/));
-test("I2 admin resume uses canonical unit pricing", () => assert.match(adminActions, /getChannelUnitPrice/));
+test("I2 admin resume uses canonical unit pricing", () => { assert.match(adminActions, /handleCampaignAction/); assert.match(fs.readFileSync("src/lib/campaignActionsHandler.ts","utf8"), /getChannelUnitPrice/); });
 test("I3 reconciliation helper is explicitly read-only", () => assert.match(reconciliation, /Read-only proof helper/));
 test("I4 reconciliation separates direct debit and ledger totals", () => assert.match(reconciliation, /direct_debit_minus_ledger/));
 test("I5 no reconciliation mutation is present", () => assert.doesNotMatch(reconciliation, /\b(?:UPDATE|INSERT|DELETE)\b/i));

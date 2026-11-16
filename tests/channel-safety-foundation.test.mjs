@@ -73,13 +73,13 @@ test("non-exempt publishers retain the existing trust and 8.4 balance enforcemen
   assert.match(source, /availableBalance >= PUBLISHER_AVAILABLE_BALANCE_THRESHOLD/);
 });
 
-test("channel health monitoring remains diagnostic and never changes channel status", () => {
+test("channel health monitoring limits automatic pause to permanent Telegram access loss", () => {
   const monitor = read("src/lib/channelHealthMonitor.ts");
-  assert.match(monitor, /const autoPaused = false/);
-  assert.match(monitor, /status_mutation_enabled: false/);
-  assert.doesNotMatch(monitor, /status=CASE WHEN/);
-  assert.doesNotMatch(monitor, /paused_reason=CASE WHEN/);
-  assert.doesNotMatch(monitor, /auto_paused_at=IF/);
+  assert.match(monitor, /telegramAutoPaused = channel\.status === "active" && telegramHealth\.permanent/);
+  assert.match(monitor, /const autoPaused = telegramAutoPaused/);
+  assert.match(monitor, /status_mutation_enabled: true/);
+  assert.doesNotMatch(monitor, /UPDATE channels SET status=/);
+  assert.doesNotMatch(monitor, /status=CASE WHEN|paused_reason=CASE WHEN|auto_paused_at=IF/);
 });
 
 test("admin UI exposes review reasons, safety metrics, GEO confidence, and unban dispositions", () => {
@@ -87,7 +87,8 @@ test("admin UI exposes review reasons, safety metrics, GEO confidence, and unban
   const dashboard = read("src/app/admin/page.tsx");
   const channels = read("src/app/admin/channels/page.tsx");
   const users = read("src/app/admin/users/page.tsx");
-  assert.match(withdrawals, /Pre-clearance/);
+  assert.match(withdrawals, /Withdrawals Fraud Verification/);
+  assert.match(withdrawals, /VerificationBadge/);
   assert.match(dashboard, /Channel Trust & Safety/);
   assert.match(channels, /GEO Confidence/);
   assert.match(users, /Trust remediation/);

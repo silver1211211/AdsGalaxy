@@ -1,3 +1,6 @@
+import type { PoolConnection } from "mysql2/promise";
+import { withFinancialPostingContext } from "./financialPostingContext.ts";
+
 export type ReferralQueryConnection = {
   query: (sql: string, params?: unknown[]) => Promise<[any, unknown?]>;
 };
@@ -69,10 +72,15 @@ export async function settleInsertedReferralReward(
     [input.ledgerId, input.userId, input.amount]
   );
   if (Number(settled?.affectedRows || 0) !== 1) return false;
-  const [credited] = await connection.query(
+  const [credited] = await withFinancialPostingContext(connection as unknown as PoolConnection, {
+    sourceKey: `referral:reward:${input.ledgerId}`,
+    sourceSystem: "referral_reward",
+    sourceRecordId: String(input.ledgerId),
+    policyVersion: "referral-reward-v1",
+  }, () => connection.query(
     "UPDATE users SET balance_available=balance_available+? WHERE id=?",
     [input.amount, input.userId]
-  );
+  ));
   if (Number(credited?.affectedRows || 0) !== 1) throw new Error("referral_balance_credit_failed");
   await rebuildReferralEarningsCache(connection, input.userId);
   return true;

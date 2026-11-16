@@ -1,6 +1,7 @@
 import type { PoolConnection } from "mysql2/promise";
 /* eslint-disable @typescript-eslint/no-explicit-any -- legacy referral query payloads are dynamically shaped */
 import pool from "@/lib/db";
+import { withFinancialPostingContext } from "@/lib/financialPostingContext";
 import { getPaidReferralEarnings, rebuildReferralEarningsCache, settleInsertedReferralReward } from "@/lib/paidReferralEarnings";
 import { sendLocalizedTelegramMessage } from "@/lib/userLocale";
 import type { TranslationKey, TranslationValues } from "@/i18n";
@@ -63,12 +64,12 @@ function getSetting(settings: Map<string, string>, key: string, fallback: string
 export async function ensureReferralGrowthSettingDefaults(db: Db = pool) {
   await db.query(
     `INSERT INTO referral_growth_settings (\`key\`, value, description) VALUES
-      ('referral_sprint_enabled', '1', 'Enable Referral Sprint, Team League, Team Rewards, popup, and growth UI'),
-      ('referral_join_reward_amount', '0.005', 'Reward paid when a referred user first joins AdsGalaxy'),
-      ('referral_verification_reward_amount', '0.010', 'Additional reward paid after the referred user verifies required channel membership'),
+      ('referral_sprint_enabled', '0', 'Enable Referral Sprint, Team League, Team Rewards, popup, and growth UI'),
+      ('referral_join_reward_amount', '0', 'Reward paid when a referred user first joins AdsGalaxy'),
+      ('referral_verification_reward_amount', '0', 'Additional reward paid after the referred user verifies required channel membership'),
       ('referral_sprint_popup_interval_seconds', '86400', 'Minimum seconds before the Referral Sprint popup is shown again after dismissal'),
       ('referral_sprint_popup_interval_hours', '24', 'Minimum hours before the Referral Sprint popup is shown again after dismissal'),
-      ('referral_reward_amount', '0.015', 'Total displayed referral reward: join reward plus channel verification bonus'),
+      ('referral_reward_amount', '0', 'Total displayed referral reward: join reward plus channel verification bonus'),
       ('referral_user_daily_cap', '0.50', 'Maximum referral-related payout per user per calendar day'),
       ('referral_user_monthly_cap', '5.00', 'Maximum referral-related payout per user per calendar month'),
       ('referral_platform_monthly_cap', '25.00', 'Maximum platform referral and sprint payout per calendar month'),
@@ -81,16 +82,20 @@ export async function ensureReferralGrowthSettingDefaults(db: Db = pool) {
   );
 }
 
+function legacyReferralRewardsEnabled() {
+  return false; // Historical records remain readable; no new fixed or sprint payouts.
+}
+
 function sprintEnabled(settings: Map<string, string>) {
-  return getSetting(settings, "referral_sprint_enabled", "1") === "1";
+  return legacyReferralRewardsEnabled();
 }
 
 export function getReferralJoinRewardAmount(settings: Map<string, string>) {
-  return toNumber(getSetting(settings, "referral_join_reward_amount", REFERRAL_REWARDS.registration));
+  return 0; // New referrals earn percentage commissions, not fixed join rewards.
 }
 
 export function getReferralVerificationRewardAmount(settings: Map<string, string>) {
-  return toNumber(getSetting(settings, "referral_verification_reward_amount", REFERRAL_REWARDS.verification));
+  return 0; // Historical pending rewards remain in the ledger for settlement.
 }
 
 export function getReferralTotalRewardAmount(settings: Map<string, string>) {
@@ -137,6 +142,9 @@ async function creditReferralReward(
     eligibilitySnapshot?: Record<string, unknown>;
   }
 ) {
+  // Retired legacy reward path. Only revenue commissions and the separate
+  // publisher channel-join reward may credit balances.
+  if (!legacyReferralRewardsEnabled()) return false;
   if (input.amount <= 0) return false;
   let amount = input.amount;
   if (input.sprintId && (input.rewardType.startsWith("sprint_rank_") || input.rewardType.startsWith("team_sprint_"))) {
@@ -222,6 +230,9 @@ async function creditImmediateReferralReward(
     metadata?: Record<string, unknown>;
   }
 ) {
+  // Retired legacy reward path. Only revenue commissions and the separate
+  // publisher channel-join reward may credit balances.
+  if (!legacyReferralRewardsEnabled()) return false;
   if (input.amount <= 0) return false;
   const [ledgerResult]: any = await conn.query(
     `INSERT IGNORE INTO referral_reward_ledger
@@ -476,6 +487,7 @@ async function getActiveBoostMultiplier(userId: number, teamId?: number | null, 
 // all-time verified referral count crosses each configured threshold. The unique key on
 // referral_milestone_claims(milestone_id, user_id) guarantees each milestone is paid once ever.
 async function awardEligibleUserMilestones(conn: PoolConnection, userId: number, verifiedCount: number, sprintId: number) {
+  if (!legacyReferralRewardsEnabled()) return [];
   const [milestones]: any = await conn.query(
     "SELECT * FROM referral_milestones WHERE scope = 'user' AND status = 'active' AND threshold_count <= ? ORDER BY threshold_count ASC",
     [verifiedCount]
@@ -526,6 +538,7 @@ async function awardEligibleUserMilestones(conn: PoolConnection, userId: number,
 }
 
 async function awardFirstReferralBonus(conn: PoolConnection, userId: number, settings: Map<string, string>, sprintId: number) {
+  if (!legacyReferralRewardsEnabled()) return false;
   const [[user]]: any = await conn.query("SELECT first_referral_bonus_paid FROM users WHERE id = ? FOR UPDATE", [userId]);
   if (Number(user?.first_referral_bonus_paid || 0) === 1) return false;
   const amount = toNumber(getSetting(settings, "first_referral_bonus_amount", "0.05"));
@@ -582,6 +595,11 @@ export async function processReferralJoinReward(referralId: number) {
 
     const settings = await getSettings(conn);
     const joinRewardAmount = getReferralJoinRewardAmount(settings);
+    if (joinRewardAmount === 0 && referral.status === "pending" && toNumber(referral.reward_amount) === 0) {
+      await conn.query("UPDATE referrals SET status='joined',reward_status='commission_only' WHERE id=? AND status='pending'", [referral.id]);
+      await conn.commit();
+      return { paid: false, reason: "commission_only" };
+    }
     if (referral.reward_status === "paid" || toNumber(referral.reward_amount) >= joinRewardAmount) {
       await conn.commit();
       return { paid: false, reason: "already_paid" };
@@ -1073,7 +1091,7 @@ export async function processVerifiedReferralForUser(userId: number) {
       return { paid: false, reason: "self_referral_blocked", referral_reward: selfDevice };
     }
 
-    if (referral.reward_status === "paid" || referral.reward_status === "verified_pending") {
+    if (["paid", "verified_pending", "commission_only_verified"].includes(referral.reward_status)) {
       await conn.commit();
       return { paid: false, reason: "already_processed" };
     }
@@ -1126,13 +1144,13 @@ export async function processVerifiedReferralForUser(userId: number) {
       `UPDATE referrals
        SET status = 'verified',
          verification_status = 'verified',
-         reward_status = 'verified_pending',
+         reward_status = CASE WHEN ? > 0 THEN 'verified_pending' ELSE 'commission_only_verified' END,
          reward_amount = ?,
          required_channel = ?,
          verified_at = COALESCE(verified_at, NOW()),
          sprint_id = COALESCE(sprint_id, ?)
        WHERE id = ?`,
-      [finalReferralRewardAmount, requiredChannel, activeSprint?.id || null, referral.id]
+      [rewardAmount, finalReferralRewardAmount, requiredChannel, activeSprint?.id || null, referral.id]
     );
 
     await creditReferralReward(conn, {
@@ -1159,15 +1177,17 @@ export async function processVerifiedReferralForUser(userId: number) {
       userId: Number(referral.invited_by),
       type: "referral_joined",
       title: "Referral verified",
-      message: "Your referral joined the required channel. The verification bonus is pending until settlement.",
+      message: rewardAmount > 0 ? "Your referral joined the required channel. The historical verification bonus is pending until settlement." : "Your referral is verified. New commissions are earned from eligible publisher earnings and confirmed advertiser deposits.",
       metadata: { referral_id: referral.id, amount: rewardAmount, total_amount: finalReferralRewardAmount },
     });
 
     await conn.commit();
-    await notifyUser(Number(referral.invited_by), "bot.referral.verified.message", {
-      amount: rewardAmount.toFixed(3),
-      total: finalReferralRewardAmount.toFixed(3),
-    });
+    if (rewardAmount > 0) {
+      await notifyUser(Number(referral.invited_by), "bot.referral.verified.message", {
+        amount: rewardAmount.toFixed(3),
+        total: finalReferralRewardAmount.toFixed(3),
+      });
+    }
     if (firstBonusPaid) {
       await notifyUser(Number(referral.invited_by), "bot.referral.firstBonus.message");
     }
@@ -1181,13 +1201,13 @@ export async function processVerifiedReferralForUser(userId: number) {
       await notifyUser(Number(referral.invited_by), "bot.referral.teamUnlocked.message", { team: team.name });
     }
     await recordReferralSprintAudit({
-      action: "referral_reward_paid",
+      action: rewardAmount > 0 ? "referral_reward_paid" : "referral_verified",
       entityType: "referral",
       entityId: Number(referral.id),
       reason: "verified_required_channel",
       metadata: { referrer_id: referral.invited_by, referred_user_id: userId, amount: rewardAmount, total_amount: finalReferralRewardAmount, milestones: milestones.length, team_id: team?.team_id || team?.id || null },
     });
-    return { paid: true, amount: rewardAmount, referral_id: referral.id };
+    return { paid: rewardAmount > 0, amount: rewardAmount, referral_id: referral.id };
   } catch (error) {
     await conn.rollback();
     throw error;
@@ -1628,7 +1648,7 @@ async function settleUserDailyMilestone(
        WHERE user_id = ? AND reward_type = ? AND status = 'pending'`,
       [runId, userId, rewardType]
     );
-    await conn.query("UPDATE users SET balance_available = balance_available + ? WHERE id = ?", [amount, userId]);
+    await withFinancialPostingContext(conn, {sourceKey:`referral:sprint:${runId}:${userId}:${rewardType}`,sourceSystem:"referral_sprint",sourceRecordId:String(runId),policyVersion:"historical-referral-sprint-v1"}, () => conn.query("UPDATE users SET balance_available = balance_available + ? WHERE id = ?", [amount, userId]));
     await rebuildReferralEarningsCache(conn, userId);
   }
 
@@ -1729,7 +1749,7 @@ async function settleTeamSprintRewards(
            WHERE user_id = ? AND reward_type = ? AND status = 'pending'`,
           [runId, userId, rewardType]
         );
-        await conn.query("UPDATE users SET balance_available = balance_available + ? WHERE id = ?", [amount, userId]);
+        await withFinancialPostingContext(conn, {sourceKey:`referral:sprint:${runId}:${userId}:${rewardType}`,sourceSystem:"referral_sprint",sourceRecordId:String(runId),policyVersion:"historical-referral-sprint-v1"}, () => conn.query("UPDATE users SET balance_available = balance_available + ? WHERE id = ?", [amount, userId]));
         await rebuildReferralEarningsCache(conn, userId);
       }
       const inserted = await insertSettlementHistory(conn, {
@@ -1775,7 +1795,7 @@ async function settleCappedLedgerRows(conn: PoolConnection, userId: number, runI
       `UPDATE referral_reward_ledger SET settled_amount=settled_amount+?,status=?,settlement_run_id=?,settled_at=CASE WHEN ? THEN NOW() ELSE settled_at END WHERE id=?`,
       [settled, complete ? "paid" : "pending", runId, complete ? 1 : 0, row.id]
     );
-    await conn.query("UPDATE users SET balance_available=balance_available+? WHERE id=?", [settled, userId]);
+    await withFinancialPostingContext(conn, {sourceKey:`referral:pending:${row.id}:${runId}`,sourceSystem:"referral_pending_reward",sourceRecordId:String(row.id),policyVersion:"historical-referral-reward-v1"}, () => conn.query("UPDATE users SET balance_available=balance_available+? WHERE id=?", [settled, userId]));
     await rebuildReferralEarningsCache(conn, userId);
     paidUnits += settledUnits;
     if (complete && row.source_type === "sprint_winner") {
@@ -1801,6 +1821,7 @@ async function settleCappedLedgerRows(conn: PoolConnection, userId: number, runI
 }
 
 export async function settlePendingReferralRewards(input: { settlementDate?: string; actorId?: number | null } = {}) {
+  if (!legacyReferralRewardsEnabled()) return { skipped: true, reason: "legacy_referral_rewards_retired" };
   const settings = await getSettings();
   if (!input.settlementDate && !(await settlementTimeReached(settings))) {
     return { skipped: true, reason: "before_configured_settlement_time" };
@@ -2118,6 +2139,7 @@ export async function getAdminReferralGrowthData() {
 // was never paid because it predates the fix wiring awardEligibleUserMilestones into the
 // live verification flow (or because the milestone was configured/edited afterwards).
 export async function backfillUserMilestones(actorId?: number | null) {
+  if (!legacyReferralRewardsEnabled()) return { users_checked: 0, users_awarded: 0, milestones_awarded: 0, disabled: true };
   const settings = await getSettings();
   const growthEnabled = sprintEnabled(settings);
   const activeSprint = growthEnabled ? await ensureActiveReferralSprint() : null;

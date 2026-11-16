@@ -1,4 +1,7 @@
 import { rebuildReferralEarningsCache } from "./paidReferralEarnings.ts";
+import { createHash } from "node:crypto";
+import type { PoolConnection } from "mysql2/promise";
+import { withFinancialPostingContext } from "./financialPostingContext.ts";
 
 type Result = { affectedRows: number; insertId?: number };
 export type Tx = { query: (sql: string, params?: unknown[]) => Promise<[any, unknown?]> };
@@ -53,7 +56,13 @@ export async function reconcileInvalidReferralRewards(conn: Tx, userId: number, 
     }
   }
 
-  const [updatedUser] = await conn.query("UPDATE users SET balance_available=? WHERE id=? AND balance_available=?", [decimal(running), userId, user.balance_available]);
+  const sourceDigest = createHash("sha256").update(reversedRewardIds.join(",")).digest("hex");
+  const [updatedUser] = await withFinancialPostingContext(conn as unknown as PoolConnection, {
+    sourceKey: `referral:invalid-reconciliation:${userId}:${sourceDigest}`,
+    sourceSystem: "referral_reconciliation",
+    sourceRecordId: String(userId),
+    policyVersion: "referral-invalid-reversal-v1",
+  }, () => conn.query("UPDATE users SET balance_available=? WHERE id=? AND balance_available=?", [decimal(running), userId, user.balance_available]));
   if ((updatedUser as Result).affectedRows !== 1) throw new Error("user_balance_state_changed");
   const paidTotal = await rebuildReferralEarningsCache(conn, userId);
 

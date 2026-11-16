@@ -79,6 +79,10 @@ type AdvertiserStats = {
   advertiser_trust_level?: string;
   advertiser_trust_label?: string;
   recent_campaigns: AdvertiserCampaign[];
+  is_official_ai_advertiser?: boolean;
+  official_ai_total_spend?: string;
+  official_ai_today_spend?: string;
+  official_ai_month_spend?: string;
 };
 
 const CAMPAIGN_TYPE_ICONS: Record<string, typeof Tv> = {
@@ -267,7 +271,7 @@ export default function AdvertiserDashboard() {
           </div>
         )}
 
-        {balance && balance.available < 2 && !lowBalanceDismissed && (
+        {balance && balance.available < 2 && !lowBalanceDismissed && !stats.is_official_ai_advertiser && (
           <div role="status" className="flex flex-col gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-950 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <p className="text-sm font-bold">{t("advertiser.dashboard.lowBalanceTitle")}</p>
@@ -280,17 +284,36 @@ export default function AdvertiserDashboard() {
           </div>
         )}
 
-        {/* Balance Section */}
+        {/* Balance Section / Total Spend Section */}
         {!loadError && <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="flex items-center justify-between rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
             <div className="space-y-1">
-              <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{t("advertiser.dashboard.adBalance")}</p>
-              {balance ? <p className="text-3xl font-black text-slate-900">${balance.available.toFixed(2)}</p> : <div className="h-9 w-32 animate-pulse rounded-lg bg-slate-100" />}
-              {balanceError && <button onClick={fetchBalance} className="text-xs font-bold text-blue-600">{t("common.retry")}</button>}
-              <div className="flex items-center gap-1.5 pt-1">
-                <div className="w-2 h-2 bg-emerald-500 rounded-full" />
-                <span className="text-xs font-medium text-slate-400">{t("advertiser.dashboard.availableForSpend")}</span>
-              </div>
+              {stats.is_official_ai_advertiser ? (
+                <>
+                  <div className="flex items-center gap-2">
+                    <span className="rounded bg-indigo-50 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-indigo-700">Official AI Advertiser</span>
+                  </div>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">TOTAL SPEND</p>
+                  <p className="text-3xl font-black text-slate-900">
+                    {stats.official_ai_total_spend || "0.0000"} <span className="text-lg font-bold text-slate-500">USDT</span>
+                  </p>
+                  <div className="flex items-center gap-2 pt-1 text-xs text-slate-500">
+                    <span>Today: <strong className="text-slate-800 font-mono">{stats.official_ai_today_spend || "0.0000"} USDT</strong></span>
+                    <span>•</span>
+                    <span>This Month: <strong className="text-slate-800 font-mono">{stats.official_ai_month_spend || "0.0000"} USDT</strong></span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{t("advertiser.dashboard.adBalance")}</p>
+                  {balance ? <p className="text-3xl font-black text-slate-900">${balance.available.toFixed(2)}</p> : <div className="h-9 w-32 animate-pulse rounded-lg bg-slate-100" />}
+                  {balanceError && <button onClick={fetchBalance} className="text-xs font-bold text-blue-600">{t("common.retry")}</button>}
+                  <div className="flex items-center gap-1.5 pt-1">
+                    <div className="w-2 h-2 bg-emerald-500 rounded-full" />
+                    <span className="text-xs font-medium text-slate-400">{t("advertiser.dashboard.availableForSpend")}</span>
+                  </div>
+                </>
+              )}
             </div>
             <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-600">
               <Wallet size={32} />

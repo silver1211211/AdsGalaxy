@@ -1,6 +1,9 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME === "edge") return;
 
+  const { installPlatformTelegramCoordinator } = await import('./lib/telegramRequestCoordinator');
+  installPlatformTelegramCoordinator();
+
   const { validateProductionStartupEnvironment } = await import("./lib/productionStartupValidation");
   validateProductionStartupEnvironment();
 

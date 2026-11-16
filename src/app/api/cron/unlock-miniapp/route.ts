@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "@/lib/db";
+import { isZeroOrdinaryLockEnabled } from "@/lib/earnings";
+import { withFinancialPostingContext } from "@/lib/financialPostingContext";
 import { acquireCronLock, releaseCronLock, requireCronSecret } from "@/lib/cronSecurity";
 
 export const dynamic = "force-dynamic";
@@ -19,6 +21,7 @@ function toNumber(value: unknown) {
 export async function GET(_req: NextRequest) {
   const unauthorized = requireCronSecret(_req);
   if (unauthorized) return unauthorized;
+  if (isZeroOrdinaryLockEnabled()) return NextResponse.json({ success: true, message: "Ordinary earnings are available immediately; legacy unlock is retired" });
 
   const lock = await acquireCronLock("unlock-miniapp", 1800);
   if (!lock) {
@@ -69,14 +72,19 @@ export async function GET(_req: NextRequest) {
             continue;
           }
 
-          const [balanceResult] = await conn.query<ResultSetHeader>(
+          const [balanceResult] = await withFinancialPostingContext(conn, {
+            sourceKey: `miniapp:external:${lockedSettlement.id}:unlock`,
+            sourceSystem: "miniapp_external_unlock",
+            sourceRecordId: String(lockedSettlement.id),
+            policyVersion: "legacy-30-day-unlock",
+          }, () => conn.query<ResultSetHeader>(
             `UPDATE users
              SET balance_locked = balance_locked - ?,
                  balance_available = balance_available + ?
              WHERE id = ?
                AND balance_locked >= ?`,
             [amount, amount, lockedSettlement.user_id, amount]
-          );
+          ));
 
           if (balanceResult.affectedRows !== 1) {
             await conn.rollback();

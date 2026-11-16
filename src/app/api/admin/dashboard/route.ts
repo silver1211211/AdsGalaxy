@@ -45,7 +45,12 @@ export async function GET(request: Request) {
       pool.query(`SELECT COUNT(*) AS total,
         SUM(created_at >= CURDATE()) AS today,
         SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)) AS week,
-        SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)) AS month FROM users`),
+        SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)) AS month,
+        COUNT(DISTINCT CASE 
+          WHEN (official_bot_started_at >= DATE_SUB(NOW(), INTERVAL 30 DAY))
+            OR (last_active_at >= DATE_SUB(NOW(), INTERVAL 30 DAY))
+            OR (created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY))
+          THEN id END) AS monthly_users FROM users`),
       pool.query(`SELECT c.status, COUNT(*) as count FROM campaigns c WHERE ${mainCampaignScopeSql("c")} GROUP BY c.status`),
       pool.query(`SELECT SUM(c.status = 'pending' AND c.type != 'broadcast') AS channel_pending, SUM(c.status = 'pending' AND c.type = 'broadcast') AS bot_pending FROM campaigns c WHERE ${mainCampaignScopeSql("c")}`),
       pool.query("SELECT status, COUNT(*) as count FROM miniapp_rewarded_campaigns GROUP BY status"),
@@ -90,6 +95,7 @@ export async function GET(request: Request) {
     const usersToday = { count: Number(usersAggregate.today || 0) };
     const usersWeek = { count: Number(usersAggregate.week || 0) };
     const usersMonth = { count: Number(usersAggregate.month || 0) };
+    const usersMonthly = { count: Number(usersAggregate.monthly_users || 0) };
     const campaignsStats = campaignsQuery.reduce((acc: any, row: any) => ({ ...acc, [row.status]: row.count }), {});
     const miniappCampaignsStats = miniappCampaignsQuery.reduce((acc: any, row: any) => ({ ...acc, [row.status]: row.count }), {});
     const standardCampaignTotal = Object.values(campaignsStats).reduce((sum: number, value: any) => sum + Number(value || 0), 0);
@@ -130,7 +136,8 @@ export async function GET(request: Request) {
         total: usersTotal.count,
         today: usersToday.count,
         week: usersWeek.count,
-        month: usersMonth.count
+        month: usersMonth.count,
+        monthly_users: usersMonthly.count
       },
       campaigns: {
         pending: Number(campaignsStats.pending || 0) + Number(miniappCampaignsStats.pending || 0),

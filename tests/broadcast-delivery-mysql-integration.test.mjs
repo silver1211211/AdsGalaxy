@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
+import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import mysql from "mysql2/promise";
-import "./reward-callback-production-loader.mjs";
+import "./broadcast-test-loader.mjs";
 
 const rawUrl = process.env.ADSGALAXY_BROADCAST_TEST_DATABASE_URL;
 if (!rawUrl) throw new Error("ADSGALAXY_BROADCAST_TEST_DATABASE_URL is required");
@@ -21,10 +22,26 @@ let publisherId;
 let campaignId;
 let botId;
 let botUserId;
+const testAccessUrl = new URL('../src/app/api/cron/process-broadcast/route.test-access.ts', import.meta.url);
+const settlementTestAccessUrl = new URL('../src/app/api/cron/settle-broadcast-publishers/route.test-access.ts', import.meta.url);
+const payout = { advertiserDebit: 1, publisherReward: 0.3, reserveAmount: 0.1, platformRevenue: 0.6 };
+let recipientSequence=0;
+async function newRecipient() {
+  const chatId=String(1000000000000000+Date.now()*1000+(++recipientSequence));
+  const [result]=await pool.query(`INSERT INTO bot_users (bot_id,chat_id,is_active,status,source,integration_first_seen_at)
+    VALUES (?,?,TRUE,'active','integration',NOW())`,[botId,chatId]);
+  return {id:result.insertId,chat_id:chatId};
+}
 
 before(async () => {
-  services = await import("../src/app/api/cron/process-broadcast/route.ts");
-  settlement = await import("../src/app/api/cron/settle-broadcast-publishers/route.ts");
+  // Load the actual route implementation with private helpers exposed only in
+  // this disposable fixture. Next route exports remain unchanged.
+  writeFileSync(testAccessUrl, readFileSync(new URL('../src/app/api/cron/process-broadcast/route.ts',import.meta.url),'utf8')+
+    '\nexport { reserveBroadcastDelivery, finalizeBroadcastDelivery, refundBroadcastReservation };\n');
+  services = await import(testAccessUrl.href);
+  writeFileSync(settlementTestAccessUrl, readFileSync(new URL('../src/app/api/cron/settle-broadcast-publishers/route.ts',import.meta.url),'utf8')+
+    '\nexport { settleBroadcastPublisherDelivery };\n');
+  settlement = await import(settlementTestAccessUrl.href);
   audience = await import("../src/lib/botAudience.ts");
   const [advertiser] = await pool.query(
     "INSERT INTO users (telegram_id,username,ad_balance) VALUES (?,?,?)",
@@ -37,8 +54,8 @@ before(async () => {
   );
   publisherId = publisher.insertId;
   const [campaign] = await pool.query(
-    `INSERT INTO campaigns (user_id,name,type,budget,total_budget,cpm,category,continents,status)
-     VALUES (?,?, 'broadcast',1,1,1000,'tech','["NA"]','active')`,
+    `INSERT INTO campaigns (user_id,name,message_text,link,button_text,type,budget,total_budget,cpm,category,continents,status)
+     VALUES (?,?, 'Test broadcast','https://example.invalid/ad','Open','broadcast',1,1,1000,'tech','["NA"]','active')`,
     [advertiserId, `${prefix}_campaign`],
   );
   campaignId = campaign.insertId;
@@ -50,14 +67,16 @@ before(async () => {
   );
   botId = bot.insertId;
   const [botUser] = await pool.query(
-    `INSERT INTO bot_users (bot_id,user_id,chat_id,is_active,status,source,integration_first_seen_at)
-     VALUES (?,?,?,TRUE,'active','integration',NOW())`,
-    [botId, `${prefix}_recipient`, `93${Date.now()}`],
+    `INSERT INTO bot_users (bot_id,chat_id,is_active,status,source,integration_first_seen_at)
+     VALUES (?,?,TRUE,'active','integration',NOW())`,
+    [botId, `93${Date.now()}`],
   );
   botUserId = botUser.insertId;
 });
 
 after(async () => {
+  try { unlinkSync(testAccessUrl); } catch {}
+  try { unlinkSync(settlementTestAccessUrl); } catch {}
   await pool.query("DELETE FROM broadcast_deliveries WHERE campaign_id=?", [campaignId]);
   await pool.query("DELETE FROM bot_users WHERE bot_id=?", [botId]);
   await pool.query("DELETE FROM bots WHERE id=?", [botId]);
@@ -101,7 +120,7 @@ test("successful production reservation debits once and finalizes one earning", 
     campaign: { id: campaignId },
     bot: { id: botId },
     user: { id: botUserId, chat_id: `93${Date.now()}` },
-    cost: 1,
+    cost: 1, payout,
   };
   const reserved = await services.reserveBroadcastDelivery(input, pool);
   assert.equal(reserved.ok, true);
@@ -110,7 +129,7 @@ test("successful production reservation debits once and finalizes one earning", 
     campaign: input.campaign,
     bot: input.bot,
     user: input.user,
-    payout: { publisherReward: 0.3, reserveAmount: 0.1, platformRevenue: 0.6 },
+    payout,
     attempts: 1,
   }, pool);
   const [rows] = await pool.query("SELECT status,cost,publisher_reward FROM broadcast_deliveries WHERE id=?", [reserved.deliveryId]);
@@ -121,8 +140,9 @@ test("successful production reservation debits once and finalizes one earning", 
 
 test("terminal failure refunds exactly once", async () => {
   await pool.query("UPDATE campaigns SET budget=1,status='active',pause_reason=NULL WHERE id=?", [campaignId]);
+  const recipient=await newRecipient();
   const reserved = await services.reserveBroadcastDelivery({
-    campaign: { id: campaignId }, bot: { id: botId }, user: { id: botUserId, chat_id: "94001" }, cost: 1,
+    campaign: { id: campaignId }, bot: { id: botId }, user: recipient, cost: 1, payout,
   }, pool);
   const first = await services.refundBroadcastReservation({
     deliveryId: reserved.deliveryId, campaignId, failureReason: "telegram_timeout", telegramError: "timeout", attempts: 3,
@@ -138,10 +158,11 @@ test("terminal failure refunds exactly once", async () => {
 
 test("simultaneous final-budget reservations allow exactly one debit", async () => {
   await pool.query("UPDATE campaigns SET budget=1,status='active',pause_reason=NULL WHERE id=?", [campaignId]);
-  const make = (chat) => services.reserveBroadcastDelivery({
-    campaign: { id: campaignId }, bot: { id: botId }, user: { id: botUserId, chat_id: chat }, cost: 1,
+  const recipients=await Promise.all([newRecipient(),newRecipient()]);
+  const make = (recipient) => services.reserveBroadcastDelivery({
+    campaign: { id: campaignId }, bot: { id: botId }, user: recipient, cost: 1, payout,
   }, pool);
-  const outcomes = await Promise.all([make("95001"), make("95002")]);
+  const outcomes = await Promise.all(recipients.map(make));
   assert.equal(outcomes.filter((item) => item.ok).length, 1);
   const [[campaign]] = await pool.query("SELECT budget FROM campaigns WHERE id=?", [campaignId]);
   assert.equal(Number(campaign.budget), 0);
@@ -159,7 +180,7 @@ test("publisher settlement is idempotent and failed deliveries are not settled",
   const [[publisher]] = await pool.query("SELECT balance_available FROM users WHERE id=?", [publisherId]);
   assert.equal(Number(publisher.balance_available), 0.3);
   const [[failed]] = await pool.query(
-    "SELECT id FROM broadcast_deliveries WHERE campaign_id=? AND status='failed' ORDER BY id DESC LIMIT 1",
+    "SELECT id FROM broadcast_deliveries WHERE campaign_id=? AND status='failed_final' ORDER BY id DESC LIMIT 1",
     [campaignId],
   );
   assert.equal((await settlement.settleBroadcastPublisherDelivery(failed.id, pool)).settled, false);

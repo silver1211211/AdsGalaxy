@@ -1,3 +1,4 @@
+import { recordChannelStatusTransitionAudit } from "./channelStatusAudit";
 import pool from "@/lib/db";
 import { getMtprotoChannelMemberCount, type ChannelMemberCountResult } from "@/lib/telegramMtproto";
 import { authoritativeMemberCount, canAutoRestore, parseFloodWait, thresholdTransition } from "@/lib/channelRefreshPolicy";
@@ -96,30 +97,115 @@ export async function refreshSubscriberChannel(channel: any, minimum: number, no
     return { status: "failed", code: failureCode, failureClass, nextRetryAt: retry };
   }
 
-  const previousBelowSince = channel.below_minimum_since ? new Date(channel.below_minimum_since) : null;
-  const mayRestore = canAutoRestore(channel, now);
-  const transition = thresholdTransition({ count: result.count, minimum, belowSince: previousBelowSince, lowChecks: Number(channel.below_minimum_success_count || 0), now, canRestore: mayRestore });
-  const pause = transition.action === "pause" || transition.action === "review";
-  const restore = transition.action === "restore";
-  const nextStatus = pause ? "paused" : restore ? "active" : String(channel.status);
   const run = deps.transaction || (async <T>(work: (query: Query) => Promise<T>) => work(deps.query));
 
+  let finalAction = "none";
   await run(async (query) => {
+    let freshChannel = channel;
+    try {
+      const rows: any = await query(
+        `SELECT c.*, u.status AS publisher_status, COALESCE(u.is_banned, 0) AS publisher_is_banned,
+                ti.verification_state, ti.bot_member_status, ti.bot_can_post, ti.next_retry_at
+         FROM channels c
+         LEFT JOIN users u ON u.id = c.user_id
+         LEFT JOIN channel_telegram_identities ti ON ti.channel_id = c.id
+         WHERE c.id = ? FOR UPDATE`,
+        [channel.id],
+      );
+      const rowList = Array.isArray(rows) && Array.isArray(rows[0]) ? rows[0] : (Array.isArray(rows) ? rows : []);
+      if (rowList[0]) {
+        freshChannel = { ...channel, ...rowList[0] };
+      }
+    } catch {
+      // Graceful fallback for mock query implementations
+    }
+
+    const currentStatus = String(freshChannel.status || channel.status || "");
+    const previousBelowSince = freshChannel.below_minimum_since ? new Date(freshChannel.below_minimum_since) : null;
+    const mayRestore = canAutoRestore(freshChannel, now);
+    const transition = thresholdTransition({
+      count: result.count,
+      minimum,
+      belowSince: previousBelowSince,
+      lowChecks: Number(freshChannel.below_minimum_success_count || 0),
+      now,
+      canRestore: mayRestore,
+    });
+    finalAction = transition.action;
+
+    const willPause = (transition.action === "pause" || transition.action === "review") && currentStatus === "active";
+    const willRestore = transition.action === "restore" && currentStatus === "paused" && mayRestore;
+    const nextStatus = willPause ? "paused" : willRestore ? "active" : currentStatus;
+    const statusChanged = nextStatus !== currentStatus;
+    const newVersion = statusChanged ? Number(freshChannel.telegram_access_version || 0) + 1 : Number(freshChannel.telegram_access_version || 0);
+
     await query(
-      `UPDATE channels SET subscriber_count=?,last_subscriber_update_at=?,subscribers_last_success_at=?,subscribers_last_attempt_at=?,subscribers_next_retry_at=NULL,subscribers_fetch_status='success',subscribers_fetch_error_code=NULL,subscribers_consecutive_failures=0,below_minimum_since=?,below_minimum_success_count=?,below_minimum_review_required=?,below_minimum_review_required_at=CASE WHEN ? THEN COALESCE(below_minimum_review_required_at,?) ELSE NULL END,status=CASE WHEN ? THEN 'paused' WHEN ? THEN 'active' ELSE status END,monetization_paused_reason=CASE WHEN ? THEN 'below_minimum' WHEN ? THEN NULL ELSE monetization_paused_reason END,monetization_auto_paused_at=CASE WHEN ? THEN COALESCE(monetization_auto_paused_at,?) ELSE monetization_auto_paused_at END,monetization_auto_restored_at=CASE WHEN ? THEN ? ELSE monetization_auto_restored_at END WHERE id=?`,
-      [result.count, now, now, now, transition.belowSince, transition.lowChecks, transition.reviewRequired, transition.reviewRequired, now, pause, restore, pause, restore, pause, now, restore, now, channel.id]
+      `UPDATE channels SET
+         subscriber_count=?,
+         last_subscriber_update_at=?,
+         subscribers_last_success_at=?,
+         subscribers_last_attempt_at=?,
+         subscribers_next_retry_at=NULL,
+         subscribers_fetch_status='success',
+         subscribers_fetch_error_code=NULL,
+         subscribers_consecutive_failures=0,
+         below_minimum_since=?,
+         below_minimum_success_count=?,
+         below_minimum_review_required=?,
+         below_minimum_review_required_at=CASE WHEN ? THEN COALESCE(below_minimum_review_required_at,?) ELSE NULL END,
+         status=CASE WHEN ? THEN 'paused' WHEN ? THEN 'active' ELSE status END,
+         paused_by_actor=CASE WHEN ? THEN 'system_subscriber' WHEN ? THEN NULL ELSE paused_by_actor END,
+         monetization_paused_reason=CASE WHEN ? THEN 'below_minimum' WHEN ? THEN NULL ELSE monetization_paused_reason END,
+         monetization_auto_paused_at=CASE WHEN ? THEN COALESCE(monetization_auto_paused_at,?) ELSE monetization_auto_paused_at END,
+         monetization_auto_restored_at=CASE WHEN ? THEN ? ELSE monetization_auto_restored_at END,
+         telegram_access_version=CASE WHEN ? THEN COALESCE(telegram_access_version,0)+1 ELSE telegram_access_version END
+       WHERE id=?`,
+      [
+        result.count, now, now, now,
+        transition.belowSince, transition.lowChecks, transition.reviewRequired, transition.reviewRequired, now,
+        willPause, willRestore,
+        willPause, willRestore,
+        willPause, willRestore,
+        willPause, now,
+        willRestore, now,
+        statusChanged,
+        channel.id,
+      ]
     );
+
+    if (statusChanged) {
+      await recordChannelStatusTransitionAudit({ query }, {
+        channelId: Number(channel.id),
+        telegramChatId: channel.chat_id,
+        previousStatus: currentStatus,
+        newStatus: nextStatus,
+        transitionedAt: now,
+        sourceWorker: "subscriber_refresh",
+        reasonCode: willPause ? "subscriber_below_minimum" : "subscriber_restored_above_minimum",
+        reasonText: willPause
+          ? `Subscriber count (${result.count}) remained below minimum (${minimum}) across confirmed checks.`
+          : `Subscriber count (${result.count}) recovered to at least ${minimum}.`,
+        evidenceClassification: willPause ? "permanent" : "recovery",
+        verificationAttemptRef: `subscribers:${result.count}`,
+        actorType: "system",
+        transitionIntent: "automatic",
+        verificationVersion: newVersion,
+        recoveryAction: willRestore ? "auto_restore_above_minimum" : null,
+        recoveryOutcome: willRestore ? "restored_active" : null,
+        metadata: { subscriber_count: result.count, min_subscribers: minimum },
+      });
+    }
 
     if (["grace", "pause", "review"].includes(transition.action)) {
       const since = transition.belowSince || now;
       const reason = transition.action === "grace" ? "BELOW_MINIMUM_GRACE_STARTED" : transition.action === "pause" ? "BELOW_MINIMUM_AUTO_PAUSED" : "BELOW_MINIMUM_SEVEN_DAY_REVIEW";
-      await insertTransitionAudit(query, { channel, previousStatus: String(channel.status), newStatus: nextStatus, reasonCode: reason, count: result.count, minimum, belowSince: since, idempotencyKey: `channel-subscriber-${transition.action}:${channel.id}:${transitionKeyPart(since)}` });
+      await insertTransitionAudit(query, { channel, previousStatus: currentStatus, newStatus: nextStatus, reasonCode: reason, count: result.count, minimum, belowSince: since, idempotencyKey: `channel-subscriber-${transition.action}:${channel.id}:${transitionKeyPart(since)}` });
     }
     if (previousBelowSince && result.count >= minimum) {
       const recoveryBase = `channel-subscriber-recovery:${channel.id}:${transitionKeyPart(previousBelowSince)}`;
-      await insertTransitionAudit(query, { channel, previousStatus: String(channel.status), newStatus: nextStatus, reasonCode: "BELOW_MINIMUM_RECOVERY_DETECTED", count: result.count, minimum, belowSince: previousBelowSince, idempotencyKey: recoveryBase });
-      await insertTransitionAudit(query, { channel, previousStatus: String(channel.status), newStatus: nextStatus, reasonCode: restore ? "BELOW_MINIMUM_AUTO_RESTORED" : "RESTORATION_WITHHELD_OTHER_RESTRICTION", count: result.count, minimum, belowSince: previousBelowSince, idempotencyKey: `${recoveryBase}:${restore ? "restored" : "withheld"}` });
+      await insertTransitionAudit(query, { channel, previousStatus: currentStatus, newStatus: nextStatus, reasonCode: "BELOW_MINIMUM_RECOVERY_DETECTED", count: result.count, minimum, belowSince: previousBelowSince, idempotencyKey: recoveryBase });
+      await insertTransitionAudit(query, { channel, previousStatus: currentStatus, newStatus: nextStatus, reasonCode: willRestore ? "BELOW_MINIMUM_AUTO_RESTORED" : "RESTORATION_WITHHELD_OTHER_RESTRICTION", count: result.count, minimum, belowSince: previousBelowSince, idempotencyKey: `${recoveryBase}:${willRestore ? "restored" : "withheld"}` });
     }
   });
-  return { status: transition.action, count: result.count };
+  return { status: finalAction, count: result.count };
 }

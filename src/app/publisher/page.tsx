@@ -4,7 +4,6 @@
 import React from "react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import {
-  Lock,
   Wallet,
   Tv,
   History,
@@ -189,8 +188,7 @@ export default function PublisherDashboard() {
   }
 
   const statCards = stats ? [
-    { label: t("publisher.dashboard.lockedBalance"), value: toFixedMoney(stats.balance_locked), icon: Lock, color: "text-amber-600", bg: "bg-amber-50" },
-    { label: t("publisher.dashboard.availableBalance"), value: toFixedMoney(stats.balance_available), icon: Wallet, color: "text-emerald-600", bg: "bg-emerald-50" },
+    { label: t("publisher.dashboard.availableBalance"), value: toFixedMoney(stats.balance_available), icon: Wallet, color: "text-emerald-600", bg: "bg-emerald-50", primary: true },
     { label: t("publisher.dashboard.monetized"), value: (stats.total_monetized ?? 0).toString(), icon: Tv, color: "text-emerald-600", bg: "bg-emerald-50" },
     { label: t("publisher.dashboard.lifetimeWithdrawn"), value: toFixedMoney(stats.total_withdrawn), icon: History, color: "text-emerald-600", bg: "bg-emerald-50" },
   ] : [];
@@ -344,12 +342,12 @@ export default function PublisherDashboard() {
         {/* Stats Grid */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
           {isLoading || loadError ? (
-            [1, 2, 3, 4].map((i) => (
+            [1, 2, 3].map((i) => (
               <div key={i} className="bg-white p-4 md:p-6 rounded-2xl border border-slate-100 shadow-sm animate-pulse h-32" />
             ))
           ) : (
             statCards.map((stat) => (
-              <div key={stat.label} className="group rounded-3xl border border-slate-100 bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-xl md:p-6">
+              <div key={stat.label} className={cn("group rounded-3xl border bg-white p-4 shadow-sm transition-all hover:shadow-lg md:p-6", stat.primary ? "col-span-2 border-blue-200 lg:col-span-2" : "border-slate-100")}>
                 <div className="flex items-center justify-between mb-4">
                   <div className={`rounded-2xl p-2 ring-1 ring-white md:p-3 ${stat.bg}`}>
                     <stat.icon className={stat.color} size={20} />
@@ -357,7 +355,7 @@ export default function PublisherDashboard() {
                 </div>
                 <div className="space-y-1">
                   <p className="text-[10px] md:text-sm font-medium text-slate-500 truncate">{stat.label}</p>
-                  <p className="text-sm md:text-2xl font-bold text-slate-900">{stat.value}</p>
+                  <p className={cn("font-bold text-slate-900", stat.primary ? "text-2xl md:text-4xl" : "text-sm md:text-2xl")}>{stat.value}</p>
                 </div>
               </div>
             ))

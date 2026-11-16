@@ -72,13 +72,42 @@ export async function aggregateChannelStatistics(requestedDate?: string): Promis
         statDate, statDate, statDate, statDate, statDate, statDate, statDate, today]
     );
 
+    // Recompute absolute publisher credits from distinct legacy and canonical
+    // settlement sources; repeat aggregation assigns the same totals.
+    await connection.query(
+      `UPDATE channel_post_daily_stats ps
+       LEFT JOIN (
+         SELECT post_id, SUM(view_credit) view_credit, SUM(click_credit) click_credit
+         FROM (
+           SELECT post_id, publisher_reward view_credit, 0 click_credit
+           FROM ad_settlements_views WHERE fraud_adjusted_at IS NULL
+             AND created_at>=? AND created_at<DATE_ADD(?,INTERVAL 1 DAY)
+           UNION ALL
+           SELECT post_id, 0, publisher_reward
+           FROM ad_settlements WHERE fraud_adjusted_at IS NULL
+             AND created_at>=? AND created_at<DATE_ADD(?,INTERVAL 1 DAY)
+           UNION ALL
+           SELECT post_id,
+             CASE WHEN settlement_type IN ('cpm_view','cpc_zero_click_advance') THEN publisher_credit ELSE 0 END,
+             CASE WHEN settlement_type='cpc_click' THEN publisher_credit ELSE 0 END
+           FROM channel_unified_settlement_events WHERE status='settled'
+             AND created_at>=? AND created_at<DATE_ADD(?,INTERVAL 1 DAY)
+         ) credits GROUP BY post_id
+       ) ledger ON ledger.post_id=ps.post_id
+       SET ps.view_earnings=COALESCE(ledger.view_credit,0),
+           ps.click_earnings=COALESCE(ledger.click_credit,0),
+           ps.earnings=COALESCE(ledger.view_credit,0)+COALESCE(ledger.click_credit,0)
+       WHERE ps.stat_date=?`,
+      [statDate,statDate,statDate,statDate,statDate,statDate,statDate]
+    );
+
     await connection.query(
       `UPDATE channel_post_daily_stats ps
        LEFT JOIN (
          SELECT post_id, SUM(view_spend) AS view_spend, SUM(click_spend) AS click_spend
          FROM (
-           SELECT post_id,CASE WHEN billable_views>0 OR subscribers>0 THEN spend ELSE 0 END view_spend,
-             CASE WHEN billable_clicks>0 THEN spend ELSE 0 END click_spend
+           SELECT post_id,CASE WHEN billable_views>0 OR subscribers>0 THEN financial.spend ELSE 0 END view_spend,
+             CASE WHEN billable_clicks>0 THEN financial.spend ELSE 0 END click_spend
            FROM (${channelFinancialEventsSql()}) financial JOIN campaigns c ON c.id=financial.campaign_id
            WHERE event_at >= ? AND event_at < DATE_ADD(?, INTERVAL 1 DAY) AND COALESCE(c.teaser_mode,'none')='none'
            UNION ALL

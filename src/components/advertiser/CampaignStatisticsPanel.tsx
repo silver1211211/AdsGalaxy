@@ -11,6 +11,7 @@ type RangeKey = "today" | "yesterday" | "7d" | "14d" | "30d" | "custom";
 type CampaignType = "views" | "clicks";
 type MetricSummary = { views: number; clicks: number; ctr: number; spend: number; conversion_rate?: number; billable_views?: number; effective_cps?: number };
 type CampaignStatistics = {
+  smart_reach?: {click_spend:string;impression_spend:string;effective_cpm:string;maximum_cpm:string}|null;
   campaign_type: CampaignType;
   billing_model?: "cpm" | "cpc" | "cps";
   primary_metric: "views" | "clicks";
@@ -247,11 +248,14 @@ export default function CampaignStatisticsPanel({ campaignId, campaignType, camp
             <MetricCard icon={primary === "views" ? MousePointer2 : Eye} label={t(`advertiser.statistics.${secondary}` as never)} value={count(totals?.[secondary])} />
             <MetricCard icon={TrendingUp} label={t("advertiser.statistics.ctr")} value={percent(totals?.ctr)} />
             <MetricCard icon={DollarSign} label={t("advertiser.statistics.spend")} value={money(totals?.spend)} tone="green" />
+            {data.smart_reach && <MetricCard icon={MousePointer2} label="Click spend" value={money(data.smart_reach.click_spend)} />}
+            {data.smart_reach && <MetricCard icon={Eye} label="Impression spend" value={money(data.smart_reach.impression_spend)} />}
             <MetricCard icon={TrendingUp} label={costLabel} value={costMoney(costValue)} />
             {campaignKind === "growth" && <MetricCard icon={TrendingUp} label="CR" value={percent(totals?.conversion_rate)} />}
             {campaignKind === "growth" && <MetricCard icon={Eye} label={t("advertiser.statistics.views")} value={count(totals?.views)} />}
             {data.billing_model === "cpm" && <MetricCard icon={Eye} label="Billable Impressions" value={count(totals?.billable_views)} />}
           </div>
+          {data.smart_reach && <p className="text-xs font-semibold text-sky-700">Impression charges are up to the active ${Number(data.smart_reach.effective_cpm).toFixed(2)} CPM (selected maximum ${Number(data.smart_reach.maximum_cpm).toFixed(2)}). Actual impression spend shows the amount charged; realized CPM can be lower near a publisher’s earnings cap.</p>}
 
           {!loading && data.data_available && data.daily_rows.some((row) => row.views > 0 || row.clicks > 0 || row.spend > 0) ? (
             <>

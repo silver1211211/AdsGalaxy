@@ -6,6 +6,7 @@ const audit=read("src/lib/campaignLifecycle.ts"), notify=read("src/lib/platformN
 const system=read("src/lib/systemLogs.ts"), mini=read("src/lib/miniappInternalAds.ts"), ext=read("src/lib/externalNetworkRevenueReconciliation.ts");
 const deposit=read("src/lib/depositAmountValidation.ts"), depositRoute=read("src/app/api/advertiser/deposits/route.ts");
 const click=read("src/app/api/clicks/[id]/[postId]/route.ts"), clickDest=read("src/lib/clickDestination.ts"), body=read("src/lib/requestBodyValidation.ts");
+const acceptedClick=read("src/lib/channelAcceptedEngagement.ts");
 const broadcast=read("src/app/api/cron/process-broadcast/route.ts"), campaign=read("src/app/api/advertiser/campaigns/route.ts");
 const cases = [
  ["A1 numeric entity",/Number\.isSafeInteger/.test(audit)], ["A2 string entity key",/entity_key/.test(audit)], ["A3 nullable entity",/entityId\?:/.test(audit)],
@@ -28,7 +29,7 @@ const cases = [
  ["C1 IDs parsed",/parsePositiveIntegerId/.test(click)], ["C2 malformed campaign safe",/Malformed campaign post click ids rejected/.test(click)],
  ["C3 malformed post safe",/!campaignId \|\| !postId/.test(click)], ["C4 missing IDs safe",/redirectToFallback/.test(click)],
  ["C5 relation joined",/JOIN campaign_posts/.test(click)], ["C6 javascript blocked",!/javascript:/.test(clickDest)], ["C7 https allowed",/https:/.test(clickDest)],
- ["C8 telegram allowed",/tg:/.test(clickDest)], ["C9 redirect preserved",/redirect preserved/.test(click)], ["C10 duplicate retained",/isNew: false/.test(click)],
+ ["C8 telegram allowed",/tg:/.test(clickDest)], ["C9 redirect preserved",/redirect preserved/.test(click)], ["C10 duplicate retained",/isNew: false/.test(acceptedClick)],
  ["F1 boundary accepted",/boundary=/.test(body)], ["F2 missing boundary 400",/Invalid multipart boundary/.test(body)], ["F3 malformed boundary",/boundary.length > 200/.test(body)],
  ["F4 unsupported 415",/status: 415/.test(body)], ["F5 oversized 413",/status: 413/.test(body)], ["F6 no stack response",!body.includes("stack")],
  ["X1 campaign guarded",/validateMultipartRequest/.test(campaign)], ["X2 canonical destination",/safeCampaignDestination/.test(click)], ["X3 provider amount guarded",/validateProviderPayAmount/.test(depositRoute)]

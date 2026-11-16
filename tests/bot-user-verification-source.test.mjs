@@ -12,6 +12,7 @@ const broadcast = read("src/app/api/cron/process-broadcast/route.ts");
 const migration = read("db/migrations/20260711_0102_bot_user_verification.sql");
 const deployment = read("deploy-vps.sh");
 const cleanup = read("src/lib/campaignPostDeletion.ts");
+const cleanupPolicy = read("src/lib/telegramCleanupPolicy.ts");
 const manualPopup = read("src/components/publisher/ManualAddUsersPopup.tsx");
 const botDetails = read("src/components/publisher/BotDetailsScreen.tsx");
 const publisherBots = read("src/app/api/publisher/bots/route.ts");
@@ -74,9 +75,10 @@ test("deployment applies verification schema and installs each managed recovery 
 test("campaign post deletion makes at most two attempts and bypasses permanent failures", () => {
   assert.match(cleanup, /const MAX_DELETE_ATTEMPTS = 2;/);
   assert.match(cleanup, /if \(!classification\.retryable\) break;/);
+  assert.match(cleanup, /classifyTelegramCleanupResult/);
   assert.match(cleanup, /for \(const post of posts\)[\s\S]*try \{[\s\S]*catch \(postErr/);
-  for (const permanentCode of ["MESSAGE_NOT_FOUND", "MESSAGE_CANT_BE_DELETED", "BOT_IS_NOT_MEMBER", "CHAT_ADMIN_REQUIRED", "CHAT_NOT_FOUND"]) {
-    assert.match(cleanup, new RegExp(`${permanentCode}[\\s\\S]*?retryable: false`));
+  for (const permanentCode of ["MESSAGE_NOT_FOUND", "MESSAGE_CANT_BE_DELETED", "BOT_IS_NOT_MEMBER", "CHAT_ADMIN_REQUIRED", "CHANNEL_ACCESS_LOST"]) {
+    assert.match(cleanupPolicy, new RegExp(`${permanentCode}[\\s\\S]*?false, true`));
   }
 });
 

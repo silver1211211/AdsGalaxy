@@ -46,6 +46,8 @@ test("7 success keeps claim and prevents a second reservation", async () => {
   let existing = null;
   let campaignPostInserts = 0;
   const conn = { query: async (sql) => {
+    if (sql.includes("SELECT status,link,approved_creative_revision_id FROM campaigns"))
+      return [[{status:'active',link:'https://approved.example',approved_creative_revision_id:1}]];
     if (sql.includes("SELECT sc.id")) return [[existing].filter(Boolean)];
     if (sql.includes("INSERT IGNORE INTO channel_schedule_slot_claims")) { existing = { id: 11, campaign_post_id: null, released_at: null, post_status: null, delivery_confirmed_at: null, delivery_failed_at: null }; return [{ affectedRows: 1, insertId: 11 }]; }
     if (sql.includes("SET delivery_claim_key=NULL")) return [{ affectedRows: 0 }];

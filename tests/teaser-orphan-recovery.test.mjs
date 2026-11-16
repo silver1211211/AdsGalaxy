@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const root="/www/wwwroot/bots/AdsFusion";
+const root=".";
 const [placement,cron,emergency,migration]=await Promise.all([
   readFile(`${root}/src/lib/teaserPlacement.ts`,"utf8"),
   readFile(`${root}/src/app/api/cron/teaser/route.ts`,"utf8"),
@@ -41,7 +41,9 @@ test("removal is durable, latest-snapshot-only, and idempotent",()=>{
   assert.match(cron,/status='already_absent'.*removed_at=COALESCE/s);
 });
 test("bounded per-item reconciliation and generic stale processing leases exist",()=>{
-  assert.match(cron,/const BATCH=25, RECONCILIATION_BATCH=10/);
+  assert.match(cron,/const BATCH=25, CLEANUP_BATCH=15, RECONCILIATION_BATCH=10/);
+  assert.match(cron,/LIMIT \${CLEANUP_BATCH}/);
+  assert.match(cron,/LIMIT \${BATCH-CLEANUP_BATCH}/);
   assert.match(cron,/for\(const row of rows\)\{try\{/);
   assert.match(cron,/console\.error\("teaser orphan reconciliation failed"/);
   assert.match(emergency,/status='processing',lease_until=DATE_ADD\(NOW\(\),INTERVAL 5 MINUTE\)/);

@@ -19,9 +19,10 @@ export async function reconcileChannelFinancialRollups(conn: PoolConnection, fro
     WHERE ps.post_id IS NULL`, [from,to]);
   let updated = 0;
   if (apply) {
+    // Inner join ensures we never zero-out historical analytics rows if events are partitioned or outside range
     const [result] = await conn.query<ResultSetHeader>(`UPDATE channel_post_daily_stats ps
-      JOIN campaigns c ON c.id=ps.campaign_id LEFT JOIN (${source}) f ON f.post_id=ps.post_id AND f.stat_date=ps.stat_date
-      SET ps.view_spend=COALESCE(f.view_spend,0),ps.click_spend=COALESCE(f.click_spend,0),ps.spend=COALESCE(f.spend,0)
+      JOIN campaigns c ON c.id=ps.campaign_id JOIN (${source}) f ON f.post_id=ps.post_id AND f.stat_date=ps.stat_date
+      SET ps.view_spend=f.view_spend,ps.click_spend=f.click_spend,ps.spend=f.spend
       WHERE ps.stat_date>=? AND ps.stat_date<=? AND COALESCE(c.teaser_mode,'none')='none'`,[from,to,from,to]);
     updated=result.affectedRows;
     await conn.query(`UPDATE channel_daily_stats ds JOIN (

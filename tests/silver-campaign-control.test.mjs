@@ -1,8 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-const read = (p) =>
-  fs.readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
+const read = (p) => {
+  const overrides = {
+    "src/app/api/admin/campaigns/[id]/actions/route.ts": "src/lib/campaignActionsHandler.ts",
+    "src/app/api/admin/campaigns/[id]/emergency-push/route.ts": "src/lib/campaignEmergencyPushHandler.ts",
+    "src/app/api/admin/campaigns/[id]/route.ts": "src/lib/campaignDetailsHandler.ts",
+    "src/app/admin/campaigns/page.tsx": "src/components/admin/AdminCampaignsView.tsx",
+  };
+  const target = overrides[p] || p;
+  return fs.readFileSync(new URL(`../${target}`, import.meta.url), "utf8");
+};
 
 test("Silver isolation is additive and preserves permanent campaign IDs", () => {
   const migration = read(
@@ -136,7 +144,7 @@ test("broadcast delivery honors Silver master pause before Telegram send", () =>
 });
 test("Silver list reuses the normal Admin campaign UI and keeps compact Release", () => {
   const ui = read("src/components/silver/SilverControlClient.tsx"),
-    adminUi = read("src/app/admin/campaigns/page.tsx"),
+    adminUi = read("src/components/admin/AdminCampaignsView.tsx"),
     list = read("src/app/api/check/silver/campaigns/route.ts");
   assert.match(list, /type_label/);
   assert.match(ui, /AdminCampaignsView silverMode/);

@@ -1,4 +1,4 @@
-import { handleCampaignAction } from "@/app/api/admin/campaigns/[id]/actions/route";
+import { handleCampaignAction } from "@/lib/campaignActionsHandler";
 import { handleSilverApiRequest } from "@/lib/silverCampaignControl";
 
 export async function POST(

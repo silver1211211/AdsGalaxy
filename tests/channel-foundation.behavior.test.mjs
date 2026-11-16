@@ -78,7 +78,7 @@ function fixture({ cap = 1, cps = 0.4, budget = 10, balance = 10, spent = 0, sta
     '@/lib/db': { getConnection: async () => conn }, '@/lib/channelDailySpend': dailySpend,
     '@/lib/channelDailyCap': capService, '@/lib/platformNotifications': notifications,
     '@/lib/publisherQuality': { getPublisherQuality: async () => ({ qualityWeight: 1 }) },
-    '@/lib/earnings': { creditUserLockedBalance: async () => true },
+    '@/lib/earnings': { creditSettledPublisherBalance: async () => true },
     '@/lib/channelAllocationLedger': { shadowWriteChannelAllocation: async () => {} },
     '@/lib/advertiserDirectDebit': { claimAdvertiserDirectDebit: async (_, x) => { state.balance -= x.amount; return { ok: true }; } },
   });
@@ -128,7 +128,7 @@ test('F/G: canonical SQL selects billed clear conversions and CPS as next unit',
   assert.match(dailySpend.channelNextUnitSql(), /channel_growth' THEN COALESCE\(c.cost_per_subscriber,0\)/);
 });
 test('I/J: both actual delivery branches create unique invite then construct tracked CTA', async () => {
-  for (const file of ['src/app/api/cron/process-ads/route.ts', 'src/app/api/admin/campaigns/[id]/emergency-push/route.ts']) {
+  for (const file of ['src/app/api/cron/process-ads/route.ts', 'src/lib/campaignEmergencyPushHandler.ts']) {
     const source = ts.createSourceFile(file, read(file), ts.ScriptTarget.Latest, true);
     let statements;
     function walk(node) {
@@ -207,6 +207,9 @@ test('K/L: real Growth click handler records analytics and preserves exact invit
   const route = load('src/app/api/clicks/[id]/[postId]/route.ts', {
     'next/server': { NextResponse: { redirect: url => ({ location: String(url) }) } },
     '@/lib/db': db, '@/lib/channelFastBilling': { debitChannelClick: async () => { debits++; } },
+    '@/lib/channelAcceptedEngagement': { acceptChannelCampaignClick: async (_db,input) => {
+      assert.equal(input.campaignId,9); assert.equal(input.postId,42); clicks++; return {id:7,isNew:true};
+    } },
     '@/lib/routeIds': { parsePositiveIntegerId: Number },
     '@/lib/clickDestination': { safeCampaignDestination: x => x },
     '@/lib/privateInviteLinkVault': { decryptPrivateInviteLink: x => x === 'cipher' ? invite : null },

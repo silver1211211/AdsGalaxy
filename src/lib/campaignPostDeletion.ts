@@ -183,6 +183,9 @@ async function fetchDeletionBatch(options: {
 
   if (options.retryOnly) {
     filters.push("(c.status <> 'paused' OR COALESCE(c.pause_reason, '') <> 'user_paused' OR c.channel_settlement_finalized_at IS NOT NULL)");
+    // Rejected edits require a fresh view/click settlement before each deletion
+    // attempt; the dedicated paused-campaign worker owns those placements.
+    filters.push("NOT (c.status='paused' AND c.pause_reason='moderation_cleanup')");
   }
 
   if (options.olderThan24Hours) {
@@ -299,6 +302,7 @@ async function markCleanupPending(postId: number, columns: CampaignPostColumns) 
 
 async function recordDeleteSuccess(postId: number, attemptsUsed: number, columns: CampaignPostColumns, status: "deleted" | "replaced" | "already_missing") {
   const updates = ["status = ?"];
+  updates.push("billing_cutoff_at = COALESCE(billing_cutoff_at,NOW(6))");
   const params: Array<number | string> = [];
   params.push(status);
 
@@ -322,7 +326,22 @@ async function recordDeleteSuccess(postId: number, attemptsUsed: number, columns
   if (columns.hasCleanupError) updates.push("cleanup_error = NULL");
 
   params.push(postId);
-  await pool.query(`UPDATE campaign_posts SET ${updates.join(", ")} WHERE id = ?`, params);
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [[identity]] = await conn.query<Array<RowDataPacket & {campaign_id:number}>>(
+      'SELECT campaign_id FROM campaign_posts WHERE id=?',[postId]);
+    if (!identity) throw new Error('campaign_post_missing_during_delete_confirmation');
+    // Match click acceptance and billing lock order. NOW(6) is evaluated only
+    // after both locks are acquired, not when a waiting UPDATE first starts.
+    await conn.query('SELECT id FROM campaigns WHERE id=? FOR UPDATE',[identity.campaign_id]);
+    await conn.query('SELECT id FROM campaign_posts WHERE id=? FOR UPDATE',[postId]);
+    await conn.query(`UPDATE campaign_posts SET ${updates.join(", ")} WHERE id = ?`, params);
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback().catch(() => undefined);
+    throw error;
+  } finally { conn.release(); }
 }
 
 async function recordDeleteFailure(
@@ -658,6 +677,7 @@ export async function deleteActiveCampaignPosts(campaignId: number | string) {
 export async function deleteAllCampaignPostsForLifecycle(campaignId: number | string) {
   const columns = await getCampaignPostDeletionColumns();
   const noMessageUpdates = ["status='deleted'"];
+  noMessageUpdates.push("billing_cutoff_at=COALESCE(billing_cutoff_at,NOW(6))");
   if (columns.hasDeletedAt) noMessageUpdates.push("deleted_at=COALESCE(deleted_at,NOW())");
   if (columns.hasCleanupAttemptedAt) noMessageUpdates.push("cleanup_attempted_at=NOW()");
   if (columns.hasCleanupStatus) noMessageUpdates.push("cleanup_status='success'");

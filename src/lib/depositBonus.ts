@@ -1,6 +1,7 @@
 import type { Pool, PoolConnection, RowDataPacket } from "mysql2/promise";
 import { enqueuePlatformNotification, recordBalanceNotificationTransition } from "@/lib/platformNotifications";
 import { calculateDepositBonus, decimalToUnits, unitsToDecimal } from "@/lib/depositBonusMath";
+import { recordReferralCommission } from "@/lib/referralCommission";
 
 export { calculateDepositBonus, depositBonusRateBasisPoints } from "@/lib/depositBonusMath";
 
@@ -179,6 +180,13 @@ export async function confirmDepositCredit(
       userId: input.userId,
       confirmedAmount: input.confirmedAmount,
       confirmedAt: input.confirmedAt,
+    });
+    await recordReferralCommission(conn, {
+      monetizingUserId: input.userId,
+      monetizedAmount: input.confirmedAmount,
+      productType: "deposit",
+      sourceEventKey: `deposit:${deposit.id}`,
+      metadata: { deposit_id: deposit.id, basis: "confirmed_principal" },
     });
     const [[balanceAfter]] = await conn.query<Array<RowDataPacket & { ad_balance: string | number }>>(
       "SELECT ad_balance FROM users WHERE id=?", [input.userId]);

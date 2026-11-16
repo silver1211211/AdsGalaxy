@@ -54,6 +54,11 @@ export async function PATCH(request: Request) {
   try {
     const body = await request.json();
     const action = clean(body.action);
+    if (["toggle_sprint", "start_sprint", "reset_sprint", "save_milestone",
+         "create_event", "finalize_sprints", "settle_referrals",
+         "backfill_user_milestones"].includes(action)) {
+      return NextResponse.json({ error: "Legacy referral rewards are retired; history remains available." }, { status: 410 });
+    }
 
     if (action === "toggle_sprint") {
       const enabled = body.enabled ? "1" : "0";

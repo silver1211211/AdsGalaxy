@@ -1,7 +1,7 @@
 import {
   handleCampaignDetailsGet,
   handleCampaignDetailsPatch,
-} from "@/app/api/admin/campaigns/[id]/route";
+} from "@/lib/campaignDetailsHandler";
 import { handleSilverApiRequest } from "@/lib/silverCampaignControl";
 
 export async function GET(

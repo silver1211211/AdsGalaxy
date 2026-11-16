@@ -2,6 +2,7 @@ import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/prom
 import pool from "@/lib/db";
 import { deleteExhaustedChannelCampaignPosts } from "@/lib/campaignPostDeletion";
 import { enqueueCampaignNotification } from "@/lib/platformNotifications";
+import {checkSmartReachDeliveryReadiness} from "@/lib/channelSmartReachDeliveryReadiness";
 
 const REQUIRED_CAMPAIGN_LIFECYCLE_COLUMNS = [
   "paused_at",
@@ -24,6 +25,7 @@ type CampaignRow = RowDataPacket & {
   id: number;
   budget: string | number;
   name?: string;
+  financial_policy_version?: string | null;
 };
 
 export async function assertCampaignLifecycleColumns() {
@@ -149,12 +151,17 @@ export async function adminResumeCampaign(campaignId: number | string) {
   await assertCampaignLifecycleColumns();
 
   const [campaignRows] = await pool.query<CampaignRow[]>(
-    "SELECT id, budget FROM campaigns WHERE id = ?",
+    "SELECT id, budget, financial_policy_version FROM campaigns WHERE id = ?",
     [campaignId]
   );
 
   if (campaignRows.length === 0) {
     throw new Error("Campaign not found");
+  }
+
+  if (campaignRows[0].financial_policy_version === "adsgalaxy-smart-reach-v1") {
+    const readiness=await checkSmartReachDeliveryReadiness(pool,Number(campaignId),{explicitManualResume:true});
+    if(!readiness.ready)throw new Error(`Smart Reach delivery is blocked: ${readiness.reasons.join(", ")}`);
   }
 
   const budget = parseFloat(String(campaignRows[0].budget || "0"));
